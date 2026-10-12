@@ -1,24 +1,13 @@
-// d1.spec.js -- D1 W7: the cadence policy, its previews, a run's trigger and
+// d1.spec.js -- the cadence policy, its previews, a run's trigger and
 // revision, coverage labels, and Back up now.
 //
-// EVERY FIXTURE HERE IS A REAL OBJECT OR A REAL RESPONSE. The legacy custom
-// resources come from D1 W8's live docker-desktop run
-// (`artifacts/d1-live/20260918t0330z` and `.../20260918t1209z`): a schedule
-// with a time zone, previews, a last slot and a missed-slot count; a retry and
-// its `retryOf`; a catch-up; and a dynamic run whose discovery failed, with
-// the `TopicsResolved=False` condition the controller wrote. The console
-// answers come from D1 W6's live smoke (`artifacts/d1w6`): two cadence
-// previews across a real DST transition, a manual run, its replay, and a
-// `409 policy_changed`. `ui/tests/fixtures/README.md` records where each one
-// came from, and `contract.spec.js` holds every console fixture to
-// `schemas/logweir-api-v1.openapi.json`.
-//
-// THE ONE FIXTURE THAT IS NOT A CAPTURE is `backup-visible-only.json`, and it
-// says so in its own row below: no live run reached `VisibleUserTopicsOnly`
-// (D1's L-09-5 is the scenario that produces one, and W8's dynamic runs ended
-// at their discovery deadline instead), so that object is a live run's SHAPE
-// with the CRD's own declared selection block filled in. It is the only place
-// in this file where a value was not observed.
+// EVERY FIXTURE HERE IS A REAL OBJECT OR A REAL RESPONSE, captured from live
+// runs (`ui/tests/fixtures/README.md` records where each came from, and
+// `contract.spec.js` holds every console fixture to
+// `schemas/logweir-api-v1.openapi.json`). The one exception is
+// `backup-visible-only.json`, and its row says so: no live run reached
+// `VisibleUserTopicsOnly`, so that object is a live run's SHAPE with the
+// CRD's declared selection block filled in.
 //
 // FIVE SENTENCES THIS PAGE REFUSES TO WRITE, and every row below is one of
 // them held down:
@@ -115,17 +104,13 @@ function console_(name) {
 const SCHEDULE = fixture("schedule-policy.json");
 const PRESETS = fixture("cadence-presets.json");
 
-// ===========================================================================
-// 1. PLAT-04.2 -- the presets, and the catalogue they are a display of
-// ===========================================================================
-
+// 1. THE PRESETS, and the catalogue they are a display of.
 test("the_forms_preset_catalogue_is_the_one_rust_emits", () => {
   // THE DRIFT ARM. `weirkeeper::cadence::presets` is the single catalogue and
   // `crates/weirkeeper/tests/cadence.rs` writes it to
-  // `ui/tests/fixtures/cadence-presets.json`. The form holds its own copy --
-  // there is no import from Rust into a browser -- so a preset that gained a
-  // parameter, changed a bound or was renamed on that side must go red here
-  // rather than become a 422 in front of an operator.
+  // `ui/tests/fixtures/cadence-presets.json`. The form holds its own copy
+  // (nothing imports Rust into a browser), so a preset that gained a parameter,
+  // changed a bound or was renamed must go red here rather than become a 422.
   assert.deepEqual(
     CADENCE_PRESETS.map((preset) => preset.kind),
     PRESETS.presets.map((preset) => preset.kind),
@@ -152,11 +137,9 @@ test("the_forms_preset_catalogue_is_the_one_rust_emits", () => {
 });
 
 test("the_form_holds_no_cron_template_and_compiles_nothing", () => {
-  // THE CATALOGUE'S `cronTemplate` IS DELIBERATELY NOT COPIED INTO THE PAGE.
-  // Filling it in would BE a browser-side cron compiler, which D1 section 4.2
-  // forbids in as many words, and the preview route exists so that it does not
-  // have to be. The fixture keeps the templates as evidence of what the server
-  // produces; the form has no such field at all.
+  // THE CATALOGUE'S `cronTemplate` IS DELIBERATELY NOT COPIED INTO THE PAGE:
+  // filling it in would BE a browser-side cron compiler, which D1 section 4.2
+  // forbids, and the preview route exists so it does not have to be.
   for (const published of PRESETS.presets) {
     assert.ok(typeof published.cronTemplate === "string",
       "the emitted catalogue still carries the templates");
@@ -202,23 +185,18 @@ test("a_preset_with_a_parameter_missing_produces_no_query_at_all", () => {
 test("the_preset_a_saved_expression_is_comes_from_the_server_and_not_from_this_page", () => {
   const matched = decoded("schedule-preset.json").item;
   assert.equal(cadenceModeOf({ __preset: matched.preset }), "daily");
-  // AND AN UNMATCHED EXPRESSION IS ADVANCED CRON, which is what every schedule
-  // in legacy mode is: there is no preview route in front of kubectl proxy, so
-  // nothing matched the expression, and the form opens on the expression it
-  // actually stores rather than on a preset this page inferred.
+  // AND AN UNMATCHED EXPRESSION IS ADVANCED CRON: the form opens on the
+  // expression it stores rather than on a preset this page inferred.
   assert.equal(cadenceModeOf(SCHEDULE), ADVANCED_CRON);
   assert.equal(cadenceModeOf({ __preset: { kind: "fortnightly", minute: 0 } }), ADVANCED_CRON,
     "a preset kind this build does not offer opens on Advanced cron, not on a blank selector");
 });
 
-// ===========================================================================
-// 2. PLAT-04.2 -- the previews, and the DST instants they must not hide
-// ===========================================================================
-
+// 2. THE PREVIEWS, and the DST instants they must not hide.
 test("a_repeated_local_hour_shows_both_firings_with_their_offsets", () => {
   // THE FIXTURE IS THE LIVE RESPONSE. Europe/Berlin, 2026-10-25, `30 2 * * *`:
-  // the local time 02:30 happens twice, the schedule fires at BOTH instants,
-  // and D1 section 4.3's table says so instant for instant.
+  // the local time 02:30 happens twice and the schedule fires at BOTH instants
+  // (D1 section 4.3's table).
   const answer = decodeCadencePreview(console_("cadence-preview-repeated.json")).value;
   const html = nextRunsPanel({
     runs: answer.runs, timeZone: answer.timeZone, tzdb: answer.tzdb,
@@ -228,9 +206,8 @@ test("a_repeated_local_hour_shows_both_firings_with_their_offsets", () => {
   assert.match(html, /2026-10-25T02:30:00\+02:00/);
   assert.match(html, /2026-10-25T02:30:00\+01:00/);
   // THE MARKER IS IN THE ROW AND THE SENTENCE IS UNDER THE TABLE, and both are
-  // asserted. The first cut of this row checked only the sentence, and a
-  // mutant that emptied the DST cell survived it: a reader scanning the table
-  // would have seen two identical-looking rows and no reason for the second.
+  // asserted: with the DST cell emptied, a reader scanning the table would see
+  // two identical-looking rows and no reason for the second.
   assert.match(html, /<span class="badge badge-pending">RepeatedLocalTimeFirst<\/span>/,
     "the DST cell of the first row carries the marker");
   assert.match(html, /<span class="badge badge-pending">RepeatedLocalTimeSecond<\/span>/,
@@ -289,10 +266,7 @@ test("staleness_is_the_first_firing_in_the_past_and_never_the_evaluation_instant
       "status.policy.evaluatedAt as a heartbeat would label every healthy schedule stale");
 });
 
-// ===========================================================================
-// 3. PLAT-05.1 -- the revision, and what a running run keeps showing
-// ===========================================================================
-
+// 3. THE REVISION, and what a running run keeps showing.
 test("the_card_prints_the_revision_in_force_and_the_digest_beside_it", () => {
   const html = renderScheduleRevision(SCHEDULE);
   assert.match(html, /revision g1/);
@@ -325,10 +299,9 @@ test("a_run_that_recorded_no_revision_is_never_revision_zero", () => {
 });
 
 test("a_running_run_keeps_the_revision_it_froze_while_the_schedule_moves_on", () => {
-  // THE PLAT-05.1 INVARIANT, ON SCREEN. The schedule is at g9; the run in
-  // flight froze g7 and is not touched by the edit. The panel reads the RUNS
-  // and not the schedule, so the two numbers being different is the invariant
-  // rather than a rendering mistake.
+  // The schedule is at g9; the run in flight froze g7 and is not touched by
+  // the edit. The panel reads the RUNS, not the schedule, so the two numbers
+  // differing is the invariant rather than a rendering mistake.
   const object = JSON.parse(JSON.stringify(SCHEDULE));
   object.metadata.generation = 9;
   object.status.activeRuns = [{ name: "logweir-backup-tz-20260918-032200", kind: "Scheduled", attempt: 0 }];
@@ -357,10 +330,7 @@ test("an_absent_active_run_list_is_not_an_empty_one", () => {
   assert.match(html, /an absent list is not an empty one/);
 });
 
-// ===========================================================================
-// 4. PLAT-05.1 -- the policy form, and the replace it is built around
-// ===========================================================================
-
+// 4. THE POLICY FORM, and the replace it is built around.
 test("the_panel_says_a_blank_field_is_a_field_being_removed", () => {
   const html = renderPolicyForm({
     name: "tz", generation: 1, values: policyValuesOf(SCHEDULE), mayOperate: true,
@@ -372,11 +342,9 @@ test("the_panel_says_a_blank_field_is_a_field_being_removed", () => {
 });
 
 test("every_field_of_the_policy_is_on_screen_because_every_one_is_sent", () => {
-  // THE FORM AND THE BODY ARE ONE LIST. A field in the draft that the body
-  // never reads is a field a person edits and the API never hears about; a
-  // field in the body that has no input is a field the form cannot express.
-  // The two sets are compared mechanically, rather than by two people reading
-  // two functions.
+  // THE FORM AND THE BODY ARE ONE LIST: a draft field the body never reads is
+  // one the API never hears about, and a body field with no input is one the
+  // form cannot express. The two sets are compared mechanically.
   const values = policyValuesOf(SCHEDULE);
   const html = renderPolicyForm({ name: "tz", generation: 1, values: values, mayOperate: true });
   for (const field of POLICY_DRAFT_FIELDS) {
@@ -445,10 +413,9 @@ test("a_dynamic_selection_with_no_incomplete_discovery_policy_is_refused_here", 
 });
 
 test("a_blank_deadline_is_sent_as_nothing_and_never_as_the_documented_default", () => {
-  // THE ROUTE REMOVES WHAT THE BODY OMITS, so "not set" and "set to 3600" are
-  // different requests with different consequences: the first inherits the
-  // default for ever, the second pins it. Prefilling the input with 3600 would
-  // have turned every save into the second one.
+  // THE ROUTE REMOVES WHAT THE BODY OMITS, so "not set" (inherit the default
+  // for ever) and "set to 3600" (pin it) are different requests. Prefilling the
+  // input with 3600 would turn every save into the second.
   const values = Object.assign(policyValuesOf(SCHEDULE), {
     startingDeadlineSeconds: "", activeDeadlineSeconds: "", maxRetries: "",
   });
@@ -475,10 +442,9 @@ test("a_preset_cannot_be_saved_until_the_server_has_compiled_it", async () => {
     },
   );
   // A PREVIEW OF A DIFFERENT QUESTION DOES NOT LICENSE THIS SAVE. The identity
-  // is the QUERY, so a preview taken in Europe/Berlin is not a preview of the
-  // same preset with no zone set -- the compiled expression is the same string
-  // and the instants are not, and the panel says the preview is out of date
-  // rather than saving under an answer to another question.
+  // is the QUERY: a preview in Europe/Berlin compiles to the same expression as
+  // the same preset with no zone, but the instants differ, so the panel says
+  // the preview is out of date.
   const berlin = {
     query: previewQueryFor(Object.assign({}, values, { timeZone: "Europe/Berlin" })),
     answer: decodeCadencePreview(console_("cadence-preview-repeated.json")).value,
@@ -518,10 +484,7 @@ test("a_login_that_may_not_operate_gets_words_and_not_a_disabled_control", () =>
   assert.match(html, /may read this schedule and not edit its policy/);
 });
 
-// ===========================================================================
-// 5. PLAT-06.2 -- Back up now
-// ===========================================================================
-
+// 5. BACK UP NOW.
 test("one_intent_is_one_key_however_many_times_it_is_sent", () => {
   const key = formKey("intent-ns", RUN_NOW_FORM, "nightly");
   dropDraft(key);
@@ -541,15 +504,9 @@ test("one_intent_is_one_key_however_many_times_it_is_sent", () => {
 });
 
 test("the_intent_is_a_field_of_the_draft_and_a_reload_genuinely_ends_it", () => {
-  // REVIEW F3. The first cut composed the key from a module-level counter that
-  // reset on every page load, so the FIRST intent minted after a reload
-  // reproduced the first intent minted before it, byte for byte -- and the
-  // page, `ui/README.md` and `docs/kubernetes.md` all said the opposite. The
-  // row that "held" that sentence asserted only that it was ON SCREEN.
-  //
   // A RELOAD IS THE DRAFT REGISTRY GOING AWAY, which is what `dropDraft` is
   // here: there is no browser storage in this tree, so the draft and the
-  // intent are lost together, and the intent is what the draft holds.
+  // intent it holds are lost together, and the next intent is a new one.
   const key = formKey("reload-ns", RUN_NOW_FORM, "nightly");
   dropDraft(key);
   const before = intentFor(key);
@@ -563,9 +520,8 @@ test("the_intent_is_a_field_of_the_draft_and_a_reload_genuinely_ends_it", () => 
   assert.notEqual(after, before,
     "a new draft after a reload is a new intent, so a click after a reload is a NEW run");
 
-  // AND IT IS NOT ORDER-DEPENDENT. The defect was that the key's body was a
-  // counter, so `mint()` twice in two sessions collided. Sixty-four mints are
-  // sixty-four distinct keys.
+  // AND IT IS NOT ORDER-DEPENDENT: sixty-four mints are sixty-four distinct
+  // keys.
   const minted = new Set();
   for (let i = 0; i < 64; i += 1) {
     const one = mintIntent();
@@ -579,17 +535,11 @@ test("the_intent_is_a_field_of_the_draft_and_a_reload_genuinely_ends_it", () => 
 });
 
 test("two_page_loads_never_mint_the_same_first_intent", async () => {
-  // THE ARM THAT CAN ACTUALLY SEE REVIEW F3, and the reason it is separate.
-  // Within ONE page load a counter is unique too -- a zero-padded counter is
-  // even 32 hex-legal characters -- so the shape check and the no-duplicates
-  // check above both pass for the defect. What the defect IS is that a SECOND
-  // page load starts the counter again and reproduces the first key.
-  //
-  // A SECOND MODULE INSTANCE IS A SECOND PAGE LOAD. Importing the page module
-  // under a distinct specifier gives it its own module state -- its own
-  // counter, if it had one -- and dropping the draft between the two is the
-  // other half of a reload, because the draft registry does not survive one
-  // either. Nothing here touches the network or a DOM.
+  // Within ONE page load a counter would be unique too, so the checks above
+  // cannot see a counter-based key; a SECOND page load restarting it can.
+  // Importing the page module under a distinct specifier gives it its own
+  // module state (a second page load), and dropping the draft between the two
+  // is the other half of a reload.
   const loadA = await import("../pages/schedules.js?pageLoad=A");
   const loadB = await import("../pages/schedules.js?pageLoad=B");
   assert.notEqual(loadA, loadB, "two distinct module instances");
@@ -752,10 +702,7 @@ test("a_policy_changed_refusal_carries_the_revision_that_is_in_force_now", () =>
     "every other refusal reaches the page as its own message, not as a contract failure here");
 });
 
-// ===========================================================================
-// 6. PLAT-09.2 -- coverage, read from the field
-// ===========================================================================
-
+// 6. COVERAGE, read from the field.
 test("the_three_coverage_labels_are_the_controllers_own_strings", () => {
   assert.deepEqual(Object.keys(COVERAGE_LABELS),
     ["NamedTopics", "AllUserTopicsAttested", "VisibleUserTopicsOnly"]);
@@ -817,10 +764,7 @@ test("a_run_with_no_selection_block_gets_the_sentence_and_never_a_label", () => 
   }
 });
 
-// ===========================================================================
-// 7. PLAT-05.1/06.2 -- the trigger, and the last slot
-// ===========================================================================
-
+// 7. THE TRIGGER, and the last slot.
 test("each_trigger_kind_is_read_from_the_runs_own_field", () => {
   const retry = fixture("backup-retry.json");
   const catchUp = fixture("backup-catchup.json");
@@ -900,14 +844,10 @@ test("a_console_that_cannot_read_the_last_slot_names_the_projection_that_owes_it
   assert.equal(renderLastSlot({ metadata: { name: "new" }, status: {} }), "");
 });
 
-// ===========================================================================
-// 8. the two modes: what the console can read, and what it says it cannot
-// ===========================================================================
-//
-// THESE ROWS DRIVE THE REAL TRANSPORT. `ui/api.js`'s one call site is stubbed
-// at the platform boundary, so the identifier under assertion is the one
-// `path(...)` built and the headers are the ones `api.js` set. Nothing opens a
-// socket.
+// 8. THE TWO MODES: what the console can read, and what it says it cannot.
+// These rows drive the real transport: `ui/api.js`'s one call site is stubbed
+// at the platform boundary, so the identifier asserted is the one `path(...)`
+// built and the headers are the ones `api.js` set. Nothing opens a socket.
 
 function transport(answer) {
   const seen = [];
@@ -928,9 +868,8 @@ function transport(answer) {
 }
 
 // THE SESSION FIXTURE IS THE ONE WITH `manualBackupCreate: true`, and that
-// flag is the whole difference. It was permanently `false` before D1 W6 --
-// there was no route -- and is now `implemented && allowed`; `session.json`
-// still carries the old value, and both are real answers this build can send.
+// flag is the whole difference (`implemented && allowed`); `session.json`
+// carries `false`, and both are real answers this build can send.
 async function consoleMode(document) {
   resetMode();
   return selectMode({
@@ -1155,17 +1094,11 @@ test("an_invented_preview_parameter_is_dropped_before_the_network", async () => 
   }
 });
 
-// ===========================================================================
-// 9. the mount half: what a save, a second backup and a refusal do to the page
-// ===========================================================================
-//
-// THE THREE ROWS BELOW DRIVE THE REAL WIRING, and they exist because a
-// reviewer's live browser journey found two defects that every pure-function
-// row above was blind to: a successful save left the pre-edit policy on screen
-// at a superseded revision (F1), and a deliberate second manual backup had no
-// path at all (F2). Both are in the mount half, so the mount half is what they
-// assert -- through the same kind of fake node `mutation.spec.js` uses, which
-// keeps the markup the page adopted and answers selectors from it.
+// 9. THE MOUNT HALF: what a save, a second backup and a refusal do to the
+// page. These defects live in the wiring, where every pure-function row
+// above is blind, so these rows drive it through the fake node
+// `mutation.spec.js` uses, which keeps the adopted markup and answers
+// selectors from it.
 
 /** A schedules page mounted over a stubbed adapter. `objects` is called for
  *  each `list(backupschedules)`, so a re-read can answer differently. */
@@ -1186,10 +1119,9 @@ function mountedPage(ns, objects, overrides) {
 }
 
 test("a_successful_policy_save_re_reads_and_shows_the_stored_revision", async () => {
-  // REVIEW F1, MEASURED LIVE: the form and the card kept showing the pre-edit
-  // policy at g3 while the API server held g4. `wirePolicy`'s success arm
-  // repainted from the object captured at mount; the suspend toggle has always
-  // re-read instead, and now so does this.
+  // A successful save must repaint from a re-read, as the suspend toggle does,
+  // not from the object captured at mount: otherwise the form and card keep
+  // the pre-edit policy at g3 while the API server holds g4.
   const at = (generation, expression) => {
     const object = JSON.parse(JSON.stringify(SCHEDULE));
     object.metadata.generation = generation;
@@ -1222,11 +1154,10 @@ test("a_successful_policy_save_re_reads_and_shows_the_stored_revision", async ()
 });
 
 test("a_deliberate_second_backup_mints_a_new_intent_and_creates_another_run", async () => {
-  // REVIEW F2. PLAT-06.2's acceptance is "repeated clicks create one requested
-  // run; A DELIBERATE LATER BACKUP CREATES ANOTHER". `newIntent` existed,
-  // was unit-tested and was called by nothing, so the second clause had no
-  // path: every click on a schedule resent the one intent it ever had, and a
-  // console could take exactly one manual backup of it, ever.
+  // "Repeated clicks create one requested run; A DELIBERATE LATER BACKUP
+  // CREATES ANOTHER." Without a control that calls `newIntent`, every click
+  // would resend the one intent and a schedule could get exactly one manual
+  // backup, ever.
   const answer = console_("manual-backup.json");
   const keys = [];
   const object = JSON.parse(JSON.stringify(SCHEDULE));
@@ -1274,10 +1205,8 @@ test("a_deliberate_second_backup_mints_a_new_intent_and_creates_another_run", as
 });
 
 test("a_policy_changed_refusal_shows_the_revision_in_force_and_offers_a_new_intent", () => {
-  // REVIEW F2's other half. `ui/client.js` decoded the 409's one extension
-  // member onto the error and no page read it, so D1 section 8.5's Conflict row
-  // -- "show the new revision; confirmation starts a new intent" -- was
-  // unimplemented in both halves.
+  // The 409's one extension member must reach the page: D1 section 8.5's
+  // Conflict row is "show the new revision; confirmation starts a new intent".
   const conflict = {
     phase: "failed",
     kind: "conflict",
@@ -1313,10 +1242,9 @@ test("a_policy_changed_refusal_shows_the_revision_in_force_and_offers_a_new_inte
 });
 
 test("an_unknown_outcome_on_a_manual_run_names_the_key_and_no_empty_name", () => {
-  // REVIEW F4. `mutationStatus`'s unknown-outcome copy was written for creates
-  // whose name IS their idempotence. A manual run has no name until the server
-  // derives one, so the rendered sentence read "it reuses the name , and" --
-  // an empty name, and the wrong reason it is safe to click again.
+  // A manual run has no name until the server derives one, so the
+  // unknown-outcome copy written for named creates would read "it reuses the
+  // name , and" -- an empty name, and the wrong reason a retry is safe.
   const html = renderRunNowPanel({
     ns: "ns", name: "tz", object: SCHEDULE, mayOperate: true, runs: [],
     state: { phase: "failed", kind: "unknown", timedOut: true, error: { message: "no answer" } },
@@ -1328,15 +1256,10 @@ test("an_unknown_outcome_on_a_manual_run_names_the_key_and_no_empty_name", () =>
   assert.equal(html.indexOf("Backup :"), -1, "and no sentence carries an empty name");
 });
 
-// ===========================================================================
-// 10. the manual-run name rule and object builder (PLAT-06.2)
-// ===========================================================================
-//
-// `manualBackupName` and `manualBackupObject` are the page's half of D1
+// 10. THE MANUAL-RUN NAME RULE AND OBJECT BUILDER: the page's half of D1
 // section 8.2's name rule and 8.1's canonical object, pinned against the
 // product API by `manual-backup-names.json` and `scripts/live/d1/run.py`'s
-// L-06-2-cli. (The legacy `kubectl proxy` path that created runs with them
-// was withdrawn in v1, PROD-17.1 C4.)
+// L-06-2-cli.
 
 const NAME_RULE = fixture("manual-backup-names.json");
 
@@ -1388,16 +1311,13 @@ test("the_manual_run_name_rule_is_one_rule_and_the_fixture_pins_both_sides", asy
 });
 
 test("the_legacy_object_copies_the_whole_archive_block_rather_than_rebuilding_it", async () => {
-  // REVIEW F3. `manualBackupObject` used to rebuild `spec.archive` as
-  // `{url, secretRef}`. `weirkeeper::controllers::backup_schedule::run_policy_spec`
-  // -- the builder the product API calls for body A -- CLONES the whole
-  // `ArchiveRef`, and the controller recomputes `runPolicySha256` over the
-  // fields the stored object carries. So a field added to `ArchiveRef` later
-  // would be dropped by this page and by nothing else, and the only symptom
-  // would be a terminal `RunPolicyDigestMismatch` after somebody clicked.
-  //
-  // The extra key below stands for that future field. It is not in today's
-  // CRD; what the row holds is that the page does not enumerate.
+  // `weirkeeper::controllers::backup_schedule::run_policy_spec` (the builder
+  // the product API calls) CLONES the whole `ArchiveRef`, and the controller
+  // recomputes `runPolicySha256` over the stored fields. A page that rebuilt
+  // `spec.archive` as `{url, secretRef}` would drop any later field, and the
+  // only symptom would be a terminal `RunPolicyDigestMismatch` after a click.
+  // The extra key below stands for that future field: the page must not
+  // enumerate.
   const schedule = legacySchedule();
   schedule.spec.archive = {
     url: "s3://kafka/logweir",

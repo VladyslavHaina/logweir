@@ -248,7 +248,7 @@ async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
     assert!(app.fake.requests().is_empty());
 }
 
-/// PLAT-11.2: the declared mapping is checked against the PREFIX THIS REQUEST
+/// The declared mapping is checked against the PREFIX THIS REQUEST
 /// STORES, and a duplicate target names BOTH sources.
 ///
 /// WHY THE API CAN CHECK THIS WITHOUT PARSING THE PLAN. The mapping rule is
@@ -430,9 +430,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     // PLAN's `topic_mapping_prefix` in that mode, this route never parses the
     // plan, so it holds no value it could check the rows against: a check
     // against `topicNaming.prefix` there would pass a declaration that
-    // disagrees with the run and fail one that agrees with it. The independent
-    // review found the previous code checking one mode while the doc claimed
-    // both.
+    // disagrees with the run and fail one that agrees with it.
     let mut scratch = support::restore_body(&plan);
     scratch["target"]["mode"] = json!("scratch");
     scratch["topicMapping"] = json!([{"source": "orders", "target": format!("{prefix}orders")}]);
@@ -491,7 +489,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     );
 }
 
-/// PLAT-11.2: the three numbers the restore wizard's limits panel is allowed
+/// The three numbers the restore wizard's limits panel is allowed
 /// to state are RUST's, and this is the Rust half of the pin.
 ///
 /// The console cannot import a Rust constant and `ui/tests/*.spec.js` cannot
@@ -588,7 +586,7 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
     assert_eq!(created.status, 201);
     let sent = post_bodies(&app, "/kafkaclusters").pop().unwrap();
     assert_eq!(sent["kind"], "KafkaCluster");
-    // PROD-01.3 security follow-up: the connection names the Secret THIS
+    // The connection names the Secret THIS
     // request created from the entered password, never one the request chose.
     let name = created.json()["item"]["name"].as_str().unwrap().to_string();
     assert_eq!(
@@ -876,7 +874,7 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "approvalsRead",
         "approvalPacketRead",
         "operationsRead",
-        // D2 W12: the three domains now have routes, so the local
+        // The three domains have routes, so the local
         // administrator — who may do every implemented action — sees them.
         // Each flag is the domain's READ floor; whether the actor may also
         // start or cancel is the role table, published per grant in `roles`.
@@ -884,11 +882,11 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "preflight",
         "destinations",
         "credentialWrite",
-        // D1 W6: `POST .../backups` has a route. `scheduleCreate` also covers
+        // `POST .../backups` has a route. `scheduleCreate` also covers
         // `PUT .../schedules/{name}`: the same authority, one flag, and
         // `role_matrix` pins that the two actions have the same role row.
         "manualBackupCreate",
-        // D3 W11: the read families, the catalog create and the event
+        // The read families, the catalog create and the event
         // stream have routes; the local administrator holds every implemented
         // action, so every one of them is on.
         "protection",
@@ -897,7 +895,7 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "retention",
         "trustPoliciesRead",
         "operationEvents",
-        // PLAT-19.2: `POST .../restores/{name}/approval` has a route.
+        // `POST .../restores/{name}/approval` has a route.
         "approvalSubmit",
     ] {
         assert_eq!(caps[enabled], true, "{enabled}");

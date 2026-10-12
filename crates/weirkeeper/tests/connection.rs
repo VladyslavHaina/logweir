@@ -1,23 +1,21 @@
-//! The saved-connection contract — PLAT-07.1.
+//! The saved-connection contract.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A FIXTURE TEST. Nothing dials a
-//! broker, nothing reads a Secret, nothing runs `kubectl`: the resolver's whole
-//! job is to turn an object into references, and a reference is checkable
-//! without the thing it references.
+//! Every test here is a pure-function or fixture test: nothing dials a
+//! broker, reads a Secret or runs `kubectl`. The resolver turns an object into
+//! references, and a reference is checkable without the thing it references.
 //!
 //! The four properties this file exists for:
 //!
-//! 1. **One resolution, three Jobs.** `probe_backup_and_restore_jobs_carry_one
-//!    _connection` builds all three Jobs from ONE `KafkaCluster` and asserts
-//!    they name the same Secret, the same key, the same CA and the same file
-//!    path, differing only in the side prefix the runner reads.
-//! 2. **Old objects, unchanged.** `legacy_objects_build_the_jobs_they_always
-//!    _did` compares against outputs CAPTURED from the pre-PLAT-07 controller
-//!    (`tests/fixtures/connection/legacy-golden`, rendered at main 4956785),
-//!    not against this build's idea of what they used to be.
-//! 3. **No value, anywhere.** `no_seeded_credential_value_reaches_a_job_a_plan
-//!    _or_a_refusal` seeds recognisable values in every place a value could
-//!    come from and greps the whole rendered output for them.
+//! 1. **One resolution, three Jobs.** `probe_backup_and_restore_jobs_carry_one_connection`
+//!    builds all three Jobs from ONE `KafkaCluster`: same Secret, key, CA and
+//!    file path, differing only in the side prefix the runner reads.
+//! 2. **Old objects, unchanged.** `legacy_objects_build_the_jobs_they_always_did`
+//!    compares against outputs CAPTURED from the controller before this
+//!    contract (`tests/fixtures/connection/legacy-golden`, main 4956785), not
+//!    against this build's idea of what they used to be.
+//! 3. **No value, anywhere.** `no_seeded_credential_value_reaches_a_job_a_plan_or_a_refusal`
+//!    seeds recognisable values wherever a value could come from and greps the
+//!    whole rendered output for them.
 //! 4. **Refused before anything exists.** Every conflicting or unusable
 //!    connection is a refusal from `resolve`, which the three controllers reach
 //!    before their first `POST`.
@@ -44,9 +42,7 @@ use weirkeeper::crds::restore::Restore;
 use weirkeeper::crds::trust_roster::TrustRoster;
 use weirkeeper::job;
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 const NS: &str = "logweir-plat07";
 const CLUSTER: &str = "orders-prod";
@@ -224,11 +220,9 @@ fn roster() -> TrustRoster {
     .expect("the fixture is a TrustRoster")
 }
 
-/// The trust a ROSTER-ONLY cluster resolves to — PLAT-19.1 moved the approval
-/// bundle from `TrustRoster/default` to the namespace's resolved trust, and
-/// `synthesize_legacy` is what the controller reaches for a cluster with no
-/// `TrustPolicy`. These goldens describe exactly such a cluster, so they must
-/// render byte-identically through it.
+/// The trust a ROSTER-ONLY cluster resolves to: `synthesize_legacy`, what the
+/// controller reaches for a cluster with no `TrustPolicy`. The goldens
+/// describe such a cluster, so they must render byte-identically through it.
 fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
     weirkeeper::trust::synthesize_legacy(&roster().spec)
 }
@@ -301,9 +295,7 @@ fn mount_paths(job: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // The contract itself
-// ---------------------------------------------------------------------------
 
 /// A plaintext connection resolves to settings and NO references.
 #[test]
@@ -521,8 +513,8 @@ fn a_bootstrap_entry_two_paths_would_dial_differently_is_refused() {
     }
 }
 
-/// A field this controller does not implement is REFUSED, not ignored — the
-/// rollback rail (PLAT-07.1).
+/// A field this controller does not implement is REFUSED, not ignored (the
+/// rollback rail).
 ///
 /// KILLS: drop `unrecognized_fields`, or resolve the connection without the
 /// field a newer CRD accepted.
@@ -845,20 +837,18 @@ fn a_restore_plan_must_agree_with_the_saved_connection() {
     }
 }
 
-/// OLD OBJECTS BUILD THE JOBS THEY ALWAYS DID — against outputs captured from
-/// the controller as it was BEFORE this contract (main 4956785).
+/// OLD OBJECTS BUILD THE JOBS THEY ALWAYS DID, against outputs captured from
+/// the controller before this contract (main 4956785).
 ///
-/// The two deliberate exceptions are named here and nowhere else: a
-/// `scramSha512` connection with no `secretRef` and a `plaintext` connection
-/// with `tls: true` are now refused rather than run, and the goldens record
-/// exactly what they used to do.
+/// The two deliberate exceptions: a `scramSha512` connection with no
+/// `secretRef` and a `plaintext` connection with `tls: true` are now refused,
+/// and the goldens record what they used to do.
 ///
-/// The restore goldens' `--execution-contract-version` moved `1` -> `2` with
-/// decision D3's Amendment I, and that is not an exception: this row is about
-/// whether the CONNECTION contract changed a Job, and the contract version is
-/// stamped by `logweir_core::execution_contract::VERSION` for every Restore
-/// alike (a v2 invocation carrying no v2 material is exactly what a legacy
-/// object produces, and the new runner accepts it).
+/// The restore goldens' `--execution-contract-version` `1` -> `2` is not an
+/// exception: this row is about the CONNECTION contract, and the contract
+/// version is stamped by `logweir_core::execution_contract::VERSION` for every
+/// Restore alike (a v2 invocation carrying no v2 material is what a legacy
+/// object produces, and the runner accepts it).
 #[test]
 fn legacy_objects_build_the_jobs_they_always_did() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/connection");
@@ -892,9 +882,9 @@ fn legacy_objects_build_the_jobs_they_always_did() {
             continue;
         }
 
-        // PROD-01.3 security follow-up: a connection with a credential gains
-        // EXACTLY the binding pair, on every Job — asserted here and removed,
-        // so everything else is still compared byte for byte.
+        // A connection with a credential gains EXACTLY the binding pair, on every
+        // Job: asserted here and removed, so everything else is still compared
+        // byte for byte.
         let credentialed =
             cluster.spec.auth.mode != weirkeeper::crds::kafka_cluster::AuthMode::Plaintext;
         let probe = serde_json::to_value(job::build(
@@ -939,11 +929,10 @@ fn legacy_objects_build_the_jobs_they_always_did() {
         let plan = backup::plan_config_map(&backup_for_legacy(&cluster), &cluster)
             .expect("the plan ConfigMap");
         let mut built_plan = serde_json::to_value(plan).expect("serialises");
-        // PLAT-06.1's THREE named additions to the plan ConfigMap, asserted and
-        // then removed so everything else is compared byte for byte against the
-        // pre-PLAT-07 object. Removing them is not weakening the row: an
-        // addition this list does not name stays in `built_plan` and fails the
-        // equality below.
+        // The plan ConfigMap's three named additions, asserted and then removed
+        // so everything else is compared byte for byte against the legacy
+        // object. An addition this list does not name stays in `built_plan` and
+        // fails the equality below.
         assert_eq!(
             built_plan["immutable"].take(),
             json!(true),
@@ -962,8 +951,8 @@ fn legacy_objects_build_the_jobs_they_always_did() {
             json!(BACKUP_UID),
             "{file}: PLAT-06.1 annotates the run identity"
         );
-        // THE SNAPSHOT RECORDS WHAT THE RESOLVER DECIDED, which is how a later
-        // pass detects a changed connection (PLAT-07.1 × PLAT-06.1).
+        // The snapshot records what the resolver decided, which is how a later
+        // pass detects a changed connection.
         let snapshot: Value = serde_json::from_str(snapshot_text).expect("the snapshot is JSON");
         let resolved = resolve(&cluster, ConnectionUse::BackupSource).expect("it resolves");
         assert_eq!(
@@ -1029,19 +1018,18 @@ fn legacy_objects_build_the_jobs_they_always_did() {
     );
 }
 
-/// PROD-01.3 security follow-up: remove the credential-binding pair from a
-/// built Job's runner env, asserting first that a credentialed connection
-/// carries EXACTLY the two entries (the expected binding as a literal and the
-/// Secret's `logweir-binding` as an OPTIONAL `secretKeyRef`) and a plaintext
-/// one none — the one deliberate change to a legacy object's Jobs.
+/// Remove the credential-binding pair from a built Job's runner env, asserting
+/// first that a credentialed connection carries EXACTLY the two entries (the
+/// expected binding as a literal and the Secret's `logweir-binding` as an
+/// OPTIONAL `secretKeyRef`) and a plaintext one none: the one deliberate
+/// change to a legacy object's Jobs.
 fn without_binding(mut job: Value, file: &str, credentialed: bool) -> Value {
     let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
         .as_array_mut()
         .expect("the runner has an env list");
-    // FX-20: an inline archive `secretRef` (the legacy Backup and Restore
-    // fixtures name `logweir-s3`) brings the OBJECT-STORE pair — its location
-    // binding — beside `AWS_*`. Asserted here and removed, so the connection's
-    // own pair below is counted as before.
+    // An inline archive `secretRef` (the legacy fixtures name `logweir-s3`)
+    // brings the object-store binding pair beside `AWS_*`. Asserted here
+    // and removed, so the connection's own pair below is counted as before.
     let store_pair = |n: &str| {
         n.starts_with("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING")
             || n.starts_with("LOGWEIR_EVIDENCE_CREDENTIAL_BINDING")
@@ -1137,19 +1125,17 @@ fn redact_image(mut job: Value) -> Value {
     job
 }
 
-/// The engine pin the goldens were captured under (main 4956785): kafka-backup
-/// 0.21.0 and its image digest.
+/// The engine pin the goldens were captured under: kafka-backup 0.21.0 and
+/// its image digest.
 const GOLDEN_ENGINE_VERSION: &str = "0.21.0";
 const GOLDEN_ENGINE_DIGEST: &str =
     "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317";
 
 /// The engine identity is not part of the connection contract. The goldens
-/// were captured when every Job stated it, first in its environment; since
-/// PROD-00.2 (review L3) no Job does — the runner image declares its own
-/// engine and the runner refuses a version its binary does not print. So each
-/// built Job is ASSERTED to carry neither variable, and the pair the golden
-/// captured is put back where it stood, so everything else still compares
-/// byte for byte. A Job that stated an engine identity fails here.
+/// captured it in every Job's environment; no Job states it now (the runner
+/// image declares its own engine). So each built Job is ASSERTED to carry
+/// neither variable, and the captured pair is put back where it stood so
+/// everything else compares byte for byte.
 fn as_captured_engine_identity(job: &mut Value) {
     let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
         .as_array_mut()
@@ -1226,9 +1212,7 @@ fn merge(value: &mut Value, patch: &Value) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The write-only credential entry
-// ---------------------------------------------------------------------------
 
 /// The Secret a product API creates: one key, the Logweir labels, the custom
 /// type, and a reference that needs no `passwordKey`.
@@ -1437,7 +1421,7 @@ fn a_create_response_is_kept_as_metadata_only() {
     );
 }
 
-/// THE CONTROLLER NEVER CALLS THE CREDENTIAL BUILDER. It is a library for the
+/// The controller never calls the credential builder: it is a library for the
 /// product API; the control plane names Secrets and reads none.
 ///
 /// KILLS: call `build_kafka_credential_secret` from a reconciler.
@@ -1483,7 +1467,7 @@ fn walk(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &str)) {
 }
 
 /// The resolution a run can freeze carries references and settings only, and
-/// round-trips: PLAT-06.1 freezes it, PLAT-17.1 returns it.
+/// round-trips (a run snapshot freezes it, the API returns it).
 #[test]
 fn a_resolution_serialises_as_references_and_settings() {
     let resolved = resolve(
@@ -1531,10 +1515,10 @@ fn a_resolution_serialises_as_references_and_settings() {
         value["tlsCa"],
         json!({ "kind": "secret", "name": "kafka-ca", "key": "ca.crt" })
     );
-    // THE WHOLE POINT OF THE KEY SET ABOVE. Every added key is a SETTING, a
-    // REFERENCE or an IDENTITY, and the serialised document is what PLAT-06.1
-    // freezes and PLAT-17.1 returns: a password or a certificate appearing
-    // here would be a credential in a run snapshot and an API response.
+    // Every added key is a SETTING, a REFERENCE or an IDENTITY: the
+    // serialised document is frozen in a run snapshot and returned by the
+    // API, so a password or a certificate here would be a credential in
+    // both.
     assert_eq!(value["connectionUse"], "restoreTarget");
     assert_eq!(value["principal"], "User:logweir");
     assert_eq!(value["uid"], CLUSTER_UID);
@@ -1658,9 +1642,7 @@ fn a_refusal_displays_as_its_terminal_state_and_message() {
     assert!(text.contains(&refusal.message));
 }
 
-// ---------------------------------------------------------------------------
-// PROD-01.3: the three new modes, and the security follow-up's binding
-// ---------------------------------------------------------------------------
+// The three newer modes, and the credential binding
 
 fn mtls(ca: bool) -> KafkaCluster {
     let mut auth = json!({
@@ -1674,9 +1656,10 @@ fn mtls(ca: bool) -> KafkaCluster {
     cluster_with(auth)
 }
 
-/// The three new modes resolve to the plan grammar's own arms; PLAIN without
-/// TLS is refused with its NAMED reason and mTLS without TLS or without a
-/// certificate reference is refused too — each beside its accepted control.
+/// The three newer modes resolve to the plan grammar's own arms; PLAIN
+/// without TLS is refused with its NAMED reason and mTLS without TLS or
+/// without a certificate reference is refused too, each beside its accepted
+/// control.
 #[test]
 fn the_prod_01_3_modes_resolve_and_their_transport_rules_refuse() {
     let scram256 = cluster_with(json!({

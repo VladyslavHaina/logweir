@@ -181,7 +181,7 @@ fn key_alg_stays_with_the_signer() {
 
 /// The checked-in fixture public key, parsed from a `&str`.
 ///
-/// This is what Task 16's `TrustRoster` reconciler has in hand instead of a
+/// This is what the `TrustRoster` reconciler has in hand instead of a
 /// file: it reads an entry's `spkiPem` out of an API object. The key id is
 /// compared against `from_pem_file` over the same bytes, so the two entry
 /// points cannot drift.

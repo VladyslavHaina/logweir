@@ -1,8 +1,8 @@
-//! Connections: `KafkaCluster` projections, and a typed create that
-//! references an existing credential Secret by name.
+//! Connections: `KafkaCluster` projections, and a typed create whose
+//! credential is entered once, as a value.
 //!
-//! No route here reads a Secret, and the create accepts no credential
-//! material: write-only credential input is PLAT-07.1 and advertised `false`.
+//! No route here reads a Secret; a credential is entered as a value once and
+//! written to a Secret this service creates (see [`create`]).
 
 use std::collections::BTreeMap;
 
@@ -247,7 +247,7 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
     }
 }
 
-/// The auth block's rules, every mode (PROD-01.3 added three).
+/// The auth block's rules, every mode.
 ///
 /// The SAME shapes the controller's resolver and the CRD's admission rules
 /// refuse, answered here as field errors so the console can name the field
@@ -256,7 +256,7 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
 /// `PlainWithoutTls`), `mtls` needs a client certificate and key, and a CA
 /// needs TLS.
 ///
-/// **THE CREDENTIAL IS TYPED, NEVER NAMED** (PROD-01.3 security follow-up).
+/// **THE CREDENTIAL IS TYPED, NEVER NAMED.**
 /// `auth.credentialRef` is refused for every mode: a connection that could name
 /// an existing Secret could make the runner present a credential its author
 /// could not read to a broker its author chose. Every refusal below names a
@@ -347,7 +347,7 @@ fn validate_auth(auth: &crate::contract::ConnectionAuthRequest, errors: &mut Vec
             ));
         }
     }
-    // PROD-01.3: SASL/PLAIN only over TLS — the named reason.
+    // SASL/PLAIN only over TLS -- the named reason.
     if auth.mode == ConnectionAuthMode::Plain && !auth.tls {
         errors.push(FieldError::new(
             "auth.tls",
@@ -461,8 +461,8 @@ pub fn build(
                 },
                 username: request.auth.username.clone(),
                 // THE CREDENTIAL THIS ROUTE CREATES, BY ITS DETERMINISTIC NAME,
-                // under the default `password` key (PLAT-07.1's
-                // `passwordKey` is not offered: absent is `password`).
+                // under the default `password` key (`passwordKey` is not offered: absent is
+                // `password`).
                 secret_ref: sasl.then(|| CredentialSecretRef {
                     name: secret.clone(),
                     password_key: None,
@@ -478,7 +478,7 @@ pub fn build(
                     }),
                     unrecognized_fields: UnrecognizedFields::default(),
                 }),
-                // PROD-01.3: the `mtls` Secret this route creates, at the
+                // The `mtls` Secret this route creates, at the
                 // `kubernetes.io/tls` default keys (`tls.crt`, `tls.key`).
                 client_certificate: (request.auth.mode == ConnectionAuthMode::Mtls).then(|| {
                     ClientCertificateRef {
@@ -586,7 +586,7 @@ fn probe_secret(namespace: &str, name: &str, type_: &str) -> WriteOnlyCredential
 
 /// `POST .../connections`.
 ///
-/// # The credential flow (PROD-01.3 security follow-up)
+/// # The credential flow
 ///
 /// A request that carries a credential VALUE needs `credential.write` too, and
 /// is written in the order the destinations route established: the Secret's

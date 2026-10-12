@@ -1,29 +1,25 @@
-//! Reading a check's framed stdout — D2 §4.3's `relay.rs` row.
+//! Reading a check's framed stdout (D2 §4.3's `relay.rs` row).
 //!
-//! # Two readers over one bounded log, and they answer different questions
+//! # Two readers over one bounded log
 //!
-//! * **The frames.** The runner's stdout carries `logweir-check-topic=`,
-//!   `logweir-check-part=` and one final `logweir-check-end=` line. They are
-//!   decoded with [`logweir_core::check_contract::frames::Decoder`], which
-//!   requires the end line and then verifies the plan digest, the subject UID,
-//!   every declared part, every per-stream digest and the topic-line count AND
-//!   digest. A mismatch is [`CheckCode::ResultUnreadable`], reported **with the
-//!   exit code but without the log content**: a relay that does not verify is
-//!   exactly the input nobody should paste into a status field.
+//! * **The frames.** `logweir-check-topic=`, `logweir-check-part=` and one
+//!   final `logweir-check-end=` line, decoded with
+//!   [`logweir_core::check_contract::frames::Decoder`], which requires the end
+//!   line and verifies the plan digest, the subject UID, every declared part,
+//!   every per-stream digest and the topic-line count and digest. A mismatch is
+//!   [`CheckCode::ResultUnreadable`], reported **with the exit code but without
+//!   the log content**: a relay that does not verify is exactly the input
+//!   nobody should paste into a status field.
 //! * **The refusal key.** D2 §4.2's exit 3 prints `refusal-reason=<Code>` and
-//!   NO frames. That is read the way every other key in this crate is —
-//!   [`crate::runner_log::key_values`], the ONE key scan over the bounded
-//!   tail, matched BY KEY NAME (plan erratum **E4**: a pod log is stdout and
-//!   stderr merged in nondeterministic order, so no reader here may take "the
-//!   last line").
+//!   no frames, read through [`crate::runner_log::key_values`], the one key
+//!   scan over the bounded tail, by key name: a pod log is stdout and stderr
+//!   merged in nondeterministic order, so no reader may take "the last line".
 //!
 //! # The log read is bounded twice
 //!
-//! `limitBytes` bounds what the API server sends ([`RELAY_LIMIT_BYTES`]); the
-//! decoder's own budget bounds what it will accumulate from what arrives. Two
-//! bounds because they fail differently: the first stops a runner filling the
-//! controller's memory over the wire, the second stops one that stayed inside
-//! the wire budget from filling it with frame CONTENT.
+//! `limitBytes` ([`RELAY_LIMIT_BYTES`]) stops a runner filling the controller's
+//! memory over the wire; the decoder's own budget stops one that stayed inside
+//! the wire budget from filling it with frame content.
 
 use kube::api::LogParams;
 
@@ -33,12 +29,11 @@ use logweir_core::check_contract::{
 
 use crate::controllers::backup::REFUSAL_REASON_PREFIX;
 
-/// `limitBytes` on the `pods/log` read — D2 §4.3.
+/// `limitBytes` on the `pods/log` read (D2 §4.3).
 ///
-/// EIGHT MEBIBYTES, above D2 §5.5's 6 MiB relay budget for topic lines and
-/// below the kubelet's default `containerLogMaxSize` of 10 MiB. The margin
-/// carries the result stream, the details stream and whatever the runner wrote
-/// on stderr.
+/// Above D2 §5.5's 6 MiB relay budget for topic lines and below the kubelet's
+/// default `containerLogMaxSize` of 10 MiB; the margin carries the result and
+/// details streams and the runner's stderr.
 pub const RELAY_LIMIT_BYTES: i64 = 8 * 1024 * 1024;
 
 /// The decoder's own budget: the relay budget plus 2 MiB of headroom for the
@@ -47,9 +42,8 @@ pub const DECODER_BUDGET_BYTES: usize = DEFAULT_RELAY_BUDGET_BYTES + (2 * 1024 *
 
 /// The `pods/log` parameters for a check: [`crate::runner_log::RELAY`].
 ///
-/// `container: Some("runner")` and not `None`: `None` means "the only
-/// container if there is one", which is true today and would silently start
-/// reading a sidecar's stdout the day something adds one.
+/// `container: Some("runner")`, not `None`: `None` means "the only container",
+/// which would silently read a sidecar's stdout the day one is added.
 #[must_use]
 pub fn log_params() -> LogParams {
     crate::runner_log::RELAY.params()
@@ -59,8 +53,8 @@ pub fn log_params() -> LogParams {
 ///
 /// # Errors
 ///
-/// Always [`CheckCode::ResultUnreadable`], with a reason that names the decode
-/// failure's KIND and never any log content.
+/// Always [`CheckCode::ResultUnreadable`], with a reason naming the decode
+/// failure's kind and never any log content.
 pub fn decode(log: &str, expect: &FrameExpectations) -> Result<CheckRelay, RelayRefusal> {
     let mut decoder = Decoder::with_budget(DECODER_BUDGET_BYTES);
     for line in log.lines() {
@@ -75,10 +69,10 @@ pub fn decode(log: &str, expect: &FrameExpectations) -> Result<CheckRelay, Relay
 
 /// Why a relay could not be read.
 ///
-/// The code is always [`CheckCode::ResultUnreadable`] — D2 §4.3 gives the whole
-/// class one code, because from a consumer's side "the runner's output did not
-/// verify" is one fact whatever the sub-cause. The sub-cause is in `reason`,
-/// which is the `FrameError`'s own `Display` and carries no log bytes.
+/// The code is always [`CheckCode::ResultUnreadable`] (D2 §4.3 gives the whole
+/// class one code: for a consumer "the output did not verify" is one fact).
+/// The sub-cause is in `reason`, the `FrameError`'s own `Display`, with no log
+/// bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayRefusal {
     /// Always [`CheckCode::ResultUnreadable`].
@@ -91,15 +85,11 @@ impl RelayRefusal {
     fn new(error: &logweir_core::check_contract::FrameError) -> Self {
         Self {
             code: error.code(),
-            // REDACTED AND CAPPED, even though no `FrameError` variant reachable
-            // from `decode` carries runner bytes today. `FrameError::
-            // ResultDocument`, whose `CheckResultError::Contract(String)`
-            // quotes the runner's own `contract` field verbatim, arises from
-            // `CheckRelay::result()` — which W8 and W9 must call, and which
-            // `CheckResult::sanitise` exists for. This string reaches
-            // `Observation.message` and from there a status condition, and
-            // `check_contract`'s redaction chokepoint is only a chokepoint if
-            // every path through it actually calls it.
+            // Redacted and capped although no `FrameError` reachable from
+            // `decode` carries runner bytes today: `CheckRelay::result()`'s
+            // `CheckResultError::Contract(String)` quotes the runner's own
+            // field, this string reaches a status condition, and the redaction
+            // chokepoint is only one if every path calls it.
             reason: redact(&error.to_string()),
         }
     }
@@ -111,15 +101,13 @@ impl std::fmt::Display for RelayRefusal {
     }
 }
 
-/// The runner's contract refusal, read BY KEY NAME from a bounded tail.
+/// The runner's contract refusal, read by key name from a bounded tail.
 ///
 /// D2 §4.2's exit 3 prints `refusal-reason=<Code>` and no frames. `None` when
-/// the tail carries no such line, or when it carries one whose value is not in
-/// the closed vocabulary — an unparseable code is an absence, never a
-/// fabricated reason, because [`CheckCode`] is what a `metav1.Condition.reason`
-/// is written from.
-///
-/// The LAST occurrence within the tail wins, matching
+/// the tail has no such line or its value is outside the closed vocabulary: an
+/// unparseable code is an absence, never a fabricated reason, because
+/// [`CheckCode`] is what a `metav1.Condition.reason` is written from. The last
+/// occurrence within the tail wins, as in
 /// [`crate::controllers::backup::evidence_keys`].
 #[must_use]
 pub fn refusal_reason(log: &str) -> Option<CheckCode> {
@@ -129,17 +117,7 @@ pub fn refusal_reason(log: &str) -> Option<CheckCode> {
         .find_map(|v| CheckCode::parse(v.trim()))
 }
 
-// `pub async fn read(client, namespace, pod_name, expect)` USED TO LIVE HERE,
-// AND IT IS DELETED RATHER THAN KEPT (review finding R5).
-//
-// It took a bare pod NAME and read `pods/log` off it with no ownership check,
-// and nothing called it — `check::observe` does its own read, off the pod
-// `pod::find_owned_pod` proved. So it was `pub` API whose only remaining
-// function was to offer the next author of a check controller a ready-made way
-// to reopen `SEC-PODLOG`: pass it a name you got from a label match and the
-// D-SEAMS S6 check is silently skipped, in code nobody thinks to review for
-// it. A convenience that can only be used wrongly is not a convenience.
-//
-// A future caller that wants this shape should take the `&Pod` that
-// `pod::find_owned_pod` returned, so the ownership proof is carried by the
-// argument type rather than by the caller remembering.
+// There is deliberately no `read(client, namespace, pod_name, …)` here: a log
+// read must take the `&Pod` that `pod::find_owned_pod` returned, so the
+// ownership proof (seam S6) is carried by the argument type rather than by the
+// caller remembering.

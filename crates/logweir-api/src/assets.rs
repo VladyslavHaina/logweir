@@ -14,12 +14,11 @@
 //! here rather than shipped under `ui/` because every shipped UI file is held
 //! to plain ASCII text with no URL scheme on any line
 //! (`scripts/check-ui-offline.sh`), and a standalone SVG cannot render without
-//! its XML namespace URI. It used to be `data:,`, which this server's
-//! Content-Security-Policy (`img-src` falls back to `default-src 'self'`)
-//! refuses, so every console page load logged a CSP violation (PLAT-18.2's
-//! live run). Served from `'self'`, the icon needs no widening of the policy.
-//! A `.svg` FILE under `ui/` is still never selected: the extension list below
-//! is unchanged, so the selection stays `Dockerfile.console`'s.
+//! its XML namespace URI. A `data:,` icon would be refused by this server's
+//! Content-Security-Policy (`img-src` falls back to `default-src 'self'`) and
+//! log a CSP violation on every page load; served from `'self'`, the icon
+//! needs no widening of the policy. A `.svg` FILE under `ui/` is still never
+//! selected: the extension list below is `Dockerfile.console`'s.
 //!
 //! READ ONCE, INTO MEMORY. The bytes a browser receives are the bytes this
 //! process read at startup; nothing on disk can swap a file under a running
@@ -59,13 +58,10 @@ pub const ICON_SVG: &str = concat!(
 /// `ui/index.html` loads before `app.js`.
 pub const CONSOLE_RUNTIME_PATH: &str = "runtime.js";
 
-/// THE CONSOLE'S `runtime.js`, compiled in and served IN PLACE OF the file
-/// (console-ux-1 review L1).
+/// THE CONSOLE'S `runtime.js`, compiled in and served IN PLACE OF the file.
 ///
-/// It marks the page as served by this process (`window.LOGWEIR_CONSOLE`).
-/// The marker told the page a failed session probe was an outage and not the
-/// legacy `kubectl proxy` mode; that mode was withdrawn in v1 (PROD-17.1 C4),
-/// and the page now treats every failed probe as an outage.
+/// It marks the page as served by this process (`window.LOGWEIR_CONSOLE`),
+/// so the page treats every failed session probe as an outage.
 ///
 /// It carries no credential and no per-request value: the namespace context is
 /// the file's empty one, because in console mode the grants come from
@@ -134,8 +130,8 @@ impl StaticAssets {
                 dir.display()
             ));
         }
-        // THE CONSOLE'S OWN runtime.js REPLACES THE FILE (review L1): the
-        // marker that tells the page it is behind this service.
+        // THE CONSOLE'S OWN runtime.js REPLACES THE FILE: the marker that tells the
+        // page it is behind this service.
         files.insert(
             CONSOLE_RUNTIME_PATH.to_string(),
             Asset {

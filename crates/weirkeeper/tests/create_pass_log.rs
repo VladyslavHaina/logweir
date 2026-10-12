@@ -1,5 +1,5 @@
-//! **FX-34 (review finding MED-3): what the pass that CREATES a runner Job
-//! logs, and that the Job's line token is in none of it.**
+//! **What the pass that CREATES a runner Job logs, and that the Job's line
+//! token is in none of it.**
 //!
 //! From `job::add_line_token` on, the token is a plain `String` among the
 //! Job's arguments. The static row in `tests/line_token.rs` counts every
@@ -13,9 +13,9 @@
 //!
 //! `tracing` caches a callsite's interest the first time the callsite is hit.
 //! A binary that mixes capturing rows with rows that install no subscriber can
-//! cache "never" and drop the capturing rows' events (FX-37). So this file
-//! holds ONLY rows that capture, as `tests/refusal_read.rs` does, and the rows
-//! about what a create pass WRITES stay in `tests/restore_controller.rs` and
+//! cache "never" and drop the capturing rows' events. So this file holds ONLY
+//! rows that capture, as `tests/refusal_read.rs` does, and the rows about what
+//! a create pass WRITES stay in `tests/restore_controller.rs` and
 //! `tests/backup_controller.rs`
 //! (`a_created_job_carries_a_fresh_line_token_and_nothing_else_does`).
 //!
@@ -45,9 +45,7 @@ use weirkeeper::crds::restore::Restore;
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
-// ---------------------------------------------------------------------------
 // The capture
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
 struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -209,9 +207,7 @@ fn assert_the_pass_logged_and_never_the_token(capture: &Capture, token: &str, cr
     );
 }
 
-// ---------------------------------------------------------------------------
 // Restore
-// ---------------------------------------------------------------------------
 
 mod restore_fixture {
     use super::*;
@@ -451,8 +447,8 @@ evidence:
 /// token**, at any level, from any target.
 ///
 /// KILLS: the Job, its pod template or its runner arguments logged on the
-/// create pass (the review's mutant R4b: the runner's arguments at `warn`
-/// just before the `POST`).
+/// create pass (for example the runner's arguments at `warn` just before the
+/// `POST`).
 #[tokio::test]
 async fn a_restores_create_pass_logs_its_creation_and_never_the_jobs_line_token() {
     let capture = Capture::start();
@@ -473,9 +469,7 @@ async fn a_restores_create_pass_logs_its_creation_and_never_the_jobs_line_token(
     assert_the_pass_logged_and_never_the_token(&capture, &token, "created the runner Job");
 }
 
-// ---------------------------------------------------------------------------
 // Backup
-// ---------------------------------------------------------------------------
 
 mod backup_fixture {
     use super::*;

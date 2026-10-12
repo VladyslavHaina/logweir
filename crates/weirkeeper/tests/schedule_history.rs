@@ -1,23 +1,16 @@
-//! PLAT-05.2 — deleting a schedule stops future work and keeps every run.
+//! Deleting a schedule stops future work and keeps every run.
 //!
-//! D1 §6. The rows named in §12's PLAT-05.2 table live here, plus the four the
-//! brief adds: the migration is idempotent across two passes and resumable
-//! after a crash mid-list, a manual run of the schedule survives its deletion
-//! and is inventoried as history, and the inventory never issues an unbounded
-//! LIST.
+//! The rows here include four beyond the table: the migration is idempotent
+//! across two passes and resumable after a crash mid-list, a manual run of the
+//! schedule survives its deletion and is inventoried as history, and the
+//! inventory never issues an unbounded LIST.
 //!
-//! # What a route table can and cannot prove here
-//!
-//! It can prove exactly what this controller ASKED the API server for, which is
-//! the whole of the claim on this side: which lists, with which `limit` and
-//! which selector, which PATCH bodies, and — because the double PANICS on a
-//! request it has no route for — that nothing else was asked at all. That last
-//! property is what makes "never deletes" assertable: there is no DELETE route
-//! anywhere in this file.
-//!
-//! It cannot prove that the API server's garbage collector then leaves the
-//! objects alone. That is `L-05.2-2`, `L-05.2-3` and `L-05.2-5` in D1 §13, and
-//! it is W8's.
+//! A route table proves exactly what this controller ASKED the API server
+//! for: which lists, with which `limit` and selector, which PATCH bodies, and,
+//! because the double PANICS on an unrouted request, that nothing else was
+//! asked. That makes "never deletes" assertable: there is no DELETE route
+//! anywhere in this file. It cannot prove that the API server's garbage
+//! collector then leaves the objects alone; that is a live row.
 
 mod support;
 use support::utc;
@@ -41,18 +34,16 @@ use weirkeeper::identity::{
 use weirkeeper::slot::{scheduled_backup_name, slot_name};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
-/// The task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-t18";
 
 /// The schedule's UID.
 const UID: &str = "3f1c8a5e-0000-4000-8000-000000000001";
 
-/// A second schedule's UID — and, in the recreation rows, the SAME NAME under a
-/// new UID, which is what D1 §6.4 says a recreated schedule is.
+/// A second schedule's UID, and, in the recreation rows, the SAME NAME under a
+/// new UID, which is what a recreated schedule is.
 const OTHER_UID: &str = "3f1c8a5e-0000-4000-8000-000000000002";
 
 /// Daily at midnight, so a slot instant reads like a date.
@@ -86,13 +77,13 @@ fn schedule_with(name: &str, uid: &str, status: serde_json::Value) -> BackupSche
         .expect("the fixture is a BackupSchedule")
 }
 
-/// A `Backup` as the controller BEFORE PLAT-05.2 created it: a controller
-/// ownerReference to the schedule, a `spec.scheduleRef` with a name and no UID,
-/// no `logweir.dev/schedule-uid` label and no `spec.trigger`.
+/// A `Backup` as an older controller created it: a controller ownerReference
+/// to the schedule, a `spec.scheduleRef` with a name and no UID, no
+/// `logweir.dev/schedule-uid` label and no `spec.trigger`.
 ///
-/// THIS SHAPE IS THE WHOLE SUBJECT OF THE MIGRATION. Every assertion about
-/// "before" in this file is an assertion about an object of exactly this shape,
-/// and the ones about "after" are about what one merge PATCH turns it into.
+/// THIS SHAPE IS THE WHOLE SUBJECT OF THE MIGRATION: every assertion about
+/// "before" in this file is about an object of exactly this shape, and the
+/// ones about "after" are about what one merge PATCH turns it into.
 fn legacy_backup(
     name: &str,
     schedule_name: &str,
@@ -277,7 +268,7 @@ fn backup_patches(seen: &[SeenBody]) -> Vec<serde_json::Value> {
 }
 
 /// A status carrying a settled `HistoryRetained=True`, which is what unlocks
-/// the label-selected inventory (D1 §6.7).
+/// the label-selected inventory.
 fn retained_status(inventoried_at: DateTime<Utc>, run_count: i64) -> serde_json::Value {
     serde_json::json!({
         "activeRuns": [],
@@ -300,20 +291,17 @@ fn retained_status(inventoried_at: DateTime<Utc>, run_count: i64) -> serde_json:
     })
 }
 
-// ---------------------------------------------------------------------------
-// §12 unit rows — the PATCH body is a pure function, and it is asserted as one
-// ---------------------------------------------------------------------------
+// The PATCH body is a pure function, and it is asserted as one
 
-/// **§12 PLAT-05.2, "Migration interruption" (unit).**
-///
-/// One entry out, nothing else touched, and the precondition present.
+/// **Migration interruption (unit).** One entry out, nothing else touched,
+/// and the precondition present.
 #[test]
 fn migration_patch_removes_only_the_matching_owner_entry() {
     let name = "logweir-backup-hist-20260910-000000";
     let mut object = legacy_backup(name, "hist", UID, "Succeeded");
-    // A SECOND OWNER, AND A THIRD THAT IS ANOTHER SCHEDULE. The first is the
-    // `anchor` ConfigMap D1 §13's L-05.2-1 pre-adds; the third is the UID this
-    // patch must not confuse with its own.
+    // A SECOND OWNER, AND A THIRD THAT IS ANOTHER SCHEDULE. The first is an
+    // `anchor` ConfigMap; the third is the UID this patch must not confuse with
+    // its own.
     object["metadata"]["ownerReferences"] = serde_json::json!([
         {
             "apiVersion": "v1",
@@ -376,7 +364,7 @@ fn migration_patch_removes_only_the_matching_owner_entry() {
 
     // THE WHOLE TRIPLE, AND EACH THIRD OF IT ON ITS OWN.
     //
-    // `controller: true` — the `other` entry above carries a real schedule UID
+    // `controller: true`: the `other` entry above carries a real schedule UID
     // and a real kind and is NOT a controller reference, so it is not an
     // ownership claim and nothing may offer to remove it.
     assert!(
@@ -384,11 +372,10 @@ fn migration_patch_removes_only_the_matching_owner_entry() {
         "a non-controller entry is not a legacy ownership claim"
     );
 
-    // `name` — this is the case `identity::legacy_owner_uid` calls an archive
-    // bug in capitals: a `Backup` whose `spec.scheduleRef` names `hist` while
-    // its controller ownerReference names `retired-nightly`. It is NOT a member
-    // of `hist` (membership rule 2 requires the name to match), so `hist`'s
-    // migration must not reach into it — detaching another schedule's claim is
+    // `name`: a `Backup` whose `spec.scheduleRef` names `hist` while its
+    // controller ownerReference names `retired-nightly` is NOT a member of
+    // `hist` (membership rule 2 requires the name to match), so `hist`'s
+    // migration must not reach into it: detaching another schedule's claim is
     // how one schedule comes to delete the other's garbage-collection anchor.
     let mut other_name = legacy_backup(name, "hist", UID, "Succeeded");
     other_name["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("retired-nightly");
@@ -402,10 +389,10 @@ fn migration_patch_removes_only_the_matching_owner_entry() {
          the entry would be reaching into somebody else's object"
     );
 
-    // `kind` and `apiVersion` — a controller reference from another API, with
+    // `kind` and `apiVersion`: a controller reference from another API, with
     // the same name and the same UID string. Kubernetes UIDs do not collide,
-    // but this function is what decides whether an ownerReference is deleted
-    // from an object, and "the UID looked familiar" is not a reason to.
+    // but this function decides whether an ownerReference is deleted from an
+    // object, and "the UID looked familiar" is not a reason to.
     let mut other_kind = legacy_backup(name, "hist", UID, "Succeeded");
     other_kind["metadata"]["ownerReferences"][0]["kind"] = serde_json::json!("RehearsalSchedule");
     assert!(
@@ -421,11 +408,10 @@ fn migration_patch_removes_only_the_matching_owner_entry() {
     );
 }
 
-/// **§12 PLAT-05.2, "Unrelated-resource preservation" (unit).**
-///
-/// The surviving entries, and every label and annotation the object already
-/// had, come through the patch unchanged — the second half by merge-patch
-/// semantics, which is why the patch must NOT name them.
+/// **Unrelated-resource preservation (unit).** The surviving entries, and
+/// every label and annotation the object already had, come through the patch
+/// unchanged: the second half by merge-patch semantics, which is why the
+/// patch must NOT name them.
 #[test]
 fn foreign_owner_references_labels_and_annotations_are_preserved_byte_for_byte() {
     let name = "logweir-backup-hist-20260910-000000";
@@ -462,7 +448,7 @@ fn foreign_owner_references_labels_and_annotations_are_preserved_byte_for_byte()
         "and the same for annotations: {patch}"
     );
 
-    // AND THE EMPTY CASE IS `null`, not `[]` — D1 §6.2 step 3.
+    // AND THE EMPTY CASE IS `null`, not `[]`.
     let alone = legacy_backup(name, "hist", UID, "Succeeded");
     let patch = migration_patch(&typed(&alone), "hist", UID).expect("the entry is there");
     assert_eq!(
@@ -473,8 +459,8 @@ fn foreign_owner_references_labels_and_annotations_are_preserved_byte_for_byte()
 }
 
 /// **The two refusals, as a closed set.** A run that is still going keeps its
-/// owner (D1 §6.2 step 2); a run whose `spec.scheduleRef` does not name this
-/// schedule keeps it too, because detaching it would orphan it.
+/// owner; a run whose `spec.scheduleRef` does not name this schedule keeps it
+/// too, because detaching it would orphan it.
 #[test]
 fn only_a_terminal_run_that_names_this_schedule_is_detached() {
     let name = "logweir-backup-hist-20260910-000000";
@@ -501,11 +487,11 @@ fn only_a_terminal_run_that_names_this_schedule_is_detached() {
         );
     }
 
-    // THE HAZARD D1 §6.2 DOES NOT NAME. Membership rule 3 is "the annotation
-    // carries the UID AND `spec.scheduleRef.name` matches". An object that is a
-    // member only through its ownerReference would, after the patch, be a
-    // member of nothing: not inventoried, not in any history view, not
-    // restorable through the schedule.
+    // Membership rule 3 is "the annotation carries the UID AND
+    // `spec.scheduleRef.name` matches". An object that is a member only through
+    // its ownerReference would, after the patch, be a member of nothing: not
+    // inventoried, not in any history view, not restorable through the
+    // schedule.
     let mut mismatched = legacy_backup(name, "hist", UID, "Succeeded");
     mismatched["spec"]["scheduleRef"] = serde_json::json!({ "name": "somebody-else" });
     assert_eq!(
@@ -555,9 +541,7 @@ fn a_migrated_run_is_still_a_run_of_its_schedule() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The condition is a pure map from the recorded block
-// ---------------------------------------------------------------------------
 
 fn history(
     run_count: i64,
@@ -647,9 +631,9 @@ fn the_history_condition_is_a_pure_map_from_the_recorded_block() {
         );
     }
 
-    // THE BLOCKED SAMPLE IS BOUNDED AND NAMED (D1 §6.2 step 4: "naming up to
-    // 10"). A status that named every blocked run on a 9 000-run schedule
-    // would be a status nobody can read.
+    // THE BLOCKED SAMPLE IS BOUNDED AND NAMED (up to 10): a status that named
+    // every blocked run on a 9 000-run schedule would be a status nobody can
+    // read.
     let many: Vec<MigrationBlocked> = (0..25)
         .map(|i| MigrationBlocked {
             name: format!("b{i}"),
@@ -661,9 +645,9 @@ fn the_history_condition_is_a_pure_map_from_the_recorded_block() {
     assert!(message.contains("b0") && message.contains("b9"));
     assert!(!message.contains("b10"), "at most ten are named: {message}");
 
-    // AND `lastTransitionTime` OBEYS THE metav1 RULE — plan erratum E11(d).
-    // This reconciler requeues every 30 s; a condition that moved its instant
-    // on every pass would be 2,880 lies a day about when the state changed.
+    // AND `lastTransitionTime` OBEYS THE metav1 RULE. This reconciler requeues
+    // every 30 s; a condition that moved its instant on every pass would be
+    // 2,880 lies a day about when the state changed.
     let settled = history_condition(&history(12, 4096, 0, 0, None), None, Some(4), now);
     let again = history_condition(
         &history(13, 5000, 0, 0, None),
@@ -731,8 +715,8 @@ fn the_inventory_is_due_only_for_the_four_recorded_reasons() {
          than waiting an hour"
     );
 
-    // AND A RUN THAT IS MERELY STILL GOING DOES NOT RE-LIST EVERY 30 s. D1 §6.2:
-    // "never retried faster than the inventory interval".
+    // AND A RUN THAT IS MERELY STILL GOING DOES NOT RE-LIST EVERY 30 s: never
+    // retried faster than the inventory interval.
     let mut waiting = retained_status(now, 3);
     waiting["history"]["legacyOwnedRuns"] = serde_json::json!(2);
     let waiting: BackupScheduleStatus = serde_json::from_value(waiting).expect("a status");
@@ -764,15 +748,11 @@ fn the_label_selector_waits_for_the_condition_to_say_true() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §12 double rows — the migration against a route table
-// ---------------------------------------------------------------------------
+// The migration against a route table
 
-/// **§12 PLAT-05.2, "Migration interruption" (double).**
-///
-/// Every PATCH carries the precondition, and a pass that loses one still
-/// migrates the rest — the interruption-safety property, which is that progress
-/// is derived from OBSERVATION and never from a cursor.
+/// **Migration interruption (double).** Every PATCH carries the precondition,
+/// and a pass that loses one still migrates the rest: progress is derived
+/// from OBSERVATION and never from a cursor.
 #[tokio::test]
 async fn migration_patches_carry_resource_version_and_resume_after_a_failed_patch() {
     let one = "logweir-backup-hist-20260910-000000";
@@ -826,8 +806,8 @@ async fn migration_patches_carry_resource_version_and_resume_after_a_failed_patc
     );
 }
 
-/// **§12 PLAT-05.2, "Migration interruption" (double).** A `409` is a lost race,
-/// not a failure: the object is re-read on the next inventory.
+/// **Migration interruption (double).** A `409` is a lost race, not a failure:
+/// the object is re-read on the next inventory.
 #[tokio::test]
 async fn a_409_migration_patch_is_retried_next_inventory() {
     let name = "logweir-backup-hist-20260910-000000";
@@ -890,7 +870,7 @@ async fn a_409_migration_patch_is_retried_next_inventory() {
     );
 }
 
-/// **§12 PLAT-05.2, "Migration interruption" (double).**
+/// **Migration interruption (double).**
 #[tokio::test]
 async fn nonterminal_legacy_runs_keep_their_owner_until_terminal() {
     let running = "logweir-backup-hist-20260910-000000";
@@ -946,8 +926,8 @@ async fn nonterminal_legacy_runs_keep_their_owner_until_terminal() {
     assert_eq!(observed.active[0].name, running);
 }
 
-/// **§12 PLAT-05.2, "Migration interruption" (double).** A `422` and a `403` are
-/// refusals a human has to clear, and the status names the object.
+/// **Migration interruption (double).** A `422` and a `403` are refusals a
+/// human has to clear, and the status names the object.
 #[tokio::test]
 async fn a_422_legacy_object_reports_migration_blocked() {
     let name = "logweir-backup-hist-20260910-000000";
@@ -1011,10 +991,10 @@ async fn a_422_legacy_object_reports_migration_blocked() {
     }
 
     // THE SAMPLE IS BOUNDED; THE COUNT IS NOT. `migrationBlocked` names at most
-    // ten (D1 §6.2 step 4), but `legacyOwnedRuns` is the TOTAL an operator reads
-    // before deciding whether an ordinary `kubectl delete` is safe. Reading it
-    // off the truncated sample would report ten owned runs on a schedule with
-    // twenty-five — an undercount of exactly the number the decision turns on.
+    // ten, but `legacyOwnedRuns` is the TOTAL an operator reads before deciding
+    // whether an ordinary `kubectl delete` is safe; reading it off the
+    // truncated sample would report ten owned runs on a schedule with
+    // twenty-five.
     let names: Vec<String> = (0..25)
         .map(|i| format!("logweir-backup-hist-2026091{}-00000{}", i / 10, i % 10))
         .collect();
@@ -1054,7 +1034,7 @@ async fn a_422_legacy_object_reports_migration_blocked() {
     );
 }
 
-/// **§12 PLAT-05.2, "Unrelated-resource preservation" (double).**
+/// **Unrelated-resource preservation (double).**
 #[tokio::test]
 async fn migration_never_patches_backups_of_other_schedules_or_manual_runs() {
     let mine = "logweir-backup-hist-20260910-000000";
@@ -1094,8 +1074,8 @@ async fn migration_never_patches_backups_of_other_schedules_or_manual_runs() {
         "and nothing is deleted: {seen:?}"
     );
 
-    // AND THE MANUAL RUN IS HISTORY (D1 §3.1's membership note): it is counted,
-    // it has no owner entry to remove, and it is not something to migrate.
+    // AND THE MANUAL RUN IS HISTORY: it is counted, it has no owner entry to
+    // remove, and it is not something to migrate.
     assert_eq!(
         observed.history.run_count, 2,
         "MY schedule's two runs — the scheduled one and the MANUAL one, which is part of this \
@@ -1105,10 +1085,8 @@ async fn migration_never_patches_backups_of_other_schedules_or_manual_runs() {
     assert_eq!(observed.history.legacy_owned_runs, 0);
 }
 
-/// **§12 PLAT-05.2, "Same-name recreation" (double).**
-///
-/// A recreated `hist` has a new UID, and D1 §6.4's consequence is that it sees
-/// none of the old runs as its own.
+/// **Same-name recreation (double).** A recreated `hist` has a new UID, and
+/// it sees none of the old runs as its own.
 #[tokio::test]
 async fn a_recreated_schedule_does_not_count_old_uid_runs() {
     let old_run = "logweir-backup-hist-20260910-000000";
@@ -1160,10 +1138,9 @@ async fn a_recreated_schedule_does_not_count_old_uid_runs() {
     );
 }
 
-/// **§12 PLAT-05.2, "Same-name recreation" (double).**
-///
-/// A slot whose deterministic name is held by the PREVIOUS generation is
-/// recorded and skipped, never re-run under a different name.
+/// **Same-name recreation (double).** A slot whose deterministic name is held
+/// by the PREVIOUS generation is recorded and skipped, never re-run under a
+/// different name.
 #[tokio::test]
 async fn a_held_deterministic_name_is_recorded_as_slot_name_unavailable() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1202,12 +1179,9 @@ async fn a_held_deterministic_name_is_recorded_as_slot_name_unavailable() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §12 scale rows, and the read cost §6.7 exists to bound
-// ---------------------------------------------------------------------------
+// Scale, and the read cost the inventory is bounded by
 
-/// **§12 PLAT-05.2, "Scale" (double).** Steady state is O(active), not
-/// O(history).
+/// **Scale (double).** Steady state is O(active), not O(history).
 #[tokio::test]
 async fn steady_state_reconcile_makes_no_list_request() {
     let now = utc(2026, 9, 10, 12, 0);
@@ -1217,9 +1191,8 @@ async fn steady_state_reconcile_makes_no_list_request() {
         serde_json::json!([{ "name": running, "kind": "Scheduled", "attempt": 0 }]);
     let status: BackupScheduleStatus = serde_json::from_value(status).expect("a status");
 
-    // NO LIST ROUTE AT ALL. The double panics on a request it has no route for,
-    // so a reconcile that listed would fail loudly rather than quietly costing
-    // O(history) — which is the defect D1 §6.7 exists to remove.
+    // NO LIST ROUTE AT ALL: a reconcile that listed would fail loudly rather
+    // than quietly costing O(history).
     let (client, _rec, bodies) = mock_client_recording_bodies(vec![Route {
         method: "GET",
         path_suffix: Box::leak(format!("/backups/{running}").into_boxed_str()),
@@ -1248,8 +1221,8 @@ async fn steady_state_reconcile_makes_no_list_request() {
     );
 }
 
-/// **§12 PLAT-05.2, "Scale" (double).** The inventory is paginated, `limit`ed,
-/// and label-selected once the condition allows it.
+/// **Scale (double).** The inventory is paginated, `limit`ed, and
+/// label-selected once the condition allows it.
 #[tokio::test]
 async fn inventory_is_paginated_and_label_selected_after_migration() {
     let now = utc(2026, 9, 10, 12, 0);
@@ -1257,10 +1230,9 @@ async fn inventory_is_paginated_and_label_selected_after_migration() {
         serde_json::from_value(retained_status(now - chrono::Duration::hours(2), 3))
             .expect("a status");
 
-    // THE ROUTE ANSWERS EVERY PAGE WITH THE SAME `continue` TOKEN, so the only
-    // thing that can stop this loop is the controller's own page cap. A double
-    // that answered one page could not tell a bounded walk from an unbounded
-    // one.
+    // THE ROUTE ANSWERS EVERY PAGE WITH THE SAME `continue` TOKEN, so only the
+    // controller's own page cap can stop this loop; a double that answered one
+    // page could not tell a bounded walk from an unbounded one.
     let (client, _rec, bodies) = mock_client_recording_bodies(vec![list_route(
         vec![retained_backup(
             "logweir-backup-hist-20260910-000000",
@@ -1319,10 +1291,9 @@ async fn inventory_is_paginated_and_label_selected_after_migration() {
     );
 }
 
-/// **The brief's row: the inventory never issues an unbounded LIST.** Before
-/// the condition says `True` the list is namespace-wide — it has to be, because
-/// a legacy object carries no UID label — but it is still `limit`ed and still
-/// bounded.
+/// **The inventory never issues an unbounded LIST.** Before the condition says
+/// `True` the list is namespace-wide (a legacy object carries no UID label),
+/// but it is still `limit`ed and still bounded.
 #[tokio::test]
 async fn the_first_inventory_is_namespace_wide_but_never_unbounded() {
     let now = utc(2026, 9, 10, 12, 0);
@@ -1361,11 +1332,9 @@ async fn the_first_inventory_is_namespace_wide_but_never_unbounded() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The brief's remaining rows
-// ---------------------------------------------------------------------------
+// Idempotence, crash resumption, manual runs and the inventory's own cost
 
-/// **The brief's row: the migration is idempotent across two passes.**
+/// **The migration is idempotent across two passes.**
 #[tokio::test]
 async fn a_second_pass_over_migrated_history_patches_nothing() {
     let name = "logweir-backup-hist-20260910-000000";
@@ -1395,9 +1364,8 @@ async fn a_second_pass_over_migrated_history_patches_nothing() {
     }))
     .expect("a status");
 
-    // PASS 2 — an hour later. THE ROUTE TABLE HAS NO PATCH ROUTE, so a second
-    // patch would fail loudly. Idempotence is not "the same patch twice is
-    // harmless"; it is "there is no second patch".
+    // PASS 2, an hour later. THE ROUTE TABLE HAS NO PATCH ROUTE: idempotence is
+    // not "the same patch twice is harmless"; it is "there is no second patch".
     let (client, _rec, bodies) =
         mock_client_recording_bodies(vec![list_route(vec![migrated], None)]);
     let second = observe(
@@ -1426,12 +1394,11 @@ async fn a_second_pass_over_migrated_history_patches_nothing() {
     );
 }
 
-/// **The brief's row: resumable after a crash mid-list.**
-///
-/// A pass that died after patching the first page is indistinguishable, to the
-/// pass that follows it, from one that never ran — because progress is
-/// OBSERVED, not recorded. The second pass sees a half-migrated namespace and
-/// finishes it, patching each object exactly once in its whole life.
+/// **Resumable after a crash mid-list.** A pass that died after patching the
+/// first page is indistinguishable, to the pass that follows it, from one that
+/// never ran, because progress is OBSERVED, not recorded. The second pass sees
+/// a half-migrated namespace and finishes it, patching each object exactly
+/// once in its whole life.
 #[tokio::test]
 async fn a_crash_mid_list_leaves_every_object_migrated_or_untouched() {
     let done = "logweir-backup-hist-20260910-000000";
@@ -1443,10 +1410,10 @@ async fn a_crash_mid_list_leaves_every_object_migrated_or_untouched() {
     let patch = migration_patch(&typed(&migrated), "hist", UID).expect("the entry was there");
     weirkeeper::conditions::apply_merge_patch(&mut migrated, &patch);
 
-    // THE RESTARTED PROCESS HAS NO STATUS AT ALL — the crash lost the status
-    // write too, which is the worst case and the one a cursor-based design
-    // cannot recover from. The route table offers a PATCH for `not_yet` only,
-    // so a pass that re-patched `done` would fail loudly.
+    // THE RESTARTED PROCESS HAS NO STATUS AT ALL: the crash lost the status
+    // write too, the worst case and the one a cursor-based design cannot
+    // recover from. The route table offers a PATCH for `not_yet` only, so a
+    // pass that re-patched `done` would fail loudly.
     let (client, _rec, bodies) = mock_client_recording_bodies(vec![
         list_route(
             vec![
@@ -1481,11 +1448,9 @@ async fn a_crash_mid_list_leaves_every_object_migrated_or_untouched() {
     assert_eq!(observed.history.legacy_owned_runs, 0);
 }
 
-/// **The brief's row: a manual run of the schedule survives deletion and is
-/// inventoried as history.**
-///
-/// D1 §3.1's membership note and §8.3: a manual run IS the schedule's history
-/// and is NEVER its concurrency.
+/// **A manual run of the schedule survives deletion and is inventoried as
+/// history**: a manual run IS the schedule's history and is NEVER its
+/// concurrency.
 #[tokio::test]
 async fn a_manual_run_is_history_and_never_concurrency() {
     let now = utc(2026, 9, 10, 12, 0);
@@ -1521,13 +1486,10 @@ async fn a_manual_run_is_history_and_never_concurrency() {
     );
 }
 
-/// **The hourly inventory is the one thing that moves a settled status**, and it
-/// is 24 writes a day rather than the 2,880 the no-write-when-nothing-changed
-/// rule exists to prevent.
-///
-/// This is the cost PLAT-05.2 adds, measured rather than assumed — and the
-/// reason `schedule_controller.rs`'s and `retention.rs`'s steady-state rows now
-/// take their second pass inside the inventory window.
+/// **The hourly inventory is the one thing that moves a settled status**: 24
+/// writes a day rather than the 2,880 the no-write-when-nothing-changed rule
+/// prevents. It is why `schedule_controller.rs`'s steady-state rows take their
+/// second pass inside the inventory window.
 #[tokio::test]
 async fn the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1577,9 +1539,8 @@ async fn the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status() {
     );
     // AND THE CONDITION IS COMPUTED, NOT COPIED. There was no stored
     // `HistoryRetained` to copy on this pass, so a builder that carried one
-    // forward — W2's documented no-op, which this task replaces — would emit
-    // `Ready` alone and leave every reader unable to tell whether deleting the
-    // schedule is safe.
+    // forward would emit `Ready` alone and leave every reader unable to tell
+    // whether deleting the schedule is safe.
     let conditions = patched["status"]["conditions"]
         .as_array()
         .expect("the status carries conditions");
@@ -1633,10 +1594,9 @@ async fn the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status() {
     );
 }
 
-/// **§12 PLAT-05.2, "Delete with active/completed runs" (double).**
-///
-/// The object this controller POSTs carries no ownerReference to its schedule,
-/// so the API server has nothing to garbage-collect when the schedule goes.
+/// **Delete with active/completed runs (double).** The object this controller
+/// POSTs carries no ownerReference to its schedule, so the API server has
+/// nothing to garbage-collect when the schedule goes.
 #[test]
 fn a_new_scheduled_backup_carries_no_schedule_owner_reference() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1676,13 +1636,10 @@ fn a_new_scheduled_backup_carries_no_schedule_owner_reference() {
     );
 }
 
-/// **§12 PLAT-05.2, "Unrelated-resource preservation" (double), the extended
-/// half.** The reconciler patches status and the migration metadata, and
-/// nothing else, ever.
-///
-/// The route table below has NO DELETE route and no route for any object this
-/// reconciler does not name, so the double panics on either — see
-/// `src/testing.rs` for why a panic and not a 404.
+/// **Unrelated-resource preservation (double), the extended half.** The
+/// reconciler patches status and the migration metadata, and nothing else,
+/// ever. The route table below has NO DELETE route and no route for any object
+/// this reconciler does not name, so the double panics on either.
 #[tokio::test]
 async fn the_reconciler_patches_only_status_and_the_migration_metadata() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1769,38 +1726,30 @@ async fn the_reconciler_patches_only_status_and_the_migration_metadata() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fix round 1 — the review's findings, each with the row that would have caught it
-// ---------------------------------------------------------------------------
+// Capped walks, the migration's cost, and terminal refusals
 
-/// **H-1 / L-1.** A walk that did not finish may not claim `Retained`, and may
-/// not narrow the next walk to a label the objects it is hunting do not carry.
+/// A walk that did not finish may not claim `Retained`, and may not narrow
+/// the next walk to a label the objects it is hunting do not carry.
 ///
-/// # The latch, and why this needs its own row
+/// A capped label-selected walk is fine: every object past its bound carries
+/// this schedule's UID label, so none can be a pre-upgrade run. A capped
+/// NAMESPACE-WIDE walk is the dangerous one. Reported as `HistoryLarge`, it
+/// would become `HistoryRetained=True`, which unlocks the
+/// `logweir.dev/schedule-uid` selector, a label no unmigrated legacy object
+/// carries: every later walk would look only where the answer cannot be, the
+/// condition would stay `True` forever, and the upgrade gate ("wait for
+/// `HistoryRetained=True`") would pass on a schedule whose history a
+/// default-propagation `kubectl delete` would still collect. A worst-case
+/// schedule (35 040 runs a year) reaches it.
 ///
-/// The only capped-walk row in this file before fix round 1
-/// (`inventory_is_paginated_and_label_selected_after_migration`) is
-/// **label-selected**, and a capped label-selected walk is fine: every object
-/// past its bound carries this schedule's UID label, so none of them can be a
-/// pre-upgrade run. The dangerous walk is the **namespace-wide** one, and
-/// nothing exercised it. The reviewer's mutant — report `runCountCapped` as
-/// `capped = label_selected` — survived all 23 rows for exactly that reason.
-///
-/// What the latch did: a capped namespace-wide walk set `runCountCapped`, which
-/// the `HistoryLarge` arm turned into `HistoryRetained=True`, which unlocked the
-/// `logweir.dev/schedule-uid` selector — a label no unmigrated legacy object
-/// carries. Every later walk then looked only where the answer could not be,
-/// the condition stayed `True` forever, and D1 §6.9's upgrade gate ("wait for
-/// `HistoryRetained=True`") passed on a schedule whose history a
-/// default-propagation `kubectl delete` would still collect. D1 §6.6's own
-/// worst-case schedule — 35 040 runs a year — reaches it.
+/// MUTANT: report `runCountCapped` as `capped = label_selected`.
 #[tokio::test]
 async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_the_selector() {
     let now = utc(2026, 9, 10, 12, 0);
 
     // The first inventory: no stored status, so the walk is namespace-wide. The
     // double answers every page with the same `continue` token, so it is
-    // capped. NOTHING IT SAW IS LEGACY-OWNED — the legacy runs are past the
+    // capped. NOTHING IT SAW IS LEGACY-OWNED: the legacy runs are past the
     // bound, which is the whole scenario.
     let (client, _rec, bodies) = mock_client_recording_bodies(vec![list_route(
         vec![retained_backup(
@@ -1855,9 +1804,8 @@ async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_th
         "and the field to look at: {message}"
     );
 
-    // THE LATCH ITSELF. This is the assertion the reviewer's reproduction made
-    // in the opposite direction, and it is the one that makes the defect
-    // permanent rather than merely wrong for one pass.
+    // THE LATCH ITSELF: the assertion that makes the defect permanent rather
+    // than merely wrong for one pass.
     let next: BackupScheduleStatus = serde_json::from_value(serde_json::json!({
         "activeRuns": [],
         "history": serde_json::to_value(&observed.history).expect("serialises"),
@@ -1872,9 +1820,7 @@ async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_th
     );
 
     // AND BOTH HALVES OF THE GATE ARE REQUIRED. A stored `True` beside an
-    // incomplete scan must still not unlock it — that is precisely the state
-    // the old code produced and would produce again if either half were
-    // dropped.
+    // incomplete scan must still not unlock it.
     let mut forged = serde_json::to_value(&next).expect("serialises");
     forged["conditions"][0]["status"] = serde_json::json!("True");
     forged["conditions"][0]["reason"] = serde_json::json!("HistoryLarge");
@@ -1895,29 +1841,18 @@ async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_th
     );
 }
 
-/// **M-1.** A migration that fits in one budget finishes in one pass, and
-/// nothing re-arms after it — against one full namespace-wide walk every thirty
-/// seconds until it finished.
+/// A migration that fits in one budget finishes in one pass, and nothing
+/// re-arms after it.
 ///
-/// This row covers the single-pass case. The multi-pass cost, which is
-/// quadratic in the page count and which no route-table row can see, is
-/// `a_multi_page_migration_costs_a_quadratic_number_of_lists`.
+/// This row covers the single-pass case. The multi-pass cost, quadratic in the
+/// page count, is `a_multi_page_migration_costs_a_quadratic_number_of_lists`.
 ///
-/// # What it cost when it was wrong
-///
-/// The patches used to be sent after the WHOLE walk, under a per-pass budget,
-/// with `inventory_due` re-arming while work remained. So each pass listed the
-/// whole namespace and then patched at most two hundred objects, and the next
-/// pass thirty seconds later listed it all over again. Migrating 10 000 legacy
-/// runs was fifty passes × twenty pages × five hundred objects — about
-/// **1 000 LISTs and 500 000 object reads**, the exact read cost D1 §6.7 exists
-/// to remove, re-incurred at its maximum for the whole upgrade window, and
-/// satisfying L-05.2-6's "zero LIST requests except inventories at the
-/// documented interval" only by calling every one of them an inventory.
-///
-/// Patching inside the page loop means a pass migrates what it sees as it goes,
-/// so a migration that fits inside one budget is DONE after one pass and the
-/// 30 s re-arm stops immediately.
+/// The patches are sent inside the page loop, so a pass migrates what it sees
+/// as it goes and a migration that fits inside one budget is DONE after one
+/// pass. Patching after the WHOLE walk under a per-pass budget, with
+/// `inventory_due` re-arming while work remained, would list the whole
+/// namespace every 30 s: for 10 000 legacy runs about **1 000 LISTs and 500 000
+/// object reads**.
 #[tokio::test]
 async fn the_migration_window_is_bounded_in_lists_not_in_passes() {
     let now = utc(2026, 9, 12, 0, 0);
@@ -1961,9 +1896,8 @@ async fn the_migration_window_is_bounded_in_lists_not_in_passes() {
     );
     assert!(first.history.ownership_scan_complete);
 
-    // PASS 2, thirty seconds later — and the whole point: ZERO lists, because
-    // there is nothing left to re-arm on. The old shape took a full
-    // namespace-wide walk here, and again every thirty seconds after it.
+    // PASS 2, thirty seconds later: ZERO lists, because there is nothing left
+    // to re-arm on.
     let migrated: Vec<serde_json::Value> = names
         .iter()
         .map(|n| {
@@ -2009,9 +1943,9 @@ async fn the_migration_window_is_bounded_in_lists_not_in_passes() {
     );
 }
 
-/// **M-1, the other half.** A pass whose detach budget IS spent stops the walk
-/// there, says its counts are floors, and re-arms the next reconcile — so a
-/// migration bigger than one budget costs ONE page per pass, not twenty.
+/// A pass whose detach budget IS spent stops the walk there, says its counts
+/// are floors, and re-arms the next reconcile, so a migration bigger than one
+/// budget costs ONE page per pass, not twenty.
 #[tokio::test]
 async fn a_pass_that_spends_its_detach_budget_stops_and_re_arms() {
     let now = utc(2026, 9, 12, 0, 0);
@@ -2057,10 +1991,9 @@ async fn a_pass_that_spends_its_detach_budget_stops_and_re_arms() {
         "and it did NOT page on to count objects it was not going to touch this pass"
     );
     // The budget is one page's worth on purpose, so a pass detaches at most one
-    // page. What the WHOLE migration costs is a different question and is
-    // measured in `a_multi_page_migration_costs_a_quadratic_number_of_lists`:
-    // this row, like every other route-table row here, only ever exercises
-    // pass 1.
+    // page. What the WHOLE migration costs is measured in
+    // `a_multi_page_migration_costs_a_quadratic_number_of_lists`: this row,
+    // like every other route-table row here, only exercises pass 1.
     assert_eq!(
         MAX_MIGRATIONS_PER_PASS, INVENTORY_PAGE_SIZE as usize,
         "the budget and the page size are one number; splitting them re-opens M-1 by degrees"
@@ -2093,16 +2026,15 @@ async fn a_pass_that_spends_its_detach_budget_stops_and_re_arms() {
     );
 }
 
-/// **M-2.** `NoScheduleReference` is terminal, and the condition says so and
-/// names the only two things that work.
+/// `NoScheduleReference` is terminal, and the condition says so and names the
+/// only two things that work.
 ///
 /// `Backup.spec` carries `self == oldSelf`, so the `spec.scheduleRef` that
 /// would keep the run a member of this schedule ([`is_run_of_schedule`] rule 3)
-/// cannot be added to an object that already exists — by this controller, by an
-/// operator, by anyone. D1 §6.9 tells an operator to wait for
+/// cannot be added to an object that already exists. The guidance to wait for
 /// `HistoryRetained=True` before deleting a schedule without
-/// `--cascade=orphan`; on a schedule holding one such run that wait never ends,
-/// and a message that reads like a transient refusal is what makes it a trap.
+/// `--cascade=orphan` would never end on a schedule holding one such run, so a
+/// message that read like a transient refusal would be a trap.
 #[tokio::test]
 async fn a_terminally_blocked_run_says_it_will_never_clear_and_names_the_remedies() {
     let now = utc(2026, 9, 12, 0, 0);
@@ -2261,24 +2193,18 @@ async fn the_blocked_sample_is_deterministic_across_passes() {
     );
 }
 
-/// **R-1.** What a whole multi-pass migration actually costs, measured against
-/// a double that can tell one page from another.
-///
-/// # Why the rest of this file could not measure it
+/// What a whole multi-pass migration costs, measured against a double that
+/// can tell one page from another.
 ///
 /// `weirkeeper::testing`'s route table matches on the request path with the
 /// query string stripped, so no route can answer page 0 and page 1 with
-/// different bodies. Every other row here therefore exercises **pass 1 only** —
-/// the one pass for which "a migrating pass reads one page" is true. It is not
-/// true of pass 2: the walk always restarts at page 0, and a page whose
-/// candidates have already been detached does not stop it, because the budget
-/// is spent only when a candidate is *skipped* and a candidate-free page skips
-/// nothing. So pass *k* reads *k* + 1 pages, and the published cost of a
-/// migration was about ten times too optimistic (review finding R-1).
+/// different bodies, and the other rows exercise **pass 1 only**. Pass 2 is
+/// different: the walk always restarts at page 0, and a page whose candidates
+/// have already been detached does not stop it, because the budget is spent
+/// only when a candidate is *skipped*. So pass *k* reads *k* + 1 pages.
 ///
-/// This row uses a stateful double — one that pages on `continue=` and
-/// remembers the patches — so the number below is measured rather than derived,
-/// and it asserts the closed form.
+/// This row uses a stateful double that pages on `continue=` and remembers the
+/// patches, so the number below is measured, and it asserts the closed form.
 #[tokio::test]
 async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
     use std::sync::{Arc, Mutex};
@@ -2337,9 +2263,7 @@ async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
 
                 if method == http::Method::GET && path.ends_with("/backups") {
                     *lists.lock().expect("readable") += 1;
-                    // THE PAGE THE `continue` TOKEN NAMES. This is the whole
-                    // point of the stateful double: the route table cannot do
-                    // it, so the multi-pass shape was invisible.
+                    // THE PAGE THE `continue` TOKEN NAMES, which the route table cannot do.
                     let page: usize = query
                         .split('&')
                         .find_map(|kv| kv.strip_prefix("continue="))
@@ -2421,9 +2345,8 @@ async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
     // walk restarts at page 0 every time and an already-detached page does not
     // stop it; the last pass reads every page and then runs out. So
     //     LISTs = Σ(k=1..P-1)(k+1) + P = P(P+1)/2 + P − 1.
-    // 10 000 pre-upgrade runs are
-    // P = 20 ⇒ 229 LIST requests and ≈ 114 500 objects read — NOT the 21 and
-    // 10 000 the table claimed before this row existed.
+    // 10 000 pre-upgrade runs are P = 20 ⇒ 229 LIST requests and ≈ 114 500
+    // objects read.
     let p = PAGES;
     assert_eq!(
         lists,
@@ -2449,13 +2372,10 @@ async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
     );
 }
 
-/// **R-3, the invariant the arm reordering must not break.**
-///
-/// An incomplete ownership scan can never produce `True`, whichever other facts
-/// the block carries. The reordering that restored D1 §6.2 step 5's
-/// `LegacyOwnerReferencesRemain` moved three `False` arms in front of the
+/// An incomplete ownership scan can never produce `True`, whichever other
+/// facts the block carries. Three `False` arms sit in front of the
 /// incomplete-scan arm; this asserts over the whole cross-product rather than
-/// over a reading of the code, because the reading is exactly what a later edit
+/// over a reading of the code, because the reading is what a later edit
 /// changes.
 #[test]
 fn an_incomplete_scan_is_never_reported_as_true() {
@@ -2514,13 +2434,10 @@ fn an_incomplete_scan_is_never_reported_as_true() {
         }
     }
 
-    // AND THE ORDINARY MID-MIGRATION STATE IS `LegacyOwnerReferencesRemain`
-    // AGAIN (finding R-3). Before the reorder, any migration spanning more than
-    // one page reported `MigrationBlocked` — because a budget-spent pass sets
-    // `runCountCapped` — where D1 §6.2 step 5 assigns
-    // `LegacyOwnerReferencesRemain` to "terminal runs still being detached", so
-    // an operator watching a healthy upgrade saw a reason that reads like
-    // something is stuck.
+    // AND THE ORDINARY MID-MIGRATION STATE IS `LegacyOwnerReferencesRemain`:
+    // a budget-spent pass sets `runCountCapped`, and a migration spanning more
+    // than one page must still read as "terminal runs still being detached",
+    // not as `MigrationBlocked`, which reads like something is stuck.
     let mid_migration = ScheduleHistory {
         run_count: 1_500,
         run_count_capped: true,

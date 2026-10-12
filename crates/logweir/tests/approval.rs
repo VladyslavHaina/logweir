@@ -58,8 +58,7 @@ fn an_approval_key_equal_to_the_signing_key_is_labelled_not_refused() {
 /// An approval file that cannot be read at all (missing, permission denied,
 /// a briefly-unavailable mount) says nothing about whether the plan is
 /// authorised — it is an OPERATIONAL failure (exit 1, retry), never a guard
-/// refusal (exit 3, "the plan is refused"). Style follows
-/// `phase0_admit.rs`'s `a_cluster_id_read_failure_is_operational_not_a_guard_refusal`.
+/// refusal (exit 3, "the plan is refused").
 #[test]
 fn a_missing_approval_file_is_operational_not_a_guard_refusal() {
     let f = fixtures::approval_ok();
@@ -106,17 +105,10 @@ fn a_malformed_approver_key_is_operational_not_a_guard_refusal() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task 22 — `--approver-key-ids`, the pinned approver set
-// ---------------------------------------------------------------------------
-//
-// EVERYTHING ABOVE THIS LINE IS UNTOUCHED, and that is an acceptance criterion
-// rather than a courtesy: "omitting `--approver-key-ids` preserves today's
-// behaviour exactly" is proved by the existing suite compiling and passing
-// against the new code with a zero-deletion test-name diff.
-// `phase1_approval::verify` keeps its four-argument signature for the same
-// reason — the pinned check is a separate entry point, hoisted ahead of phase
-// 0, not a fifth parameter every caller must pass.
+// `--approver-key-ids`, the pinned approver set. Omitting the flag keeps the
+// behaviour above exactly; `phase1_approval::verify` keeps its four-argument
+// signature, and the pinned check is a separate entry point hoisted ahead of
+// phase 0.
 
 use std::path::Path;
 use std::process::Command;
@@ -141,9 +133,8 @@ fn run_restore(args: &[String]) -> (Option<i32>, String, String) {
 /// example plan and the checked-in fixture keypair.
 ///
 /// `e2e/fixtures/signed/public.pem` is the PUBLIC half; no private key is read
-/// here (erratum **E10e**: `signing.pem` is a stage-1 throwaway and is the only
-/// private key any test may name, and it is named as the SCORECARD signing key,
-/// which is what `restore run` requires).
+/// here. `signing.pem`, the one throwaway private key any test may name, is
+/// named only as the SCORECARD signing key `restore run` requires.
 fn base_args() -> Vec<String> {
     [
         "--spec",
@@ -278,9 +269,8 @@ fn phase1_accepts_approver_key_inside_pinned_ids() {
 /// that is in no set at all — so nothing can be refused for want of a flag.
 /// (b) The same command line WITHOUT the flag reaches the same phase-0 refusal
 /// as the one WITH a matching id, byte for byte on the discriminating message.
-/// The third half is the test-name diff: every test above this section runs
-/// unmodified, and the mutant "make `--approver-key-ids` mandatory" is killed
-/// by the binary refusing this very invocation.
+/// Making `--approver-key-ids` mandatory is killed by the binary refusing
+/// this very invocation.
 #[test]
 fn phase1_without_the_flag_is_unchanged() {
     phase1_approval::admit_pinned_approver_key_id(
@@ -313,26 +303,17 @@ fn phase1_without_the_flag_is_unchanged() {
 /// phase 0 — asserted over the whole transcript of a real process whose
 /// bootstrap is a CLOSED port.
 ///
-/// Task 22 fix round 1, review finding **MED-1**. The three rows above all
-/// point at `examples/drill.yaml`'s `:9092`, where a live broker accepts the
-/// connection and logs nothing at rdkafka's level 3, and they assert with
-/// `contains` — so none of them could see that `admit_pinned_approver_key_id`
-/// used to be called from `drill::execute_with_outcome`, which is already past
-/// `drill::context`, and `context` CONSTRUCTS the rdkafka client. Construction
-/// alone begins bootstrap connections. Against a closed port the same run
-/// emitted, from its own process,
-/// `%3|…|FAIL|logweir-drill#producer-2| … Connect to ipv4#127.0.0.1:<port>
-/// failed: Connection refused` on stderr and a `BrokerTransportFailure` line
-/// on stdout, and only THEN the refusal whose own text says it had dialled
-/// nothing. The guard now runs in `drill::execute`, beside I11's
-/// `check_projected_credentials()` and ahead of `context`.
+/// The rows above point at a live broker, which accepts and logs nothing, so
+/// they cannot see a client CONSTRUCTED before the guard runs; construction
+/// alone begins bootstrap connections. Against a closed port that shows on
+/// stderr (`Connect to ipv4#127.0.0.1:<port> failed`) and stdout
+/// (`BrokerTransportFailure`). The guard runs in `drill::execute`, beside
+/// I11's `check_projected_credentials()` and ahead of `context`.
 ///
-/// **A closed port is the instrument, and a live broker cannot be one**: it
-/// accepts and stays silent. The port is taken from a listener bound on `:0`
-/// and then released, and this row PROVES it is closed before it spawns
-/// anything — a hard-coded port that something happened to be serving would
-/// make the assertion below silently vacuous, which is the exact failure mode
-/// that let MED-1 ship.
+/// **A closed port is the instrument.** The port is taken from a listener
+/// bound on `:0` and released, and this row PROVES it is closed before it
+/// spawns anything: a port something happened to be serving would make the
+/// assertion silently vacuous.
 ///
 /// The tokens asserted absent are `localhost:<port>` and `127.0.0.1:<port>`
 /// rather than the bare port number on purpose: a five-digit number can appear
@@ -360,12 +341,10 @@ fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
          it between the listener being released and this connect"
     );
 
-    // The `bootstrap_servers:` LINE is rewritten wholesale rather than by
-    // substituting the example's current host:port pair. That pair is one of
-    // `no_network_in_unit_tests.rs`'s `DIAL_TOKENS`, so spelling it out here —
-    // even inside a comment, as the first draft of this row did and that gate
-    // caught — would put this file on an allow-list it has no business being
-    // on. Rewriting the line is also robust to the example changing.
+    // The `bootstrap_servers:` LINE is rewritten wholesale: the example's
+    // host:port pair is one of `no_network_in_unit_tests.rs`'s `DIAL_TOKENS`,
+    // and spelling it out here, even in a comment, would put this file on an
+    // allow-list.
     let mut rewritten = 0usize;
     let text = std::fs::read_to_string("../../examples/drill.yaml")
         .unwrap()
@@ -395,8 +374,7 @@ fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
     // takes to start a process. A `--version` run of the same binary, taken
     // immediately before and under the same load, is the process start-up
     // cost (exec, dynamic loading, the OS's first-run scan); it is subtracted
-    // so a loaded host (TEST-APPROVAL-UNPINNED-TIMING: 17.8 s beside three
-    // builds) is not read as a client spinning on a dead broker.
+    // so a loaded host is not read as a client spinning on a dead broker.
     let baseline_started = std::time::Instant::now();
     let baseline = Command::new(env!("CARGO_BIN_EXE_logweir"))
         .arg("--version")
@@ -475,9 +453,7 @@ fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
 /// **The assertion is against `verify`, not against a `drill run` invocation**:
 /// `drill/mod.rs` dials in phase 0 before it reaches phase 1 (and
 /// `assert_engine_identity` exits 1 on an unset engine environment), so a
-/// `drill run` with no broker up exits 1 and never observes this refusal. This
-/// task therefore needs neither the compose stack nor a
-/// `no_network_in_unit_tests.rs` allow-list entry.
+/// `drill run` with no broker up exits 1 and never observes this refusal.
 #[test]
 fn subject_kind_is_inside_the_signed_bytes() {
     let dir = tempfile::tempdir().unwrap();

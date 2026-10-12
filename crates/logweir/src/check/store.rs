@@ -6,8 +6,8 @@
 //! Every handle is built through D2 W2's EXPLICIT constructors
 //! (`Store::read_only_with` / `Store::from_url_with`), whose bucket, region,
 //! endpoint, addressing style and `allow_http` come from the plan's
-//! [`DestinationLocation`] and from nowhere else. That is D-SEAMS **S5** and
-//! defect SEC-ENVHTTP: a forwarded `AWS_ALLOW_HTTP=true` must not be able to
+//! [`DestinationLocation`] and from nowhere else: a forwarded
+//! `AWS_ALLOW_HTTP=true` must not be able to
 //! put an approved TLS destination on plaintext. The only thing the
 //! environment ever supplies is the CREDENTIAL, and only through the named
 //! variables [`CredentialMode`] selects — or, for a row whose grant the
@@ -24,7 +24,7 @@
 //! writable handle, and both name the destination UID so a marker can never
 //! land under a run's evidence keys.
 //!
-//! **`AlreadyExists` counts as write-authorised** (D2 §4.2, `[VERIFY U7]`): S3
+//! **`AlreadyExists` counts as write-authorised** (D2 §4.2): S3
 //! and MinIO authorise a `PUT` before they evaluate the `If-None-Match`
 //! precondition, so a 412 is proof the principal could have written. It is
 //! reported as [`CheckCode::MarkerAlreadyPresent`] rather than as
@@ -106,7 +106,7 @@ pub fn marker_body(destination_uid: &str) -> Vec<u8> {
 ///
 /// Four methods, each time-bounded by the implementation (the timeout lives on
 /// the handle, in [`StoreOptions::with_request_timeout`], not on the call), and
-/// every read SIZE-bounded by the caller (FX-31): a read names its cap from
+/// every read SIZE-bounded by the caller: a read names its cap from
 /// `logweir_store::caps`, and an object over it is
 /// [`StoreError::TooLarge`], never a read of the whole object.
 pub trait ObjectAccess {
@@ -126,9 +126,6 @@ pub trait ObjectAccess {
     /// (D3 §5.3): without it, a walk that ran out of budget could only ever
     /// re-read the same first page, and `status.cursor.rescanStartAfter`
     /// would be a field nothing honoured.
-    ///
-    /// # Errors
-    /// [`StoreError`].
     fn list_page(
         &self,
         prefix: &str,
@@ -141,9 +138,6 @@ pub trait ObjectAccess {
     /// A PROVIDED method, so a new implementation cannot answer the two
     /// differently: the readiness listing probe and the catalog walk ask the
     /// same backend the same question.
-    ///
-    /// # Errors
-    /// [`StoreError`].
     fn list_bounded(&self, prefix: &str, max: usize) -> Result<Vec<String>, StoreError> {
         self.list_page(prefix, None, max)
     }
@@ -158,18 +152,15 @@ pub trait ObjectAccess {
     /// A manifest-relative key, qualified into this handle's key space.
     fn qualify(&self, relative_key: &str) -> String;
 
-    /// **FX-7.** [`ObjectAccess::get`], together with the VERSION id the store
+    /// [`ObjectAccess::get`], together with the VERSION id the store
     /// answered the read with — `None` for a store that keeps no versions.
-    /// The same `max_bytes` cap (FX-31).
+    /// The same `max_bytes` cap.
     ///
     /// A PROVIDED method answering `None`, which is the unversioned store's
     /// true answer, so a double that models one needs nothing more. `Store`,
     /// the one live implementation, overrides it with the backend's own
     /// answer; `catalog_sync_reads_the_version_the_live_store_reports` holds
     /// that override in place.
-    ///
-    /// # Errors
-    /// As [`ObjectAccess::get`].
     fn get_with_version(
         &self,
         key: &str,
@@ -178,8 +169,8 @@ pub trait ObjectAccess {
         self.get(key, max_bytes).map(|bytes| (bytes, None))
     }
 
-    /// **FX-7.** Read ONE VERSION of an object by the id a signed document
-    /// pinned, never more than `max_bytes` of it (FX-31).
+    /// Read ONE VERSION of an object by the id a signed document
+    /// pinned, never more than `max_bytes` of it.
     ///
     /// The provided method REFUSES, as [`StoreError::Backend`]: a handle that
     /// cannot read by version must never be taken to have read one, and an
@@ -301,46 +292,18 @@ pub fn classify(e: &StoreError) -> CheckCode {
 /// Remove object_store's retry bookkeeping from an error's text before it is
 /// classified.
 ///
-/// **Since PROD-01.2's fix round the classifier no longer needs this for an
-/// HTTP failure**: it reads `object_store`'s own account of a failure, which
-/// starts AFTER the request line the retry clause is part of
-/// (`logweir_store`'s `own_accounts`), so `retry_timeout:` is never scanned
-/// there, and its bare word `timeout` is matched only as a word of its own.
-/// The strip is kept for a text that carries the clause without a request
-/// line in front of it, and because its rows pin the outcome; the request
-/// line is still recognised after it (`request_line_end`'s own row). What
-/// follows is the history, in the classifier's words of the time.
-///
-/// # Why this exists, and why it belongs here rather than in the classifier
-///
-/// `StoreErrorClass::classify` was a token scan, and its `TIMEOUT` list
-/// (`"timeout"`, `"timed out"`, …) is tested BEFORE its `UNREACHABLE` list
-/// (`"error sending request"`, `"connection refused"`, …). That order is right:
-/// a call that really timed out and then reported a transport symptom is a
-/// timeout.
-///
-/// But [`options_for`] sets `retry_timeout`, and object_store renders its retry
-/// configuration into the error text —
-/// `… after 2 retries, max_retries: 2, retry_timeout: 5s - HTTP error: error
-/// sending request …`. The literal `retry_timeout:` matches `"timeout"`, so
-/// **every transport failure under a check classified as `Timeout`**: a blocked
-/// NetworkPolicy, a wrong port and a DNS failure all came back `unknown` /
-/// `Timeout` with the remedy "raise the check timeout" instead of `notReady` /
-/// `EndpointUnreachable` with "check the URL and port, and that egress to it is
-/// allowed". It also downgraded a BLOCKING `notReady` to a non-blocking
-/// `unknown`, so the aggregate said `unknown` where it should have said
-/// `notReady`.
-///
-/// `crates/logweir-store/tests/options.rs` asserts `EndpointUnreachable` for
-/// the same failure built WITHOUT these options, so it was this module's own
-/// settings that shadowed it — which is why the removal is here, next to the
-/// settings that cause it, and not in the shared classifier.
+/// object_store renders its retry configuration into the error text
+/// (`… after 2 retries, max_retries: 2, retry_timeout: 5s - HTTP error: …`),
+/// and [`options_for`] sets `retry_timeout`, whose literal once made every
+/// transport failure classify as `Timeout`. The classifier now reads only
+/// `object_store`'s own account of a failure, which starts after the request
+/// line; the strip stays for a text that carries the clause without a request
+/// line in front of it, and because its rows pin the outcome.
 ///
 /// Three patterns and no more, each anchored on a literal object_store writes:
 /// `after <n> retries`, `max_retries: <n>` and `retry_timeout: <n><unit>`. A
-/// GENUINE timeout survives: "timed out", "operation timed out" and "deadline
-/// has elapsed" are untouched, and `a_genuine_timeout_survives_the_strip`
-/// asserts it.
+/// genuine timeout survives ("timed out", "operation timed out", "deadline
+/// has elapsed"; `a_genuine_timeout_survives_the_strip`).
 #[must_use]
 pub fn strip_retry_noise(text: &str) -> String {
     /// `(marker, must be followed by digits, trailing word to swallow)`
@@ -456,7 +419,7 @@ pub fn options_for(plan: &DestinationPlan, budget: Duration) -> Result<StoreOpti
     finish_options(plan, opts, budget)
 }
 
-/// FX-20: refuse to build ANY store while this pod carries an object-store
+/// Refuse to build ANY store while this pod carries an object-store
 /// credential whose Secret is not bound to the destination (or archive
 /// location) the controller built the check for — `CredentialBindingMismatch`,
 /// before a request is signed. Every store a check opens goes through
@@ -513,9 +476,6 @@ fn finish_options(
 pub const RETRIES: usize = 2;
 
 /// A READ-ONLY handle for `role`.
-///
-/// # Errors
-/// [`StoreFailure`].
 pub fn open_read(
     plan: &DestinationPlan,
     role: DestinationRole,
@@ -537,12 +497,11 @@ pub fn open_read(
 
 /// The store options one ROLE's handle is built with, when the plan names a
 /// separate [`GrantRef`] for it — the principal selection shared by the
-/// marker write and the evidence read (defect
-/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL and its class sweep).
+/// marker write and the evidence read.
 ///
 /// * `grant` ABSENT — the role's grant IS the plan's destination grant, so
 ///   [`options_for`] is the right principal. This is also every plan an older
-///   controller renders, and it behaves exactly as before.
+///   controller renders.
 /// * `static` — the role's own three variables (`vars`) and NOTHING else:
 ///   [`CredentialSource::Static`](logweir_engine_oso::storage::CredentialSource)
 ///   with the values read here, because `StaticFromEnv` would read `AWS_*`,
@@ -550,7 +509,7 @@ pub fn open_read(
 ///   variable the plan says is projected and is not is a refusal naming the
 ///   variable, never a fall-back to `AWS_*`.
 /// * `workloadIdentity` — the injected identity only; the destination grant's
-///   static keys in the same environment are ignored (G16).
+///   static keys in the same environment are ignored.
 /// * `controllerIdentity` / `notConfigured` — no check pod holds such a
 ///   credential. A refusal (`EvidenceReadNotConfigured`, an `unknown` code),
 ///   never a handle built from some other principal. The access kind answers
@@ -577,7 +536,7 @@ pub fn grant_options(
     let Some(grant) = grant else {
         return options_for(plan, budget);
     };
-    // Review L9: only the two evidence roles are ever separate grants. An
+    // Only the two evidence roles are ever separate grants. An
     // archive role here is a plan this runner must not guess about.
     let Some(vars) = grant_env(role) else {
         return Err(StoreFailure::new(
@@ -643,9 +602,6 @@ pub fn grant_env(role: DestinationRole) -> Option<GrantEnv> {
 
 /// [`grant_options`] for the create-only marker: the `evidenceWrite`
 /// principal's.
-///
-/// # Errors
-/// As [`grant_options`].
 pub fn evidence_write_options(
     plan: &DestinationPlan,
     grant: Option<&GrantRef>,
@@ -657,9 +613,6 @@ pub fn evidence_write_options(
 
 /// [`grant_options`] for the evidence-read probe: the `evidenceRead`
 /// principal's.
-///
-/// # Errors
-/// As [`grant_options`].
 pub fn evidence_read_options(
     plan: &DestinationPlan,
     grant: Option<&GrantRef>,
@@ -679,9 +632,6 @@ pub use crate::backup::store_contract::{
 
 /// A READ-ONLY handle on the evidence root AS the `evidenceRead` principal
 /// ([`evidence_read_options`]).
-///
-/// # Errors
-/// [`StoreFailure`].
 pub fn open_evidence_read(
     plan: &DestinationPlan,
     grant: Option<&GrantRef>,
@@ -709,9 +659,6 @@ pub fn open_evidence_read(
 /// `logweir/` — which is what `Store::from_url_with`'s Global Constraint 6
 /// guard requires, and what makes [`marker_key`] the only key this handle can
 /// accept.
-///
-/// # Errors
-/// [`StoreFailure`].
 pub fn open_evidence_write(
     plan: &DestinationPlan,
     grant: Option<&GrantRef>,
@@ -740,20 +687,10 @@ pub enum MarkerOutcome {
     /// `NotImplemented` to `PutMode::Create` and `put_create_only` fell back to
     /// HEAD-then-PUT — a real, non-conditional write with a TOCTOU window.
     ///
-    /// Reviewer question **Q1**. The grant is proved either way, so the code is
-    /// the same; what differs is whether D2 §4.2's guarantee — spelled
-    /// "create-only" — actually held for this put. The marker body is
-    /// deterministic, so an overwrite is a no-op in CONTENT, but a row that
-    /// said `MarkerWritten` for a best-effort write would be claiming a
-    /// property the backend declined to provide. `PutOutcome::
-    /// create_only_enforced` is recorded honestly by `logweir-store` for
-    /// exactly this reason ("never assumed true"), and this arm is the one
-    /// caller in the check runner that reads it.
-    ///
-    /// **Since RECEIPT-DUP, [`put_marker`] no longer returns it**: that case is
+    /// [`put_marker`] does not return it: such a store is
     /// `ConditionalCreateUnsupported`, notReady, because the backup runner's
-    /// execution claim cannot be held on such a store. Kept so the outcome
-    /// vocabulary and its `createOnlyEnforced` fact stay one type.
+    /// execution claim cannot be held on it. Kept so the outcome vocabulary
+    /// and its `createOnlyEnforced` fact stay one type.
     WrittenUnconditionally,
     /// The object was already there, and the backend authorised the write
     /// before it evaluated the precondition — so the grant is proved.
@@ -797,7 +734,7 @@ pub fn put_marker(
 ) -> Result<MarkerOutcome, StoreFailure> {
     let key = marker_key(destination_uid);
     let body = marker_body(destination_uid);
-    // RECEIPT-DUP: the backup runner's execution claim is a lock only on a
+    // The backup runner's execution claim is a lock only on a
     // store that ENFORCES `If-None-Match: *`, and a destination that does not
     // must fail HERE, before its first backup, rather than at every run with
     // exit 4 `ExecutionClaimUnproven`. So a fresh marker is created a second
@@ -828,16 +765,15 @@ pub fn put_marker(
                 ),
             )),
         },
-        // Reviewer question Q1, and RECEIPT-DUP: the backend declined the
+        // The backend declined the
         // precondition and the store fell back to HEAD-then-PUT. The grant is
         // proved, but the store cannot hold an execution claim, so the row is
         // notReady rather than a written marker with a fact.
         Ok(_) => Err(unsupported(
             "the store reported conditional put unsupported and fell back to HEAD-then-PUT",
         )),
-        // D2 §4.2 `[VERIFY U7]`: AUTHORISED. Turning this arm into a failure
-        // is mutant M5's twin — it would report a healthy destination as
-        // unwritable on every check after the first.
+        // D2 §4.2: AUTHORISED. As a failure this arm would report a healthy
+        // destination as unwritable on every check after the first.
         Err(StoreError::AlreadyExists(_)) => Ok(MarkerOutcome::AlreadyPresent),
         Err(e) => Err(StoreFailure::new(
             classify(&e),

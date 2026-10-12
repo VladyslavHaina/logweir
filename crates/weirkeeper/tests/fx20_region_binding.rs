@@ -1,16 +1,16 @@
-//! FX-20 fix round, review F1: an inline `Restore`'s LOCATION binding left out
-//! the S3 `region`, and on an endpoint-less location `object_store` builds the
-//! host from it (`s3.<region>.amazonaws.com`). The reviewer's probe kept the
-//! victim's bucket, set `region: "x@127.0.0.1:<port>/"`, got the victim
-//! Secret's binding from `inline_restore_binding_env`, and the runner's store
-//! dialled the loopback listener (a TLS ClientHello arrived).
+//! An inline `Restore`'s LOCATION binding includes the S3 `region`. On an
+//! endpoint-less location `object_store` builds the host from it
+//! (`s3.<region>.amazonaws.com`), so a plan that kept the victim's bucket and
+//! set `region: "x@127.0.0.1:<port>/"` would, with the region unbound, get the
+//! victim Secret's binding from `inline_restore_binding_env`, and the runner's
+//! store would dial the loopback listener.
 //!
-//! These rows are that probe, now refused twice, each beside its negative
-//! control: the controller expects ANOTHER binding for the attacker's plan
-//! (the region is bound), and no store is built over the injected region, so
-//! nothing reaches the listener — while a store over a real region and the
-//! listener's own endpoint does dial it, which is what makes "nothing arrived"
-//! an observation and not a vacuous one.
+//! These rows refuse that twice, each beside its negative control: the
+//! controller expects ANOTHER binding for the attacker's plan (the region is
+//! bound), and no store is built over the injected region, so nothing reaches
+//! the listener, while a store over a real region and the listener's own
+//! endpoint does dial it, which makes "nothing arrived" an observation and
+//! not a vacuous one.
 
 use logweir_core::credential_binding as cb;
 use logweir_store::{CredentialSource, Store, StoreOptions};
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use weirkeeper::controllers::restore::inline_restore_binding_env;
 use weirkeeper::destination::DestinationEnv;
 
-/// The reviewer's victim plan: the source archive and the evidence store in
+/// The victim plan: the source archive and the evidence store in
 /// `victim-backups` on the AWS default endpoint, region `us-east-1`.
 const VICTIM_PLAN: &str = "\
 source:
@@ -96,8 +96,8 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
         "{victim_archive}"
     );
 
-    // THE PROBE: same bucket, injected region, on the source and then also on
-    // the evidence store. Neither expectation is the victim's any more.
+    // The attack: same bucket, injected region, on the source and then also
+    // on the evidence store. Neither expectation is the victim's any more.
     for both in [false, true] {
         let attacker = inline_restore_binding_env(
             "victim-s3",
@@ -146,7 +146,7 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
     );
 
     // A plan that omits the region expects the region the Job is handed
-    // (`AWS_REGION`, object_store's own fall-back) — the same location as the
+    // (`AWS_REGION`, object_store's own fall-back): the same location as the
     // plan that states it, and so the same binding as a `Backup` there.
     let unstated: String = VICTIM_PLAN
         .lines()
@@ -210,8 +210,8 @@ fn fx20_no_store_is_built_over_an_injected_region_and_a_real_one_dials() {
     let plan: logweir_core::spec::RestoreSpec =
         serde_yaml::from_str(&with_region(&format!("x@127.0.0.1:{port}/"), true)).unwrap();
 
-    // THE PROBE'S DIAL, REFUSED: neither constructor builds a client over the
-    // injected region, by name, and the listener sees nothing.
+    // The attacker's dial, refused: neither constructor builds a client over
+    // the injected region, by name, and the listener sees nothing.
     let source = Store::read_only_from_url(&plan.source.storage)
         .err()
         .expect("the legacy read path refuses the injected region");
@@ -224,7 +224,7 @@ fn fx20_no_store_is_built_over_an_injected_region_and_a_real_one_dials() {
     }
     assert_eq!(connections_within(&listener, Duration::from_millis(500)), 0);
 
-    // NEGATIVE CONTROL: a real region and the listener as the endpoint — the
+    // NEGATIVE CONTROL: a real region and the listener as the endpoint; the
     // same constructor dials, so the listener can see a dial when one happens.
     let control = logweir_core::engine::StorageUrl::S3 {
         bucket: "victim-backups".into(),

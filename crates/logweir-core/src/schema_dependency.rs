@@ -1,4 +1,4 @@
-//! **PROD-03.0 — the detection contract for schema-dependent topics.**
+//! **The detection contract for schema-dependent topics.**
 //!
 //! A restore can succeed while no application can read what it restored: a
 //! record a Confluent serializer wrote is `0x00`, a 4-byte schema id and a

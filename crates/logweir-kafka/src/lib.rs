@@ -1,5 +1,5 @@
 //! logweir-kafka — the fingerprint (always available) and, behind the `client`
-//! feature added in Task 10, the only broker-dialling code in the workspace.
+//! feature, the only broker-dialling code in the workspace.
 #![forbid(unsafe_code)]
 pub mod access;
 pub mod api_versions;

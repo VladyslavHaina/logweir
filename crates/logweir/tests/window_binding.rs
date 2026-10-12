@@ -3,9 +3,8 @@
 //! The engine's PITR filter is `time_window_start`/`time_window_end`, both
 //! `Option<i64>` epoch-ms, validated only as `start <= end`, and
 //! `render_restore.rs` renders BOTH unconditionally from `RestorePlan.
-//! time_window`. Nothing used to bind the start to the archive: a restore that
-//! inherited a later start silently lost everything before it, while phase 7
-//! reconciled only the *sampled* records and the scorecard said pass.
+//! time_window`. A start not bound to the archive silently loses everything
+//! before it, while phase 7 reconciles only the *sampled* records.
 //!
 //! Two properties, at two different seams, because one of them cannot see the
 //! other's mutants:
@@ -19,8 +18,7 @@
 //!    document, reads the `time_window_start` line back off the BYTES, and
 //!    compares that against a floor it re-derives from the manifest — because
 //!    `render_restore::render` is a printer, and a printer mutant is invisible
-//!    to any assertion about the plan struct. That is exactly why spec §10's
-//!    earlier G-WIN row had two mutants that both passed.
+//!    to any assertion about the plan struct.
 //!
 //! **No dial token, deliberately** (STANDING RULE 18): every fixture here
 //! names `kafka-broker-1:9094` and a filesystem archive URL, so this file is
@@ -129,9 +127,7 @@ fn named_topics() -> BTreeSet<&'static str> {
 /// ascending partition the first segment *is* the minimum. The fixtures that
 /// do tell those apart are `facts_from(&[LATER_SEGMENT_MS, FLOOR_MS])` and its
 /// cross-partition twin — see
-/// `the_floor_is_the_minimum_not_the_first_segment_in_iteration_order`, which
-/// exists because a `.min()` → `.next()` mutant survived all 814 tests
-/// (task-9 review, MED-1).
+/// `the_floor_is_the_minimum_not_the_first_segment_in_iteration_order`.
 fn facts_with_two_segments() -> BackupSetFacts {
     facts_from(&[FLOOR_MS, LATER_SEGMENT_MS])
 }
@@ -248,10 +244,8 @@ fn restore_plan_window_start_is_the_archive_floor() {
 /// that partition rolls them, not when some other partition does.
 ///
 /// `facts_with_two_segments` cannot see that. Its one partition is ascending,
-/// so its first segment IS its minimum, and `.min()` → `.next()` produced the
-/// same answer for every test in the tree: the mutant survived
-/// `cargo test --workspace` at 814 passed / 0 failed (task-9 review, MED-1).
-/// Both arms below are the witness that fixture lacks.
+/// so its first segment IS its minimum and `.min()` → `.next()` gives the
+/// same answer there. Both arms below are the witness that fixture lacks.
 #[test]
 fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
     // (i) One partition, segments DESCENDING: the earlier segment is SECOND,
@@ -294,7 +288,7 @@ fn the_floor_is_the_minimum_not_the_first_segment_in_iteration_order() {
     );
 }
 
-/// The enum is checked against the value it claims (critique A F22).
+/// The enum is checked against the value it claims.
 /// `window_floor_source == ArchiveManifest` while `time_window.0` was read
 /// from the spec is a lie the enum cannot catch on its own, so plan
 /// construction refuses it — exit 3, before anything runs.
@@ -364,11 +358,9 @@ fn the_floor_source_enum_agrees_with_the_value() {
 /// `restore` block absent, `time_window.1` is `sample.window_end` and every
 /// existing drill fixture is unchanged.
 ///
-/// Both epoch-ms values the brief states are asserted here, at the RFC3339
-/// string each actually denotes: `2026-09-07T14:05:00Z` is
-/// `1_788_789_900_000` and `2026-08-30T14:05:00Z` is `1_788_098_700_000`. The
-/// brief paired the first string with the second integer; rather than pick
-/// one and drop the other silently, this test proves the property at both.
+/// Both epoch-ms values are asserted, at the RFC3339 string each denotes:
+/// `2026-09-07T14:05:00Z` is `1_788_789_900_000` and `2026-08-30T14:05:00Z`
+/// is `1_788_098_700_000`.
 #[test]
 fn the_point_in_time_is_the_window_end_when_present() {
     for (stated, want_ms) in [
@@ -428,11 +420,9 @@ fn the_point_in_time_is_the_window_end_when_present() {
 ///
 /// The window's start is the archive's floor and its end is the requested
 /// recovery point, so a point at or before the floor describes an interval
-/// holding no instant. Before this refusal `build_plan` returned `Ok` with
-/// `time_window.0 > time_window.1`, phase 5 passed it (that check reads only
-/// the START), and the failure surfaced from the ENGINE's `start <= end`
-/// config validation as ruling R-E's `EngineError` — exit **1, operational**,
-/// after phases 0-4 had already run (task-9 review, MED-2).
+/// holding no instant. Without this refusal the inverted window would pass
+/// phase 5 (that check reads only the START) and fail in the ENGINE's
+/// `start <= end` validation: exit **1, operational**, after phases 0-4 ran.
 ///
 /// Both arms are asserted because `>` would let the equality case through: a
 /// window `[t, t]` against the engine's `>= start && <= end` filter is one
@@ -616,7 +606,7 @@ fn a_topic_the_restore_does_not_name_does_not_lower_the_floor() {
 ///
 /// The plan's `time_window.0` is forced to the spec value AFTER construction,
 /// which is why this test cannot also stand in for the plan-construction
-/// mutants: it overrides the very field they change (critique A F22).
+/// mutants: it overrides the very field they change.
 #[test]
 fn phase5_refuses_a_rendered_start_that_is_not_the_floor() {
     let facts = facts_with_two_segments();

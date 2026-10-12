@@ -1041,14 +1041,12 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ConsoleApprovalRequest>();
     let _ = generator.subschema_for::<c::ApprovalRequestResponse>();
     // BOTH SHAPES STAY PUBLISHED, AND THAT IS NOT AN OVERSIGHT.
-    // `OperationViewResponse` is what the route returns and is a strict
-    // SUPERSET of `OperationResponse`: D3 §2.5's keys sit beside PLAT-17.1's
-    // frozen sixteen, which keep their spellings and their types.
-    // `OperationResponse` — and through it `Operation` — is therefore still an
-    // accurate description of what a PLAT-17.1 client decodes, and
-    // `ui/contract.js`'s `OPERATION` shape is checked against it. Removing it
-    // would make a MAJOR change out of a MINOR one: a client written against
-    // the frozen shape keeps working, and the document should say so.
+    // `OperationViewResponse` is what the route returns and is a strict SUPERSET
+    // of `OperationResponse`: D3 §2.5's keys sit beside the frozen sixteen,
+    // which keep their spellings and their types. `OperationResponse` -- and
+    // through it `Operation` -- still accurately describes what a client of the
+    // frozen shape decodes, and `ui/contract.js`'s `OPERATION` shape is checked
+    // against it. Removing it would make a MAJOR change out of a MINOR one.
     let _ = generator.subschema_for::<c::OperationResponse>();
     let _ = generator.subschema_for::<crate::routes::operations::OperationViewResponse>();
     let _ = generator.subschema_for::<crate::routes::protection::ProtectionPolicyList>();

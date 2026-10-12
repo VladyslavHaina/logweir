@@ -1,6 +1,6 @@
-//! Chart gap G5: the controller answers a liveness and a readiness probe, and
-//! the liveness probe FAILS when the runtime is wedged or a controller task
-//! has ended — the two states a kubelet restart can fix.
+//! The controller answers a liveness and a readiness probe, and the liveness
+//! probe FAILS when the runtime is wedged or a controller task has ended: the
+//! two states a kubelet restart can fix.
 //!
 //! Every socket is a `127.0.0.1` listener this file binds; every probe carries
 //! the module's two-second deadline, so no row can hang.
@@ -133,9 +133,9 @@ fn a_watched_task_that_returns_is_recorded() {
     assert!(ended.contains("#3"), "{ended}");
 }
 
-/// **The listener binds loopback, and `main` binds it no other way** (the
-/// review's mutant m5). A listener on `0.0.0.0` would let any pod hold its
-/// connections and starve the kubelet's exec probe.
+/// **The listener binds loopback, and `main` binds it no other way.** A
+/// listener on `0.0.0.0` would let any pod hold its connections and starve
+/// the kubelet's exec probe.
 #[test]
 fn the_listener_binds_loopback_only_and_main_binds_through_it() {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -174,13 +174,13 @@ fn the_listener_binds_loopback_only_and_main_binds_through_it() {
 }
 
 /// **A connection that sends nothing is dropped at the listener's I/O
-/// deadline** (FX-24's sweep of every Logweir listener). The listener answers
-/// one connection at a time, so a silent one occupies it; `serve` bounds each
-/// answer, its first read included, by `IO_DEADLINE`. Only a process inside
-/// the controller's pod can reach this loopback listener, so this is not the
-/// API's exposure, but the bound is what keeps one stray connection from
-/// holding the exec probe out for good. NEGATIVE CONTROL: a probe made once
-/// the silent connection is dropped is answered, so the listener survived it.
+/// deadline.** The listener answers one connection at a time, so a silent one
+/// occupies it; `serve` bounds each answer, its first read included, by
+/// `IO_DEADLINE`. Only a process inside the controller's pod can reach this
+/// loopback listener, so this is not the API's exposure, but the bound keeps
+/// one stray connection from holding the exec probe out for good. NEGATIVE
+/// CONTROL: a probe made once the silent connection is dropped is answered,
+/// so the listener survived it.
 #[test]
 fn a_connection_that_sends_nothing_is_dropped_at_the_io_deadline() {
     use std::io::Read as _;

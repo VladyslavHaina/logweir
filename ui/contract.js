@@ -1,14 +1,11 @@
 // contract.js -- the typed contract: what a response is allowed to be, in both
 // modes, and what happens when it is not.
 //
-// WHY A DECODER AND NOT A CAST. Before PLAT-18.1 every page read a response by
-// reaching into it -- `object.status.evidence.verification.result` -- and a
-// backend that renamed, moved or dropped that field produced an empty cell.
-// An empty cell is what an absent OPTIONAL field also looks like, so the page
-// could not tell "the controller did not record this" from "the contract
-// changed under us". That is the silent field loss PLAT-18.1's acceptance
-// names, and the only way to stop it is to state, once, which fields are
-// REQUIRED, and to fail loudly when one of them is not there.
+// WHY A DECODER AND NOT A CAST. A page that reached into a response could not
+// tell an absent OPTIONAL field ("the controller did not record this") from a
+// renamed or dropped one ("the contract changed under us"): both are an empty
+// cell. So the REQUIRED fields are stated once, and a missing one fails
+// loudly.
 //
 // THE THREE RULES EVERY DECODER HERE OBEYS.
 //
@@ -17,11 +14,10 @@
 //      to render (`status`, `reason`, `message`, exactly as `render.js`'s
 //      `errorBox` reads them), naming the DTO and the JSON path. It is never
 //      swallowed and never turned into a default value.
-//   2. AN UNKNOWN FIELD IS TOLERATED AND RECORDED. D0's compatibility rule is
-//      "unknown newer fields are tolerated on responses by older clients", so
-//      an unknown key never fails a read -- but it is collected in `unknown`,
-//      so a test and a reviewer can see exactly which fields this client is
-//      ignoring rather than discovering them from a screenshot.
+//   2. AN UNKNOWN FIELD IS TOLERATED AND RECORDED. Unknown newer fields are
+//      tolerated on responses by older clients, so an unknown key never fails
+//      a read -- but it is collected in `unknown`, so a test and a reviewer
+//      can see exactly which fields this client is ignoring.
 //   3. A DECODER RETURNS A VALUE, NOT A PROMISE, AND TOUCHES NO PLATFORM API.
 //      No fetch, no clock, no storage, no DOM. Every decoder in this file is a
 //      pure function, which is what lets `ui/tests/contract.spec.js` drive all
@@ -73,10 +69,6 @@
 /** @typedef {{limit: number, nextCursor: (string|null),
  *             snapshot: (string|null)}} Page */
 
-// ===========================================================================
-// the failure
-// ===========================================================================
-
 /** The reason every contract failure carries, so a page can tell one from an
  *  API refusal without reading prose. */
 export const CONTRACT_REASON = "ContractViolation";
@@ -110,10 +102,6 @@ export function contractFailure(dto, path, said) {
 export function isContractFailure(error) {
   return error !== null && typeof error === "object" && error.kind === "contract";
 }
-
-// ===========================================================================
-// the kit
-// ===========================================================================
 
 function typeName(value) {
   if (value === null) {
@@ -212,17 +200,11 @@ export function objectOf(shape) {
   };
 }
 
-/** The same, for a shape declared LATER in this file.
- *
- *  DECLARATION ORDER IS A REAL CONSTRAINT HERE and this is the one escape
- *  from it. `objectOf(SHAPE)` reads `SHAPE` while the module is evaluating, so
- *  a DTO can only carry a shape defined above it; `Connection.lastTest` is a
- *  preflight view, and the preflight vocabulary is 600 lines below the
- *  connection's. The alternatives were to hoist an exported vocabulary out of
- *  the section it documents, or to spell the state list twice -- and a
- *  vocabulary spelled twice is the defect every closed list in this file
- *  exists to prevent. The thunk is resolved when a DOCUMENT is read, which is
- *  long after every declaration has run.
+/** The same, for a shape declared LATER in this file. `objectOf(SHAPE)` reads
+ *  `SHAPE` while the module evaluates, so a DTO can only carry a shape defined
+ *  above it; `Connection.lastTest` is a preflight view declared far below.
+ *  The thunk is resolved when a DOCUMENT is read, long after every
+ *  declaration has run, so no vocabulary is spelled twice.
  *
  *  @param {() => object} later a function returning the shape */
 export function objectOfLater(later) {
@@ -255,21 +237,15 @@ export function shapeOf(name, required, optional) {
   return shape;
 }
 
-// EVERY SHAPE THIS FILE DECLARES, IN DECLARATION ORDER (FX-48).
-//
-// WHY A REGISTRY AND NOT ONLY THE TWO MAPS BELOW. `CONSOLE_SHAPES` and
-// `D3_SHAPES` are written by hand, and a shape nobody added to either was
-// compared with nothing: `PointTopicView` was in neither, it did not declare
-// `schemaDependency`, and the catalog page dropped what the API sent for it
-// while every row in the suite stayed green. A shape cannot be declared
-// without passing through `shapeOf`, so this list cannot miss one;
+// EVERY SHAPE THIS FILE DECLARES, IN DECLARATION ORDER. `CONSOLE_SHAPES` and
+// `D3_SHAPES` are written by hand; a shape cannot be declared without passing
+// through `shapeOf`, so this list misses none, and
 // `ui/tests/contract-coverage.spec.js` walks it against
-// `schemas/logweir-api-v1.openapi.json` and names every member the document
+// `schemas/logweir-api-v1.openapi.json`, naming every member the document
 // publishes and a shape omits.
 //
-// ONLY DECLARATIONS ARE RECORDED. A shape built after the module has loaded
-// (`declaring` is false by then) is not, so reading a document never grows
-// this list.
+// ONLY DECLARATIONS ARE RECORDED: `declaring` is false once the module has
+// loaded, so reading a document never grows this list.
 const DECLARED = [];
 let declaring = true;
 
@@ -316,23 +292,12 @@ export function decodeWith(shape, value) {
   return { value: decoded, unknown: ctx.unknown };
 }
 
-// THE SUITE'S SEAM (FX-48), AND NOTHING IN THE SHIPPED TREE CALLS IT -- the
-// same kind of seam `resetMode` is in `ui/client.js`.
-//
-// WHY IT EXISTS. Rule 2 above says an unknown field is RECORDED, "so a test
-// and a reviewer can see exactly which fields this client is ignoring". Half
-// of the callers threw that record away on the way to the page, so nothing
-// could ask the one question that matters about a console read: WHICH SHAPE
-// DECODED THIS ROUTE'S ANSWER, AND WHAT DID IT DROP. The restore detail read
-// the operation route -- which answers `OperationViewResponse` -- through the
-// narrower `OperationResponse`, and lost the integrity level without a trace.
-// With a listener set, every decode reports the shape it used, the document
-// it was handed and the paths it ignored; `ui/tests/contract-coverage.spec.js`
-// drives the real client over the real transport seam and compares each
-// report with the schema the OpenAPI document publishes for the route.
-//
-// WITH NO LISTENER -- which is every page load -- a decode does exactly what
-// it did before: rule 3 stands, and no decoder reads this to decide anything.
+// THE SUITE'S SEAM, and nothing in the shipped tree calls it (like
+// `resetMode` in `ui/client.js`). With a listener set, every decode reports
+// the shape it used, the document and the paths it ignored, so
+// `ui/tests/contract-coverage.spec.js` can compare which shape decoded each
+// route's answer with the schema the OpenAPI document publishes for it.
+// With no listener -- every page load -- rule 3 stands.
 let observer = null;
 
 /** Sets, or with anything but a function clears, the one decode listener. It
@@ -370,10 +335,6 @@ export function decodeListWith(shape, itemShape, value) {
   return { value: envelope, unknown: ctx.unknown };
 }
 
-// ===========================================================================
-// the console DTOs -- schemas/logweir-api-v1.openapi.json
-// ===========================================================================
-
 const NAME_REF = shapeOf("NameRef", { name: str });
 
 export const CAPABILITY_FLAGS = Object.freeze([
@@ -398,11 +359,11 @@ const ACTOR = shapeOf("ActorView", {
   id: str, issuer: str, subject: str, displayName: str,
 });
 
-/** The four PRODUCT roles (PLAT-17.2). They are Logweir's own: they are not
- *  Kubernetes roles, they are not granted by cluster RBAC, and holding one
- *  says nothing about what the console ServiceAccount may do. The set is
- *  empty in localAdmin mode, which has no roles -- so an empty list is a
- *  mode, not a missing field, and the field itself is required. */
+/** The four PRODUCT roles. They are Logweir's own: they are not Kubernetes
+ *  roles, they are not granted by cluster RBAC, and holding one says nothing
+ *  about what the console ServiceAccount may do. The set is empty in
+ *  localAdmin mode, which has no roles -- so an empty list is a mode, not a
+ *  missing field, and the field itself is required. */
 export const ROLES = Object.freeze(["viewer", "operator", "approver", "administrator"]);
 
 const GRANT = shapeOf("NamespaceGrant", {
@@ -431,10 +392,8 @@ const SESSION = shapeOf(
 const FIELD_ERROR = shapeOf("FieldError", { field: str, code: str, message: str });
 
 // `policy` IS THE ONE EXTENSION MEMBER THE DOCUMENT PUBLISHES ON A PROBLEM
-// (`409 policy_changed`, see `POLICY_CHANGED_DETAIL` below, which is declared
-// 600 lines on -- hence the thunk). It was not declared here until FX-48, so
-// `decodeProblem` dropped it; the page was unaffected only because
-// `decodePolicyChanged` reads the raw document `ui/api.js` attaches.
+// (`409 policy_changed`; `POLICY_CHANGED_DETAIL` is declared further down,
+// hence the thunk).
 const PROBLEM = shapeOf(
   "Problem",
   {
@@ -457,9 +416,8 @@ const CONDITION = shapeOf(
 
 const ARCHIVE = shapeOf("ArchiveView", { url: str }, { credentialRef: objectOf(NAME_REF) });
 
-/** The authentication modes a connection may declare: tag 1's two, and
- *  PROD-01.3's three (`plain` only over TLS, `mtls` with a client
- *  certificate). Byte for byte `ConnectionAuthMode`. */
+/** The authentication modes a connection may declare (`plain` only over TLS,
+ *  `mtls` with a client certificate). Byte for byte `ConnectionAuthMode`. */
 export const CONNECTION_AUTH_MODES = Object.freeze([
   "plaintext", "scramSha512", "scramSha256", "plain", "mtls",
 ]);
@@ -474,7 +432,7 @@ export const CONCURRENCY_POLICIES = Object.freeze(["Forbid", "Allow"]);
  *  `TargetMode` and the CRD's own enum -- see `ui/plan.js`. */
 export const RESTORE_MODES = Object.freeze(["scratch", "newTopic"]);
 
-/** Where a stored connection's CA certificate is -- a REFERENCE (PROD-01.3). */
+/** Where a stored connection's CA certificate is -- a REFERENCE. */
 const TLS_CA_VIEW = shapeOf("TlsCaView", { kind: str, name: str, key: str }, {});
 
 const CONNECTION_AUTH = shapeOf(
@@ -516,8 +474,6 @@ const CONNECTION = shapeOf(
 
 const RETENTION = shapeOf("RetentionView", {}, { keepLast: int, keepDays: int });
 
-// ---------------------------------------------- D1 W7: the cadence policy
-//
 // THE FOUR CLOSED SETS BELOW ARE THE CONTROLLER'S OWN SPELLINGS. `nextRuns[]`
 // on a saved schedule and `runs[]` on a draft preview are ONE shape
 // (`NextRunView`), so a form renders a policy that is saved and a policy that
@@ -533,7 +489,7 @@ export const CADENCE_ADJUSTMENTS = Object.freeze([
 ]);
 
 /** Whether a slot past its starting deadline may still run. ABSENT means
- *  `None`, which is what every schedule written before PLAT-04.2 carries. */
+ *  `None`. */
 export const CATCH_UP_POLICIES = Object.freeze(["None", "Latest"]);
 
 /** Which kind of run a `Backup` is. PascalCase, the CRD's own. */
@@ -564,8 +520,8 @@ const SCHEDULE_POLICY = shapeOf(
 );
 
 /** What happened to a schedule's most recent decided slot, and the skipped
- *  slots (D1 section 4.8), as the controller recorded them. ADDITIVE (MCP-13):
- *  both are optional, and an absent one is "not yet recorded". */
+ *  slots, as the controller recorded them. Both are optional, and an absent
+ *  one is "not yet recorded". */
 const LAST_SLOT = shapeOf(
   "LastSlotView",
   { slot: str, dueAt: str, attempt: int, disposition: str, reason: str, decidedAt: str },
@@ -588,15 +544,15 @@ const SCHEDULE_STATUS = shapeOf(
     lastFireTime: str, nextFireTime: str, lastMissedSlot: str,
     activeBackup: str, pendingBackup: str,
     ready: objectOf(CONDITION),
-    // D1 W7. `activeRuns` ABSENT means "not yet computed", never "none are
-    // running", and `ui/pages/schedules.js` renders those two differently.
+    // `activeRuns` ABSENT means "not yet computed", never "none are running",
+    // and `ui/pages/schedules.js` renders those two differently.
     observedGeneration: int, policy: objectOf(SCHEDULE_POLICY),
     nextRuns: listOf(objectOf(NEXT_RUN)), activeRuns: listOf(objectOf(ACTIVE_RUN)),
   },
 );
 
 /** The retry policy a schedule carries. ABSENT is `maxRetries: 0`, which is
- *  "no retry" and is what every schedule written before PLAT-04.2 means. */
+ *  "no retry". */
 const RETRY_POLICY = shapeOf("RetryPolicy", { maxRetries: int }, { delaySeconds: int });
 
 // A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth and
@@ -615,8 +571,8 @@ const CADENCE_PRESET = shapeOf(
 );
 
 /** What a dynamic run does when discovery cannot prove it saw everything.
- *  Required on the block, with NO default, for the reason D1 gives: both
- *  possible defaults are wrong in a way the operator would not notice. */
+ *  Required on the block, with NO default, because both possible defaults
+ *  are wrong in a way the operator would not notice. */
 export const INCOMPLETE_DISCOVERY_POLICIES = Object.freeze(["Refuse", "BackUpVisibleTopics"]);
 
 const TOPIC_EXCLUSIONS = shapeOf(
@@ -631,30 +587,16 @@ const ALL_USER_TOPICS = shapeOf(
   { exclude: objectOf(TOPIC_EXCLUSIONS) },
 );
 
-// `destinationRef` AND `allUserTopics` LANDED WITH D1 W6 (PLAT-06.2, PLAT-09.2)
-// AND ARE DECODED HERE, which is the whole of what this client does with them:
-// a schedule may now NAME a saved destination, and it may now say that its
-// selection is dynamic. Both are OPTIONAL and both are absent on every schedule
-// written before that change, so absent keeps meaning what it meant.
+// `destinationRef` and `allUserTopics` are OPTIONAL and absent on older
+// schedules, so absent keeps meaning what it meant. The policy fields
+// (`preset`, `timeZone`, `retry`, `catchUpPolicy`, `startingDeadlineSeconds`,
+// `activeDeadlineSeconds`, `generation`) are declared because
+// `ui/pages/schedules.js` renders every one of them.
 //
-// AND D1 W7 DECLARES THE REST, BECAUSE D1 W7 IS THE FORM THAT OWNS THEM.
-// `preset`, `timeZone`, `retry`, `catchUpPolicy`, `startingDeadlineSeconds`,
-// `activeDeadlineSeconds` and `generation` were left in the decoder's
-// `unknown` list by D1 W6 -- tolerated, recorded and visibly unrendered --
-// with the constraint that they are declared by the task that RENDERS them,
-// never by one that would leave a declared field with nothing on screen. That
-// task is this one: `ui/pages/schedules.js`'s policy form reads every one of
-// them, and `renderScheduleRevision` reads `generation`.
-//
-// `generation` STAYS OPTIONAL, AND THAT IS NOT THIS SIDE'S CHOICE. D1 W6
-// records that the API always emits it and left it out of the schema's
-// `required` set only so that tightening it would be one cross-side commit.
-// The drift arm compares this client's required set with the SCHEMA's, so
-// moving it here alone turns `contract.spec.js` red: the tightening needs
-// `crates/logweir-api/src/contract.rs` in the same commit, which is Rust
-// product code this task does not own. The page therefore treats an absent
-// generation as "revision not recorded" -- the same words a pre-PLAT-05.1 run
-// gets -- and never as revision 0.
+// `generation` STAYS OPTIONAL because the schema's `required` set omits it,
+// and the drift arm compares the two: tightening it is a change to
+// `crates/logweir-api/src/contract.rs` in the same commit. The page treats an
+// absent generation as "revision not recorded", never revision 0.
 const SCHEDULE = shapeOf(
   "Schedule",
   {
@@ -691,8 +633,8 @@ const OPERATION_SUMMARY = shapeOf(
     verificationState: oneOf(VERIFICATION_STATES),
     verifiedSuccess: bool,
   },
-  // `exitCode` and `outcome` (MCP-17): the operation's own result, carried on
-  // a LIST row. Additive; an absent one is "not recovered".
+  // `exitCode` and `outcome`: the operation's own result, carried on a LIST
+  // row. Additive; an absent one is "not recovered".
   { stateReason: str, exitCode: int, outcome: str },
 );
 
@@ -700,14 +642,11 @@ const WINDOW_COVERED = shapeOf("WindowCoveredView", { fromMs: int, toMs: int });
 
 const OBSERVED_AUTH = shapeOf("ObservedAuthView", {}, { mode: str, username: str });
 
-// WHAT KIND OF RUN THIS IS, AND WHICH REVISION IT FROZE (D1 W7).
-//
-// BOTH ARE OPTIONAL AND BOTH ARE ABSENT ON A PRE-PLAT-05.1 RUN, and the page
-// renders that absence as "revision not recorded" rather than as `Manual`,
-// generation 0 or an empty digest. `triggeredBy` -- the CRD's older, coarser
-// `manual | schedule` string -- stays required and stays rendered: it is what
-// a run created before `trigger` existed carries, and the two are shown as the
-// two facts they are rather than one reconciled guess.
+// WHAT KIND OF RUN THIS IS, AND WHICH REVISION IT FROZE. Both are optional
+// and absent on an older run, rendered as "revision not recorded" rather
+// than as `Manual`, generation 0 or an empty digest. `triggeredBy` -- the
+// CRD's older `manual | schedule` string -- stays required and rendered
+// beside them: two facts, not one reconciled guess.
 const TRIGGER = shapeOf(
   "TriggerView",
   { kind: oneOf(TRIGGER_KINDS), attempt: int },
@@ -726,7 +665,7 @@ const BACKUP_DESTINATION_REF = shapeOf(
   { uid: str },
 );
 
-// P10: the ceiling a queued manual run waits behind, published only while the
+// The ceiling a queued manual run waits behind, published only while the
 // run is queued.
 const RUN_QUEUE = shapeOf("RunQueueView", { limit: int }, { authorizationExpiresAt: str });
 
@@ -747,33 +686,31 @@ const BACKUP = shapeOf(
   },
 );
 
-// PROD-15.1: `originalName` -- whether the restore writes under the ORIGINAL
-// topic names -- required, as the schema requires it.
+// `originalName` -- whether the restore writes under the ORIGINAL topic
+// names -- required, as the schema requires it.
 const RESTORE_TARGET = shapeOf(
   "RestoreTargetView",
   { clusterRef: objectOf(NAME_REF), mode: str, topicPrefix: str, originalName: bool },
 );
 
-// FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
-// controller copied it -- which source topics the restore selected by the
-// producers' clocks, and which with an unrecorded timestamp type. Absent is
-// not recorded.
+// The signed scorecard's `source.time_basis` as the controller copied it:
+// which source topics the restore selected by the producers' clocks, and
+// which with an unrecorded timestamp type. Absent is not recorded.
 const RESTORE_TIME_BASIS = shapeOf(
   "RestoreTimeBasisView",
   { producerTime: listOf(str), notRecorded: listOf(str) },
   { plan: str },
 );
 
-/** PROD-08.1a: how much of a restore phase 7 verifies, in the product API's
- *  one spelling for both what a Restore asks for and what its scorecard says
- *  it verified. */
+/** How much of a restore phase 7 verifies, in the product API's one spelling
+ *  for both what a Restore asks for and what its scorecard says it
+ *  verified. */
 export const COVERAGE_VALUES = Object.freeze(["sampled", "complete"]);
 
-// PROD-08.1a: a Restore's coverage -- what it asks for (`requested`, always
-// stated) and what its signed scorecard says it verified (`recorded`; ABSENT is
-// not recorded, never complete). `covered` and its reason belong to a recorded
-// complete verification. REQUIRED on the Restore, as the schema requires it:
-// the API always states what a Restore asks for.
+// A Restore's coverage: what it asks for (`requested`, always stated) and
+// what its signed scorecard says it verified (`recorded`; ABSENT is not
+// recorded, never complete). `covered` and its reason belong to a recorded
+// complete verification. REQUIRED on the Restore, as the schema requires it.
 const RESTORE_COVERAGE = shapeOf(
   "RestoreCoverageView",
   { requested: oneOf(COVERAGE_VALUES) },
@@ -783,13 +720,11 @@ const RESTORE_COVERAGE = shapeOf(
   },
 );
 
-// PROD-15.1: what a stopped creation step left behind -- the mapped target
-// names someone else created while the restore was admitted, and every topic
-// this restore created and LEFT, empty. Logweir deletes none of them;
-// `leftInstruction` is the one sentence that says what to do with each.
-// Review 2, M2: a THIRD list, `unconfirmed` (names the restore asked for and
-// cannot account for, with their own sentence), and a count beside each list
-// so a list the 100-name bound cut says how many more there are.
+// What a stopped creation step left behind: the mapped target names someone
+// else created while the restore was admitted, every topic this restore
+// created and LEFT empty, and the names it asked for and cannot account for
+// (`unconfirmed`), each with its own sentence and a count, so a list the
+// 100-name bound cut says how many more there are. Logweir deletes none.
 const CREATION_STOP = shapeOf(
   "CreationStopView",
   {
@@ -799,11 +734,11 @@ const CREATION_STOP = shapeOf(
   { unconfirmedSeen: bool, unconfirmedInstruction: str },
 );
 
-// PROD-11.1b: a Restore's signed replay selection -- a window from a stated
-// start, or a partition subset of each narrowed topic. ABSENT means the
-// scorecard states none (every partition of every restored topic, from the
-// archive's floor); PRESENT and empty is a selection the controller could not
-// read, which is still a selection and never a restore of everything.
+// A Restore's signed replay selection: a window from a stated start, or a
+// partition subset of each narrowed topic. ABSENT means the scorecard
+// states none (every partition of every restored topic, from the archive's
+// floor); PRESENT and empty is a selection the controller could not read,
+// which is still a selection and never a restore of everything.
 const SELECTED_PARTITIONS = shapeOf(
   "SelectedPartitionsView",
   { topic: str, partitions: listOf(int) },
@@ -827,8 +762,7 @@ const RESTORE = shapeOf(
     target: objectOf(RESTORE_TARGET), deadlineSeconds: int,
     newTopics: listOf(str), operation: objectOf(OPERATION_SUMMARY),
     coverage: objectOf(RESTORE_COVERAGE),
-    // PROD-15.1: the approval subject this restore needs -- `originalName` or
-    // `ordinary`.
+    // The approval subject this restore needs: `originalName` or `ordinary`.
     approvalSubject: str,
   },
   {
@@ -847,8 +781,8 @@ const VERIFIED_SUBJECT = shapeOf(
   { kind: str, name: str, namespace: str, uid: str },
 );
 
-// PLAT-19.2: the policy, mode and console-attested requester a v2 verdict
-// was made under. Present only while the Approval is verified.
+// The policy, mode and console-attested requester a v2 verdict was made
+// under. Present only while the Approval is verified.
 const APPROVAL_AUTHORIZATION = shapeOf(
   "ApprovalProvenanceView",
   { mode: str, policyName: str, policyDigest: str, requester: str, confirmationKeyId: str },
@@ -861,8 +795,8 @@ const APPROVAL = shapeOf(
     subjectRef: objectOf(SUBJECT_REF), planHash: str,
     approvalBytesLength: int, sidecarBytesLength: int,
     conditions: listOf(objectOf(CONDITION)),
-    // PROD-15.1: the approval subject the SIGNED document carries --
-    // `originalName`, `ordinary`, or `unknown` (not readable).
+    // The approval subject the SIGNED document carries: `originalName`,
+    // `ordinary`, or `unknown` (not readable).
     approvalSubject: str,
   },
   {
@@ -872,48 +806,45 @@ const APPROVAL = shapeOf(
   },
 );
 
-// PLAT-19.2 / PLAT-12.1: where a submitted Restore goes next, decided by the
-// namespace's frozen approval policy. `state` is `confirmed` (route to the
-// operation) or `awaitingApproval` (route to its approval page); `mode` is
-// `governed` or `ordinary`. Read as strings, and compared by the one function
-// that routes on them, `ui/pages/restore-wizard.js`'s `frozenDecision`.
-// PROD-16.1: `operatorMode` is confirm | two-person | strict, the operator's
-// name for `mode`; required, as the schema requires it (the console and the
-// API ship together until the OpenAPI document is frozen).
+// Where a submitted Restore goes next, decided by the namespace's frozen
+// approval policy. `state` is `confirmed` (route to the operation) or
+// `awaitingApproval` (route to its approval page); `mode` is `governed` or
+// `ordinary`. Read as strings, and compared by the one function that routes
+// on them, `ui/pages/restore-wizard.js`'s `frozenDecision`. `operatorMode`
+// is confirm | two-person | strict, the operator's name for `mode`.
 const RESTORE_AUTHORIZATION = shapeOf(
   "RestoreRoutingView",
   { mode: str, operatorMode: str, policy: str, legacy: bool, state: str, approvalName: str },
   { policyDigest: str, confirmationName: str, requester: str, expiresAt: str },
 );
 
-// PLAT-19.2: a namespace's effective approval policy.
+// A namespace's effective approval policy.
 const APPROVAL_POLICY = shapeOf(
   "ApprovalPolicyView",
   {
     namespace: str, name: str, mode: str, legacy: bool,
-    // PROD-16.1: the operator's mode name, and why the namespace resolves so
+    // The operator's mode name, and why the namespace resolves so
     // (binding | configured | freshInstall | legacy).
     operatorMode: str, basis: str,
     requireDistinctPrincipal: bool, installationDigest: str,
     ordinaryConfirmationAvailable: bool, ticketRequired: bool,
-    // PROD-16.2: whether THIS console takes a second person's approval here
-    // (a two-person policy, the shared console, its key present).
+    // Whether THIS console takes a second person's approval here (a
+    // two-person policy, the shared console, its key present).
     consoleApprovalAvailable: bool,
   },
   { maxAgeSeconds: int, digest: str, confirmationKeyId: str },
 );
 
-// PROD-16.2: whether this session may approve a two-person request, decided
-// by the server with the rules the click is held to, and the one sentence the
-// page shows either way. `refusal` is read as a string and never switched on:
-// the sentence is the server's.
+// Whether this session may approve a two-person request, decided by the
+// server with the rules the click is held to, and the one sentence the page
+// shows either way. `refusal` is read as a string and never switched on.
 const APPROVE_OFFER = shapeOf(
   "ApproveOfferView", { offered: bool, sentence: str }, { refusal: str },
 );
 
-// PROD-16.2: THE APPROVAL SCOPE -- everything a second person approves, from
-// the plan the request names by hash: source, recovery point, target cluster,
-// EVERY topic and the name it is restored under, the verification and the
+// THE APPROVAL SCOPE: everything a second person approves, from the plan the
+// request names by hash -- source, recovery point, target cluster, EVERY
+// topic and the name it is restored under, the verification and the
 // evidence. `topicsCount` restates the list's length so the page can check it
 // rendered every one.
 const SCOPE_STORAGE = shapeOf(
@@ -931,9 +862,9 @@ const SCOPE_RECOVERY = shapeOf(
   { pointInTime: str, pointInTimeStated: bool },
   { windowStart: str, timeBasis: str },
 );
-// Review S-1: the requester's owner statement for an original-name restore,
-// as the plan signs it. `owners` ABSENT is "not declared", EMPTY is "the
-// requester states there is none".
+// The requester's owner statement for an original-name restore, as the plan
+// signs it. `owners` ABSENT is "not declared", EMPTY is "the requester states
+// there is none".
 const SCOPE_OWNER = shapeOf("ScopeOwnerView", { topic: str, kind: str, reference: str });
 const SCOPE_OWNER_STATEMENT = shapeOf(
   "ScopeOwnerStatementView", { ownerPath: bool }, { owners: listOf(objectOf(SCOPE_OWNER)) },
@@ -967,13 +898,12 @@ const APPROVAL_SCOPE = shapeOf(
   { planName: str },
 );
 
-// PROD-16.2: a two-person request as the approver is shown it. Every optional
-// field comes from the request's SIGNED bytes (and the plan they name by
-// hash), after the console verified its own signature on them; a request that
-// does not verify carries none of them. `state` is pending | approved |
-// expired | notConfirmed, read as a string by the one function that renders
-// it (`ui/pages/approvals.js`). `scopeComplete` is the server's word on
-// whether `scope` is the whole of what is approved.
+// A two-person request as the approver is shown it. Every optional field
+// comes from the request's SIGNED bytes (and the plan they name by hash),
+// after the console verified its own signature on them; a request that does
+// not verify carries none of them. `state` is pending | approved | expired |
+// notConfirmed, read as a string by `ui/pages/approvals.js`. `scopeComplete`
+// is the server's word on whether `scope` is the whole of what is approved.
 const APPROVAL_REQUEST = shapeOf(
   "ApprovalRequestView",
   {
@@ -989,14 +919,14 @@ const APPROVAL_REQUEST = shapeOf(
   },
 );
 
-// PROD-16.2: the second person's click. ONE field, which names the request
-// the approver was shown by the hash of its signed bytes; nothing an
+// The second person's click. ONE field, which names the request the
+// approver was shown by the hash of its signed bytes; nothing an
 // authorization carries is ever sent from this page.
 const CONSOLE_APPROVAL_REQUEST = shapeOf(
   "ConsoleApprovalRequest", { confirmationSha256: str },
 );
 
-// PLAT-19.2: a governed approver's countersigned sidecar.
+// A governed approver's countersigned sidecar.
 const SUBMIT_APPROVAL_REQUEST = shapeOf(
   "SubmitApprovalRequest", { sidecarBytes: str }, { approvalBytes: str },
 );
@@ -1073,9 +1003,9 @@ function item(name, itemShape) {
   return shapeOf(name, { item: objectOf(itemShape), requestId: str }, { replayed: bool });
 }
 
-// A single-item response for a route that only READS. It has no `replayed`,
-// and declaring one here would have been this client tolerating a field the
-// schema does not publish -- which the drift arm now refuses.
+// A single-item response for a route that only READS. It has no
+// `replayed`; declaring one would tolerate a field the schema does not
+// publish, which the drift arm refuses.
 function readOnlyItem(name, itemShape) {
   return shapeOf(name, { item: objectOf(itemShape), requestId: str });
 }
@@ -1083,7 +1013,7 @@ function readOnlyItem(name, itemShape) {
 const CONNECTION_RESPONSE = item("ConnectionResponse", CONNECTION);
 const SCHEDULE_RESPONSE = item("ScheduleResponse", SCHEDULE);
 const BACKUP_RESPONSE = item("BackupResponse", BACKUP);
-// Not `item(...)`: a create answers PLAT-19.2's `authorization` beside the item.
+// Not `item(...)`: a create answers the `authorization` routing view beside the item.
 const RESTORE_RESPONSE = shapeOf(
   "RestoreResponse",
   { item: objectOf(RESTORE), requestId: str },
@@ -1091,14 +1021,11 @@ const RESTORE_RESPONSE = shapeOf(
 );
 const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
 const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
-// NO `OperationResponse` SHAPE ANY MORE (FX-48). The operation route answers
-// `OperationViewResponse`; the shape a DETAIL view reads it with is declared
-// beside the view itself, as `OPERATION_DETAIL_RESPONSE`. `Operation` -- the
-// frozen sixteen -- stays declared above: it is that shape's required floor.
+// The operation route answers `OperationViewResponse`; a detail view's
+// shape is `OPERATION_DETAIL_RESPONSE`, declared beside the view, and
+// `Operation` above is its required floor.
 const APPROVAL_POLICY_RESPONSE = readOnlyItem("ApprovalPolicyResponse", APPROVAL_POLICY);
 const APPROVAL_REQUEST_RESPONSE = readOnlyItem("ApprovalRequestResponse", APPROVAL_REQUEST);
-
-// ------------------------------------------- D1 W7: the three W6 answers
 
 /** A draft cadence, previewed. `schedule` is the CANONICAL expression -- what
  *  a preset compiled to, and therefore the string the form saves -- and
@@ -1115,8 +1042,8 @@ const CADENCE_PREVIEW_RESPONSE = shapeOf(
 );
 
 /** The schedule a manual run was taken from, as the create route saw it.
- *  `suspended` and `activeRuns` are NOTICES here and not blocks: D1 section 8.3 is
- *  explicit that nothing about a schedule prevents a manual run. */
+ *  `suspended` and `activeRuns` are NOTICES here and not blocks: nothing about
+ *  a schedule prevents a manual run. */
 const SCHEDULE_CONTEXT = shapeOf(
   "ScheduleContextView",
   {
@@ -1147,28 +1074,17 @@ const POLICY_CHANGED_DETAIL = shapeOf(
 );
 
 
-// ===========================================================================
-// the console REQUEST DTOs -- the other half of the contract
-// ===========================================================================
-//
-// WHY THESE ARE DECLARED AND NOT ONLY BUILT. `ui/client.js` hand-writes the
-// body of every product-API create. Nothing compared those bodies with the
-// published request schemas, so a field that became REQUIRED on a create route
-// would have been a 422 in front of an operator rather than a red test -- the
-// mirror image of the read-side failure this module exists to stop. They are
-// declared here, `ui/tests/contract.spec.js` holds them to
-// `schemas/logweir-api-v1.openapi.json` exactly as it holds the response
-// shapes, and `ui/tests/client.spec.js` validates the body `requestBody`
-// actually builds against them.
-//
-// THEY ARE NOT USED TO BUILD A REQUEST. A decoder is a reader; making it also
-// a writer would put a second opinion about the plan bytes in this tree.
+// THE CONSOLE REQUEST DTOs. `ui/client.js` hand-writes every create body;
+// declaring the request schemas here lets `ui/tests/contract.spec.js` hold
+// them to `schemas/logweir-api-v1.openapi.json` and `ui/tests/client.spec.js`
+// validate the bodies `requestBody` builds, so a field that became REQUIRED
+// on a route is a red test and not a 422. They are never used to BUILD a
+// request: a decoder is a reader.
 
 const ARCHIVE_REQUEST = shapeOf("ArchiveRequest", { url: str }, { credentialRef: objectOf(NAME_REF) });
 
-/** PROD-01.3 security follow-up: the credential, TYPED ONCE and never named.
- *  WRITE-ONLY -- the product API turns it into a Secret bound to the
- *  connection and never returns it. */
+/** The credential, TYPED ONCE and never named. WRITE-ONLY -- the product API
+ *  turns it into a Secret bound to the connection and never returns it. */
 const NEW_CONNECTION_CREDENTIAL_REQUEST = shapeOf(
   "NewConnectionCredentialRequest",
   {},
@@ -1189,9 +1105,9 @@ const CONNECTION_AUTH_REQUEST = shapeOf(
   { mode: oneOf(CONNECTION_AUTH_MODES), tls: bool },
   {
     username: str,
-    // REFUSED by the product API since the PROD-01.3 security follow-up; kept
-    // in the shape only because the server's grammar still names it, so the
-    // refusal can say why. This client never sends it.
+    // REFUSED by the product API; kept in the shape only because the server's
+    // grammar still names it, so the refusal can say why. This client never
+    // sends it.
     credentialRef: objectOf(NAME_REF),
     credential: objectOf(NEW_CONNECTION_CREDENTIAL_REQUEST),
     tlsCa: objectOf(TLS_CA_REQUEST),
@@ -1210,18 +1126,12 @@ const CREATE_CONNECTION_REQUEST = shapeOf(
 
 const RETENTION_REQUEST = shapeOf("RetentionRequest", {}, { keepLast: int, keepDays: int });
 
-/** `POST .../schedules`: THE WHOLE POLICY, as of PLAT-10.1.
- *
- *  IT CREATES WHAT THE EDIT ROUTE CAN EDIT, and until PLAT-10.1 it did not:
- *  five required fields against the edit route's thirteen, so a form could
- *  edit a schedule into a shape it had no way to create and every guided
- *  creation would have been a create followed by a repair. `archive` and
- *  `topics` left the required set to make room for the two spellings that
- *  replace them -- `destinationRef` and `allUserTopics` -- and the xor of each
- *  pair is the SERVER's rule, not a copy kept here: a body with both, or with
- *  neither, is `422 validation_failed` naming the field. This shape's job is
- *  only to notice a field that became required on the server and stayed
- *  optional here, which is the silent field loss PLAT-18.1 exists to stop. */
+/** `POST .../schedules`: THE WHOLE POLICY. It creates what the edit route can
+ *  edit. `archive` and `topics` are optional beside the two spellings that
+ *  replace them (`destinationRef`, `allUserTopics`); the xor of each pair is
+ *  the SERVER's rule (`422 validation_failed` naming the field). This shape
+ *  only notices a field that became required on the server and stayed
+ *  optional here. */
 const CREATE_SCHEDULE_REQUEST = shapeOf(
   "CreateScheduleRequest",
   {
@@ -1249,24 +1159,21 @@ const RESTORE_TARGET_REQUEST = shapeOf(
   },
 );
 
-/** PLAT-11.2: one row of the mapping a create declares beside its plan -- a
- *  source topic and the target name the page previewed for it. */
+/** One row of the mapping a create declares beside its plan: a source topic
+ *  and the target name the page previewed for it. */
 const TOPIC_MAPPING_ROW = shapeOf("TopicMappingRow", { source: str, target: str });
 
-/** PROD-15.1: the mapped names an operator typed to confirm a restore under
- *  the ORIGINAL topic names, where the namespace's policy takes typed names. */
+/** The mapped names an operator typed to confirm a restore under the
+ *  ORIGINAL topic names, where the namespace's policy takes typed names. */
 const ORIGINAL_NAME_CONFIRMATION_REQUEST = shapeOf(
   "OriginalNameConfirmationRequest",
   { typedTopics: listOf(str) },
 );
 
-// FOUR MEMBERS THE DOCUMENT PUBLISHES WERE NOT DECLARED HERE UNTIL FX-48:
-// `coverage` and `completeMaxRecords` (PROD-08.1a), `topicMapping` (PLAT-11.2)
-// and `originalNameConfirmation` (PROD-15.1). `ui/client.js` builds three of
-// them into the body it sends -- unchecked, because a Restore create is the
-// one body it does not pass through `decodeRequest` -- so a member renamed on
-// the server would have been a 422 in front of an operator rather than a red
-// row, which is the failure this section's header names.
+// `ui/client.js` builds `coverage`, `topicMapping` and
+// `originalNameConfirmation` into a Restore create without passing it
+// through `decodeRequest`, so declaring them here is what makes a renamed
+// member a red row rather than a 422 in front of an operator.
 const CREATE_RESTORE_REQUEST = shapeOf(
   "CreateRestoreRequest",
   {
@@ -1282,14 +1189,13 @@ const CREATE_RESTORE_REQUEST = shapeOf(
   {
     sourceDestinationRef: objectOf(NAME_REF),
     evidenceDestinationRef: objectOf(NAME_REF),
-    // PLAT-19.2: the change ticket the console signs; required under a
-    // Governed policy (D0).
+    // The change ticket the console signs; required under a Governed policy.
     ticket: str,
-    // PROD-08.1a: the coverage the plan asks for, and its record bound.
+    // The coverage the plan asks for, and its record bound.
     coverage: oneOf(COVERAGE_VALUES), completeMaxRecords: int,
-    // PLAT-11.2: the declared mapping the API recomputes row by row.
+    // The declared mapping the API recomputes row by row.
     topicMapping: listOf(objectOf(TOPIC_MAPPING_ROW)),
-    // PROD-15.1: the typed names of an original-name restore.
+    // The typed names of an original-name restore.
     originalNameConfirmation: objectOf(ORIGINAL_NAME_CONFIRMATION_REQUEST),
   },
 );
@@ -1298,8 +1204,6 @@ const SET_SUSPENSION_REQUEST = shapeOf(
   "SetSuspensionRequest",
   { suspended: bool, expectedResourceVersion: str },
 );
-
-// ------------------------------------------- D1 W7: the two write bodies
 
 const TOPIC_SELECTION_REQUEST = shapeOf(
   "TopicSelectionRequest",
@@ -1359,10 +1263,6 @@ const CREATE_BACKUP_REQUEST = shapeOf(
   },
 );
 
-// ===========================================================================
-// D2: destinations, topic discoveries and operation readiness
-// ===========================================================================
-//
 // THREE DOMAINS, ONE RULE: NOTHING HERE READS AS HEALTH BY DEFAULT.
 //
 //   * A destination's `status.valid` is OPTIONAL, and absent means the
@@ -1379,7 +1279,7 @@ const CREATE_BACKUP_REQUEST = shapeOf(
 // does. `ui/render.js` carries the words and `ui/tests/pages.spec.js` holds
 // them.
 
-/** How a request names the bucket. NEVER a transport choice (defect G5). */
+/** How a request names the bucket. NEVER a transport choice. */
 export const ADDRESSING_MODES = Object.freeze(["pathStyle", "virtualHosted"]);
 
 /** Transport security. Immutable once the destination exists. */
@@ -1419,7 +1319,7 @@ export const PREFLIGHT_STATES = Object.freeze([
 
 /** What a preflight is about.
  *
- *  `sourceConnection` IS THE ONE THAT NAMES NOTHING ELSE (D2-SOURCECHECK). The
+ *  `sourceConnection` IS THE ONE THAT NAMES NOTHING ELSE. The
  *  other three each need something the connection would be used FOR -- a
  *  destination, a plan, a topic list -- and a console control that asked for
  *  one of those in order to find out whether a broker answers would be a
@@ -1562,7 +1462,7 @@ const TOPIC_DISCOVERY = shapeOf(
   },
   {
     createdAt: str, reason: str, observedAt: str, freshUntil: str, clusterId: str,
-    // FX-5: how many brokers answered the inventory's metadata read. Absent is
+    // How many brokers answered the inventory's metadata read. Absent is
     // unknown and never zero; the restore wizard caps its replication factor
     // at it for a fresh discovery of the target.
     brokerCount: int,
@@ -1676,8 +1576,6 @@ const TOPIC_DISCOVERY_RESPONSE = shapeOf(
   { replayed: bool, reused: bool },
 );
 
-// ------------------------------------------------- the D2 request shapes
-
 const CA_BUNDLE_REQUEST = shapeOf("CaBundleRequest", { configMapName: str }, { key: str });
 
 const STORAGE_REQUEST = shapeOf(
@@ -1772,8 +1670,8 @@ const CREATE_TOPIC_DISCOVERY_REQUEST = shapeOf(
 
 const RECOVERY_POINT_REQUEST = shapeOf("RecoveryPointRequest", { backupName: str }, { backupUid: str });
 
-/** PLAT-15.2: a catalog point a restore readiness check is about -- the
- *  catalog that lists it and its content-derived id. */
+/** A catalog point a restore readiness check is about: the catalog that
+ *  lists it and its content-derived id. */
 const CATALOG_POINT_REQUEST = shapeOf("CatalogPointRequest", { catalog: str, pointId: str });
 
 const BACKUP_PREFLIGHT_REQUEST = shapeOf(
@@ -1825,21 +1723,21 @@ export const CONSOLE_REQUESTS = Object.freeze({
   schedules: CREATE_SCHEDULE_REQUEST,
   restores: CREATE_RESTORE_REQUEST,
   "schedules:set-suspension": SET_SUSPENSION_REQUEST,
-  // D2 W13. Keyed by the ACTION the client names, which is the same key
-  // `api.js`'s frozen action table uses, so the body a page builds and the
-  // route it is sent to cannot come apart.
+  // Keyed by the ACTION the client names, the same key `api.js`'s frozen
+  // action table uses, so the body a page builds and the route it is sent to
+  // cannot come apart.
   destinations: CREATE_DESTINATION_REQUEST,
   preflights: CREATE_PREFLIGHT_REQUEST,
   "destinations:update-access": UPDATE_DESTINATION_ACCESS_REQUEST,
   "destinations:test": TEST_DESTINATION_REQUEST,
   "connections:topic-discoveries": CREATE_TOPIC_DISCOVERY_REQUEST,
-  // D1 W7. The policy replace is keyed by the route it is sent to; the manual
-  // run is keyed by the plural, because it goes through `consoleCreate`.
+  // The policy replace is keyed by the route it is sent to; the manual run
+  // is keyed by the plural, because it goes through `consoleCreate`.
   "schedules:policy": UPDATE_SCHEDULE_POLICY_REQUEST,
   backups: CREATE_BACKUP_REQUEST,
-  // PLAT-19.2: a governed approver's countersignature, keyed by the action.
+  // A governed approver's countersignature, keyed by the action.
   "restores:approval": SUBMIT_APPROVAL_REQUEST,
-  // PROD-16.2: a second person's approval in the console, keyed by the action.
+  // A second person's approval in the console, keyed by the action.
   "restores:console-approval": CONSOLE_APPROVAL_REQUEST,
 });
 
@@ -1941,7 +1839,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   CreateRestoreRequest: CREATE_RESTORE_REQUEST,
   SetSuspensionRequest: SET_SUSPENSION_REQUEST,
 
-  // D1 W7: the cadence policy, the revision and the manual run.
+  // The cadence policy, the revision and the manual run.
   NextRunView: NEXT_RUN,
   ActiveRunView: ACTIVE_RUN,
   SchedulePolicyView: SCHEDULE_POLICY,
@@ -1959,7 +1857,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   ReadinessAcknowledgementRequest: READINESS_ACKNOWLEDGEMENT_REQUEST,
   CreateBackupRequest: CREATE_BACKUP_REQUEST,
 
-  // D2: destinations, topic discoveries and operation readiness.
+  // Destinations, topic discoveries and operation readiness.
   CaBundleView: CA_BUNDLE,
   StorageView: STORAGE,
   TransportView: TRANSPORT,
@@ -2021,9 +1919,8 @@ export const CONSOLE_SHAPES = Object.freeze({
   SourceConnectionPreflightRequest: SOURCE_CONNECTION_PREFLIGHT_REQUEST,
   CreatePreflightRequest: CREATE_PREFLIGHT_REQUEST,
 
-  // FX-48: SIX SHAPES THAT WERE DECLARED AND IN NO MAP, so no drift arm
-  // compared them with the document. `ui/tests/contract-coverage.spec.js` now
-  // fails when a declared shape is in neither map.
+  // Shapes nested in others: `ui/tests/contract-coverage.spec.js` fails when
+  // a declared shape is in neither map.
   BackupDestinationRefView: BACKUP_DESTINATION_REF,
   RunQueueView: RUN_QUEUE,
   RestoreTimeBasisView: RESTORE_TIME_BASIS,
@@ -2139,12 +2036,12 @@ export function decodeConsoleItem(plural, value) {
   return decodeWith(route.response, value);
 }
 
-/** PLAT-19.2: a namespace's effective approval policy. @returns {Decoded} */
+/** A namespace's effective approval policy. @returns {Decoded} */
 export function decodeApprovalPolicy(value) {
   return decodeWith(APPROVAL_POLICY_RESPONSE, value);
 }
 
-/** PROD-16.2: a two-person request as the approver is shown it.
+/** A two-person request as the approver is shown it.
  *  @returns {Decoded} */
 export function decodeApprovalRequest(value) {
   return decodeWith(APPROVAL_REQUEST_RESPONSE, value);
@@ -2229,59 +2126,30 @@ export function decodePolicyChanged(problem) {
   return decodeWith(POLICY_CHANGED_DETAIL, detail).value;
 }
 
-// ===========================================================================
-// D3 -- the shapes the console's D3 surfaces consume
-// ===========================================================================
+// THE D3 SHAPES: every name and `required` set below comes from
+// `schemas/logweir-api-v1.openapi.json`, and `contract.spec.js`'s drift arm
+// pins each one field for field.
 //
-// RECONCILED AGAINST THE PUBLISHED DOCUMENT. These were declared before the API
-// half existed, from D3's own status contracts, and every name and every
-// `required` set below now comes from `schemas/logweir-api-v1.openapi.json` --
-// which is the source of truth for names, and against which
-// `contract.spec.js`'s drift arm pins each of them field for field. Nothing
-// here is assumed any more; the shapes that used to be
-// (`D3Operation`, `RecoveryCatalog`, `CatalogPointView`, `CreateCatalogRequest`
-// and the four `*StatusView`s) are gone, and this comment is what is left of
-// them.
-//
-// THREE THINGS THE RECONCILIATION SETTLED, EACH ONE A DECISION AND NOT A
-// RENAME.
-//
-//   1. **THE VIEWS ARE FLAT.** "DTOs are separate from CRDs" is PLAT-17.1's
-//      rule and every projection this console already reads (`Connection`,
-//      `Schedule`, `Backup`, `Destination`) is flat. So a D3 view carries its
-//      identity and its facts at the top level, and there is no `spec`/`status`
-//      pair to read. The renderers in `ui/pages/*` still speak the CUSTOM
-//      RESOURCE's vocabulary, because legacy mode hands them exactly that, so
-//      `ui/operation-watch.js` projects the flat view into it -- the same
-//      decision `ui/client.js` made for the five older kinds, for the same
-//      reason: one renderer, one vocabulary, and no page that reads one way in
-//      one mode and another way in the other.
-//
-//   2. **THE OPEN VOCABULARIES ARE STRINGS, AND THAT IS DELIBERATE.** Eight D3
-//      words are published as typed enums; the rest -- a health, an
-//      availability, a diagnosis code, an effective key state -- are published
-//      as `string`, because each is a word a CONTROLLER writes into a status
-//      field the API passes through, and a closed enum there would turn a
-//      forward-compatible status into a 500. So this client declares them
-//      `str` too, and keeps the vocabularies below as RENDERING lists: a word
-//      inside the set gets its colour, a word outside it is rendered VERBATIM
-//      and never dropped, never rounded to a neighbour and never treated as a
-//      pass. That is also what D3 section 7.7's "unknown is not valid"
-//      requires, one level up.
-//
-//   3. **THE EVIDENCE VERDICT ARRIVES ALREADY COMBINED.** `OperationTrust.state`
-//      is D3 section 2.5's own word -- `verified`, `verifiedHistorical`,
-//      `untrusted`, `invalid`, `notAttempted`, `notApplicable`, `pending` --
-//      computed by `logweir-api` from the controller's `result` and
-//      `trust.basis`. In console mode the page reads that word instead of
-//      re-deriving it, which is the whole point of a normalizing API; in legacy
-//      mode there is no such word and the page keeps its own rule over the
-//      custom resource's `result` + PascalCase `basis`. Two documents, two
-//      rules, each reading what its own document carries.
+//   1. THE VIEWS ARE FLAT: a view carries its identity and its facts at the
+//      top level, with no `spec`/`status` pair, like every projection this
+//      console reads. The renderers in `ui/pages/*` speak the CUSTOM
+//      RESOURCE's vocabulary (legacy mode hands them that), so
+//      `ui/operation-watch.js` projects the flat view into it: one renderer,
+//      one vocabulary in both modes.
+//   2. THE OPEN VOCABULARIES ARE STRINGS, DELIBERATELY. A health, an
+//      availability, a diagnosis code or an effective key state is a word a
+//      CONTROLLER writes and the API passes through; a closed enum would turn
+//      a forward-compatible status into a 500. So they are `str` here, and the
+//      lists below are RENDERING lists: a word inside gets its colour, a word
+//      outside is rendered VERBATIM, never dropped, rounded or read as a pass.
+//   3. THE EVIDENCE VERDICT ARRIVES ALREADY COMBINED. `OperationTrust.state`
+//      (`verified`, `verifiedHistorical`, `untrusted`, `invalid`,
+//      `notAttempted`, `notApplicable`, `pending`) is computed by
+//      `logweir-api` from the controller's `result` and `trust.basis`.
+//      Console mode reads that word; legacy mode keeps the page's own rule
+//      over the custom resource's `result` + PascalCase `basis`.
 
-// --------------------------------------------------------- typed vocabularies
-
-/** `OperationStage` -- D3 section 2.5's six stages, camelCase on the wire.
+/** `OperationStage` -- the six stages, camelCase on the wire.
  *  ABSENT when nothing was observed, which is why `queued` and `preparing` are
  *  never inferred. */
 export const PROGRESS_STAGES = Object.freeze([
@@ -2306,10 +2174,10 @@ export const APPROVED_PLAN_STATES = Object.freeze([
 ]);
 
 /** `RetentionAccountingState` -- whether a retention evaluation's counts and
- *  `kept` rows are published (FX-22 review M1). The API writes it on every
- *  `lastEvaluation`; with `NotRecorded` an absent `kept` says nothing. The
- *  schema's declared default for an answer WITHOUT the member (a build that
- *  predates it) is `NotRecorded`. */
+ *  `kept` rows are published. The API writes it on every `lastEvaluation`;
+ *  with `NotRecorded` an absent `kept` says nothing. The schema's declared
+ *  default for an answer WITHOUT the member (an older build) is
+ *  `NotRecorded`. */
 export const RETENTION_ACCOUNTING_STATES = Object.freeze(["Recorded", "NotRecorded"]);
 
 /** `EvaluationState` -- whether a trust evaluation is believed. The API
@@ -2328,11 +2196,9 @@ export const EVALUATION_REASONS = Object.freeze([
 export const CONNECT_SYNC_MODES = Object.freeze(["index", "full"]);
 export const CONNECT_DEEP_CHECKS = Object.freeze(["none", "manifestDigest", "segmentSample"]);
 
-// ------------------------------------------------------- rendering vocabularies
-//
-// PUBLISHED AS `string`, KEPT AS LISTS. See point 2 of this section's header:
-// membership decides a badge's colour and nothing else, and a word outside a
-// list is rendered as itself.
+// PUBLISHED AS `string`, KEPT AS LISTS (point 2 above): membership decides a
+// badge's colour and nothing else, and a word outside a list is rendered as
+// itself.
 
 /** `ProtectionPolicyView.health`. */
 export const HEALTH_STATES = Object.freeze([
@@ -2350,7 +2216,7 @@ export const POINT_EVIDENCE = Object.freeze([
   "Valid", "ValidHistorical", "Untrusted", "NotAttempted",
 ]);
 
-/** The five alert kinds (D3 section 3.3). */
+/** The five alert kinds. */
 export const ALERT_KINDS = Object.freeze([
   "BackupFailure", "Staleness", "ArchiveUnavailable", "RehearsalFailure", "RecoveryCompleted",
 ]);
@@ -2358,7 +2224,7 @@ export const ALERT_KINDS = Object.freeze([
 /** An alert ledger entry's own state. */
 export const ALERT_STATES = Object.freeze(["Open", "Resolved"]);
 
-/** A catalog entry's availability axis (D3 section 5.4) -- the BEST of its
+/** A catalog entry's availability axis -- the BEST of its
  *  locations. */
 export const AVAILABILITY_STATES = Object.freeze([
   "Available", "Missing", "Unreadable", "Deleted", "Conflict", "UnsupportedFormat", "Partial",
@@ -2387,7 +2253,7 @@ export const GUARANTEE_LEVELS = Object.freeze([
 export const RETENTION_MODES = Object.freeze(["Report", "Enforce", "ExternalLifecycle"]);
 
 /** A key's resolved state, plus the `unknown` the API writes when the
- *  evaluation is not fresh (D3 section 7.7). */
+ *  evaluation is not fresh. */
 export const EFFECTIVE_KEY_STATES = Object.freeze([
   "Active", "NotYetValid", "Expired", "Retired", "Revoked", "Unparseable", "unknown",
 ]);
@@ -2398,7 +2264,7 @@ export const VERIFICATION_USES = Object.freeze(["Full", "Historical", "None"]);
 /** A key's DECLARED lifecycle state. MONOTONIC. */
 export const KEY_STATES = Object.freeze(["Active", "Retired", "Revoked"]);
 
-/** The three usages a key may carry (D3 section 7.3). */
+/** The three usages a key may carry. */
 export const KEY_USAGES = Object.freeze([
   "EvidenceSigning", "GovernedApproval", "ConsoleConfirmation",
 ]);
@@ -2409,7 +2275,7 @@ export const REVOCATION_REASONS = Object.freeze([
   "KeyCompromise", "Superseded", "Unspecified",
 ]);
 
-/** `trust.basis`, in the CRD's OWN spelling (D3 section 12: an absent block
+/** `trust.basis`, in the CRD's OWN spelling (an absent block
  *  projects to `None`). An unrecognised value is passed through by the API and
  *  is rendered as itself here. */
 export const TRUST_BASES = Object.freeze([
@@ -2417,10 +2283,10 @@ export const TRUST_BASES = Object.freeze([
 ]);
 
 /** `status.evidence.verification.result` on a CUSTOM RESOURCE -- the CRD's own
- *  PascalCase vocabulary, which gained `Untrusted` with D3 section 7.4 and
- *  `Pending` with D2 section 3.9's evidence-fetch Job. It is NOT the
- *  console's lowercase `verification.state` and not `trust.state` either;
- *  three fields of two documents, and this file keeps them apart.
+ *  PascalCase vocabulary, including `Untrusted` and the evidence-fetch Job's
+ *  `Pending`. It is NOT the console's lowercase `verification.state` and not
+ *  `trust.state` either; three fields of two documents, and this file keeps
+ *  them apart.
  *
  *  `Pending` IS NOT A VERDICT. It is written while the evidence-fetch check
  *  Job reads a run's evidence with the destination's `evidenceRead` grant,
@@ -2431,7 +2297,7 @@ export const EVIDENCE_RESULTS = Object.freeze([
   "Valid", "Invalid", "NotAttempted", "Untrusted", "Pending",
 ]);
 
-/** The closed diagnosis vocabulary (D3 section 2.3). Thirteen codes; a
+/** The closed diagnosis vocabulary. Thirteen codes; a
  *  fourteenth from a newer controller renders as itself rather than refusing
  *  the whole document. */
 export const DIAGNOSIS_CODES = Object.freeze([
@@ -2443,8 +2309,6 @@ export const DIAGNOSIS_CODES = Object.freeze([
 
 /** A diagnosis' severity. */
 export const DIAGNOSIS_SEVERITIES = Object.freeze(["Warning", "Error"]);
-
-// --------------------------------------------------------- the operation view
 
 const D3_DIAGNOSTIC_OBJECT = shapeOf("DiagnosticObjectView", { kind: str, name: str });
 
@@ -2460,10 +2324,10 @@ const D3_DIAGNOSTIC = shapeOf(
 const D3_RUNNER_PHASE = shapeOf("RunnerPhaseView", {}, { number: int, name: str });
 
 /** `ProgressView`. NO `runner` BLOCK, and that is a decision rather than an
- *  omission: a Job name and a pod name are infrastructure detail, D0's visible
- *  list does not carry them, and a structural test on the API side keeps them
- *  out. What a reader needs instead is `reason`, `message` and a DIAGNOSTIC's
- *  own `object {kind, name}`, which IS published. */
+ *  omission: a Job name and a pod name are infrastructure detail, the
+ *  published view does not carry them, and a structural test on the API side
+ *  keeps them out. What a reader needs instead is `reason`, `message` and a
+ *  DIAGNOSTIC's own `object {kind, name}`, which IS published. */
 const D3_PROGRESS = shapeOf(
   "ProgressView",
   {},
@@ -2474,8 +2338,8 @@ const D3_PROGRESS = shapeOf(
   },
 );
 
-// PROD-08.1a: a complete verification's exact counts, copied from the signed
-// scorecard by the controller and served by the API beside a recorded
+// A complete verification's exact counts, copied from the signed scorecard
+// by the controller and served by the API beside a recorded
 // `coverage: complete` only. `covered: false` is never a pass.
 const D3_REPLAY_COUNTS = shapeOf(
   "ReplayCountsView",
@@ -2557,9 +2421,9 @@ const D3_TRUST = shapeOf(
 
 const D3_READINESS = shapeOf("ReadinessView", { state: str, basis: str });
 
-/** `OperationView` -- PLAT-17.1's `Operation` FLATTENED, so the body is the
- *  frozen sixteen plus D3's additions and a client written against either
- *  reads the one it knows. */
+/** `OperationView` -- `Operation` FLATTENED, so the body is the frozen sixteen
+ *  plus D3's additions and a client written against either reads the one it
+ *  knows. */
 const D3_OPERATION = shapeOf(
   "OperationView",
   {
@@ -2591,32 +2455,19 @@ const D3_OPERATION = shapeOf(
 
 const D3_OPERATION_RESPONSE = readOnlyItem("OperationViewResponse", D3_OPERATION);
 
-// THE SAME DOCUMENT, AS A DETAIL VIEW READS IT (FX-48).
+// THE SAME DOCUMENT, AS A DETAIL VIEW READS IT. `GET
+// .../operations/{kind}/{name}` answers `OperationViewResponse`, and the
+// Backup and Restore detail views read it here, so every member D3 added
+// reaches them: the loop below takes each member of `OperationView` that the
+// frozen sixteen do not carry, with the view's own decoder, so a member added
+// to the view cannot be forgotten here.
 //
-// ONE ROUTE, ONE PUBLISHED DOCUMENT, AND UNTIL NOW TWO SHAPES THAT DISAGREED
-// ABOUT IT. `GET .../operations/{kind}/{name}` answers `OperationViewResponse`.
-// The operation page read it with the shape above; the Backup and Restore
-// DETAIL views read it with `OperationResponse` -- the frozen sixteen of
-// PLAT-17.1 -- and every member D3 added was dropped on the way through. The
-// trust basis was recovered by a second, partial decoder
-// (CONSOLE-DETAIL-TRUST-BASIS-DROPPED), the verification scope by a third (the
-// PoC round's class sweep), and the fourth loss was found on a live install:
-// `completion.integrityLevel`, so the Restore detail's Integrity table read
-// "-" for a level the API had published (PoC batch 6, F-4). Three patches for
-// one cause is the cause not being fixed.
-//
-// SO THE DETAIL READ DECLARES EVERY MEMBER THE VIEW DECLARES, BY CONSTRUCTION:
-// the loop below takes each member of `OperationView` the frozen sixteen do
-// not carry, with the view's own decoder for it. A member added to the view is
-// in the detail read the moment it is declared, and cannot be forgotten here.
-//
-// WHAT STAYS DIFFERENT IS WHICH MEMBERS ARE REQUIRED, AND THAT IS DELIBERATE.
-// The five D3 members the document requires (`trust`, `verificationScope`,
-// `readiness`, `awaitingApproval`, `stale`) are OPTIONAL here: D3 section 12's
-// rule is "`trust` absent -> the pre-existing rule", an answer of the frozen
-// sixteen alone still renders the detail it always rendered, and a block that
-// is absent is `null` -- never a default. A block that is present and
-// malformed is a contract failure, like any other.
+// WHICH MEMBERS ARE REQUIRED DIFFERS, DELIBERATELY. The five D3 members the
+// document requires (`trust`, `verificationScope`, `readiness`,
+// `awaitingApproval`, `stale`) are OPTIONAL here: an absent `trust` keeps the
+// pre-existing rule, an answer of the frozen sixteen alone still renders, and
+// an absent block is `null`, never a default. A block present and malformed
+// is a contract failure, like any other.
 const D3_ADDITIONS = {};
 for (const bag of [D3_OPERATION.required, D3_OPERATION.optional]) {
   for (const key of Object.keys(bag)) {
@@ -2655,8 +2506,6 @@ export const TOLERANT_SHAPES = Object.freeze([
       "declared a second time because it carries the detail read's view and not the strict one",
   }),
 ]);
-
-// ------------------------------------------------------- protection policies
 
 const D3_LAST_POINT = shapeOf(
   "AvailablePointView",
@@ -2730,8 +2579,6 @@ const D3_PROTECTION = shapeOf(
 const D3_PROTECTION_RESPONSE = readOnlyItem("ProtectionPolicyResponse", D3_PROTECTION);
 const D3_PROTECTION_LIST = envelope("ProtectionPolicyList");
 
-// ----------------------------------------------------------------- catalogs
-
 const D3_CATALOG_COUNTS = shapeOf(
   "CatalogCountsView",
   {},
@@ -2783,22 +2630,9 @@ const D3_CATALOG_LIST = envelope("CatalogList");
 
 const D3_LOCATION = shapeOf("PointLocationView", { locationId: str, availability: str });
 
-/** `PointView` -- ONE POINT, AS THE CATALOG MATERIALISED IT.
- *
- *  `selectable` IS READ AND NEVER RE-DERIVED. D3 section 5.4's rule --
- *  `Available` AND (`Verified` or `VerifiedHistorical`) -- is materialised by
- *  the catalog on purpose, and a page recomputing it from two parsed words
- *  would be a second implementation of the most consequential rule in the
- *  document.
- *
- *  THE FOUR PLAN-BINDING KEYS ARE REQUIRED, and that is why "Restore this
- *  point" can exist: section 5.5 step 4's plan carries
- *  `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, and
- *  a link that could not name them would be an offer to build a plan out of
- *  nothing. */
-/** PROD-03.0: one topic's schema dependency, as the catalog's view lists it
- *  -- whether its archived keys or values carry Confluent wire-format framing,
- *  judged by the backup run from the archived bytes and never from a registry.
+/** One topic's schema dependency, as the catalog's view lists it: whether its
+ *  archived keys or values carry Confluent wire-format framing, judged by the
+ *  backup run from the archived bytes and never from a registry.
  *
  *  `verdict` IS PUBLISHED AS A STRING AND READ AS ONE: `schemaDependent`,
  *  `notDetected` or `notAssessed` today, and a word a newer runner adds still
@@ -2815,16 +2649,10 @@ const D3_POINT_SCHEMA_DEPENDENCY = shapeOf(
   },
 );
 
-/** PROD-05.1: one topic of a point, as the catalog's view lists it -- the
- *  recorded layout and how its configuration is held, never a value.
- *
- *  `schemaDependency` WAS NOT DECLARED HERE UNTIL FX-48, AND THAT WAS THE WHOLE
- *  DEFECT. `readShape` copies declared fields only, so what the API sent for a
- *  topic was dropped on the way to the page: the catalog page rendered no
- *  "Schema-dependent topics" section and the restore review said "not
- *  assessed" for a point whose receipt, catalog record and API view all said
- *  `schemaDependent`. ABSENT stays NOT ASSESSED -- a receipt before format
- *  1.5.0, or a catalog synced by an older runner. */
+/** One topic of a point, as the catalog's view lists it: the recorded layout
+ *  and how its configuration is held, never a value. `schemaDependency`
+ *  ABSENT is NOT ASSESSED (a receipt before format 1.5.0, or a catalog synced
+ *  by an older runner). */
 const D3_POINT_TOPIC = shapeOf(
   "PointTopicView",
   { name: str, applyRoute: str },
@@ -2834,10 +2662,9 @@ const D3_POINT_TOPIC = shapeOf(
   },
 );
 
-/** PROD-04.1: a point's consumer position evidence, as the catalog's view
- *  lists it -- the snapshot's freshness, and per selected group its outcome and
- *  its positions counted by what they say about archived data. Never a
- *  position. */
+/** A point's consumer position evidence, as the catalog's view lists it: the
+ *  snapshot's freshness, and per selected group its outcome and its positions
+ *  counted by what they say about archived data. Never a position. */
 const D3_POINT_POSITION_COUNTS = shapeOf("PointPositionCountsView", {
   related: int, notRelated: int, neverCommitted: int, beyondEnd: int, failed: int,
   notObserved: int,
@@ -2856,6 +2683,17 @@ const D3_POINT_CONSUMER_POSITIONS = shapeOf(
   },
 );
 
+/** `PointView` -- ONE POINT, AS THE CATALOG MATERIALISED IT.
+ *
+ *  `selectable` IS READ AND NEVER RE-DERIVED. `Available` AND (`Verified` or
+ *  `VerifiedHistorical`) is materialised by the catalog on purpose, and a page
+ *  recomputing it from two parsed words would be a second implementation of
+ *  the most consequential rule in the document.
+ *
+ *  THE FOUR PLAN-BINDING KEYS ARE REQUIRED, which is why "Restore this point"
+ *  can exist: the plan carries `source.point {point_id, receipt_key,
+ *  receipt_sha256, manifest_sha256}`, and a link that could not name them
+ *  would be an offer to build a plan out of nothing. */
 const D3_POINT = shapeOf(
   "PointView",
   {
@@ -2869,20 +2707,20 @@ const D3_POINT = shapeOf(
     locations: listOf(objectOf(D3_LOCATION)),
     signerKeyId: str, remedy: str, formatVersion: str,
     // The controller's reached refusal on this point's own Backup, joined
-    // server side (`claude/verdict-precedence`). Present only for a refusal;
-    // a row that carries it is `selectable: false` whatever its two axes say.
+    // server side. Present only for a refusal; a row that carries it is
+    // `selectable: false` whatever its two axes say.
     backupVerdict: str,
-    // PROD-05.1: the point's topics with their recorded layout. ABSENT is not
-    // published (an older runner, a record before 1.3.0, a point that is not
-    // Available), never "no topics"; `topicsOmitted` counts a list left out.
+    // The point's topics with their recorded layout. ABSENT is not published
+    // (an older runner, a record before 1.3.0, a point that is not Available),
+    // never "no topics"; `topicsOmitted` counts a list left out.
     topics: listOf(objectOf(D3_POINT_TOPIC)),
     topicsOmitted: int,
     // Where the backup run looked for declarative owners, beside `topics`.
     // EMPTY says it looked nowhere, so an un-owned topic's `applyRoute` is
     // `unknown` -- never read as `adminApi`.
     ownerDetection: listOf(str),
-    // PROD-04.1: the consumer position evidence of the groups the backup
-    // selected. ABSENT is not published, never "no positions".
+    // The consumer position evidence of the groups the backup selected. ABSENT
+    // is not published, never "no positions".
     consumerPositions: objectOf(D3_POINT_CONSUMER_POSITIONS),
   },
 );
@@ -2910,7 +2748,7 @@ const D3_SIGNER_PAGE = shapeOf(
   { untrustedPoints: int },
 );
 
-/** The connect-existing-archive submission (D3 section 5.5 step 1). */
+/** The connect-existing-archive submission. */
 const CONNECT_ARCHIVE_REQUEST = shapeOf(
   "ConnectArchiveRequest",
   { name: str, syncMode: oneOf(CONNECT_SYNC_MODES) },
@@ -2919,8 +2757,6 @@ const CONNECT_ARCHIVE_REQUEST = shapeOf(
     intervalSeconds: int, deepCheck: oneOf(CONNECT_DEEP_CHECKS), viewLimit: int,
   },
 );
-
-// -------------------------------------------------------- retention policies
 
 const D3_GUARANTEES = shapeOf(
   "GuaranteesView",
@@ -2946,16 +2782,15 @@ const D3_LAST_EVALUATION = shapeOf(
   { truncated: bool },
   {
     at: str, pointsEvaluated: int, candidateCount: int,
-    // FX-22 review M1: the API says on every answer whether the three counts
-    // and `kept` below are published, so this client does not infer it from a
-    // count that is missing. OPTIONAL HERE AS IN THE SCHEMA, which declares
-    // the default `NotRecorded`: an answer from a build that predates the
-    // member still DECODES (the policy list is not lost to a contract
-    // failure) and reads as not recorded -- `null` after the decode.
+    // The API says on every answer whether the three counts and `kept` below
+    // are published, so this client does not infer it from a missing count.
+    // OPTIONAL HERE AS IN THE SCHEMA, which declares the default
+    // `NotRecorded`: an answer from an older build still DECODES and reads as
+    // not recorded (`null` after the decode).
     accounting: oneOf(RETENTION_ACCOUNTING_STATES),
-    // FX-22: the closed accounting. Each is ABSENT when `accounting` is
-    // `NotRecorded` (an older controller's evaluation, or two controllers'
-    // numbers in one block), and then `kept` is absent too.
+    // The closed accounting. Each is ABSENT when `accounting` is `NotRecorded`
+    // (an older controller's evaluation, or two controllers' numbers in one
+    // block), and then `kept` is absent too.
     keptCount: int, truncatedByCap: int, maxDeletionsPerRun: int,
     // `true` whenever the status says it; `false` only with
     // `accounting: Recorded`; absent is "not recorded".
@@ -2976,8 +2811,8 @@ const D3_LAST_ENFORCEMENT = shapeOf(
   {
     runId: str, startedAt: str, finishedAt: str, planSha256: str,
     deleted: listOf(str), failed: listOf(objectOf(D3_FAILED_DELETION)),
-    // FX-22: present, and `true`, only when `failed` was cut at the route's
-    // row bound.
+    // Present, and `true`, only when `failed` was cut at the route's row
+    // bound.
     failedTruncated: bool,
     objectsDeleted: int, recordKey: str, recordSha256: str, exitCode: int,
   },
@@ -3024,20 +2859,15 @@ const D3_RETENTION = shapeOf(
 const D3_RETENTION_RESPONSE = readOnlyItem("RetentionPolicyResponse", D3_RETENTION);
 const D3_RETENTION_LIST = envelope("RetentionPolicyList");
 
-// ------------------------------------------------------------ trust policies
-
 const D3_PRINCIPAL = shapeOf("KeyPrincipalView", { id: str }, { display: str });
 
-/** `TrustKeyView` -- ONE ROW PER KEY, declaration and verdict together.
+/** `TrustKeyView` -- ONE ROW PER KEY, declaration and verdict together: state,
+ *  usages, principal, validity window and the evaluation column.
+ *  `effectiveState` is ALWAYS written and is `unknown` when the evaluation is
+ *  not fresh, which is how "unknown is not valid" arrives already decided.
  *
- *  Section 7.7 asks for one row carrying state, usages, principal, validity
- *  window and the evaluation column; a separate verdict object to join would
- *  have been two objects for one row. `effectiveState` is ALWAYS written and is
- *  `unknown` when the evaluation is not fresh, which is how "unknown is not
- *  valid" arrives already decided.
- *
- *  `spkiPem` IS NOT PUBLISHED AT ALL, and this client no longer declares it: a
- *  key id is what an operator compares out of band. */
+ *  `spkiPem` IS NOT PUBLISHED AT ALL and is not declared: a key id is what an
+ *  operator compares out of band. */
 const D3_TRUST_KEY = shapeOf(
   "TrustKeyView",
   {
@@ -3053,15 +2883,10 @@ const D3_TRUST_KEY = shapeOf(
 );
 
 /** `TrustEvaluationView` -- THE FRESHNESS DECISION, MADE BY THE API AGAINST ITS
- *  OWN CLOCK AND PUBLISHED WITH THE INSTANT IT USED.
- *
- *  This is the reconciliation's most consequential single field. The page used
- *  to decide freshness itself from the `Date` header of the last answer;
- *  `logweir-api` now decides it, says which of D3 section 7.7's causes it was,
- *  and publishes `serverTime` and `freshWithinSeconds` so a reader can check
- *  the arithmetic. The page renders the answer. Legacy mode has no such view
- *  and keeps the page's own rule over the same server instant -- two documents,
- *  two rules. */
+ *  OWN CLOCK AND PUBLISHED WITH THE INSTANT IT USED (`serverTime`,
+ *  `freshWithinSeconds`), so a reader can check the arithmetic; the page
+ *  renders the answer. Legacy mode has no such view and keeps the page's own
+ *  rule over the same server instant. */
 const D3_TRUST_EVALUATION = shapeOf(
   "TrustEvaluationView",
   {
@@ -3100,9 +2925,8 @@ const D3_TRUST_LIST = envelope("TrustPolicyList");
 
 /** Every D3 shape this client declares, by the name the OpenAPI document
  *  publishes it under. `contract.spec.js`'s drift arm pins each one's
- *  `required` set against that document, exactly as it does for the shapes
- *  PLAT-17.1 and D2 landed; there is no separate "assumed" bucket any more,
- *  and `d3.spec.js` asserts that there is not. */
+ *  `required` set against that document; `d3.spec.js` asserts there is no
+ *  separate "assumed" bucket. */
 export const D3_SHAPES = Object.freeze({
   OperationView: D3_OPERATION,
   OperationViewResponse: D3_OPERATION_RESPONSE,
@@ -3143,8 +2967,7 @@ export const D3_SHAPES = Object.freeze({
   SignerPageResponse: D3_SIGNER_PAGE,
   PointView: D3_POINT,
   PointLocationView: D3_LOCATION,
-  // FX-48: the five shapes a point NESTS were in no map, so `PointTopicView`
-  // could omit a published member and stay green.
+  // The shapes a point nests.
   PointTopicView: D3_POINT_TOPIC,
   PointSchemaDependencyView: D3_POINT_SCHEMA_DEPENDENCY,
   PointConsumerPositionsView: D3_POINT_CONSUMER_POSITIONS,
@@ -3256,20 +3079,11 @@ export function decodeD3Operation(value) {
 
 /** Decodes ONE STREAM FRAME'S operation document -- the BARE view, no envelope.
  *
- *  THE READ AND THE STREAM SEND TWO DIFFERENT SHAPES AND THAT IS THE SERVER'S
- *  DECISION, not a guess. `GET .../operations/{kind}/{name}` answers
- *  `OperationViewResponse` (`{item, requestId}`, and both are required); the
- *  stream's `operation` and `reset` frames are
- *  `serde_json::to_string(&OperationView)` -- see `send_view` in
- *  `crates/logweir-api/src/status.rs` -- so they carry the flat view and
- *  neither an `item` wrapper nor a `requestId`. A request id belongs to a
- *  REQUEST, and a stream that emitted one per frame would be publishing the
- *  same id 20 times.
- *
- *  Reading a frame with the envelope shape is not a cosmetic mismatch: it
- *  yields `undefined` for every document the stream has ever sent, so the
- *  console's live operation view renders nothing that arrives over the wire
- *  and falls silent behind its own first read. */
+ *  The read answers `OperationViewResponse` (`{item, requestId}`); the
+ *  stream's `operation` and `reset` frames are the flat `OperationView`
+ *  (`send_view` in `crates/logweir-api/src/status.rs`), with no wrapper and no
+ *  request id, which belongs to a request. Reading a frame with the envelope
+ *  shape would yield `undefined` for every frame. */
 export function decodeD3OperationFrame(value) {
   return decodeWith(D3_OPERATION, value);
 }
@@ -3277,12 +3091,7 @@ export function decodeD3OperationFrame(value) {
 /** A durable run's normalized status, as a Backup or Restore DETAIL view reads
  *  it: `GET .../operations/{kind}/{name}`'s envelope, decoded by the published
  *  `OperationViewResponse` with D3's additions optional (see
- *  `OPERATION_DETAIL` above).
- *
- *  ONE DECODE, AND NOTHING THE ROUTE PUBLISHES IS LEFT BEHIND (FX-48). This
- *  replaces three: the frozen-sixteen decode and the two partial decoders that
- *  recovered `trust` and `verificationScope` after it had dropped them. An
- *  absent D3 block is `null` here, exactly as each of those answered `null`.
+ *  `OPERATION_DETAIL` above). An absent D3 block is `null`.
  *  @returns {Decoded} */
 export function decodeOperation(value) {
   return decodeWith(OPERATION_DETAIL_RESPONSE, value);
@@ -3303,10 +3112,6 @@ export function decodeCatalogSigners(value) {
 export function decodeCatalogRequest(value) {
   return decodeWith(CONNECT_ARCHIVE_REQUEST, value);
 }
-
-// ===========================================================================
-// the registry closes
-// ===========================================================================
 
 declaring = false;
 

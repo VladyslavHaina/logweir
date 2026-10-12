@@ -77,11 +77,9 @@ fn a_populated_topics_to_restore_parses_into_the_vendored_shape() {
     assert_eq!(r.topics_to_restore[0].target_topic, "drill-20260903-orders");
 }
 
-// --- Coverage beyond the brief's literal Step 1, per the top-level task's
-// instruction to test "correct argv for each of the three allowed
-// subcommands, exit-code mapping including the failure codes, unknown-key
-// warnings read from the correct stream, and a run whose output is
-// malformed" against the stub.
+// --- Against the stub: the argv for each of the three allowed subcommands,
+// exit-code mapping including the failure codes, unknown-key warnings read
+// from the correct stream, and a run whose output is malformed.
 //
 // `run_engine`'s public signature (Interfaces block) takes no env parameter,
 // so the FAKE_ENGINE_* variations below are driven with `Command::env`

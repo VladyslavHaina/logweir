@@ -1,11 +1,11 @@
 //! Every routed request passes through the access layer — checked at runtime,
-//! per declared route, from the audit record the layer signs (review M1).
+//! per declared route, from the audit record the layer signs.
 //!
 //! WHY A RUNTIME CHECK AS WELL AS THE SOURCE POSITION. A route that runs
 //! outside the layer still gets a 401 from its handler's own `Actor`
 //! extractor, and a handler that authorizes on its own still refuses the
 //! wrong role — so every HTTP-answer sweep passes for a route the layer never
-//! saw (the reviewer's mutant R5 survived 65/65 that way). The layer records
+//! saw. The layer records
 //! the declaration it applied as the audit note `routeAccess`; this test sends
 //! one request to every declared route through the real router and requires
 //! that note, with the declared kind, on its record.

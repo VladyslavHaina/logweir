@@ -3,28 +3,16 @@
 //!
 //! # Why a NEW DOCUMENT and not new scorecard fields
 //!
-//! Global Constraint 12 freezes the drill scorecard at `format_version 1.0.0`
-//! with **21 top-level properties and 17 required ones**, and permits tag 1 to
-//! add NESTED OPTIONAL fields only. The backup's evidence is not a nested
-//! detail of a restore drill: the source cluster id read from the broker, the
+//! The backup's evidence (the source cluster id read from the broker, the
 //! rendered auth mode, the named topic set, the engine id/version/digest, the
 //! `backup_id`, the manifest key and its sha256, the per-topic record counts
-//! and the covered time range are top-level facts about a DIFFERENT
-//! operation, on a different cluster, at a different time. Bolting them onto
-//! the scorecard would have cost eight new top-level properties in the one
-//! document GC12 exists to keep still — and would have left every scorecard
-//! ever written claiming, by the shape of its own schema, to say something
-//! about a backup it never observed.
-//!
-//! So this is its own media type
-//! (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
+//! and the covered time range) is about a DIFFERENT operation from a restore
+//! drill, on a different cluster, at a different time. So it is its own media
+//! type (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
 //! (`schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR,
-//! the older ones frozen), its own `format_version` and its own arms — four
-//! self-contradiction invariants and one closed value set in 1.0.0, and six
-//! more (arms 6-11) that read only the 1.1.0 `config_coverage` block. Spec §7:
-//! "new payload types, not new scorecard fields."
+//! the older ones frozen), its own `format_version` and its own arms.
 //!
-//! # 1.1.0: topic-configuration capture coverage (FX-4)
+//! # 1.1.0: topic-configuration capture coverage
 //!
 //! The engine captures topic configuration non-fatally (`backup/engine.rs:
 //! 382-393` in the pinned source): a denied DescribeConfigs leaves the
@@ -37,7 +25,7 @@
 //! every topic, never `captured`; [`SourceConfigCoverage`] is the one reader
 //! of the block and cannot answer anything stronger for an absent entry.
 //!
-//! # 1.2.0: the manifest's version id, pinned (FX-7)
+//! # 1.2.0: the manifest's version id, pinned
 //!
 //! On a bucket with versioning enabled, `archive.manifest_version_id` names
 //! WHICH VERSION of the manifest key the run read back; a receipt that carries
@@ -47,7 +35,7 @@
 //! `catalog::pin`), and a 1.1.0 reader, which ignores unknown fields inside
 //! major 1, reads a 1.2.0 receipt as the 1.1.0 document under it.
 //!
-//! # 1.3.0: the topic configuration model (PROD-05.1)
+//! # 1.3.0: the topic configuration model
 //!
 //! `topic_configuration` records, per named topic, the source's partition
 //! count as the archive's manifest records it, its replication factor as
@@ -61,7 +49,7 @@
 //! Every receipt this build signs carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] ([`format_version_for`]).
 //!
-//! # 1.5.0: schema dependency (PROD-03.0)
+//! # 1.5.0: schema dependency
 //!
 //! `schema_dependency` records, per named topic, whether the archived keys and
 //! values carry Confluent wire-format framing (magic byte 0 and a schema id),
@@ -74,7 +62,7 @@
 //! carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] or later.
 //!
-//! # 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+//! # 1.6.0: the topic's ID before and after the engine
 //!
 //! `generations` records, per named topic, the topic ID (KIP-516) Logweir's
 //! own DescribeTopics read returned immediately before the engine
@@ -88,10 +76,8 @@
 //! it, so every one is written as [`FORMAT_VERSION_WITH_GENERATIONS`] or,
 //! when its backup selected consumer groups,
 //! [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`].
-//! PROD-02.1 extends the same block with the offset observation and the
-//! lineage of decision §3.2.
 //!
-//! # 1.8.0: the source's watermarks, and the empty capture (PROD-02.1)
+//! # 1.8.0: the source's watermarks, and the empty capture
 //!
 //! `source_watermarks` records, per named topic, each partition's low and
 //! high watermark as Logweir read them once before the engine. ABSENT (every
@@ -100,7 +86,7 @@
 //! source that held no record (every partition `low == high`) is an EMPTY
 //! CAPTURE: `covered` is the empty window `[t, t)`, which covers no record.
 //! Arms 41-45 read the block, and arm 4 admits the empty window only beside
-//! it — an older reader refuses an empty capture, the safer verdict (OD-7).
+//! it — an older reader refuses an empty capture, the safer verdict.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -443,8 +429,8 @@ impl SchemaDependency {
     }
 }
 
-/// **PROD-03.0.** The `format_version` of a receipt that carries
-/// `schema_dependency` — the MINOR after PROD-01.3's 1.4.0. Every receipt this
+/// The `format_version` of a receipt that carries
+/// `schema_dependency`: the MINOR after 1.4.0. Every receipt this
 /// build signs carries the block, so every one is 1.5.0 or later
 /// ([`format_version_for`]); 1.5.0 defines every earlier minor's fields and
 /// values. An older reader ignores the field inside major 1 and reads the
@@ -458,9 +444,9 @@ pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 /// keeps them coherent.
 pub const SCHEMA_DEPENDENCY_SINCE_MINOR: u64 = 5;
 
-/// **PROD-04.1.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `consumer_positions` — a MINOR bump over [`FORMAT_VERSION_WITH_GENERATIONS`]
-/// (PROD-01.4a's 1.6.0) under OD-7 (a): arms 30-35 read only the new optional
+/// (1.6.0) under OD-7 (a): arms 30-35 read only the new optional
 /// block, so every document without it is decided exactly as before, and an
 /// older reader ignores the field inside major 1. Written only for a backup
 /// that selects consumer groups; it includes every earlier minor.
@@ -473,7 +459,7 @@ pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
 /// keeps them coherent.
 pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = 7;
 
-/// **PROD-02.1.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `source_watermarks` — a MINOR bump over
 /// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] under OD-7: arms 41-45 read only
 /// the new block, and arm 4 admits an empty window only beside it, so every
@@ -488,7 +474,7 @@ pub const FORMAT_VERSION_WITH_SOURCE_WATERMARKS: &str = "1.8.0";
 /// together.
 pub const SOURCE_WATERMARKS_SINCE_MINOR: u64 = 8;
 
-/// **PROD-02.1 (review F1).** The most bytes a writer lets `source_watermarks`
+/// The most bytes a writer lets `source_watermarks`
 /// take in a receipt: 32 KiB, measured as the block encoded exactly as the
 /// receipt encodes it (`crate::det_json`, nested at the receipt's depth; see
 /// [`source_watermarks_encoded_len`]). One partition takes 36 bytes plus its
@@ -523,8 +509,7 @@ pub fn source_watermarks_encoded_len(
 pub const RECEIPT_FORMAT_VERSION: &str = "1.1.0";
 
 /// The first minor of format 1 that defines `config_coverage`. **A renumber
-/// changes this and [`RECEIPT_FORMAT_VERSION`] together** (FX-4 kept 1.1.0;
-/// FX-7's pin, which merged after it, took 1.2.0); arm 6's message and
+/// changes this and [`RECEIPT_FORMAT_VERSION`] together**; arm 6's message and
 /// `docs/verify_scorecard.py`'s `RECEIPT_CONFIG_COVERAGE_SINCE_MINOR` follow
 /// it, and `tests/backup_receipt.rs::the_written_version_defines_config_coverage`
 /// keeps the pair coherent.
@@ -557,13 +542,11 @@ pub const CONFIG_SOURCES: [&str; 6] = [
     "unknown",
 ];
 
-/// **PROD-05.1.** The `format_version` of a receipt that carries
-/// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
-/// build signs carries the block, pinned or not; until PROD-01.4a that made
-/// every one 1.3.0, and since then every one is
-/// [`FORMAT_VERSION_WITH_GENERATIONS`] ([`format_version_for`]). A 1.0.0,
-/// 1.1.0 or 1.2.0 reader ignores the field inside major 1 and reads the
-/// document under it.
+/// The `format_version` of a receipt that carries `topic_configuration`: the
+/// MINOR after 1.2.0. Every receipt this build signs carries the block and is
+/// written as [`FORMAT_VERSION_WITH_GENERATIONS`] or later
+/// ([`format_version_for`]). A 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
+/// inside major 1 and reads the document under it.
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// The first minor of format 1 that defines `topic_configuration` (arm 12). A
@@ -762,7 +745,7 @@ impl ConfigCoverage {
 /// bound to a recovery point) and a receipt without the 1.1.0 block both
 /// answer [`ConfigCoverage::Unknown`] for every topic.
 ///
-/// **FX-21.** It also lends the receipt's own record of each source topic's
+/// It also lends the receipt's own record of each source topic's
 /// replication factor ([`SourceConfigCoverage::replication_factor`], from
 /// `topic_configuration`, format 1.3.0), which a parity check reads where the
 /// archive's manifest records none: engine 0.23.3 records the factor in the
@@ -803,7 +786,7 @@ impl SourceConfigCoverage {
         }
     }
 
-    /// **FX-21.** The source `topic`'s replication factor as the receipt
+    /// The source `topic`'s replication factor as the receipt
     /// records it (`topic_configuration`, format 1.3.0), or `None` when it
     /// records none — NOT RECORDED, never a default.
     #[must_use]
@@ -819,8 +802,8 @@ impl SourceConfigCoverage {
         })
     }
 
-    /// `topic`'s recorded entry, when there is one — how FX-8 reads the
-    /// effective `timestamp_type`.
+    /// `topic`'s recorded entry, when there is one: how the time-basis rule
+    /// reads the effective `timestamp_type`.
     #[must_use]
     pub fn entry(&self, topic: &str) -> Option<&TopicConfigCoverage> {
         self.recorded.as_ref().and_then(|m| m.get(topic))
@@ -926,24 +909,23 @@ pub struct ReceiptArchive {
     pub prefix: String,
 }
 
-/// **FX-7.** The `format_version` a receipt carries when it pins
+/// The `format_version` a receipt carries when it pins
 /// `archive.manifest_version_id`: a MINOR bump over [`RECEIPT_FORMAT_VERSION`]
-/// (FX-4's 1.1.0, which merged first), because the field is optional and a
-/// 1.1.0 or 1.0.0 reader, which ignores unknown fields inside major 1, still
-/// reads it (reading rule 1). Written only when the pin is present, so every
-/// receipt on an unversioned bucket is exactly the [`RECEIPT_FORMAT_VERSION`]
-/// document.
+/// (1.1.0), because the field is optional and a 1.1.0 or 1.0.0 reader, which
+/// ignores unknown fields inside major 1, still reads it (reading rule 1).
+/// Written only when the pin is present, so every receipt on an unversioned
+/// bucket is exactly the [`RECEIPT_FORMAT_VERSION`] document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
-/// **PROD-01.3.** The `format_version` of a receipt whose `source.auth.mode`
-/// is one of the modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — a
-/// MINOR bump over [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (PROD-05.1's
-/// 1.3.0, which merged first), because the change is new content in an
-/// existing field that an older reader can only refuse (arm 5a), never accept
-/// as something stronger (OD-7, third case). Written only for those modes, so
-/// a receipt for a `plaintext` or `scramSha512` backup is byte-for-byte the
-/// document it was before. It includes every earlier minor: a 1.4.0 receipt
-/// carries `topic_configuration` and may carry `archive.manifest_version_id`.
+/// The `format_version` of a receipt whose `source.auth.mode` is `scramSha256`,
+/// `plain` or `mtls`: a MINOR bump over
+/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (1.3.0), because the change is
+/// new content in an existing field that an older reader can only refuse (arm
+/// 5a), never accept as something stronger (OD-7, third case). Written only for
+/// those modes, so a receipt for a `plaintext` or `scramSha512` backup is
+/// byte-for-byte the document it was before. It includes every earlier minor: a
+/// 1.4.0 receipt carries `topic_configuration` and may carry
+/// `archive.manifest_version_id`.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 
 /// The first minor of format 1 whose `source.auth.mode` may be one of
@@ -952,9 +934,9 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// `docs/verify_scorecard.py`'s `RECEIPT_AUTH_MODES_SINCE_MINOR` follows it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 4;
 
-/// **PROD-01.4a.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `generations` — a MINOR bump over [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`]
-/// (PROD-03.0's 1.5.0) under OD-7 (a): arms 36-40 read only the new optional
+/// (1.5.0) under OD-7 (a): arms 36-40 read only the new optional
 /// block, so every document without it is decided exactly as before, and an
 /// older reader ignores the field inside major 1. Every receipt this build
 /// signs carries the block, so every one is at least 1.6.0; it includes every
@@ -981,27 +963,19 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `format_version` a receipt is written with — the NEWEST minor whose
-/// fields it uses, so a receipt carrying both features names the version that
-/// defines both: [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] when it carries
-/// `schema_dependency` (PROD-03.0 — every receipt this build signs; 1.5.0
-/// defines every earlier field and value), else
-/// [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
-/// PROD-01.3 added (it also defines PROD-05.1's `topic_configuration` and
-/// FX-7's pin), else [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it
-/// carries `topic_configuration` (PROD-05.1),
-/// else
+/// The `format_version` a receipt is written with: the NEWEST minor whose
+/// fields it uses, so a receipt carrying several features names the version
+/// that defines them all. The ONE place a writer decides it. In order:
+/// [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] for `source_watermarks`;
+/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] for `consumer_positions`;
+/// [`FORMAT_VERSION_WITH_GENERATIONS`] for `generations` (every receipt this
+/// build signs, so every one is at least 1.6.0);
+/// [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] for `schema_dependency`;
+/// [`FORMAT_VERSION_WITH_AUTH_MODES`] for a 1.4.0 auth mode;
+/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] for `topic_configuration`;
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
-/// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
-/// writer decides it.
-///
-/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] (PROD-04.1) comes first: a
-/// receipt carrying `consumer_positions` is 1.7.0, which defines every earlier
-/// minor's fields. [`FORMAT_VERSION_WITH_GENERATIONS`] (PROD-01.4a) comes
-/// next: a receipt carrying `generations` is 1.6.0, which defines every
-/// earlier minor's fields. Every receipt this build signs carries
-/// `generations`, so every one is at least 1.6.0.
-/// [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] (PROD-02.1) comes before both.
+/// version; else [`RECEIPT_FORMAT_VERSION`]. Each defines every earlier minor's
+/// fields.
 #[must_use]
 pub fn format_version_for(
     archive: &ReceiptArchive,
@@ -1079,25 +1053,21 @@ fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 impl BackupReceipt {
-    /// The five arms of a signed receipt: the four claims it cannot
-    /// contradict, and the one field whose value set is closed.
+    /// The arms of a signed receipt: the claims it cannot contradict, and the
+    /// fields whose value sets are closed.
     ///
-    /// Called before signing and by `logweir drill verify --payload-type
-    /// backup-receipt`, so no signed receipt can carry a self-contradicting
-    /// claim. `Err` is the exact message, and the messages are **not to be
-    /// reworded**: `docs/verify_scorecard.py`'s mirrored block compares
-    /// byte-for-byte against them, and `crates/logweir-core/tests/
-    /// backup_receipt.rs` asserts each one in full —
-    /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` over the four
-    /// self-contradiction arms, `arm_5_refuses_an_auth_mode_outside_the_closed_two`
-    /// over arm 5, and
-    /// `validate_invariants_has_exactly_five_return_err_statements` over the
-    /// total, so neither the four nor the five can go stale on its own.
+    /// Called before signing and by
+    /// `logweir drill verify --payload-type backup-receipt`, so no signed
+    /// receipt can carry a self-contradicting claim. `Err` is the exact
+    /// message, and the messages are **not to be reworded**:
+    /// `docs/verify_scorecard.py`'s mirrored block compares byte-for-byte
+    /// against them, and `crates/logweir-core/tests/backup_receipt.rs` asserts
+    /// each one in full and counts them.
     ///
     /// `Result<(), String>` rather than a `thiserror` newtype, because the
-    /// interface this task publishes is the STRING: the comparison the two
-    /// readers make is on the text, and a wrapper type would put a prefix in
-    /// front of it that the Python half has no way to reproduce.
+    /// interface is the STRING: the two readers compare the text, and a wrapper
+    /// type would put a prefix in front of it that the Python half cannot
+    /// reproduce.
     ///
     /// # The arms, in order
     ///
@@ -1108,18 +1078,18 @@ impl BackupReceipt {
     /// 2. `exit_code == 0` **iff** `archive.manifest_key` is non-empty.
     /// 3. `records` covers exactly `source.topics`.
     /// 4. `covered.from_ms < covered.to_ms` STRICTLY — the end is EXCLUSIVE
-    ///    (I22, and Task 5's review finding F3).
+    ///    (I22).
     /// 5. `source.auth.mode` is one of the values this format defines.
     ///    The first arm that is not a self-contradiction check: the document
     ///    does not disagree with itself, it names a mechanism the format has
     ///    no spelling for. LAST of the 1.0.0 arms on purpose — the four
     ///    consistency arms are what an auditor reads first, and a receipt that
     ///    contradicts itself should say so before it is told its auth mode is
-    ///    unknown. Since 1.4.0 (PROD-01.3) it is three statements: 5a, the
-    ///    closed two below 1.4.0 (unchanged); 5b, a PROD-01.3 mode under a
+    ///    unknown. Since 1.4.0 it is three statements: 5a, the
+    ///    closed two below 1.4.0 (unchanged); 5b, a 1.4.0 mode under a
     ///    version that predates it; 5c, the closed five from 1.4.0.
     ///
-    /// Arms 6-11 (format 1.1.0, FX-4) read `config_coverage` and NOTHING ELSE,
+    /// Arms 6-11 (format 1.1.0) read `config_coverage` and NOTHING ELSE,
     /// and run only when it is present — so every document without it, which
     /// is every receipt written before 1.1.0, is accepted or refused exactly
     /// as before. Within the block, topics are visited in name order (the
@@ -1138,7 +1108,7 @@ impl BackupReceipt {
     /// 11. a `timestamp_type`'s `value` is one of [`TIMESTAMP_TYPES`] and its
     ///     `source` one of [`CONFIG_SOURCES`].
     ///
-    /// Arms 12-19 (format 1.3.0, PROD-05.1) read `topic_configuration` — with
+    /// Arms 12-19 (format 1.3.0) read `topic_configuration` — with
     /// `config_coverage` and `source.topics` as the context it is judged in,
     /// the way arm 7 reads `source.topics` — and run only when it is present,
     /// so every document without it is decided exactly as before:
@@ -1162,7 +1132,7 @@ impl BackupReceipt {
     /// 21. every recorded owner's basis names a source `owner_detection` lists
     ///     (absent reads as empty).
     ///
-    /// Arms 22-29 (format 1.5.0, PROD-03.0) read `schema_dependency` — with
+    /// Arms 22-29 (format 1.5.0) read `schema_dependency` — with
     /// `source.topics` and `records` as the context it is judged in — and run
     /// only when it is present, so every document without it is decided
     /// exactly as before:
@@ -1187,7 +1157,7 @@ impl BackupReceipt {
     /// 29. a judged topic is `schemaDependent` exactly when a side is
     ///     dependent.
     ///
-    /// Arms 30-35 (format 1.7.0, PROD-04.1) read `consumer_positions` and run
+    /// Arms 30-35 (format 1.7.0) read `consumer_positions` and run
     /// only when it is present ([`crate::consumer_positions`]); the positions
     /// document it binds is checked by
     /// [`BackupReceipt::validate_consumer_positions_document`] (CP-1 to
@@ -1206,7 +1176,7 @@ impl BackupReceipt {
     ///     `group_type: other`; any other group none of them.
     /// 35. `active` is what the two states say.
     ///
-    /// Arms 36-40 (format 1.6.0, PROD-01.4a) read `generations` — with
+    /// Arms 36-40 (format 1.6.0) read `generations` — with
     /// `source.topics` as its context — and run only when it is present, so
     /// every document without it is decided exactly as before. Topics in name
     /// order; per topic, arms 38, 39 and 40, each over `topic_id` then
@@ -1238,15 +1208,11 @@ impl BackupReceipt {
         // a failed backup names no manifest, and a receipt naming a manifest
         // did not fail.
         //
-        // TRIMMED-EMPTY COUNTS AS ABSENT (ruling R-A). `.is_empty()` alone
-        // accepted `"   "` as "a manifest was named", which is the exact
-        // class of defect R-A was raised over on the scorecard's
-        // `partial_reason`: a whitespace-only string that one reader treats
-        // as present and the other as blank. Naming no manifest and naming a
-        // manifest made of spaces are the same claim, and this is the strict
-        // side of it — the accepted set narrows and no receipt Logweir writes
-        // is affected, because `BackupOutcome::manifest_key` is either the
-        // engine's key or `""`.
+        // TRIMMED-EMPTY COUNTS AS ABSENT, as in the scorecard's
+        // `partial_reason` arm: naming no manifest and naming a manifest made
+        // of spaces are the same claim, and this is the strict side of it. No
+        // receipt Logweir writes is affected: `BackupOutcome::manifest_key` is
+        // either the engine's key or `""`.
         let named = !self.archive.manifest_key.trim().is_empty();
         if (self.exit_code == 0) != named {
             let rendered = if named {
@@ -1285,25 +1251,15 @@ impl BackupReceipt {
         // one, and an archive that captured a record cannot cover an empty
         // range.
         //
-        // STRICT `<` SINCE TASK 5b (Task 5's review, F3). Task 5 shipped `<=`
-        // and a test asserting `from_ms == to_ms` was legal, while
-        // `config/crd/backups.yaml` already documented
-        // `status.windowCovered.toMs` as the *exclusive* end of the same
-        // window (I22) — two documents describing one range by rules that
-        // disagree, with Task 17 about to copy the numbers from one into the
-        // other. One of the two had to move; the CRD's is the shape an
-        // operator reads and the half-open convention every range API in this
-        // tree uses, so the receipt's is the one that moved.
+        // `config/crd/backups.yaml` documents `status.windowCovered.toMs` as
+        // the *exclusive* end of the same window (I22), the half-open
+        // convention every range API in this tree uses.
+        // `crates/logweir/src/backup/phase_run.rs` derives `to_ms` from the
+        // newest segment's INCLUSIVE `end_timestamp` plus one millisecond, so a
+        // single-record topic yields `[t, t+1)`; that conversion is stated
+        // once, there.
         //
-        // The measurement side moved with it: `crates/logweir/src/backup/
-        // phase_run.rs` derives `to_ms` from the newest segment's INCLUSIVE
-        // `end_timestamp` and adds one millisecond, so a single-record topic
-        // yields `[t, t+1)` — a window that contains exactly that record —
-        // rather than the empty `[t, t]` this arm now refuses. That
-        // conversion is stated once, there, and nothing else in the tree
-        // converts between the two conventions.
-        //
-        // PROD-02.1 (1.8.0): the EMPTY window `[t, t)` is an empty capture —
+        // The EMPTY window `[t, t)` is an empty capture —
         // an archive that holds no record, which an empty range is exactly
         // right for — and is admitted only beside `source_watermarks`, whose
         // arm 45 then proves it. Without the block (every older document) the
@@ -1318,46 +1274,34 @@ impl BackupReceipt {
             ));
         }
         // ARM 5. THE AUTH MODE'S VALUE SET IS CLOSED, and this is where it is
-        // closed (controller ruling, Task 5b fix round 1; Task 6's review
-        // Ruling 3).
+        // closed. An unconstrained string here would verify a
+        // `"totally-made-up"` mode at both readers and propagate into
+        // `Backup.status.auth.mode`, whose CRD description promises the closed
+        // set, as an attested claim.
         //
-        // Before this arm the field was an unconstrained `String` that no
-        // reader looked at: a receipt carrying
-        // `"auth": {"mode": "totally-made-up"}` verified 0/0 at BOTH readers,
-        // which was proved by execution in Task 5b's review. That is worse
-        // than a documentation defect, because `Backup.status.auth.mode` is
-        // copied FROM here by Task 17 and its CRD description promises the
-        // two values below — so an unrefused third spelling propagates into
-        // the control plane as an attested claim.
-        //
-        // The two values are `logweir_core::spec::AuthSpec`'s serde tags, the
-        // only strings `AuthSpec::mode_str()` returns, and the
-        // `KafkaCluster` CRD's `auth.mode` enum byte for byte. There is
-        // therefore no legitimate writer of a third value anywhere in this
-        // tree, and `crates/logweir/src/backup/phase_run.rs::receipt_auth` —
-        // the ONE site that fills this field on a real run — cannot drift
-        // back to `scram-sha-512` without `logweir backup run` refusing its
-        // own receipt at `persist_receipt`'s step 1, before it signs or puts
-        // anything.
+        // The values are `logweir_core::spec::AuthSpec`'s serde tags, the only
+        // strings `AuthSpec::mode_str()` returns, and the `KafkaCluster` CRD's
+        // `auth.mode` enum byte for byte;
+        // `crates/logweir/src/backup/phase_run.rs::receipt_auth`, the ONE site
+        // that fills this field on a real run, cannot drift without
+        // `logweir backup run` refusing its own receipt before it signs.
         //
         // The mode IS interpolated, unlike the scorecard's two `target.auth`
         // arms: every arm of THIS document already echoes an adopter-supplied
         // string (`format_version` in arm 1, `manifest_key` in arm 2), a
-        // reader that refuses a value without naming it makes the refusal
-        // unactionable, and `{:?}` is the same rendering
-        // `docs/verify_scorecard.py::_rust_debug_str` reproduces.
+        // refusal that does not name the value is unactionable, and `{:?}` is
+        // the rendering `docs/verify_scorecard.py::_rust_debug_str` reproduces.
         //
-        // PROD-01.3 (format 1.4.0) SPLITS THE ARM BY VERSION, and leaves every
-        // document below 1.4.0 judged exactly as before. The three new modes
+        // Format 1.4.0 SPLITS THE ARM BY VERSION, and leaves every document
+        // below 1.4.0 judged exactly as before. The three new modes
         // (`crate::connection::PROD_01_3_AUTH_MODES`) are values of 1.4.0 and
         // later only: a document declaring an older minor that names one is
-        // refused (arm 5b) — no writer of that version could have produced
-        // it — and a 1.4.0 document is held to the closed set of five (arm
-        // 5c). An older reader refuses a 1.4.0 receipt that names a new mode
-        // through arm 5a, which is the SAFER verdict (OD-7, third case): so
-        // the change is MINOR, and a receipt for a `plaintext` or
-        // `scramSha512` backup is still written as the 1.1.0/1.2.0/1.3.0 document
-        // it always was (`format_version_for`).
+        // refused (arm 5b), and a 1.4.0 document is held to the closed set of
+        // five (arm 5c). An older reader refuses a 1.4.0 receipt that names a
+        // new mode through arm 5a, the SAFER verdict (OD-7, third case), so the
+        // change is MINOR, and a receipt for a `plaintext` or `scramSha512`
+        // backup is still written as the document it always was
+        // (`format_version_for`).
         let mode = self.source.auth.mode.as_str();
         let five_defined = parse_semver(&self.format_version)
             .is_some_and(|(_, minor, _)| minor >= AUTH_MODES_SINCE_MINOR);
@@ -1386,7 +1330,7 @@ impl BackupReceipt {
                 self.source.auth.mode
             ));
         }
-        // ARMS 6-11 (format 1.1.0, FX-4): the `config_coverage` block, and
+        // ARMS 6-11 (format 1.1.0): the `config_coverage` block, and
         // only when it is present. Nothing below reads a field a 1.0.0
         // document has, so every earlier receipt is decided exactly as before.
         if let Some(coverage) = &self.config_coverage {
@@ -1471,7 +1415,7 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS 12-19 (format 1.3.0, PROD-05.1): the `topic_configuration`
+        // ARMS 12-19 (format 1.3.0): the `topic_configuration`
         // block, and only when it is present. Every earlier receipt is decided
         // exactly as before. Within the block, topics in name order (the map's
         // own), and per topic arm 15, then arms 16 and 17 per entry in key
@@ -1616,7 +1560,7 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARM 20 (format 1.3.0, PROD-05.1). Where the run looked for owners:
+        // ARM 20 (format 1.3.0). Where the run looked for owners:
         // only beside the model it qualifies, from the closed set, each source
         // at most once.
         if let Some(detection) = &self.owner_detection {
@@ -1654,7 +1598,7 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS 22-29 (format 1.5.0, PROD-03.0): the `schema_dependency` block,
+        // ARMS 22-29 (format 1.5.0): the `schema_dependency` block,
         // and only when it is present — every earlier receipt is decided
         // exactly as before. Topics in name order (the map's own), and per
         // topic arms 24, 25 and 26, then 27 and 28 for the key side and then
@@ -1821,7 +1765,7 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS 30-35 (format 1.7.0, PROD-04.1): the `consumer_positions`
+        // ARMS 30-35 (format 1.7.0): the `consumer_positions`
         // block, and only when it is present. Every earlier receipt, and every
         // later one whose backup selected no group, is decided exactly as
         // before. Groups in id order. The positions themselves are in the
@@ -1971,7 +1915,7 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS 36-40 (format 1.6.0, PROD-01.4a): the `generations` block, and
+        // ARMS 36-40 (format 1.6.0): the `generations` block, and
         // only when it is present. Every earlier receipt is decided exactly as
         // before. Topics in name order (the map's own).
         if let Some(generations) = &self.generations {
@@ -2065,9 +2009,8 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS 41-45 (format 1.8.0, PROD-02.1): `source_watermarks`, and ONLY
-        // when it is present (OD-7 (a)). Topics in name order, partitions in
-        // index order.
+        // ARMS 41-45 (format 1.8.0): `source_watermarks`, and ONLY when it is
+        // present (OD-7 (a)). Topics in name order, partitions in index order.
         if let Some(watermarks) = &self.source_watermarks {
             // ARM 41. A document declaring a minor before 8 cannot carry it.
             let minor = parse_semver(&self.format_version).map(|(_, minor, _)| minor);
@@ -2123,7 +2066,7 @@ impl BackupReceipt {
         Ok(())
     }
 
-    /// **PROD-02.1.** Whether this receipt is an EMPTY CAPTURE: a backup whose
+    /// Whether this receipt is an EMPTY CAPTURE: a backup whose
     /// source held no record in any selected partition, so its archive holds
     /// none and its `covered` window is the empty `[t, t)`. Meaningful on a
     /// receipt `validate_invariants` accepted (arm 4 admits the empty window
@@ -2133,7 +2076,7 @@ impl BackupReceipt {
         self.covered.from_ms == self.covered.to_ms
     }
 
-    /// **PROD-04.1: the positions document, checked against THIS receipt**
+    /// **The positions document, checked against THIS receipt**
     /// — arms CP-1 to CP-14, run by a reader that was given the document
     /// (`logweir drill verify --consumer-positions`, `verify_scorecard.py
     /// --consumer-positions`) after `validate_invariants` accepted the
@@ -2461,7 +2404,7 @@ fn render_set(set: &std::collections::BTreeSet<&str>) -> String {
     format!("{{{}}}", inner.join(", "))
 }
 
-/// **PROD-02.1, arm 45.** Why `records` and `watermarks` do not describe an
+/// **Arm 45.** Why `records` and `watermarks` do not describe an
 /// empty capture — the first topic (name order) that counts a record, else
 /// the first partition (topic name order, then index) whose low and high
 /// differ — or `None` when they do. The writer asks the same question
@@ -2485,7 +2428,7 @@ pub fn empty_capture_contradiction(
     })
 }
 
-/// **PROD-02.1.** The partitions that held no record at capture (`low ==
+/// The partitions that held no record at capture (`low ==
 /// high`), as `(topic, partition)` in topic name order, then index.
 #[must_use]
 pub fn empty_partitions(watermarks: &BTreeMap<String, Vec<[u64; 2]>>) -> Vec<(String, usize)> {

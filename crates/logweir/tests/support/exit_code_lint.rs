@@ -1,11 +1,9 @@
-//! **I29 — the exit-code tokeniser.** Task 12.
+//! **I29 — the exit-code tokeniser.**
 //!
 //! One shell tokeniser for STANDING RULE 20 — *exit codes are read directly,
-//! never through a pipe* — shared by every task that ships a script. **Task 28
-//! and Task 32 reuse this helper and do not write a second one** (controller
-//! ruling, critique C M12): they open with `mod support;` and call
-//! `support::exit_code_lint`, and nothing here may be specific to any one
-//! script.
+//! never through a pipe* — shared by every test that checks a script: they
+//! open with `mod support;` and call `support::exit_code_lint`, and nothing
+//! here may be specific to any one script.
 //!
 //! # The rule, verbatim
 //!

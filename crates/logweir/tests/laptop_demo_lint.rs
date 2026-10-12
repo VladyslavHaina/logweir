@@ -33,9 +33,9 @@ fn read(rel: &str) -> String {
 ///
 /// KILLS: replacing `emit-restore-body.js`'s call to `renderPlanBytes` with a
 /// hand-written YAML string. That mutant is invisible everywhere else on the
-/// walk — the `Restore` is created, `logweir drill approve` hashes it, Task
-/// 16's five approval checks pass — and surfaces only at step 12, when the
-/// runner cannot parse the document. Task 27's
+/// walk (the `Restore` is created, `logweir drill approve` hashes it, the
+/// approval checks pass) and surfaces only at step 12, when the runner cannot
+/// parse the document.
 /// `render_plan_bytes_emits_a_document_the_runner_parses` is the guard that
 /// exists to catch it three slots earlier; this is the arm that keeps the
 /// demo inside that guard's reach.

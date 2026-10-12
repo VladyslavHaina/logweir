@@ -1,41 +1,32 @@
-//! Check concurrency — D2 §4.3's `limits.rs` row and §4.4's `checks` block.
+//! Check concurrency (D2 §4.3's `limits.rs` row and §4.4's `checks` block).
 //!
-//! # Why a check has a limit at all
-//!
-//! Every check is a pod that dials somebody's broker and somebody's object
-//! store with a projected credential. An interactive surface that creates one
-//! per click, with no ceiling, is a way to exhaust a namespace's quota, a
-//! node's capacity, or a broker's connection budget from a browser. The
-//! ceilings are the administrator's ([`super::policy::ChecksPolicy`]), not a
-//! tenant's.
+//! Every check is a pod that dials somebody's broker and object store with a
+//! projected credential; with no ceiling, an interactive surface could exhaust
+//! a namespace's quota, a node or a broker's connection budget from a browser.
+//! The ceilings are the administrator's ([`super::policy::ChecksPolicy`]).
 //!
 //! # What "active" means, and why it is counted from Jobs
 //!
-//! A Job with no `Complete` and no `Failed` condition. Not a custom resource
+//! A Job with no `Complete` and no `Failed` condition, not a custom resource
 //! phase: a phase is this controller's own writing and would count a check
-//! whose status patch failed as finished. The Job is the API server's record of
-//! the same fact, and it is the object the quota is actually spent on.
+//! whose status patch failed as finished, while the Job is the API server's
+//! record and the object the quota is spent on.
 //!
-//! They are found by [`super::job::LABEL_COMPONENT`], which
-//! [`super::job::labels`] writes on every check Job — and which a `Backup`'s
-//! own per-run topic discovery Job wears with the OTHER value
-//! (`run-discovery`, PLAT-09.2). One set-based [`active_selector`] therefore
-//! finds both populations in one request, and [`count`] attributes each from
-//! the same label: an interactive check spends the namespace and installation
-//! pools, a run's discovery spends only the per-connection ceiling, because
-//! nothing admits it and a Job counted against a pool it is never queued by
-//! spends somebody else's budget for free. **A label is the right tool HERE
-//! and the wrong tool for pod identity** (see [`super::pod`]): counting is an
-//! approximation whose worst outcome is a queued check, while reading a pod's
-//! stdout is a trust decision whose worst outcome is publishing somebody
-//! else's output.
+//! They are found by [`super::job::LABEL_COMPONENT`], which a `Backup`'s own
+//! per-run topic discovery Job wears with the other value (`run-discovery`),
+//! so one [`active_selector`] request finds both populations and [`count`]
+//! attributes each: an interactive check spends the namespace and installation
+//! pools, a run's discovery only the per-connection ceiling. **A label is the
+//! right tool here and the wrong one for pod identity** ([`super::pod`]): a
+//! miscount's worst outcome is a queued check, a misread pod's is publishing
+//! somebody else's output.
 //!
-//! # The overshoot is accepted and written down
+//! # The overshoot is accepted
 //!
-//! Two reconciles that count concurrently can both admit. D2 §4.3 accepts that
-//! explicitly: the alternative is a lease or a lock in the control plane for a
-//! bound whose purpose is to be approximately right. A small overshoot costs a
-//! pod; a lock costs a liveness failure mode.
+//! Two reconciles counting concurrently can both admit. D2 §4.3 accepts that:
+//! the alternative is a lock in the control plane for a bound meant to be
+//! approximately right, and an overshoot costs a pod where a lock costs a
+//! liveness failure mode.
 
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::ListParams;
@@ -45,15 +36,13 @@ use logweir_core::check_contract::{CheckCode, CheckPlanKind};
 
 use super::policy::ChecksPolicy;
 
-/// How long a queued check waits before it is looked at again — D2 §4.3.
+/// How long a queued check waits before it is looked at again (D2 §4.3).
 pub const QUEUED_REQUEUE_SECS: u64 = 10;
 
-/// The INTERACTIVE pool's own membership: `app.kubernetes.io/component=check`.
-///
-/// This is what a check Job wears and what the namespace and installation
-/// ceilings are about. It is NOT what [`check_jobs`] lists with — see
-/// [`active_selector`], which widens the same key to find a `Backup`'s own
-/// per-run discoveries as well.
+/// The interactive pool's membership: `app.kubernetes.io/component=check`,
+/// which the namespace and installation ceilings are about. [`check_jobs`]
+/// lists with [`active_selector`] instead, which also finds a `Backup`'s
+/// per-run discoveries.
 #[must_use]
 pub fn check_selector() -> String {
     format!(
@@ -63,26 +52,21 @@ pub fn check_selector() -> String {
     )
 }
 
-/// The selector [`check_jobs`] actually lists with — **both populations, one
-/// request**.
+/// The selector [`check_jobs`] lists with: **both populations, one request**.
 ///
-/// `app.kubernetes.io/component in (check, run-discovery)`, a SET-BASED
-/// selector. A label selector ANDs its terms and cannot express "either key",
-/// which is why the two populations share one key with two values rather than
-/// carrying two different keys: one `list` then finds an interactive check and
-/// a `Backup`'s own per-run topic discovery alike, and [`count`] tells them
-/// apart from the label it already has in hand.
+/// `app.kubernetes.io/component in (check, run-discovery)`, set-based: a label
+/// selector ANDs its terms and cannot express "either key", so the two
+/// populations share one key with two values, and [`count`] tells them apart
+/// from the label it already has.
 ///
-/// # Why they are not simply both `check`
+/// # Why they are not both `check`
 ///
-/// Nothing calls [`admit`] for a run's discovery — D1 §7.2 defines no admission
-/// for work an operator already scheduled, and a run that waited for a
-/// browser-driven ceiling to clear would miss its slot. A Job that is counted
-/// against a pool but never admitted by it is a Job that spends somebody else's
-/// budget for free, so a run's discovery spends the ONE ceiling it genuinely
-/// belongs to (the per-connection one, which bounds simultaneous dials at a
-/// broker) and neither of the interactive pools. [`check_selector`] stays the
-/// console pool's own membership for exactly that reason.
+/// Nothing calls [`admit`] for a run's discovery (D1 §7.2 defines no admission
+/// for work an operator already scheduled, and a run waiting on a
+/// browser-driven ceiling would miss its slot). A Job counted against a pool
+/// that never admits it spends somebody else's budget for free, so a run's
+/// discovery spends only the per-connection ceiling, which bounds simultaneous
+/// dials at a broker.
 #[must_use]
 pub fn active_selector() -> String {
     format!(
@@ -95,10 +79,9 @@ pub fn active_selector() -> String {
 
 /// Whether a check Job is still occupying a slot.
 ///
-/// The INVERSE of [`crate::controllers::backup::job_finished`], and it calls
-/// it rather than re-deriving: "finished" is `Complete` or `Failed` with
-/// `status: "True"`, and two definitions of that in one crate is how a count
-/// and a state machine come to disagree.
+/// The inverse of [`crate::controllers::backup::job_finished`], calling it
+/// rather than re-deriving: two definitions of "finished" in one crate is how a
+/// count and a state machine come to disagree.
 #[must_use]
 pub fn is_active(job: &Job) -> bool {
     !crate::controllers::backup::job_finished(job)
@@ -114,7 +97,7 @@ pub struct ActiveCounts {
     pub total: u32,
     /// Active `topicInventory` Jobs against the candidate's connection UID.
     pub per_connection: u32,
-    /// Active `evidenceFetch` Jobs in the candidate's namespace — a SEPARATE
+    /// Active `evidenceFetch` Jobs in the candidate's namespace: a separate
     /// pool, so verification cannot be starved by interactive checks
     /// (D2 §4.3).
     pub evidence_namespace: u32,
@@ -129,20 +112,12 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
     let mut counts = ActiveCounts::default();
     for job in jobs.iter().filter(|j| is_active(j)) {
         let labels = job.labels();
-        // A `Backup`'S OWN DISCOVERY SPENDS THE CONNECTION AND NOTHING ELSE.
-        // It is not an interactive check: nothing admits it, so counting it
-        // against `namespace`/`total` would let a nightly schedule queue a
-        // browser click without ever being queued itself. The ceiling it
-        // genuinely belongs to is the per-connection one, which bounds
-        // simultaneous dials at one broker — and eight dynamic schedules
-        // firing at 02:00 against one `KafkaCluster` is exactly what that
-        // ceiling is for. See `active_selector`.
-        //
-        // TOLD APART BY `app.kubernetes.io/component`, the same key the
-        // listing selects on, so the population a request returned and the
-        // population this function attributes cannot drift.
-        // `logweir.dev/purpose` stays on the Job as the handle an operator
-        // types into `kubectl get jobs -l`.
+        // A `Backup`'s own discovery spends the connection ceiling and nothing
+        // else: nothing admits it, so counting it against the interactive pools
+        // would let a nightly schedule queue a browser click without ever being
+        // queued itself. See `active_selector`. Told apart by the same key the
+        // listing selects on, so the listed and attributed populations cannot
+        // drift; `logweir.dev/purpose` stays on the Job for `kubectl`.
         if labels.get(super::job::LABEL_COMPONENT).map(String::as_str)
             == Some(crate::controllers::backup_selection::COMPONENT_RUN_DISCOVERY)
         {
@@ -157,12 +132,10 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
             }
             continue;
         }
-        // `CheckPlanKind` has no `parse` — the closed-vocabulary macro is for
-        // `CheckCode`/`CheckId` — so the label is matched against `ALL`'s own
-        // spellings. A label this build does not recognise is `None`, which
-        // counts against the general pools and against no kind-specific one:
-        // an unknown check still occupies a slot, and that is the safe
-        // direction for a ceiling.
+        // `CheckPlanKind` has no `parse`, so the label is matched against
+        // `ALL`'s spellings. An unrecognised label is `None`, which counts
+        // against the general pools and no kind-specific one: an unknown check
+        // still occupies a slot, the safe direction for a ceiling.
         let kind = labels
             .get(super::job::LABEL_CHECK_KIND)
             .map(String::as_str)
@@ -174,8 +147,7 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
             if same_namespace {
                 counts.evidence_namespace += 1;
             }
-            // An evidence fetch spends only its own pool — that is the whole
-            // point of the pool.
+            // An evidence fetch spends only its own pool.
             continue;
         }
         counts.total += 1;
@@ -200,7 +172,6 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
 /// Whether a candidate check may start now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admission {
-    /// Create the Job.
     Admit,
     /// Do not. The status is `phase: Queued` with this reason, requeued after
     /// [`QUEUED_REQUEUE_SECS`].
@@ -208,28 +179,25 @@ pub enum Admission {
 }
 
 impl Admission {
-    /// Whether this admits.
     #[must_use]
     pub fn is_admitted(self) -> bool {
         matches!(self, Self::Admit)
     }
 }
 
-/// Apply the policy to a count — **pure**, and the ONE place the four ceilings
-/// are compared.
+/// Apply the policy to a count (**pure**; the one place the four ceilings are
+/// compared).
 ///
-/// D2 §4.3 gives every over-limit outcome the single reason
-/// [`CheckCode::ConcurrencyLimited`]: from a user's side "the installation is
-/// busy, this is queued" is one fact, and four reasons would be four strings a
-/// UI has to carry remedies for. Which ceiling bit belongs in the condition
-/// MESSAGE, which the caller composes from [`ActiveCounts`].
+/// D2 §4.3 gives every over-limit outcome the one reason
+/// [`CheckCode::ConcurrencyLimited`]: for a user "the installation is busy,
+/// this is queued" is one fact. Which ceiling bit belongs in the condition
+/// message, which the caller composes from [`ActiveCounts`].
 #[must_use]
 pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) -> Admission {
     if kind == CheckPlanKind::EvidenceFetch {
-        // THE SEPARATE POOL, and ONLY that pool: an evidence fetch is how a
-        // verification reads what it needs, and making it compete with
-        // interactive discovery is how verification stops happening on a busy
-        // installation.
+        // The separate pool, and only that pool: making an evidence fetch
+        // compete with interactive discovery is how verification stops
+        // happening on a busy installation.
         return if counts.evidence_namespace >= policy.max_evidence_fetch_active_per_namespace {
             Admission::Queued(CheckCode::ConcurrencyLimited)
         } else {
@@ -252,13 +220,10 @@ pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) 
 /// Every check Job in the installation, active or not.
 ///
 /// Every namespace this controller acts in (`crate::scope`: the whole cluster
-/// through `Api::all` by default, one list per execution namespace when D0
-/// stage 5's scoping is on) plus the component label — the same `list` verb
-/// the three existing reconcilers already hold on Jobs. The installation-wide
-/// ceiling counts the Jobs THIS controller could have created, which in a
-/// scoped install are exactly the ones in its namespaces. The filtering to
-/// "active" is [`is_active`]'s, in memory, because a Job's conditions are not
-/// a field selector the API server offers.
+/// by default, one list per execution namespace when scoped) with the
+/// component label. The installation-wide ceiling counts the Jobs this
+/// controller could have created. The "active" filter is [`is_active`]'s, in
+/// memory, because a Job's conditions are not a field selector.
 ///
 /// # Errors
 ///

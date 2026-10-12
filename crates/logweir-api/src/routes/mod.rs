@@ -621,9 +621,7 @@ pub async fn get_object<K: ProductResource>(
     Ok(object)
 }
 
-// ======================================================================
-// Transient checks: rate limit, cancellation, object-level authorization
-// ======================================================================
+// TRANSIENT CHECKS: rate limit, cancellation, object-level authorization.
 
 /// D2 §8.2: at most this many discovery creates per actor, per namespace, per
 /// minute.
@@ -679,11 +677,9 @@ pub fn check_create_rate(
     )
 }
 
-// ======================================================================
-// P10: the manual-run create limit
-// ======================================================================
+// THE MANUAL-RUN CREATE LIMIT.
 
-/// P10: the default ceiling on manual `Backup` creates ("Back up now") per
+/// The default ceiling on manual `Backup` creates ("Back up now") per
 /// actor, per namespace, per minute.
 ///
 /// TEN. A person clicking "Back up now" does it once and waits; a script that
@@ -692,7 +688,7 @@ pub fn check_create_rate(
 /// controller's `runs.maxManualBackupsActivePerNamespace` is what bounds the
 /// PODS, and it holds whatever this says.
 pub const MANUAL_BACKUP_CREATES_PER_MINUTE: u32 = 10;
-/// P10: the default ceiling on manual `Restore` creates per actor, per
+/// The default ceiling on manual `Restore` creates per actor, per
 /// namespace, per minute. Five: a restore is an incident action with a human
 /// approval behind it.
 pub const MANUAL_RESTORE_CREATES_PER_MINUTE: u32 = 5;
@@ -783,7 +779,7 @@ pub enum ManualRun {
     Restore,
 }
 
-/// P10: count one manual-run create and decide.
+/// Count one manual-run create and decide.
 ///
 /// KEYED BY `(actor, namespace, route)`, exactly as the check limiter is: the
 /// actor is the stable `issuer#subject` id, never a display name, so two

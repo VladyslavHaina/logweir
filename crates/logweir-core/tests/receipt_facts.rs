@@ -1,10 +1,9 @@
-//! FX-33: `ReceiptFacts::fold` reads what the `serde_json::Value` walk read.
+//! `ReceiptFacts::fold` reads what the `serde_json::Value` walk read.
 //!
-//! The controller used to parse a receipt into a `Value` and read five things
-//! from it. The fold reads the same five as the bytes stream past. A verdict
-//! hangs on each (the signing time decides a key's validity window, the
-//! `backup_id` binds a relayed receipt to its run), so the fold is held to
-//! the walk it replaces, body by body.
+//! The fold reads five things from a receipt as the bytes stream past, where a
+//! `Value` walk parses it whole. A verdict hangs on each (the signing time
+//! decides a key's validity window, the `backup_id` binds a relayed receipt to
+//! its run), so the fold is held to the walk it replaces, body by body.
 
 use chrono::{DateTime, Utc};
 use logweir_core::receipt_facts::{Field, ReceiptFacts, MAX_RECORDS_ENTRIES};

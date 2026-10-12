@@ -29,8 +29,6 @@ use support::{
     SHARED_ORIGIN,
 };
 
-// ------------------------------------------------------------ log capture
-
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
 
@@ -107,8 +105,6 @@ fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let guard = tracing::subscriber::set_default(subscriber);
     (buffer, guard)
 }
-
-// ------------------------------------------------------------------ setup
 
 fn app_with(fake: FakeKube) -> SharedApp {
     SharedApp::new(
@@ -674,8 +670,7 @@ async fn every_request_produces_exactly_one_record() {
         }
     }
     // The refusals name the CHECK that refused them, not the status they used
-    // (review finding F-1; the dedicated test is
-    // `every_transport_refusal_names_itself_in_the_audit_record`).
+    // (the dedicated test is `every_transport_refusal_names_itself_in_the_audit_record`).
     assert_eq!(log.record(&ids[4])["failureCode"], "misdirected_request");
     assert_eq!(log.record(&ids[5])["failureCode"], "header_not_allowed");
 }
@@ -777,7 +772,7 @@ async fn a_forwarded_address_is_recorded_only_for_a_trusted_peer() {
     let trusted = vec![Cidr::parse("10.0.0.0/8").expect("a constant CIDR")];
     let (recorded, actor_a) = probe([10, 1, 2, 3], trusted.clone()).await;
     assert_eq!(recorded["peer"], "10.1.2.3");
-    // THE RIGHTMOST HOP THE TRUSTED PROXY DID NOT ADD (PLAT-17.2 review L4):
+    // THE RIGHTMOST HOP THE TRUSTED PROXY DID NOT ADD:
     // the proxy appends the address it received from, so `198.51.100.2` is what
     // the trusted peer saw and `203.0.113.9` is whatever the client wrote.
     assert_eq!(
@@ -801,14 +796,12 @@ async fn a_forwarded_address_is_recorded_only_for_a_trusted_peer() {
 /// **Every transport-boundary refusal names the check that refused it, not the
 /// status it happened to use.**
 ///
-/// REGRESSION REASON (review finding F-1). The four refusals in
-/// `crate::http` returned without calling `AuditContext::set_failure`, so
-/// `finish()` substituted `http_<status>`. The branch's own live `server.log`
-/// shows it: the `Impersonate-User` refusal recorded `http_400`, the foreign
-/// and missing `Origin` refusals BOTH `http_403`, the poisoned `Host`
+/// REGRESSION REASON. A refusal in `crate::http` that returned without
+/// calling `AuditContext::set_failure` would let `finish()` substitute
+/// `http_<status>`: the `Impersonate-User` refusal would read `http_400`, the
+/// foreign and missing `Origin` refusals BOTH `http_403`, the poisoned `Host`
 /// `http_421`. Those are exactly the attack-shaped refusals, and an operator
 /// reading the log could not tell a cross-origin write from a bad CSRF token.
-/// The HTTP body always named the code; only the record did not.
 #[tokio::test]
 async fn every_transport_refusal_names_itself_in_the_audit_record() {
     let (log, _guard) = capture();

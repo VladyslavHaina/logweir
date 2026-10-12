@@ -1,12 +1,12 @@
-//! `GET /api/v1/trust-policies[/{name}]` — PLAT-19.1's read half: which keys
-//! this installation accepts, for what, and whether anybody has checked
+//! `GET /api/v1/trust-policies[/{name}]` -- the read half of trust: which
+//! keys this installation accepts, for what, and whether anybody has checked
 //! lately.
 //!
 //! # `unknown` is not `valid` (D3 §7.7)
 //!
-//! The page this replaces printed `valid` for any key not listed in
-//! `status.expiredKeyIds`, *including when the object carried no status at
-//! all*. So the evaluation freshness is decided HERE, on the server, and a key
+//! A key not listed in `status.expiredKeyIds` is not thereby valid -- an
+//! object may carry no status at all. So the evaluation freshness is decided
+//! HERE, on the server, and a key
 //! whose evaluation is not fresh is published with `effectiveState: unknown`
 //! and no usability verdict — not with the last verdict anybody happened to
 //! write. An evaluation is fresh only when the object has a status, that

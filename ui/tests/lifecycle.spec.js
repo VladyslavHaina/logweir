@@ -21,7 +21,7 @@ import {
 import { wire } from "./console-fixture.js";
 
 
-// THE MODE IS PINNED, NOT PROBED (PLAT-18.1). `ui/client.js` decides once per
+// THE MODE IS PINNED, NOT PROBED. `ui/client.js` decides once per
 // loaded page by asking `GET /api/v1/session`. A mount in this suite must not
 // issue that request: it would show up in the stubbed request log the two
 // transport rows below count. The pin is the console with two granted

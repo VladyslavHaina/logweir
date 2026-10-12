@@ -1,20 +1,10 @@
-//! Run-id minting. This module exists in `crates/logweir` and NOT in
-//! `logweir-core` for one reason: **Global Constraint 1**.
-//!
-//! `logweir-core`'s own module doc says "No I/O, no clock, no network", and
-//! three separate comments in this crate say "the clock is read HERE … never
-//! in `logweir-core`". `logweir_core::ids::new_run_id` used to call
-//! `ulid::Ulid::new()`, which reads `SystemTime::now()` and the OS entropy
-//! pool — the one leak in an otherwise genuinely pure crate, and the only
-//! timestamp in this build not taken by the impure layer and passed in.
-//!
-//! Both impure inputs are now taken here. `logweir_core::ids::format_run_id`
-//! is the pure encoder they are handed to, so the ULID layout stays defined in
-//! the crate that owns the document format while the clock stays out of it.
-//! `logweir-core` no longer even LINKS `ulid`, which is what
-//! `scripts/check-pure-core.sh` checks — a grep over the crate's source and a
-//! `cargo tree` over its dependencies, so the constraint is machine-checked
-//! rather than asserted in a comment.
+//! Run-id minting. This module is in `crates/logweir` and NOT in
+//! `logweir-core` because of **Global Constraint 1**: `logweir-core` reads no
+//! clock and no entropy. Both impure inputs are taken here and handed to
+//! `logweir_core::ids::format_run_id`, the pure encoder, so the ULID layout
+//! stays with the crate that owns the document format while the clock stays
+//! out of it. `scripts/check-pure-core.sh` checks that `logweir-core` does not
+//! link `ulid`.
 
 /// A fresh run id: 48-bit big-endian millisecond timestamp + 80 random bits.
 ///

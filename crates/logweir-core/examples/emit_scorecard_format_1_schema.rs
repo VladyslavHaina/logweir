@@ -1,9 +1,8 @@
 // crates/logweir-core/examples/emit_scorecard_format_1_schema.rs
 #![forbid(unsafe_code)]
 //! Prints the newest MINOR of scorecard format 1 (`just schema`): the frozen
-//! predecessor's file (PROD-15.1's 1.8.0) plus PROD-16.2's optional
-//! `approval.console` block, as
-//! `logweir_core::schema::scorecard_format_1_schema` builds it.
+//! predecessor's file (1.8.0) plus the optional `approval.console` block
+//! (1.9.0), as `logweir_core::schema::scorecard_format_1_schema` builds it.
 fn main() {
     let frozen = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-drill-scorecard-{}.json",

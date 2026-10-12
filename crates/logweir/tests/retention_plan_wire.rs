@@ -1,4 +1,4 @@
-//! The retention plan's wire agreement — review `d3w9` **L6**.
+//! The retention plan's wire agreement.
 //!
 //! # Why this file exists, and why it is in THIS crate
 //!
@@ -12,8 +12,7 @@
 //! **Both carry `#[serde(deny_unknown_fields)]`, so the failure mode of drift
 //! is total, not partial.** One field added to the writer makes every plan
 //! `Refusal::Unreadable`, every run exit 3, and the discovery happens at 04:17
-//! in a Job log. Nothing tested the agreement; the reviewer checked it by hand
-//! and recorded that as a finding.
+//! in a Job log.
 //!
 //! `crates/logweir` is where the check can live: it is a crate that already
 //! reads the whole tree's source in its lint suites, and it can link neither of

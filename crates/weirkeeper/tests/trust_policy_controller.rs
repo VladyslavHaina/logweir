@@ -1,24 +1,21 @@
 //! `TrustPolicy` resolution, the synthesised `legacy-roster-v1`, and the
-//! reconciler around them (PLAT-19.1, decision D3 §7.1 and §7.5).
+//! reconciler around them (decision D3).
 //!
 //! # Where the key material comes from
 //!
-//! The same two **public** halves `tests/approval_controller.rs` uses, and for
-//! the same reason: `scripts/check-one-signer.sh`'s check 3 greps
-//! `crates/*/tests` for the signing API and `weirkeeper` is on neither
-//! `ALLOWED_LINK` nor `ALLOWED_SOURCE`, so a test here that minted a key pair
-//! would put the controller crate's test target on the signing side of the one
-//! boundary this crate exists to respect. These are public keys and key ids;
-//! no private half was ever written down.
+//! The same two **public** halves `tests/approval_controller.rs` uses, for the
+//! same reason: `scripts/check-one-signer.sh`'s check 3 greps `crates/*/tests`
+//! for the signing API and `weirkeeper` is on neither `ALLOWED_LINK` nor
+//! `ALLOWED_SOURCE`, so a test here that minted a key pair would put the
+//! controller crate's test target on the signing side of that boundary.
 //!
 //! # What each test is allowed to prove
 //!
-//! The resolution and evaluation tests call the pure functions directly — the
-//! property is a mapping from objects and a clock to a verdict, and a test that
-//! needs a route table to reach it is a test about `kube`. The reconciler tests
-//! go through `weirkeeper::testing::mock_client_recording`, whose double panics
-//! on a request it was not given a route for; that panic is what makes "the
-//! reconciler asked for nothing else" an assertion rather than a hope.
+//! The resolution and evaluation tests call the pure functions directly: the
+//! property is a mapping from objects and a clock to a verdict. The reconciler
+//! tests go through `weirkeeper::testing::mock_client_recording`, whose double
+//! panics on a request it was not given a route for; that panic is what makes
+//! "the reconciler asked for nothing else" an assertion.
 
 mod support;
 use support::{at, seen};
@@ -47,9 +44,7 @@ use weirkeeper::trust::{
     REASON_TRUST_POLICY_CONFLICT,
 };
 
-// ---------------------------------------------------------------------------
 // Public material, out of tree. See the module header.
-// ---------------------------------------------------------------------------
 
 /// An Ed25519 **public** key, SubjectPublicKeyInfo PEM.
 const KEY_A_PEM: &str =
@@ -74,9 +69,7 @@ fn now() -> DateTime<Utc> {
     at("2026-09-16T12:00:00Z")
 }
 
-// ---------------------------------------------------------------------------
 // Builders
-// ---------------------------------------------------------------------------
 
 /// An `Active` key entry with `usage`, valid through 2027.
 fn key(
@@ -110,8 +103,8 @@ fn policy(name: &str, namespaces: &[&str], default: bool, keys: Vec<TrustedKey>)
             name: Some(name.to_string()),
             uid: Some(format!("uid-{name}")),
             generation: Some(1),
-            // SEAM S7 (review finding F6): every status write carries it, so a
-            // fixture without one is a fixture the reconciler refuses.
+            // Every status write carries the precondition (seam S7), so a fixture
+            // without one is a fixture the reconciler refuses.
             resource_version: Some("17".to_string()),
             ..ObjectMeta::default()
         },
@@ -165,9 +158,7 @@ fn expect_trust(resolution: Resolution) -> weirkeeper::trust::ResolvedTrust {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Resolution — D3 §7.1
-// ---------------------------------------------------------------------------
+// Resolution
 
 /// An explicit `spec.namespaces` match wins over the default.
 #[test]
@@ -218,20 +209,17 @@ fn with_no_policy_and_no_roster_nothing_is_configured() {
     );
 }
 
-/// **MUTANT 3 — a conflict resolving to the first policy.**
+/// **A conflict does not resolve to the first policy.**
 ///
-/// The planted mutation is `resolve_in` taking `explicit.first()` whenever one
-/// exists instead of refusing a contested namespace — the "pick one and move
-/// on" shape a reconciler falls into naturally. It is a mutation a coverage
-/// number cannot see: `policy-a` genuinely governs `team-a` under one reading,
-/// so a test that only asserted "some trust resolves" would stay green while
-/// the namespace silently took whichever policy the list happened to hold
-/// first.
+/// `policy-a` genuinely governs `team-a` under one reading, so a test that only
+/// asserted "some trust resolves" would stay green while the namespace took
+/// whichever policy the list held first.
 ///
-/// Three assertions kill it: the resolution is a `Conflict`, the conflict
-/// NAMES BOTH policies (so a mutant that refused while reporting one dies
-/// too), and the uncontested namespace of the same policy still resolves — so
-/// a mutant that "fixed" the conflict by refusing everything dies as well.
+/// KILLS: `resolve_in` taking `explicit.first()` instead of refusing a
+/// contested namespace. Three assertions: the resolution is a `Conflict`, the
+/// conflict NAMES BOTH policies (a mutant that refused while reporting one
+/// dies), and the uncontested namespace of the same policy still resolves (a
+/// mutant that refused everything dies).
 #[test]
 fn mutant_a_namespace_two_policies_claim_resolves_to_nothing() {
     let a = policy("policy-a", &["team-a"], false, vec![evidence_key()]);
@@ -332,9 +320,7 @@ fn bound_namespaces_drops_the_contested_ones() {
     assert_eq!(trust::bound_namespaces(&a, &all), vec!["team-a"]);
 }
 
-// ---------------------------------------------------------------------------
-// The synthesised legacy policy — D3 §7.5
-// ---------------------------------------------------------------------------
+// The synthesised legacy policy
 
 /// The mapping, field by field.
 #[test]
@@ -408,13 +394,13 @@ fn a_key_on_both_roster_lists_becomes_one_entry_with_both_usages() {
     assert!(only.trust.has_usage(KeyUsage::EvidenceSigning));
 }
 
-/// **MUTANT 6 — a partially parseable roster loading.**
+/// **A partially parseable roster is not a roster.**
 ///
-/// The planted mutation is the legacy synthesis skipping an unparseable
-/// `approverKeys` entry instead of blocking the usage — which would let the
-/// OTHER approver key on the same roster authorise a restore, on a roster
-/// today's `evaluate` check 2 refuses outright. Both halves are asserted: the
-/// block exists, and its message is the one today's refusal carries.
+/// KILLS: the legacy synthesis skipping an unparseable `approverKeys` entry
+/// instead of blocking the usage, which would let the OTHER approver key on
+/// the same roster authorise a restore on a roster `evaluate` check 2 refuses
+/// outright. Both halves are asserted: the block exists, and its message is
+/// the one that refusal carries.
 #[test]
 fn mutant_a_partially_parseable_roster_is_not_a_roster() {
     let spec = roster(
@@ -443,9 +429,9 @@ fn mutant_a_partially_parseable_roster_is_not_a_roster() {
          in the key set"
     );
 
-    // AND THE RULE STOPS AT THE APPROVAL SIDE. `verify_evidence` step 4 skips
-    // an unparseable signing key and keeps trying the rest, so a bad APPROVER
-    // key must not stop evidence verifying.
+    // The rule stops at the approval side. `verify_evidence` step 4 skips
+    // an unparseable signing key and keeps trying the rest, so a bad
+    // APPROVER key must not stop evidence verifying.
     assert_eq!(
         resolved.blocked_for(KeyUsage::EvidenceSigning),
         None,
@@ -472,8 +458,8 @@ fn an_unparseable_key_is_never_offered_to_a_verifier() {
 }
 
 /// A roster entry whose declared id is not the hash of its own material is
-/// reported separately from an unparseable one — today's `KeyIdNotInRoster`
-/// and `SignatureInvalid` are different refusals.
+/// reported separately from an unparseable one: `KeyIdNotInRoster` and
+/// `SignatureInvalid` are different refusals.
 #[test]
 fn a_declared_id_that_does_not_match_its_material_is_its_own_fault() {
     let spec = roster(vec![], vec![entry(KEY_B_ID, KEY_A_PEM, None)]);
@@ -509,9 +495,7 @@ fn a_real_policy_reports_one_unparseable_key_without_refusing_the_others() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The seams W10 wires in
-// ---------------------------------------------------------------------------
+// The verification and signing seams
 
 /// `decide_for` resolves by stored `matchedKeyId` and refuses an id the policy
 /// does not carry.
@@ -540,7 +524,8 @@ fn the_decide_seam_resolves_by_stored_key_id() {
 }
 
 /// `may_sign_new_for` is the admission-time half, and it disagrees with
-/// `decide_for` exactly where D3 §7.4 says it should.
+/// `decide_for` exactly where it should: a retired key signs nothing new,
+/// yet what it signed before retiring still verifies (`Historical`).
 #[test]
 fn the_signing_seam_refuses_what_the_verification_seam_still_trusts() {
     let retired = TrustedKey {
@@ -576,9 +561,7 @@ fn the_conflict_refusal_has_one_spelling() {
     assert_eq!(REASON_CONFLICT, REASON_TRUST_POLICY_CONFLICT);
 }
 
-// ---------------------------------------------------------------------------
-// The reconciler's verdict — D3 §7.1 status
-// ---------------------------------------------------------------------------
+// The reconciler's verdict
 
 /// A healthy policy: `Loaded=True`, per-key verdicts, `Bound=True`.
 #[test]
@@ -811,9 +794,7 @@ fn condition<'a>(
         .unwrap_or_else(|| panic!("the verdict carries no `{type}` condition", type = r#type))
 }
 
-// ---------------------------------------------------------------------------
-// The `evaluatedAt` heartbeat — D3 §7.1 and §7.7
-// ---------------------------------------------------------------------------
+// The `evaluatedAt` heartbeat
 
 /// A steady policy keeps the stored `evaluatedAt` until [`HEARTBEAT`] has
 /// elapsed, and then moves it.
@@ -897,9 +878,7 @@ fn the_status_carries_the_generation_it_was_computed_from() {
     assert_eq!(status.key_count, Some(1));
 }
 
-// ---------------------------------------------------------------------------
 // The reconciler, over a route table
-// ---------------------------------------------------------------------------
 
 /// The reconcile lists policies, patches its own status, and writes the
 /// `Superseded` condition on the roster — and asks for nothing else.
@@ -956,15 +935,15 @@ async fn the_reconcile_patches_its_status_and_writes_the_roster_condition() {
     );
 }
 
-/// The `Superseded` condition names the reason D3 §7.5 fixes, and says the
-/// roster is untouched.
+/// The `Superseded` condition names the reason the decision fixes, and says
+/// the roster is untouched.
 #[test]
 fn the_superseded_reason_is_the_one_the_decision_names() {
     assert_eq!(CONDITION_SUPERSEDED, "Superseded");
     assert_eq!(REASON_SUPERSEDED_BY_TRUST_POLICY, "SupersededByTrustPolicy");
 }
 
-/// A bare `TrustRoster` object with `conditions`, for the F2 tests.
+/// A bare `TrustRoster` object with `conditions`.
 fn roster_object(conditions: Vec<weirkeeper::crds::Condition>) -> TrustRosterObject {
     use weirkeeper::crds::trust_roster::TrustRosterStatus;
     TrustRosterObject {
@@ -983,13 +962,13 @@ fn roster_object(conditions: Vec<weirkeeper::crds::Condition>) -> TrustRosterObj
     }
 }
 
-/// **F2, first half: only a MATCHING policy supersedes the roster.**
+/// **Only a MATCHING policy supersedes the roster.**
 ///
 /// A policy governing `team-a` leaves every other namespace resolving to
 /// `legacy-roster-v1`, synthesised from this very roster. Marking it superseded
 /// invites an operator to stop maintaining or delete it, which silently
-/// un-trusts every unbound namespace. The only policy that displaces the roster
-/// for EVERY namespace is the cluster default.
+/// un-trusts every unbound namespace. Only the cluster default displaces the
+/// roster for EVERY namespace.
 #[test]
 fn only_a_default_policy_supersedes_the_roster() {
     let roster = roster_object(vec![]);
@@ -1029,13 +1008,12 @@ fn only_a_default_policy_supersedes_the_roster() {
     }
 }
 
-/// **F2, second half: the condition CLEARS when the policy goes away.**
+/// **The condition CLEARS when the policy goes away.**
 ///
 /// `reconcile_policy` runs only for a policy that exists, so deleting every
-/// policy would otherwise leave `Superseded=True` forever — rollback in place
-/// advertising the opposite of what is happening. The roster's own reconciler
-/// recomputes it from its 300 s requeue, which runs whether or not a policy
-/// exists.
+/// policy would otherwise leave `Superseded=True` for ever, advertising the
+/// opposite of a rollback. The roster's own reconciler recomputes it on its
+/// 300 s requeue, which runs whether or not a policy exists.
 #[test]
 fn the_superseded_condition_clears_when_the_default_policy_goes_away() {
     use weirkeeper::controllers::trust_roster;
@@ -1070,7 +1048,7 @@ fn the_superseded_condition_clears_when_the_default_policy_goes_away() {
     );
 }
 
-/// **F6: both status writes carry seam S7's precondition.**
+/// **Both status writes carry the `resourceVersion` precondition (seam S7).**
 #[test]
 fn a_status_patch_carries_the_resource_version_precondition() {
     let patch = trust_policy::with_precondition(
@@ -1229,15 +1207,13 @@ fn the_status_shape_is_the_crds_own() {
     assert!(status.conflicts.is_none());
 }
 
-// ---------------------------------------------------------------------------
-// TRUST-EXPIRY-LAG — the requeue arithmetic, and what a policy's clock owes
-// ---------------------------------------------------------------------------
+// The requeue arithmetic, and what a policy's clock owes
 
 /// [`requeue_before`]'s four rows, and the bound that makes it safe.
 ///
-/// KILLS: "believe the deadline whatever it is" — a deadline in the past would
-/// become `Action::requeue(0)` and spin this controller against the API server;
-/// and "ignore the deadline", which is the shipped behaviour the defect names.
+/// KILLS: "believe the deadline whatever it is" (a deadline in the past would
+/// become `Action::requeue(0)` and spin this controller against the API
+/// server); "ignore the deadline".
 #[test]
 fn a_boundary_requeue_is_bounded_at_both_ends() {
     use weirkeeper::controllers::trust_policy::{requeue_before, HEARTBEAT, MIN_REQUEUE};
@@ -1282,10 +1258,10 @@ fn a_boundary_requeue_is_bounded_at_both_ends() {
 
 /// The earliest instant a policy's own status changes with nobody editing it.
 ///
-/// KILLS: "watch `notAfter` only" — a key that becomes valid, or one crossing
+/// KILLS: "watch `notAfter` only" (a key that becomes valid, or one crossing
 /// the `ExpiringSoon` horizon, are transitions this controller writes and no
-/// edit announces either; and "take the earliest boundary, past ones included",
-/// which would peg the requeue at the floor for every expired key for ever.
+/// edit announces); "take the earliest boundary, past ones included", which
+/// would peg the requeue at the floor for every expired key for ever.
 #[test]
 fn a_policy_wakes_at_the_next_instant_its_own_status_changes() {
     use weirkeeper::controllers::trust_policy::next_clock_change;
@@ -1367,10 +1343,9 @@ fn a_policy_wakes_at_the_next_instant_its_own_status_changes() {
 /// The window scanned is the reconciler's own body, so an unrelated `HEARTBEAT`
 /// elsewhere in the file is invisible to it.
 ///
-/// KILLS: "leave the policy on the plain heartbeat" — `status.keys[].effectiveState`
+/// KILLS: "leave the policy on the plain heartbeat": `status.keys[].effectiveState`
 /// would then read `Active` for up to five minutes after the window it names
-/// has closed, which is the same defect the approval had, on the object an
-/// operator is told to consult for exactly this question.
+/// has closed, on the object an operator is told to consult for exactly this.
 #[test]
 fn the_policy_reconcile_requeues_at_its_next_boundary() {
     let src = std::fs::read_to_string(

@@ -1,5 +1,5 @@
-//! `Store::list_page` — the ONE new store capability decision D3 §5.2 adds
-//! for the recovery catalog (PLAT-15.1).
+//! `Store::list_page` — the store capability the recovery catalog pages
+//! with.
 //!
 //! Every test here runs against `Store::in_memory`, so the whole file is
 //! socket-free and subprocess-free (Global Constraint 22); the `InMemory`
@@ -183,7 +183,7 @@ fn a_page_is_the_smallest_max_keys_even_when_the_backend_streams_out_of_order() 
 
 #[test]
 fn a_read_only_handle_can_page_and_still_cannot_write() {
-    // `list_page` adds NO write and NO delete (D3 §5.2). The claim is made
+    // `list_page` adds NO write and NO delete. The claim is made
     // here against a handle that physically cannot put: if paging had somehow
     // acquired a write, this is where it would show.
     let s = Store::in_memory("logweir/");

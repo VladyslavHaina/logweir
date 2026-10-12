@@ -1,59 +1,45 @@
-//! The `Backup` execution contract — PLAT-06.1.
+//! The `Backup` execution contract.
 //!
 //! # What executes, and where it comes from
 //!
-//! A runner Job executes exactly three things, and every one of them is
-//! derived here from typed, server-side facts:
+//! A runner Job executes exactly three things, each derived here from typed,
+//! server-side facts:
 //!
-//! 1. **The run identity** ([`execution_identity`]). A scheduled `Backup` —
-//!    `spec.triggeredBy: schedule`, a `spec.scheduleRef`, a `spec.slot`, a
-//!    controller owner reference to that `BackupSchedule` and the deterministic
-//!    object name for that slot — runs as `<schedule uid>-<slot>`
-//!    ([`crate::slot::backup_id_for`], guard **G-SLOT**). A manual `Backup` —
-//!    `spec.triggeredBy: manual` — runs as its own API-server UID. Creating a
-//!    `Backup` under a new name is a new run; re-creating the same name while
-//!    the object exists is `AlreadyExists`; deleting and re-creating it mints a
-//!    new UID and therefore a new manual run.
+//! 1. **The run identity** ([`execution_identity`]). A scheduled `Backup` runs
+//!    as `<schedule uid>-<slot>` ([`crate::slot::backup_id_for`], guard
+//!    **G-SLOT**); a manual one runs as its own API-server UID, so deleting and
+//!    re-creating it is a new run.
 //! 2. **The resolved inputs** ([`BackupExecutionInputs`]): the identity, the
-//!    source connection resolved from the `KafkaCluster` (its UID, addresses,
-//!    SCRAM username and TLS flag), the topic allowlist, the archive location
-//!    with its resolved storage block and the object-store addressing
-//!    environment, and the runner argv and deadline. No Secret value and no
-//!    Secret name is part of it: the password and archive credential references
-//!    are fixed by the pinned `KafkaCluster` UID and the CEL-immutable
-//!    `KafkaCluster.spec` and `Backup.spec`, so the Job builder derives them
-//!    from those objects and the ConfigMap, which has no encryption at rest,
-//!    names no credential.
+//!    source connection resolved from the `KafkaCluster` (UID, addresses, SCRAM
+//!    username, TLS flag), the topic allowlist, the archive location with its
+//!    storage block and addressing environment, and the runner argv and
+//!    deadline. No Secret value or name is part of it: the credential references
+//!    follow from the pinned `KafkaCluster` UID and the CEL-immutable specs, so
+//!    the plan ConfigMap, which has no encryption at rest, names no credential.
 //! 3. **The runner argv** ([`runner_argv`]), a pure function of the trigger and
 //!    the identity.
 //!
-//! # No annotation contributes
-//!
-//! Controllers before PLAT-06.1 executed the JSON array on the
-//! `logweir.dev/runner-argv` annotation ([`RUNNER_ARGV_ANNOTATION`]), so a
-//! manual `Backup` without it could not run and whoever could annotate a
-//! `Backup` could change the subcommand, the spec path, the signing key path or
-//! the backup id. That annotation is now only OBSERVED ([`runner_argv_annotation`]),
-//! reported by size and digest, and never executed or echoed.
+//! The `logweir.dev/runner-argv` annotation ([`RUNNER_ARGV_ANNOTATION`]) older
+//! controllers executed is only observed ([`runner_argv_annotation`]), reported
+//! by size and digest, never executed or echoed: whoever could annotate a
+//! `Backup` could otherwise change the subcommand, the paths or the backup id.
 //!
 //! # Frozen before any Job exists
 //!
 //! [`FrozenInputs`] is the canonical encoding of the inputs
 //! (`logweir_core::det_json`) plus its `sha256:` digest. The controller writes
 //! it into the create-only, `immutable: true` plan ConfigMap
-//! ([`inputs_config_map`]) together with the two documents the runner reads,
-//! both rendered FROM the snapshot, and records `status.execution` before it
-//! creates the Job. On every later pass that needs the ConfigMap, the controller
-//! re-resolves the inputs and admits the existing object only through
+//! ([`inputs_config_map`]) with the two documents the runner reads, both
+//! rendered from the snapshot, and records `status.execution` before it creates
+//! the Job. Every later pass admits the existing object only through
 //! [`verify_frozen_config_map`]: exact single owner, immutable, canonical,
 //! digest-annotated, documents re-rendered byte for byte, bound to this
-//! `Backup`, equal to the recorded status and equal to the fresh resolution in
+//! `Backup`, equal to the recorded status and to a fresh resolution in
 //! everything executable. Anything else is a terminal conflict; nothing is
 //! overwritten or adopted.
 //!
 //! This module performs no I/O. It reads the process environment only through
-//! [`crate::retention::storage_url_for`], the one archive URL parser, exactly as
-//! the plan renderer always has.
+//! [`crate::retention::storage_url_for`], the one archive URL parser.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -94,48 +80,37 @@ pub const ALLOWED_CLUSTERS_PATH: &str = "/plan/allowed-clusters.json";
 pub const SIGNING_KEY_PATH: &str = "/signing/key.pem";
 /// Where the runner writes its backup document.
 ///
-/// **NOT IN THE RUNNER ARGV, AND THE REASON IS A MEASUREMENT.** `logweir
-/// backup run` writes exactly one document and `--receipt-out` takes
-/// precedence over `--out`, so passing both at DIFFERENT paths is refused with
-/// exit 1 before the engine is spawned, by `refuse_two_receipt_paths` in the
-/// CLI's own `backup/phase_minus1_admit.rs`. The scheduled argv passed both
-/// until Task 24 measured it on a live cluster, which means every scheduled
-/// `Backup` in the shipped tree failed that way and archived nothing. The
-/// constant is kept because `job::WORK_VOLUME`'s doc comment and
-/// `docs/kubernetes.md` name the path a runner's scratch volume has to make
-/// writable, and that is still true; nothing passes it as a flag.
+/// Not in the runner argv: `logweir backup run` writes one document,
+/// `--receipt-out` takes precedence over `--out`, and passing both at different
+/// paths is refused with exit 1 before the engine starts
+/// (`refuse_two_receipt_paths`). The constant names the path a runner's scratch
+/// volume must make writable (`job::WORK_VOLUME`).
 pub const OUT_PATH: &str = "/work/backup.json";
 /// Where the runner writes the signed receipt.
 pub const RECEIPT_OUT_PATH: &str = "/work/receipt.json";
 
-/// The annotation older controllers executed as the runner argv.
-///
-/// OBSERVED AND NEVER EXECUTED. New scheduled `Backup`s do not carry it; a
-/// `Backup` that does gets a `RunnerArgvAnnotationIgnored` condition naming
-/// the annotation's size and digest. The name stays public so tests, docs and
-/// upgrade tooling can identify legacy objects precisely.
+/// The annotation older controllers executed as the runner argv. Observed and
+/// never executed: a `Backup` that carries it gets a
+/// `RunnerArgvAnnotationIgnored` condition naming its size and digest. Public
+/// so tests, docs and upgrade tooling can identify legacy objects.
 pub const RUNNER_ARGV_ANNOTATION: &str = "logweir.dev/runner-argv";
 
 /// The plan ConfigMap key carrying the canonical typed input snapshot.
 pub const INPUTS_KEY: &str = "execution-inputs.json";
 
-/// PLAT-06.1's snapshot grammar: identity, source, topics, archive, runner.
+/// The first snapshot grammar: identity, source, topics, archive, runner.
 ///
-/// STILL READ, STILL EXECUTED, NEVER REWRITTEN. Every `Backup` frozen by a
-/// controller that predates D1 carries this version, and a run in flight at
-/// upgrade time must keep executing the bytes it was admitted with — so this
-/// constant is not "the old one", it is one of the two grammars
-/// [`verify_frozen_config_map`] admits. See [`INPUTS_VERSIONS_READ`].
+/// Still read and executed, never rewritten: a `Backup` frozen before D1
+/// carries it, and a run in flight at upgrade must keep executing the bytes it
+/// was admitted with. One of the two grammars [`verify_frozen_config_map`]
+/// admits ([`INPUTS_VERSIONS_READ`]).
 pub const INPUTS_VERSION_V1: &str = "logweir.dev/backup-execution-inputs/v1";
 
-/// D1 §3.3's grammar: [`INPUTS_VERSION_V1`] **plus** the trigger, the schedule
-/// revision, the run policy digest, the frozen selection and the reserved
-/// destination block.
-///
-/// ADDITIVE, AND THE ADDITIONS ARE ALL OPTIONAL. A `v1` document deserialises
-/// into the same type with every `v2` field absent and re-encodes to the exact
-/// bytes it was stored as, which is what keeps a frozen `v1` plan verifiable
-/// after the upgrade (D-SEAMS **S4**).
+/// D1 §3.3's grammar: [`INPUTS_VERSION_V1`] plus the trigger, the schedule
+/// revision, the run policy digest, the frozen selection and the destination
+/// block. All additions are optional, so a `v1` document deserialises into the
+/// same type and re-encodes to its stored bytes, which keeps a frozen `v1` plan
+/// verifiable after the upgrade (seam **S4**).
 pub const INPUTS_VERSION_V2: &str = "logweir.dev/backup-execution-inputs/v2";
 
 /// The snapshot grammar this controller WRITES.
@@ -182,11 +157,9 @@ impl ExecutionRefusal {
 }
 
 impl From<crate::connection::ConnectionRefusal> for ExecutionRefusal {
-    /// A connection the ONE resolver refuses is a refusal of the run, with the
-    /// resolver's own terminal state and message (PLAT-07.1). The state is
-    /// carried rather than flattened to one of this module's: a caller that
-    /// sees `ConnectionConfigInvalid` is being told the saved connection is
-    /// wrong, not that the snapshot is.
+    /// A connection the shared resolver refuses is a refusal of the run, with
+    /// the resolver's own terminal state and message: `ConnectionConfigInvalid`
+    /// says the saved connection is wrong, not the snapshot.
     fn from(refusal: crate::connection::ConnectionRefusal) -> Self {
         Self::new(refusal.reason, refusal.message)
     }
@@ -199,10 +172,6 @@ impl fmt::Display for ExecutionRefusal {
 }
 
 impl std::error::Error for ExecutionRefusal {}
-
-// ---------------------------------------------------------------------------
-// Identity
-// ---------------------------------------------------------------------------
 
 /// What caused a run, as the typed spec states it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,7 +213,7 @@ pub struct ObjectIdentity {
 pub struct ScheduleTrigger {
     /// The `BackupSchedule`'s name.
     pub name: String,
-    /// The `BackupSchedule`'s UID, from the controller owner reference.
+    /// The `BackupSchedule`'s UID.
     pub uid: String,
     /// The slot, `yyyymmdd-hhmmss` in UTC.
     pub slot: String,
@@ -266,12 +235,9 @@ pub struct ExecutionIdentity {
     pub schedule: Option<ScheduleTrigger>,
 }
 
-/// A `triggeredBy` value, bounded for a condition message. The field is spec
-/// text and not a credential, but it is unbounded.
-///
-/// `pub(crate)` because the same bound applies to a topic NAME a runner
-/// relayed, which `controllers::backup_selection` puts into a refusal message
-/// — one truncation rule, not two.
+/// A `triggeredBy` value, bounded for a condition message (spec text, not a
+/// credential, but unbounded). `pub(crate)` because a relayed topic name in
+/// `controllers::backup_selection`'s refusal messages takes the same bound.
 pub(crate) fn shown(value: &str) -> String {
     const LIMIT: usize = 64;
     if value.chars().count() <= LIMIT {
@@ -283,40 +249,19 @@ pub(crate) fn shown(value: &str) -> String {
 
 /// Derive the run identity from the typed spec and server-generated metadata.
 ///
-/// # ONE DERIVATION, IN [`crate::identity`], AND THIS IS ITS EXECUTION-SIDE
-/// PROJECTION
+/// The derivation is [`crate::identity::run_identity`] (D1 §3.1), which reads
+/// the object alone and knows all four trigger kinds; this projects it into the
+/// `execution` block of the frozen grammar. A scheduled `Backup` created before
+/// `spec.trigger` existed (`triggeredBy: schedule`, a `scheduleRef` without a
+/// `uid`, the controller owner reference) still reads as `Scheduled`/attempt 0
+/// with the UID from that owner reference, so its execution id is unchanged and
+/// nothing is converted on upgrade.
 ///
-/// PLAT-06.1 derived the identity here, from `spec.triggeredBy` plus the
-/// `BackupSchedule` controller owner reference. D1 §3.1 moves the derivation
-/// into [`crate::identity::run_identity`], which reads the object and nothing
-/// else and knows all four trigger kinds — so a retry named `-r1` cannot be
-/// minted by the scheduler and adopted as attempt 0 here. This function calls
-/// that one derivation and projects it into the `execution` block of the
-/// frozen grammar.
-///
-/// **EVERY PLAT-06.1 OBJECT IS STILL ADMITTED, BYTE FOR BYTE.** A scheduled
-/// `Backup` created before `spec.trigger` existed carries `triggeredBy:
-/// schedule`, a `spec.scheduleRef` without a `uid` and the controller owner
-/// reference; D1 §3.1 rule 4 reads it as `Scheduled`/attempt 0 and rule 3's
-/// last clause takes the UID from that owner reference, so its execution id is
-/// `<owner uid>-<slot>` — exactly what PLAT-06.1 computed. Nothing is
-/// converted and no write happens on upgrade.
-///
-/// # What this adds on top of the one derivation
-///
-/// **One** check, and it belongs to the EXECUTION contract rather than to
-/// identity: `spec.triggeredBy` is still a two-value vocabulary. The value
-/// becomes the signed receipt's `triggered_by`, so an unknown one is
-/// [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] exactly as it was — and it must
-/// AGREE with `spec.trigger.kind`, or a `Manual` run would sign a receipt
-/// saying `schedule`.
-///
-/// PLAT-06.1's other two rails — a slot that is a real CALENDAR instant, and a
-/// legacy ownerReference that NAMES the schedule `spec.scheduleRef` names —
-/// were briefly re-stated here and now live where D1 §3.1 puts rules 1 and 3:
-/// in [`crate::identity`], guarded by `tests/run_identity.rs`. They are rules
-/// about what a run IS, and the scheduler's 409-adoption path is a second
-/// caller that needs them too.
+/// The one check added here belongs to the execution contract:
+/// `spec.triggeredBy` becomes the signed receipt's `triggered_by`, so an unknown
+/// value is [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`], and it must agree with
+/// `spec.trigger.kind` or a `Manual` run would sign a receipt saying
+/// `schedule`.
 ///
 /// # Errors
 ///
@@ -348,7 +293,7 @@ pub fn execution_identity(backup: &Backup) -> Result<ExecutionIdentity, Executio
         uid,
     };
 
-    // (1) THE RECEIPT'S OWN VOCABULARY, UNCHANGED.
+    // (1) The receipt's own vocabulary.
     let declared = backup.spec.triggered_by.as_str();
     if declared != TRIGGER_MANUAL && declared != TRIGGER_SCHEDULE {
         return Err(ExecutionRefusal::spec(format!(
@@ -396,12 +341,10 @@ pub fn execution_identity(backup: &Backup) -> Result<ExecutionIdentity, Executio
     })
 }
 
-/// The backup id controllers before PLAT-06.1 reported: the first controller
-/// owner's UID plus `spec.slot`, else this object's UID.
-///
-/// USED ONLY TO REPORT A RUN THIS CONTROLLER DID NOT DERIVE — a Job an older
-/// controller created, whose status must say what that controller would have
-/// said. For every `Backup` [`execution_identity`] accepts, the two agree.
+/// The backup id older controllers reported: the first controller owner's UID
+/// plus `spec.slot`, else this object's UID. Used only to report a Job an older
+/// controller created; for every `Backup` [`execution_identity`] accepts, the
+/// two agree.
 #[must_use]
 pub fn legacy_backup_id(backup: &Backup) -> String {
     let owner = backup
@@ -418,17 +361,12 @@ pub fn legacy_backup_id(backup: &Backup) -> String {
 /// The runner argv for one run: a pure function of the trigger and the run
 /// identity, with every path fixed by this controller.
 ///
-/// INTERFACE **I10** IS PASSED HERE, NOT DEFINED HERE. The backup id override
-/// flag is Task 4's, on Task 4's `logweir backup run`; this function writes it
-/// so the CLI does not have to know whether a schedule or a person asked for
-/// the run. It is always present, including for a manual run whose plan
-/// document already names the same id, so the Job spec states the executed
+/// Interface **I10**'s backup id override flag is always passed, even when the
+/// plan already names the same id, so the Job spec states the executed
 /// identity. `tests/schedule_controller.rs::the_backup_id_override_is_passed_not_defined`
 /// asserts that the flag token appears on exactly one code line in this crate,
-/// in this function.
-///
-/// The leading `"backup"` token names the **`logweir`** subcommand, not the
-/// engine's; `--receipt-out` and never `--out` (see [`OUT_PATH`]).
+/// in this function. The leading `"backup"` names the `logweir` subcommand;
+/// `--receipt-out` and never `--out` (see [`OUT_PATH`]).
 #[must_use]
 pub fn runner_argv(trigger: ExecutionTrigger, execution_id: &str) -> Vec<String> {
     [
@@ -452,23 +390,14 @@ pub fn runner_argv(trigger: ExecutionTrigger, execution_id: &str) -> Vec<String>
     .collect()
 }
 
-/// [`runner_argv`] with D2 §3.5's **version-skew handshake** appended, for a
+/// [`runner_argv`] with D2 §3.5's version-skew handshake appended, for a
 /// destination-backed run.
 ///
-/// # A RUNNER WITHOUT THE CONTRACT MUST REFUSE, NOT IMPROVISE
-///
-/// The same technique as `--execution-contract-version`: an unknown flag is a
-/// clap parse error, so an OLD runner image handed a destination-backed Job
-/// exits before it dispatches — it never reaches the store builder that would
-/// otherwise have assembled the archive handle out of whatever `AWS_*`
-/// happened to be in the pod. Without the handshake a new controller could
-/// drive an old runner that silently built its store from ambient credentials
-/// while the plan said otherwise, which is defect **SEC-ENVHTTP** re-opened
-/// one layer down.
-///
-/// A LEGACY inline-`archive` run does NOT carry it: the flag is the promise
-/// that every store setting arrives explicitly, and on the legacy path it does
-/// not.
+/// An unknown flag is a clap parse error, so an old runner image handed a
+/// destination-backed Job exits before it could build its store from whatever
+/// `AWS_*` was in the pod (seam S5). A legacy inline-`archive` run does not
+/// carry it: the flag promises that every store setting arrives explicitly, and
+/// on that path it does not.
 #[must_use]
 pub fn runner_argv_with_store_contract(
     trigger: ExecutionTrigger,
@@ -479,10 +408,6 @@ pub fn runner_argv_with_store_contract(
     argv.push(crate::destination::STORE_CONTRACT_VERSION.to_string());
     argv
 }
-
-// ---------------------------------------------------------------------------
-// The snapshot
-// ---------------------------------------------------------------------------
 
 /// A literal environment variable forwarded to the runner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,27 +431,21 @@ pub struct SourceInputs {
     pub bootstrap_servers: Vec<String>,
     /// Mode, SCRAM username and TLS flag. No password at any variant.
     pub auth: AuthSpec,
-    /// The private CA the connection verifies the broker with, as the
-    /// reference [`crate::connection::resolve`] decided — Secret or ConfigMap,
-    /// object name and data key (PLAT-07.1).
+    /// The private CA the connection verifies the broker with, as the reference
+    /// [`crate::connection::resolve`] decided (Secret or ConfigMap, object name
+    /// and data key).
     ///
-    /// EXECUTABLE, so a `tlsCa` edited after the freeze is a
-    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] and never a Job that
-    /// verifies the broker against a different root than the plan was approved
-    /// for. A CA CERTIFICATE IS PUBLIC MATERIAL, which is why its reference may
-    /// be named here while the SASL password's may not: the password reference
-    /// is projected into the Job from the pinned `KafkaCluster` and resolved by
-    /// the kubelet, and appears in no snapshot, no document and no status.
-    ///
-    /// Absent for every connection that names no CA, so a snapshot frozen
-    /// before this field existed re-encodes to the same bytes and is still
-    /// admitted under grammar [`INPUTS_VERSION`].
+    /// Executable, so a `tlsCa` edited after the freeze is a
+    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`], never a Job that verifies the
+    /// broker against another root. A CA certificate is public, which is why its
+    /// reference may be named here while the SASL password's may not. Absent
+    /// when no CA is named, so older snapshots re-encode to the same bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<crate::connection::CaReference>,
     /// `KafkaCluster.status.clusterId` when the inputs were resolved.
-    /// INFORMATIONAL on the backup path: the runner observes the id from the
-    /// broker and never reads this, so it is excluded from the executable
-    /// comparison and a later probe result never invalidates frozen inputs.
+    /// Informational: the runner observes the id from the broker, so it is
+    /// excluded from the executable comparison and a later probe never
+    /// invalidates frozen inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_cluster_id: Option<String>,
 }
@@ -595,28 +514,19 @@ pub struct RunnerInputs {
     pub settings: RunnerSettings,
 }
 
-// ---------------------------------------------------------------------------
-// Grammar v2 (D1 §3.3): the trigger, the revision, the selection, the
-// reserved destination block
-// ---------------------------------------------------------------------------
-
 /// `false` as a serde skip predicate, for a `bool` that is absent when unset.
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// The `trigger` block: WHICH KIND of run this is, and where in its slot's
+/// The `trigger` block: which kind of run this is, and where in its slot's
 /// attempt chain it sits (D1 §3.1).
 ///
-/// # Why this is frozen beside `execution`, and is not `execution`
-///
-/// [`ExecutionIdentity`] is `v1`'s and its bytes are load-bearing: it is
-/// compared field for field against a fresh derivation on every later pass, and
-/// every `Backup` frozen before D1 carries it. Adding `kind` and `attempt` to
-/// it would have changed the bytes of every stored snapshot. This block carries
-/// the finer trigger additively, and `execution.id` — which already encodes the
-/// attempt through `slot::backup_id_for_attempt`'s `-r<k>` suffix — stays the
-/// one identity the runner is handed.
+/// Beside `execution`, not inside it: [`ExecutionIdentity`]'s bytes are
+/// compared against a fresh derivation on every pass and every `v1` snapshot
+/// carries them, so adding fields there would change every stored snapshot.
+/// `execution.id` already encodes the attempt (`-r<k>`) and stays the one
+/// identity the runner is handed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunInputs {
@@ -635,12 +545,8 @@ pub struct RunInputs {
 }
 
 /// The `scheduleRef` block: which `BackupSchedule` revision this run copied
-/// (D1 §5.3).
-///
-/// **IT SURVIVES THE SCHEDULE.** PLAT-05.2 stops deleting a schedule from
-/// deleting its history, so the revision a run executed has to be recorded
-/// somewhere that outlives the object — and the frozen inputs are the only
-/// immutable place a run has.
+/// (D1 §5.3). Deleting a schedule keeps its history, and the frozen inputs are
+/// the only immutable place a run has to record the revision it executed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScheduleRefInputs {
@@ -654,12 +560,10 @@ pub struct ScheduleRefInputs {
     /// Its `metadata.generation` when this run was admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<i64>,
-    /// The run policy digest COPIED from the schedule at that generation.
-    ///
-    /// Beside [`BackupExecutionInputs::run_policy_sha256`], which is the digest
-    /// this run's OWN fields produce. D1 §3.1 rule 5 requires the two to be
-    /// equal, and [`crate::identity::check_run_policy_digest`] is what refuses
-    /// the run when they are not.
+    /// The run policy digest copied from the schedule at that generation. D1
+    /// §3.1 rule 5 requires it to equal
+    /// [`BackupExecutionInputs::run_policy_sha256`] (this run's own fields), and
+    /// [`crate::identity::check_run_policy_digest`] refuses the run otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_policy_sha256: Option<String>,
 }
@@ -691,12 +595,8 @@ pub struct DiscoveryNames {
     pub truncated: bool,
 }
 
-/// What the per-run discovery observed — D1 §3.3's `selection.discovery`.
-///
-/// **RESERVED FOR D1 W5 (PLAT-09.2), AND NOTHING WRITES IT YET.** The grammar
-/// declares it here, inside PLAT-06.1's one frozen document (D-SEAMS **S4**),
-/// so the worker that resolves dynamic selection extends this validation rather
-/// than adding a parallel freeze.
+/// What the per-run discovery observed (D1 §3.3's `selection.discovery`),
+/// frozen inside the one execution document (seam **S4**).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DiscoveryInputs {
@@ -723,19 +623,14 @@ pub struct DiscoveryInputs {
     pub discovery_job: String,
 }
 
-/// The `selection` block: HOW this run chose its topics, and what it may
+/// The `selection` block: how this run chose its topics, and what it may
 /// honestly claim to have covered (D1 §3.3, §7.4).
 ///
-/// # The names are NOT repeated here
-///
-/// D1 §3.3 sketches a `selection.topics`. This grammar does not carry one:
-/// `v1`'s top-level [`BackupExecutionInputs::topics`] IS the exact frozen list
-/// — the bytes `backup.yaml` is rendered from and the bytes a later pass
-/// compares — and a second copy inside this block would be a third copy of a
-/// list D1 §7.2 R8 bounds at 256 KiB of names, in a `ConfigMap` bounded at one
-/// MiB, with two places for one answer to drift. The count and the byte size
-/// are recorded instead, and [`BackupExecutionInputs::selection`] is the
-/// PROVENANCE of `topics`, never a second statement of it.
+/// The names are not repeated here: [`BackupExecutionInputs::topics`] is the
+/// exact frozen list, and a second copy would be a third copy of up to 256 KiB
+/// of names in a one-MiB `ConfigMap`, with two places for one answer to drift.
+/// The count and byte size are recorded instead; this block is the provenance
+/// of `topics`, never a second statement of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SelectionInputs {
@@ -754,17 +649,14 @@ pub struct SelectionInputs {
     /// The policy's answer to incomplete visibility, in dynamic mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete_discovery: Option<IncompleteDiscovery>,
-    /// What discovery observed. Reserved for D1 W5.
+    /// What discovery observed, in dynamic mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<DiscoveryInputs>,
 }
 
 impl SelectionInputs {
-    /// The `status.selection` projection of this block.
-    ///
-    /// ONE PROJECTION, SO THE STATUS AND THE FROZEN DOCUMENT CANNOT DISAGREE.
-    /// A reader comparing `status.selection.resolvedTopicCount` against the
-    /// plan is comparing two renderings of the same value, not two counts.
+    /// The `status.selection` projection of this block: one projection, so the
+    /// status and the frozen document cannot disagree.
     #[must_use]
     pub fn status(&self) -> SelectionStatus {
         let discovery = self.discovery.as_ref();
@@ -790,14 +682,10 @@ impl SelectionInputs {
 /// What a run's topic resolution decided: the exact frozen list and the
 /// provenance block that explains it.
 ///
-/// # THE SEAM D1 W5 PLUGS INTO
-///
-/// [`resolve_inputs`] takes one of these and never computes a selection of its
-/// own. Today the only producer is [`ResolvedSelection::named`], the named
-/// allowlist. W5 (PLAT-09.2) adds a second producer — the discovery result —
-/// and passes it to the same function, so the dynamic path freezes through the
-/// same code, the same canonical encoding and the same
-/// [`verify_frozen_config_map`] comparison as the named one.
+/// [`resolve_inputs`] takes one of these and computes no selection of its own:
+/// [`ResolvedSelection::named`] (the named allowlist) and the dynamic discovery
+/// result both freeze through the same code, encoding and
+/// [`verify_frozen_config_map`] comparison.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedSelection {
     /// The exact names handed to `backup.yaml`, in the order they are handed.
@@ -806,46 +694,15 @@ pub struct ResolvedSelection {
     pub selection: SelectionInputs,
 }
 
-/// The selection a previous pass FROZE, read back out of a plan `ConfigMap`.
-///
-/// # WHY A FROZEN RUN RE-READS ITS SELECTION INSTEAD OF RESOLVING ONE
-///
-/// A run's topic set is decided ONCE, at the freeze. Resolving it again on a
-/// later pass — a pass that exists only to re-create a Job the garbage
-/// collector took — asks the cluster a question whose answer has moved on: a
-/// topic created or deleted since the freeze would yield a different list, and
-/// [`verify_frozen_config_map`] would refuse the run as a
-/// `PlanConfigMapConflict` **on a run whose archive may be half written**. D1
-/// §12 forbids exactly that (`a_frozen_dynamic_backup_never_reruns_discovery`).
-///
-/// # This does not weaken the comparison
-///
-/// The value it returns feeds `desired`, so the `topics`/`selection` halves of
-/// the stored-vs-desired comparison become vacuous. What still anchors the
-/// document is `status.execution.inputsSha256`: [`verify_frozen_config_map`]
-/// requires the STORED bytes to digest to the value **this controller** wrote
-/// before any Job existed, and that check does not involve `desired` at all. A
-/// swapped plan fails it whatever `desired` says.
-///
-/// `None` for a `ConfigMap` with no snapshot, an unparseable one, or a `v1`
-/// snapshot — `v1` predates dynamic selection, so its run is a named allowlist
 /// The resolved `BackupDestination` a frozen plan carries, and the CA bytes
-/// frozen beside it — the readback that makes "a destination edited after the
-/// freeze changes nothing for the running run" true.
+/// frozen beside it, so a destination edited after the freeze changes nothing
+/// for the running run.
 ///
-/// # The defect this closes
-///
-/// Every edit to a `BackupDestination` bumps `metadata.generation`, and the
-/// frozen block records the generation it resolved. Without this readback, a
-/// pass that re-creates a garbage-collected Job re-resolves the LIVE object and
-/// `verify_frozen_config_map` then refuses the run as a
-/// `PlanConfigMapConflict` — on an archive that may be half written — because
-/// an operator rotated a Secret name while it ran. `stored_selection` has had
-/// this readback since D1 W5, for the same reason and with the same shape.
-///
-/// `None` for a legacy plan, for a plan this controller cannot parse, and for a
-/// `Backup` whose plan `ConfigMap` is gone — in which case the caller
-/// re-resolves and re-freezes, which is the only thing left to do.
+/// Every edit bumps `metadata.generation`, which the frozen block records, so a
+/// pass that re-created a garbage-collected Job from the live object would be
+/// refused as a `PlanConfigMapConflict` on an archive that may be half written.
+/// `None` for a legacy plan, an unparseable one, or a `Backup` whose plan
+/// `ConfigMap` is gone; the caller then re-resolves and re-freezes.
 pub fn stored_destination(
     existing: &ConfigMap,
 ) -> Option<(ResolvedDestinationSnapshot, Option<String>)> {
@@ -857,6 +714,16 @@ pub fn stored_destination(
 }
 
 /// The topic selection a frozen plan carries.
+///
+/// A run's topic set is decided once, at the freeze. Resolving it again on a
+/// pass that only re-creates a collected Job would see topics created or
+/// deleted since, and [`verify_frozen_config_map`] would refuse a run whose
+/// archive may be half written (D1 §12,
+/// `a_frozen_dynamic_backup_never_reruns_discovery`). The comparison is not
+/// weakened: [`verify_frozen_config_map`] still requires the stored bytes to
+/// digest to `status.execution.inputsSha256`, which this controller wrote
+/// before any Job existed. `None` for a `ConfigMap` with no snapshot, an
+/// unparseable one, or a `v1` snapshot (a named allowlist).
 pub fn stored_selection(existing: &ConfigMap) -> Option<ResolvedSelection> {
     let stored = existing.data.as_ref()?.get(INPUTS_KEY)?;
     let inputs: BackupExecutionInputs = serde_json::from_str(stored).ok()?;
@@ -868,13 +735,10 @@ pub fn stored_selection(existing: &ConfigMap) -> Option<ResolvedSelection> {
 }
 
 impl ResolvedSelection {
-    /// The named allowlist: `spec.topics` VERBATIM, coverage
-    /// [`Coverage::NamedTopics`].
-    ///
-    /// VERBATIM AND NOT SORTED. `Backup.spec.topics` keeps the user's order all
-    /// the way to the engine — only [`crate::policy::run_policy_sha256`]
-    /// canonicalises — and reordering here would change the frozen bytes of
-    /// every run whose list is not already sorted.
+    /// The named allowlist: `spec.topics` verbatim, coverage
+    /// [`Coverage::NamedTopics`]. Not sorted: the user's order reaches the
+    /// engine (only [`crate::policy::run_policy_sha256`] canonicalises), and
+    /// sorting would change the frozen bytes of every unsorted list.
     #[must_use]
     pub fn named(spec: &BackupCrdSpec) -> Self {
         let topics = spec.topics.clone();
@@ -894,26 +758,18 @@ impl ResolvedSelection {
     }
 }
 
-/// The canonical typed snapshot of everything one run executes — the
+/// The canonical typed snapshot of everything one run executes: the
 /// `execution-inputs.json` document.
 ///
-/// VERSIONED AND CLOSED. Every struct denies unknown fields and the controller
-/// re-encodes a stored snapshot and requires the same bytes, so a snapshot
-/// written by a later grammar is a conflict and never a partial read.
+/// Versioned and closed: every struct denies unknown fields and a stored
+/// snapshot must re-encode to the same bytes, so a later grammar is a conflict,
+/// never a partial read. `v1` and `v2` are one type (seam **S4**): `v2` adds
+/// optional blocks, each `skip_serializing_if = "Option::is_none"`, and
+/// `logweir_core::det_json` emits fields in declaration order, so a `v1`
+/// document re-encodes to the bytes it was stored as and keeps running across
+/// the upgrade ([`verify_frozen_config_map`] rests on this).
 ///
-/// # `v1` and `v2` are ONE TYPE, and that is what makes the upgrade free
-///
-/// D-SEAMS **S4**: this document is the single frozen grammar and every worker
-/// that freezes more adds a BLOCK to it. So `v2` is `v1` plus five optional
-/// fields, and a `v1` document deserialises with all five absent. Because each
-/// one is `skip_serializing_if = "Option::is_none"` and
-/// `logweir_core::det_json` emits struct fields in DECLARATION order, that
-/// document re-encodes to the exact bytes it was stored as — which is the
-/// property [`verify_frozen_config_map`] rests on, and the reason a `Backup`
-/// frozen by a PLAT-06.1 controller keeps running across the upgrade instead of
-/// turning into a `PlanConfigMapConflict`.
-///
-/// **THE ORDER OF THESE FIELDS IS THE WIRE FORMAT.** Reordering them re-encodes
+/// **The order of these fields is the wire format.** Reordering them re-encodes
 /// every stored snapshot differently and turns every running `Backup` terminal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -949,24 +805,17 @@ pub struct BackupExecutionInputs {
     /// claim to have covered. `v2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<SelectionInputs>,
-    /// The resolved `BackupDestination` this run writes to — D2 §3.7, seam
-    /// **S4**. `v2`.
-    ///
-    /// **RESERVED. NOTHING WRITES IT YET.** D2 W10 wires destination-backed
-    /// execution; the block is declared here so that when it does, it lands in
-    /// PLAT-06.1's one document under a grammar that already loads, verifies
-    /// and compares it — not in a second freeze.
+    /// The resolved `BackupDestination` this run writes to (D2 §3.7, seam
+    /// **S4**). `v2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<ResolvedDestinationSnapshot>,
-    /// **PROD-04.1.** The consumer groups this run records positions for,
-    /// copied from `Backup.spec.consumerGroups` in the spec's order. `v2`,
-    /// optional and LAST among the optional blocks: ABSENT when the run
-    /// selects none, so every snapshot frozen before this field — and every
-    /// one that selects no group — re-encodes to the bytes it was stored as.
-    ///
-    /// A controller older than this field refuses a snapshot that carries it
-    /// (`deny_unknown_fields`: `PlanConfigMapConflict`), which is the rollback
-    /// cost, and only for runs that select groups.
+    /// The consumer groups this run records positions for, copied from
+    /// `Backup.spec.consumerGroups` in the spec's order. `v2`, optional and last
+    /// among the optional blocks: absent when the run selects none, so every
+    /// older snapshot, and every one that selects no group, re-encodes to its
+    /// stored bytes. A controller older than this field refuses a snapshot that
+    /// carries it (`deny_unknown_fields`: `PlanConfigMapConflict`), the rollback
+    /// cost, only for runs that select groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_groups: Option<Vec<String>>,
     /// The archive. `v1`.
@@ -988,19 +837,11 @@ impl BackupExecutionInputs {
     /// This snapshot as grammar [`INPUTS_VERSION_V1`] states it: every `v2`
     /// block dropped.
     ///
-    /// # Why a downgraded VIEW rather than a version-blind comparison
-    ///
-    /// A `Backup` frozen before D1 holds a `v1` plan, and the fresh resolution
-    /// made for it now is a `v2` one. Comparing them whole would find five
-    /// added blocks and refuse the run as a `PlanConfigMapConflict` — every
-    /// in-flight `Backup` in the cluster, at the moment the new controller
-    /// starts. Comparing the stored `v1` document against this view of the
-    /// fresh resolution asks the only question a `v1` plan can answer: are the
-    /// fields it actually froze still the fields this run resolves?
-    ///
-    /// It is deliberately NOT used the other way round. A `v2` plan is compared
-    /// whole, so a changed trigger, revision, policy digest, selection or
-    /// destination is a conflict.
+    /// A `Backup` frozen before D1 holds a `v1` plan while its fresh resolution
+    /// is `v2`; comparing them whole would refuse every in-flight `Backup` the
+    /// moment the new controller starts. Comparing the stored `v1` document with
+    /// this view asks whether the fields it froze still resolve the same. Never
+    /// used the other way: a `v2` plan is compared whole.
     #[must_use]
     pub fn as_version_v1(&self) -> Self {
         let mut view = self.clone();
@@ -1025,7 +866,7 @@ impl BackupExecutionInputs {
 /// UID, whatever [`crate::connection::resolve`] refuses the source connection
 /// for (`CredentialNotRenderable` for a SCRAM cluster without a username or a
 /// usable Secret reference, `ConnectionConfigInvalid`,
-/// `ConnectionReferenceInvalid` or `ConnectionFieldUnsupported` — PLAT-07.1),
+/// `ConnectionReferenceInvalid` or `ConnectionFieldUnsupported`),
 /// `CredentialNotRenderable` for an archive Secret reference with a blank name,
 /// `ArchiveUrlUnreadable` for an archive URL no storage block can be rendered
 /// from, and `ExecutionSpecInvalid` for a non-positive deadline.
@@ -1054,40 +895,27 @@ pub fn resolve_inputs(
             ),
         )
     })?;
-    // THE ONE RESOLUTION (PLAT-07.1). The source connection's settings are not
-    // read off `cluster.spec` here: `connection::resolve` is the single answer
-    // to "what does a runner Job need to dial this KafkaCluster", so the plan
-    // document, the probe and the Job cannot disagree, and a connection it
-    // refuses is refused BEFORE anything is frozen or created.
-    //
-    // WHAT IS COPIED AND WHAT IS ONLY VALIDATED. The bootstrap addresses, the
-    // auth block and the CA reference are copied into the snapshot, because
-    // each of them changes what the run dials or trusts and a later pass must
-    // compare them. The PASSWORD reference is validated and NOT copied: the Job
-    // builder projects it from this same KafkaCluster, whose UID the snapshot
-    // pins and whose spec is CEL-immutable, so no Secret name and no credential
-    // key reaches a ConfigMap.
+    // The one resolution: `connection::resolve` answers "what does a runner Job
+    // need to dial this KafkaCluster" for the plan, the probe and the Job, and
+    // refuses before anything is frozen. The bootstrap addresses, the auth block
+    // and the CA reference are copied, because each changes what the run dials
+    // or trusts. The password reference is only validated: the Job builder
+    // projects it from this same pinned, CEL-immutable KafkaCluster, so no
+    // Secret name reaches a ConfigMap.
     let connection = crate::connection::resolve(cluster, ConnectionUse::BackupSource)
         .map_err(ExecutionRefusal::from)?;
     connection
         .check_job_namespace(&identity.backup.namespace)
         .map_err(ExecutionRefusal::from)?;
-    // WHERE THE ARCHIVE IS, FROM ONE OF TWO PLACES AND NEVER FROM BOTH.
-    //
-    // A destination-backed run takes its storage block from the RESOLVED
-    // destination. `spec.archive.url` on such a `Backup` is the sentinel
-    // `logweir-destination://<name>` (CEL rule `DESTINATION_SENTINEL_RULE`),
-    // which `storage_url_for` refuses as an unknown scheme — and that refusal
-    // is load-bearing on the OTHER side of the seam: an older controller
-    // reading the same object writes the terminal `ArchiveUrlUnreadable`
-    // before it POSTs anything, which is D2 §3.6's rollback behaviour.
-    //
-    // A legacy run resolves the URL exactly as it always has.
+    // The archive comes from the resolved destination or from the URL, never
+    // both. A destination-backed `Backup`'s `spec.archive.url` is the sentinel
+    // `logweir-destination://<name>` (`DESTINATION_SENTINEL_RULE`), which
+    // `storage_url_for` refuses as an unknown scheme, so an older controller
+    // writes `ArchiveUrlUnreadable` before it POSTs anything (D2 §3.6's rollback
+    // behaviour).
     let storage = match destination {
-        // THE SNAPSHOT AND NOT A LIVE RESOLUTION, so that a pass which RE-CREATES
-        // a garbage-collected Job renders the same storage block the run was
-        // admitted with. `controllers::backup` reads the snapshot back out of
-        // the immutable plan on any pass where `status.execution` exists.
+        // The snapshot, not a live resolution, so a pass that re-creates a
+        // collected Job renders the storage block the run was admitted with.
         Some(frozen) => frozen.archive_storage.clone(),
         None => crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
             ExecutionRefusal::new(
@@ -1108,14 +936,10 @@ pub fn resolve_inputs(
             format!("spec.archive.secretRef on {name} names no Secret"),
         ));
     }
-    // THE LIST THAT REACHES THE ENGINE, RE-CHECKED AT THE FREEZE BOUNDARY.
-    // `reconcile_backup`'s step 0b already refuses a glob in `spec.topics` and
-    // its step 0b' refuses a selection that is neither D1 §7.1 shape — but
-    // W5's dynamic path produces this list from a runner's stdout rather than
-    // from the spec, and the last place to refuse an empty or patterned
-    // allowlist is the one every producer goes through. An empty list handed
-    // to `backup.yaml` is the "no allowlist means everything" shape guard
-    // G-GLOB exists for.
+    // The list that reaches the engine, re-checked at the freeze boundary every
+    // producer goes through: the dynamic path builds it from a runner's stdout,
+    // not the spec, and an empty list in `backup.yaml` is the "no allowlist
+    // means everything" shape guard G-GLOB exists for.
     if selection.topics.is_empty() {
         return Err(ExecutionRefusal::new(
             crate::conditions::TERMINAL_STATE_SELECTION_EMPTY,
@@ -1138,12 +962,9 @@ pub fn resolve_inputs(
         ));
     }
     // D1 §3.3: "Kafka-legal names `^[a-zA-Z0-9._-]{249}$` are re-validated
-    // before freeze". THE SECOND RAIL, AND IT IS NOT THE GLOB RAIL AGAIN: a
-    // space, a slash, a control character or a 250-character name carries no
-    // glob metacharacter, so the check above admits every one of them. The
-    // list that needs this is the one W5 produces from a runner's stdout —
-    // `spec.topics` is pattern-checked by the CRD, and a runner's frames are
-    // not — and a name the broker cannot hold would otherwise be frozen into
+    // before freeze". Not the glob rail again: a space, a slash, a control
+    // character or a 250-character name has no glob metacharacter. A
+    // runner-relayed name the broker cannot hold would otherwise be frozen into
     // an immutable plan and fail opaquely inside the engine.
     if let Err(entry) = logweir_core::guard::reject_non_kafka_topic_names(&selection.topics) {
         return Err(ExecutionRefusal::new(
@@ -1157,13 +978,12 @@ pub fn resolve_inputs(
         ));
     }
 
-    // FX-33: THE MAXIMUM ONE BACKUP MAY NAME, at the boundary every producer
-    // of the list goes through — a named allowlist and a dynamic selection
-    // alike. A backup over it would sign a receipt the recovery catalog could
-    // not list and this controller could not verify, so it is refused BY NAME
-    // before any plan is frozen or any Job exists, and nothing is dropped
-    // from the selection to make it fit. The runner refuses the same count at
-    // phase −1 (`logweir_core::topic_budget::refuse_topic_count`).
+    // The maximum one backup may name, at the boundary every producer goes
+    // through. A larger backup would sign a receipt the recovery catalog could
+    // not list and this controller could not verify, so it is refused by name
+    // before anything is frozen, and nothing is dropped to make it fit. The
+    // runner refuses the same count at phase −1
+    // (`logweir_core::topic_budget::refuse_topic_count`).
     if let Some(why) = logweir_core::topic_budget::refuse_topic_count(selection.topics.len()) {
         return Err(ExecutionRefusal::new(
             crate::conditions::TERMINAL_STATE_SELECTION_TOO_LARGE,
@@ -1174,8 +994,8 @@ pub fn resolve_inputs(
         ));
     }
 
-    // PROD-04.1: a consumer group selection the runner would refuse at phase
-    // −1 (exit 3) is refused HERE, before anything is frozen or created.
+    // A consumer group selection the runner would refuse at phase −1 (exit 3)
+    // is refused here, before anything is frozen or created.
     if let Some(why) = crate::policy::selected_groups(&backup.spec)
         .and_then(logweir_core::consumer_positions::refuse_selection)
     {
@@ -1219,16 +1039,11 @@ pub fn resolve_inputs(
         archive: ArchiveInputs {
             url: backup.spec.archive.url.clone(),
             storage,
-            // **EMPTY FOR A DESTINATION-BACKED RUN, AND THAT IS DEFECT
-            // SEC-ENVHTTP's CONTROLLER HALF.** The forwarded set is the
-            // controller's OWN `AWS_ENDPOINT_URL`, `AWS_REGION`,
-            // `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — a
-            // global setting that the engine's `from_env()` honours over the
-            // approved plan. A destination renders the complete explicit set
-            // itself, from the object and from nothing else
-            // (`ResolvedDestination::job_env`), so forwarding anything here
-            // would be a second answer to the same question and the process's
-            // answer would win.
+            // Empty for a destination-backed run: the forwarded set is the
+            // controller's own `AWS_*` addressing, which the engine's
+            // `from_env()` would honour over the approved plan, and a
+            // destination renders its complete set from the object alone
+            // (`ResolvedDestination::job_env`).
             addressing_env: match destination {
                 Some(_) => Vec::new(),
                 None => addressing_env
@@ -1249,13 +1064,11 @@ pub fn resolve_inputs(
     })
 }
 
-/// The `trigger` block for this `Backup`, read the way D1 §3.1 reads it.
-///
-/// PURE, AND THE SAME READ [`crate::identity::run_identity`] MAKES. A `Backup`
-/// created before `spec.trigger` existed has none, and rule 4 says what it is:
-/// `Scheduled`/0 when `triggeredBy` is `schedule`, `Manual` otherwise. That is
-/// exactly what the controller that created it did, so freezing the derived
-/// value converts nothing and loses nothing.
+/// The `trigger` block for this `Backup`, read as
+/// [`crate::identity::run_identity`] reads it (D1 §3.1). A `Backup` created
+/// before `spec.trigger` existed is `Scheduled`/0 when `triggeredBy` is
+/// `schedule` and `Manual` otherwise, which is what its creator did, so freezing
+/// the derived value converts nothing.
 fn run_inputs(backup: &Backup) -> RunInputs {
     let (kind, attempt, retry_of) = crate::identity::declared_trigger(backup);
     RunInputs {
@@ -1272,11 +1085,8 @@ fn run_inputs(backup: &Backup) -> RunInputs {
 }
 
 /// The `scheduleRef` block for this `Backup`, or `None` for an ad-hoc run.
-///
-/// COPIED, NOT RESOLVED. Whatever `spec.scheduleRef` states is what the run
-/// executed under; the schedule is never re-read to fill this in, because a
-/// schedule edited between the admission and the freeze must not change what a
-/// created run records (D1 §5.4).
+/// Copied, not resolved: a schedule edited between admission and the freeze
+/// must not change what a created run records (D1 §5.4).
 fn schedule_ref_inputs(backup: &Backup) -> Option<ScheduleRefInputs> {
     let reference = backup.spec.schedule_ref.as_ref()?;
     if reference.name.is_empty() {
@@ -1300,23 +1110,15 @@ pub struct FrozenInputs {
     pub canonical: String,
     /// `sha256_prefixed` of [`FrozenInputs::canonical`].
     pub sha256: String,
-    /// The destination's CA bundle, copied into the SAME immutable plan
-    /// `ConfigMap` as [`ARCHIVE_CA_PLAN_KEY`] — D2 §3.7.
+    /// The destination's CA bundle, copied into the same immutable plan
+    /// `ConfigMap` as [`ARCHIVE_CA_PLAN_KEY`] (D2 §3.7).
     ///
-    /// # Why the bytes are here and the DIGEST is in the snapshot
-    ///
-    /// A snapshot is re-encoded and compared byte for byte on every later pass,
-    /// so putting a 64 KiB PEM bundle inside it would put 64 KiB through
-    /// `det_json` on every reconcile of every destination-backed `Backup`. The
-    /// snapshot therefore carries `caSha256` and these bytes travel beside it,
-    /// in the same immutable object, under their own key — and the digest is
-    /// what BINDS them, so a CA swapped into a run that already exists makes
-    /// the plan disagree with its own snapshot
-    /// ([`verify_frozen_config_map`]) instead of being trusted silently.
-    ///
-    /// `None` for every legacy run and for every destination with no
-    /// `spec.transport.caBundle`; the plan then carries its three keys exactly
-    /// as it did before destinations existed.
+    /// The bytes sit beside the snapshot and the snapshot carries `caSha256`,
+    /// because a 64 KiB bundle inside it would go through `det_json` on every
+    /// reconcile; the digest binds them, so a CA swapped into an existing run
+    /// makes the plan disagree with its own snapshot
+    /// ([`verify_frozen_config_map`]). `None` for every legacy run and every
+    /// destination with no `spec.transport.caBundle`.
     pub ca_pem: Option<String>,
 }
 
@@ -1350,11 +1152,9 @@ impl FrozenInputs {
     /// # Errors
     ///
     /// See [`canonical_inputs`], plus
-    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] when the bytes handed here
-    /// are not the bytes the snapshot's `caSha256` names, or when one of the
-    /// two is present without the other. **A CA the plan cannot prove is a CA
-    /// the run does not get**: the alternative is a Job mounting bytes nothing
-    /// in the frozen document commits to.
+    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] when the bytes are not the
+    /// ones the snapshot's `caSha256` names, or one is present without the
+    /// other: a CA the plan cannot prove is a CA the run does not get.
     pub fn freeze_with_ca(
         inputs: BackupExecutionInputs,
         ca_pem: Option<String>,
@@ -1408,8 +1208,8 @@ impl FrozenInputs {
                 auth: inputs.source.auth.clone(),
                 topics: inputs.topics.clone(),
                 topic_owners: None,
-                // PROD-04.1: from the frozen snapshot, so a re-created Job
-                // records the groups the run was admitted with.
+                // From the frozen snapshot, so a re-created Job records the
+                // groups the run was admitted with.
                 consumer_groups: inputs.consumer_groups.clone(),
             },
             storage: inputs.archive.storage.clone(),
@@ -1456,10 +1256,8 @@ impl FrozenInputs {
         ]
         .into_iter()
         .collect();
-        // THE FOURTH KEY, AND ONLY FOR A DESTINATION THAT DECLARES A CA.
-        // `freeze_with_ca` has already checked that these bytes are the ones
-        // the snapshot's `caSha256` names, so the plan and the document that
-        // describes it cannot disagree about which root a run trusts.
+        // The fourth key, only for a destination that declares a CA;
+        // `freeze_with_ca` has already bound these bytes to `caSha256`.
         if let Some(ca) = self.ca_pem.as_ref() {
             documents.insert(ARCHIVE_CA_PLAN_KEY.to_string(), ca.clone());
         }
@@ -1495,7 +1293,7 @@ pub fn backup_owner_reference(backup_name: &str, backup_uid: &str) -> OwnerRefer
 /// Whether `metadata` is owned by exactly this `Backup` incarnation and by
 /// nothing else.
 ///
-/// A SECOND OWNER IS REFUSED EVEN BESIDE A COMPLETE FIRST ONE: it can keep the
+/// A second owner is refused even beside a complete first one: it can keep the
 /// object alive after this `Backup` is deleted, so a later `Backup` of the same
 /// name could find inputs this one froze.
 #[must_use]
@@ -1633,14 +1431,10 @@ pub fn verify_frozen_config_map(
     let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
     keys.sort_unstable();
     let mut expected_keys = vec![PLAN_ALLOWED_CLUSTERS_KEY, PLAN_SPEC_KEY, INPUTS_KEY];
-    // THE FOURTH KEY IS ADMITTED HERE AND PROVED BELOW. A destination that
-    // declares a CA bundle freezes its bytes beside the snapshot (D2 §3.7), so
-    // the key set is three or four. Admitting it is not trusting it: the
-    // snapshot is parsed a few lines down, `freeze_with_ca` refuses bytes whose
-    // digest is not the one the snapshot names, and `documents()` is compared
-    // against `data` whole — so a plan carrying an `archive-ca.pem` its
-    // snapshot does not commit to is still a conflict, with a message naming
-    // the digest rather than the key set.
+    // The fourth key is admitted here and proved below: a destination with a CA
+    // bundle freezes its bytes beside the snapshot (D2 §3.7). `freeze_with_ca`
+    // refuses bytes whose digest the snapshot does not name, and `documents()`
+    // is compared against `data` whole.
     if data.contains_key(ARCHIVE_CA_PLAN_KEY) {
         expected_keys.push(ARCHIVE_CA_PLAN_KEY);
     }
@@ -1656,10 +1450,9 @@ pub fn verify_frozen_config_map(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         });
-    // BOTH GRAMMARS ARE READ, AND ONLY ONE IS WRITTEN (D-SEAMS S4). A `v1`
-    // plan is a run a PLAT-06.1 controller admitted and a runner may already
-    // have mounted; refusing it on the version string alone would make the
-    // upgrade terminate every `Backup` in flight.
+    // Both grammars are read, one is written (seam S4): a `v1` plan may already
+    // be mounted by a runner, and refusing it on the version alone would
+    // terminate every `Backup` in flight at upgrade.
     if !version
         .as_deref()
         .is_some_and(|v| INPUTS_VERSIONS_READ.contains(&v))
@@ -1673,9 +1466,8 @@ pub fn verify_frozen_config_map(
         Ok(parsed) => parsed,
         Err(e) => return refuse(format!("{INPUTS_KEY} is not a typed snapshot: {e}")),
     };
-    // REFROZEN WITH THE BYTES THE OBJECT ACTUALLY CARRIES, so the digest bind
-    // in `freeze_with_ca` is evaluated against what a kubelet would mount and
-    // not against what the controller wishes were there.
+    // Refrozen with the bytes the object carries, so the digest bind is
+    // evaluated against what a kubelet would mount.
     let frozen = FrozenInputs::freeze_with_ca(parsed, data.get(ARCHIVE_CA_PLAN_KEY).cloned())?;
     if frozen.canonical != *stored {
         return refuse(format!("{INPUTS_KEY} is not in its canonical encoding"));
@@ -1734,10 +1526,8 @@ pub fn verify_frozen_config_map(
             expected.execution.id
         ));
     }
-    // THE `v2` BLOCKS, EACH NAMED SEPARATELY. The whole-snapshot comparison
-    // below would catch all of these, with a message that says only "the
-    // inputs differ" — and "which of the nine blocks" is the first thing an
-    // operator reading a terminal `PlanConfigMapConflict` needs.
+    // The `v2` blocks, each named: the whole-snapshot comparison below would
+    // catch them too, but only as "the inputs differ".
     if frozen.inputs.trigger != expected.trigger {
         return refuse(format!(
             "its snapshot froze trigger {:?} and this Backup declares {:?}; a run's kind and \
@@ -1788,10 +1578,6 @@ pub fn verify_frozen_config_map(
     }
     Ok(frozen)
 }
-
-// ---------------------------------------------------------------------------
-// The Job, and what is observed about it
-// ---------------------------------------------------------------------------
 
 /// Whether a Job occupying the `Backup`'s name is controlled by exactly this
 /// `Backup` incarnation. Its inputs may still be legacy; its identity may never

@@ -1,25 +1,20 @@
-//! Task 10 — guards **G-HDR** and **G-WIN** (second half).
+//! Guards **G-HDR** and **G-WIN** (second half).
 //!
-//! ## G-HDR: the header is little-endian, and the old decode was silent
+//! ## G-HDR: the header is little-endian
 //!
-//! `phase7_verify::compare` decoded `x-original-offset` as DECIMAL TEXT
-//! (`std::str::from_utf8(v).ok().and_then(|s| s.parse::<i64>().ok())`) while
-//! the engine writes an 8-byte little-endian i64
+//! The engine writes `x-original-offset` as an 8-byte little-endian i64
 //! (`U:crates/kafka-backup-core/src/backup/engine.rs:1846`,
 //! `record.offset.to_le_bytes()`; the restore-side injection matches at
-//! `U:…/restore/helpers.rs:130`). So `orig` was `None` against EVERY real
-//! archive, and reconciliation fell back to the target's OWN offsets — which
-//! is correct only for a scratch topic restored from offset 0 with no window,
-//! and is precisely why today's drills passed.
+//! `U:…/restore/helpers.rs:130`). Decoded as decimal text, `orig` is `None`
+//! against EVERY real archive and reconciliation falls back to the target's
+//! OWN offsets, which is correct only for a scratch topic restored from
+//! offset 0 with no window.
 //!
-//! The defect was fixture-invisible: every fixture in this tree fabricated the
-//! header as ASCII **and** restored from offset 0, so the fallback happened to
-//! equal the right answer. `phase7_reconciles_a_windowed_restore_by_original_offset`
-//! below is the case no existing fixture could express — an archive whose
-//! offsets start at the window floor (1000..1050) restored into a topic whose
-//! own offsets start at 0. Under the decimal decode nothing matches and the
-//! run reports 0/50, a **false red**; under the little-endian decode all 50
-//! match.
+//! `phase7_reconciles_a_windowed_restore_by_original_offset` is the case that
+//! tells them apart: an archive whose offsets start at the window floor
+//! (1000..1050) restored into a topic whose own offsets start at 0. Under a
+//! decimal decode nothing matches (0/50); under the little-endian decode all
+//! 50 match.
 //!
 //! ## G-WIN, second half: the restored count is BOUNDED by the manifest
 //!
@@ -34,7 +29,7 @@
 //!
 //! Every epoch millisecond asserted in this file was computed with
 //! `python3 -c 'import datetime as d; ...'` before it was written, and is
-//! spelled beside its date (plan errata E6/E7).
+//! spelled beside its date.
 mod fixtures;
 mod support;
 
@@ -230,7 +225,7 @@ fn scratch_target_configs() -> BTreeMap<String, String> {
 /// **Guard G-HDR.** An archive whose offsets start at the window floor
 /// (1000..1050) restored into a topic whose own offsets start at 0.
 ///
-/// Two separate assertions, per the task's acceptance:
+/// Two separate assertions:
 ///
 /// 1. the run reconciles **50/50** — under the decimal-text decode this fixture
 ///    reports **0/50**, because every `orig` is `None`, the fallback uses the
@@ -498,7 +493,7 @@ const BOUND_FAILURE: &str = "restored 5800 records but the manifest bounds the w
 
 /// **Guard G-WIN, second half.** A manifest whose segments bound `[5900, 6000]`
 /// over `[floor, pit]` for the whole drill, and `[5901, 6000]` for its one
-/// partition (FX-23: the straddling segment's FIRST record is inside the
+/// partition (the straddling segment's FIRST record is inside the
 /// window, so it is restored):
 ///
 /// - a target holding **6000** passes — the UPPER edge, and the mutant
@@ -507,7 +502,7 @@ const BOUND_FAILURE: &str = "restored 5800 records but the manifest bounds the w
 /// - a target holding **5901** passes — the partition's LOWER edge;
 /// - a target holding **5950** passes — strictly inside;
 /// - a target holding **5900** is inside the SUM's bound and outside the
-///   partition's: `fail-integrity`, naming the partition (FX-23);
+///   partition's: `fail-integrity`, naming the partition;
 /// - a target holding **5800** is `fail-integrity`, exit **2**, with the exact
 ///   failure text, and the scorecard is still written and signed (GC11).
 #[test]
@@ -524,7 +519,7 @@ fn restored_count_is_inside_the_manifest_bound() {
         assert_eq!(out.integrity.records_sampled_matching, 50);
     }
 
-    // FX-23: one short of the partition's lower edge. The sum's bound says
+    // One short of the partition's lower edge. The sum's bound says
     // nothing (5900 is inside [5900, 6000]); the partition's names the gap.
     let out = run_with_restored_count(5900);
     assert_eq!(out.integrity.result, IntegrityResult::Fail);
@@ -648,13 +643,10 @@ fn facts_with_an_unnamed_topic(named: SegmentFacts, unnamed: SegmentFacts) -> Ba
 ///    (`window_binding.rs::a_topic_the_restore_does_not_name_does_not_lower_the_floor`,
 ///    which is the floor-side twin of this test).
 ///
-/// Kills the mutant "delete the `mapping.contains_key(&t.name)` filter in
-/// `check_restored_count`" — measured by Task 10's reviewer to leave the whole
-/// 924-test suite green. It is not an equivalent mutant: with the filter gone
-/// the bound over this fixture becomes `[9050, 9050]`, and the healthy,
-/// exact 50-of-50 restore below is signed `fail-integrity` with
-/// `restored 50 records but the manifest bounds the window [.., ..] at
-/// [9050, 9050]`. Half 2 is what fails, on the COUNT.
+/// Kills deleting the `mapping.contains_key(&t.name)` filter in
+/// `check_restored_count`: the bound over this fixture becomes
+/// `[9050, 9050]`, and the healthy, exact 50-of-50 restore below is signed
+/// `fail-integrity`. Half 2 is what fails, on the COUNT.
 #[test]
 fn the_bound_counts_only_the_topics_the_restore_names() {
     let store = Store::in_memory("logweir");
@@ -893,8 +885,7 @@ fn the_count_expectation_never_reads_the_rendered_document() {
 /// lines", which also flags the records' own key and value literals
 /// (`crates/logweir-kafka/tests/reader.rs`) and would fail on correct code.
 /// The `to_string().into_bytes()` clause alone is not enough either: it misses
-/// the `b"5"` at `verify_phase.rs` and the `b"100"` at `reader.rs`, which are
-/// two of the six sites this task rewrote.
+/// a `b"5"` or a `b"100"` literal.
 ///
 /// Comment lines are skipped, and only comment lines: three of the
 /// occurrences in these files are prose ABOUT the header, and a prose sentence

@@ -1,5 +1,4 @@
 // design.spec.js -- the design system's own guarantees, under node --test.
-// Task 36.
 //
 // Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`, which is what
 // `scripts/check-ui-behaviour.sh` runs on every `just lint`.
@@ -47,8 +46,7 @@ function fixture(name) {
 const css = readFileSync(UI + "style.css", "utf8");
 
 /** The semantic colour roles the token layer must name, in both schemes --
- *  Clarity's own alias names (PLAT-18.2: the tokens are named after Clarity's
- *  token set, `vmware-clarity/core` v6.17.0). */
+ *  Clarity's own alias names (`vmware-clarity/core` v6.17.0's token set). */
 const SEMANTIC = [
   "--cds-alias-object-app-background",
   "--cds-alias-object-container-background",
@@ -106,8 +104,6 @@ function badgesIn(html) {
   }
   return out;
 }
-
-// -------------------------------------------------------------------- rows
 
 test("the_stylesheet_defines_the_token_layer_for_light_and_dark", () => {
   const light = blockAfter(css, ":root");
@@ -284,11 +280,11 @@ test("the_tables_collapse_to_cards_below_the_breakpoint", () => {
   assert.ok(out.includes('<div class="table-wrap"><table class="grid"><thead><tr><th scope="col">'));
 });
 
-// Measured at 390 px before these two rules existed (the review of Task 36):
-// a stacked cell holding an unbreakable id widened the page to 417 px, and a
-// two-column fact list rendered a topic list one character per line. The
-// narrow block must keep both: the value column of a stacked cell allowed to
-// shrink to nothing (`minmax(0, 1fr)`), and a fact list in one column.
+// At 390 px, a stacked cell holding an unbreakable id would widen the page
+// to 417 px, and a two-column fact list would render a topic list one
+// character per line. The narrow block keeps both: the value column of a
+// stacked cell may shrink to nothing (`minmax(0, 1fr)`), and a fact list is
+// one column.
 test("the_narrow_block_keeps_long_values_inside_their_cards", () => {
   const narrow = blockAfter(css, "@media (max-width: 767.98px)");
   assert.ok(narrow !== null, "a max-width: 767.98px block exists -- the stacked-card breakpoint (Clarity's sm width)");

@@ -1,9 +1,6 @@
-//! The eleven-phase orchestrator (-1..=9). Phase -1 is the `--from-cluster`
-//! source-side capture — Global Constraint 18 (reversed 2026-09-03) and
-//! docs/architecture.md#adr-0007-source-capture-scope put it in v0.1 scope, and global
-//! ruling GR4 Part B defers its execution path to Task 24, so it is NOT wired
-//! here. The slot domain is `-1..=9`; the ten modules below are phases 0
-//! through 9.
+//! The drill orchestrator. Phases 0 to 9 are the modules below; phase -1, the
+//! `--from-cluster` source capture, is `logweir backup run` and is not wired
+//! here. The slot domain is `-1..=9`.
 /// Execution contract **v2**'s two pre-data-plane bindings (D3 §4.3, §5.5).
 /// Not a phase: everything in it runs before phase 0, before `context`, and
 /// therefore before any broker client exists.
@@ -51,37 +48,22 @@ pub enum DrillError {
     Kafka(#[from] logweir_kafka::reader::KafkaError),
     #[error("engine: {0}")]
     Engine(#[from] logweir_core::engine::EngineError),
-    /// A drill RESULT, not an operational failure (Task 18 fix round 1,
-    /// review finding F1): the restore subprocess ran, exited 0, the target
-    /// cluster was read successfully for every selected destination topic,
-    /// and every partition was still at end offset <= 0. That is a
-    /// positively established fact ABOUT the archive — the backup does not
-    /// actually restore — so it must NOT be routed like `Operational` (exit
-    /// 1, no artifact). It mirrors phase 5's `Verdict::Block`: the
-    /// orchestrator (Task 21a) must catch this variant at the phase-6 call
-    /// site, BEFORE the generic `record(...)?` short-circuit, build and sign
-    /// a scorecard from it, and return `DrillError::NotPass(Box::new(signed), keys)`
-    /// so it reaches ExitCode::DrillNotPass (2). See `task-21a-addendum.md`
-    /// ruling A8 for the required orchestrator wiring — implemented in
-    /// `execute_with`'s phase-6 branch. If this variant ever reaches
-    /// `impl From<DrillError> for ExitCode` unhandled (or handled by a
-    /// catch-all that maps it to `Operational`), that is the exact defect
-    /// this comment exists to prevent.
+    /// A drill RESULT, not an operational failure: the restore exited 0, the
+    /// target was read for every selected topic, and every partition was still
+    /// at end offset <= 0, so the backup does not actually restore. Like phase
+    /// 5's `Verdict::Block`, `execute_with`'s phase-6 branch catches it before
+    /// `record(...)?` short-circuits, signs a scorecard and returns `NotPass`
+    /// (exit 2). Reaching [`DrillError::exit_code`] unhandled is a defect.
     #[error("drill-not-pass: {0}")]
     RestoreNoOp(String),
     /// A drill RESULT that is not a pass. The scorecard is carried out so it
     /// is still signed and uploaded — exit 1 here would produce no artifact,
     /// and this signed document is the NIS2 IR 4.2.3 evidence.
     ///
-    /// **THE SECOND FIELD IS INTERFACE I8's KEYS FOR THAT SIGNED DOCUMENT**
-    /// (FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5 and PLAT-14.3's "failed
-    /// verification"). Every orchestrator path that builds this variant has
-    /// just put the document, so it hands out the keys `phase8_score::Signed`
-    /// put at, and `exiting` prints them at exit 2 exactly as it does at exit
-    /// 0. `None` is the shape of a caller that holds no put receipt — a test
-    /// double, or an embedder constructing the error by hand — and prints no
-    /// key line, which is what every runner before this change printed at
-    /// exit 2. Never reconstructed from the run id (see [`EvidenceKeys`]).
+    /// The second field is the keys the signed document was put at
+    /// (`phase8_score::Signed`), which `exiting` prints at exit 2 as at exit 0.
+    /// `None` (a test double, or an error built by hand) prints no key line.
+    /// Never reconstructed from the run id (see [`EvidenceKeys`]).
     #[error("drill did not pass")]
     NotPass(Box<Scorecard>, Option<EvidenceKeys>),
     /// The drill RAN, and its result could not be signed or its lock proof
@@ -103,7 +85,7 @@ pub enum DrillError {
     /// or network side effect at all.
     #[error("signing or lock proof failed: {0}")]
     SigningPrerequisite(String),
-    /// **PROD-15.1 review M4: the creation step stopped, by name.** A mapped
+    /// The creation step stopped, by name. A mapped
     /// target name phase 0 proved absent existed when the run came to create
     /// it (a lost race), or creation failed after this execution had created
     /// a topic. Exit 1 (phases 0–5 ran), like [`Self::Operational`], but
@@ -116,39 +98,28 @@ pub enum DrillError {
 }
 
 impl DrillError {
-    /// Global Constraint 11 / spec §6 C5, in ONE place — the match body that
-    /// used to live in `impl From<DrillError> for ExitCode`, moved here so a
-    /// caller can know the code while still BORROWING the scorecard a
-    /// `NotPass` carries. The `From` impl below delegates, so the by-value and
-    /// by-reference forms can never disagree. A blanket `map_err` at any call
-    /// site would move the exit-4 contract out of here, so nothing else in the
-    /// crate may map a `DrillError` to an `ExitCode`.
+    /// The exit-code contract (Global Constraint 11), in one place. It borrows
+    /// so a caller can keep the scorecard a `NotPass` carries; the `From` impl
+    /// delegates here, and nothing else in the crate maps a `DrillError` to an
+    /// `ExitCode`.
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            // A guard refused the plan before anything ran.
             DrillError::Guard(_) => ExitCode::GuardRefused, // 3
-            // A drill RESULT that is not a pass. A scorecard IS written and
-            // signed — `execute_with` does that before ever constructing this
+            // `execute_with` signs the scorecard before it constructs this
             // variant, which is what makes exit 2's promise true.
             DrillError::NotPass(..) => ExitCode::DrillNotPass, // 2
-            // The drill ran and its result is unattested, or the signing key
-            // failed its startup readiness check before anything ran.
             DrillError::SigningOrLock(_) | DrillError::SigningPrerequisite(_) => {
                 ExitCode::SigningOrLock // 4
             }
-            // A drill RESULT that is not a pass. It must have been intercepted
-            // by the orchestrator, scored, signed and uploaded before any exit
-            // code was derived — reaching here means the artifact was never
-            // built, so exit 2 ("a scorecard IS written and signed") would be a
-            // lie and exit 1 would discard a positively established fact about
-            // the archive. Fail loudly instead of choosing between two wrong
-            // answers (task-21a-addendum.md ruling A8).
+            // Must be intercepted, scored and signed by the orchestrator first:
+            // exit 2 would claim a scorecard that was never built, and exit 1
+            // would discard an established fact about the archive.
             DrillError::RestoreNoOp(_) => unreachable!(
                 "RestoreNoOp must be intercepted in the orchestrator before reaching \
                  ExitCode conversion — see task-21a-addendum.md ruling A8"
             ),
             // A Kafka or engine failure says nothing about the archive; nor
-            // does a lost creation race (PROD-15.1), which is named apart.
+            // does a lost creation race.
             DrillError::Operational(_)
             | DrillError::Kafka(_)
             | DrillError::Engine(_)
@@ -169,20 +140,10 @@ impl From<DrillError> for ExitCode {
 /// an error leaves a truthful partial record. `last_phase_completed` is updated
 /// in exactly one place, which is why it can never drift from `phases`.
 ///
-/// This is also the ONE caller of `PhaseObserver::phase_started` /
-/// `phase_finished`. Before Task 13 those two methods were live code with no
-/// caller anywhere in the product: `PhaseLogger` implemented them, a test
-/// invoked them directly, and no production path ever did — so the per-phase
-/// progress an operator was documented to see did not exist. Wiring them here
-/// rather than at fifteen call sites is what keeps `record`'s signature and
-/// every caller unchanged: the run id the lines carry is `sc.run_id`, which
-/// `record` already has in hand, and which is the same id `run()` minted and
-/// put on the `drill` span.
-///
-/// The pair is what an operator sees on a phase that has NOTHING to report —
-/// phase 9 on a clean teardown, most obviously, where the metric reads `0` and
-/// the summary line says nothing. Without these lines a clean phase 9 is
-/// indistinguishable in the log from a phase 9 that never ran.
+/// It is also the one caller of `PhaseObserver::phase_started` and
+/// `phase_finished`, with `sc.run_id`, the id `run()` put on the `drill` span.
+/// The pair is what shows that a phase with nothing to report (a clean phase
+/// 9) actually ran.
 pub fn record<T>(
     sc: &mut Scorecard,
     phase: i8,
@@ -192,13 +153,9 @@ pub fn record<T>(
     use logweir_core::engine::PhaseObserver;
     let mut obs = crate::metrics::PhaseLogger::new(&sc.run_id);
     obs.phase_started(phase, name);
-    // **D3 §2.4's progress channel, at the ONE place a phase begins.** The
-    // controller reads pod logs by key name out of a bounded tail and has no
-    // other way to know which phase a running restore is in: a `tracing` line
-    // is JSON on the same merged stream and is filtered by `RUST_LOG`, so it
-    // is not a contract anything can read. Emitted here rather than at the ten
-    // call sites for the same reason `phase_started` is — one producer, and a
-    // phase that cannot be recorded cannot be announced either.
+    // D3 §2.4's progress channel, at the one place a phase begins. The
+    // controller reads pod logs by key name from a bounded tail; a `tracing`
+    // line is JSON filtered by `RUST_LOG`, so it is no contract.
     print_progress_phase(phase, name);
     // Global Constraint 1: the clock is read HERE, in `crates/logweir`.
     let at = chrono::Utc::now();
@@ -227,16 +184,11 @@ pub fn record<T>(
 
 /// Print one `progress-phase=` line, or nothing (D3 §2.4).
 ///
-/// **The ONLY `println!` of a progress line in this crate**, and it goes
-/// through `logweir_core::execution_contract::progress_phase_line`, which is a
-/// FILTER: a name outside `[a-z0-9-]`, an over-long name or a phase outside
-/// `-1..=9` renders nothing at all. So a caller that reached this function
-/// with a projected credential, a broker error or a string containing a
-/// newline cannot put any of it on the channel a controller reads — and D3
-/// §2.4 already says absence is not an error, so silence is a legal answer.
-///
-/// `crates/logweir/tests/progress_channel.rs` pins both halves: that the
-/// helper is the only producer, and that a hostile name yields no line.
+/// The only `println!` of a progress line in this crate. `progress_phase_line`
+/// is a filter: a name outside `[a-z0-9-]`, an over-long name or a phase
+/// outside `-1..=9` renders nothing, so a credential, a broker error or a
+/// newline never reaches the channel a controller reads. Absence is not an
+/// error. `crates/logweir/tests/progress_channel.rs` pins both halves.
 pub fn print_progress_phase(phase: i8, name: &str) {
     if let Some(line) = logweir_core::execution_contract::progress_phase_line(phase, name) {
         println!("{line}");
@@ -252,28 +204,19 @@ pub struct RunArgs {
     /// location, addressing or transport. `None` is a legacy or standalone
     /// invocation, unchanged.
     ///
-    /// It is separate from `execution_contract_version` because the two answer
-    /// different questions: that one is "which plan grammar is this", this one
-    /// is "where do the stores come from". A single version would have coupled
-    /// a destination rollout to a plan-grammar rollout.
+    ///
+    /// Separate from `execution_contract_version` so a destination rollout is
+    /// not coupled to a plan-grammar rollout.
     pub store_contract_version: Option<String>,
     pub spec: PathBuf,
-    /// `--approval`. The per-run `Approval` document the human signed over
+    /// `--approval`: the per-run `Approval` document the human signed over
     /// `sha256(plan bytes)`.
     ///
-    /// # Optional, and ABSENT IS LEGAL ONLY FOR A REHEARSAL
-    ///
-    /// PLAT-14.3b: a standing-authorized rehearsal has no per-run approval and
-    /// no unattended controller can mint one (Global Constraint 27 links no
-    /// signer into `weirkeeper`). Under
-    /// [`logweir_core::execution_contract::AuthorizationKind::Standing`] the
-    /// standing document REPLACES it — it is not verified beside it — and the
-    /// bundle carries no `approval.json` slot at all.
-    ///
-    /// Absent under any other shape is a refusal by name, never a skipped
-    /// check: an ordinary `Restore` that lost its approval must fail closed,
-    /// and a standalone invocation has no contract that could make a standing
-    /// document trustworthy.
+    /// Absent is legal only under
+    /// [`logweir_core::execution_contract::AuthorizationKind::Standing`], whose
+    /// signed standing document replaces it (no unattended controller can mint
+    /// a per-run approval). Absent under any other shape is a refusal by name,
+    /// never a skipped check.
     pub approval: Option<PathBuf>,
     pub approver_key: PathBuf,
     pub allowed_clusters: PathBuf,
@@ -286,28 +229,18 @@ pub struct RunArgs {
     /// `offsets.json` in this run's workdir (`run_workdir`), beside the
     /// checkpoint.
     pub offset_report_out: Option<PathBuf>,
-    /// `--approver-key-ids`, repeated. The approver key ids this run accepts.
-    ///
-    /// **EMPTY MEANS NOT PINNED**, which is today's behaviour exactly: the
-    /// flag is additive and no existing adopter breaks. A non-empty set is
-    /// checked by `phase1_approval::admit_pinned_approver_key_id` from
-    /// `drill::execute`, ahead of `context` and therefore before any Kafka
-    /// client exists — which is what makes "BEFORE phase 0 dials anything"
-    /// true at the socket layer and not merely at the phase layer. An approver
-    /// key outside the set is exit 3.
-    ///
-    /// The operator fills this from the `TrustRoster`
-    /// (`weirkeeper::controllers::restore::approver_key_ids`: every
-    /// `spec.approverKeys[].keyId` that `status.expiredKeyIds` does not name,
-    /// in roster order), which is how the one source of truth reaches a pod
-    /// that holds no cluster credential.
+    /// `--approver-key-ids`, repeated: the approver key ids this run accepts.
+    /// Empty means not pinned. A non-empty set is checked by
+    /// `phase1_approval::admit_pinned_approver_key_id` before `context`, so
+    /// before any Kafka client exists; a key outside it is exit 3. The operator
+    /// fills it from the `TrustRoster`
+    /// (`weirkeeper::controllers::restore::approver_key_ids`).
     pub approver_key_ids: Vec<String>,
-    /// `--policy-snapshot`. PLAT-19.2's approval-policy snapshot. This build
-    /// pins its digest and carries it no further; the contract exists so the
-    /// worker who interprets it does not also have to change the bundle.
+    /// `--policy-snapshot`: the approval-policy snapshot. This build pins its
+    /// digest and carries it no further.
     pub policy_snapshot: Option<PathBuf>,
-    /// `--confirmation-key`. The confirmation issuer's public key — the second
-    /// of D0's "both public keys". Digest-pinned here, verified by PLAT-19.2.
+    /// `--confirmation-key`: the confirmation issuer's public key, the second
+    /// of D0's "both public keys". Digest-pinned here.
     pub confirmation_key: Option<PathBuf>,
     /// `--evidence-keys`. The evidence-signing keyring
     /// ([`logweir_core::execution_contract::EvidenceKeyring`]) a plan bound to
@@ -317,11 +250,10 @@ pub struct RunArgs {
     /// standalone, it is the operator's own trust anchor. A point-bound plan
     /// with no keyring is refused (`PointUntrusted`), never run unverified.
     pub evidence_keys: Option<PathBuf>,
-    /// `--kafka-topic-resources` (PROD-15.1): the target's Strimzi
-    /// `KafkaTopic` resources, read for a restore under the original topic
-    /// names only — a place the run looks for a declarative owner of the
-    /// restored names. A Restore Job never carries it (the controller does not
-    /// list `KafkaTopic` resources, PROD-05.1a).
+    /// `--kafka-topic-resources`: the target's Strimzi `KafkaTopic` resources,
+    /// read for a restore under the original topic names only, to find a
+    /// declarative owner of the restored names. A Restore Job never carries it
+    /// (the controller does not list `KafkaTopic` resources).
     pub kafka_topic_resources: Option<PathBuf>,
     /// `--strimzi-cluster`: count only resources labelled for this cluster.
     pub strimzi_cluster: Option<String>,
@@ -349,15 +281,9 @@ pub struct ExecutionContract {
     pub approval_name: String,
     pub approval_uid: String,
     pub plan_sha256: String,
-    /// MANDATORY under [`AuthorizationKind::Approval`] and REFUSED under
-    /// `Standing` — PLAT-14.3b.
-    ///
-    /// A standing rehearsal's bundle has no per-run approval slot to pin, and
-    /// a digest here under `Standing` would be the controller committing to a
-    /// document the runner is not going to verify. Refused rather than
-    /// ignored, for the reason `validate_execution_contract`'s optional-member
-    /// table already gives: unpinned material is never acted on, and pinned
-    /// material that nothing checks is worse than either.
+    /// Mandatory under [`AuthorizationKind::Approval`], refused under
+    /// `Standing`: a digest here would commit to a document the runner never
+    /// verifies.
     pub approval_sha256: Option<String>,
     /// As [`ExecutionContract::approval_sha256`], for its DSSE sidecar.
     pub approval_sidecar_sha256: Option<String>,
@@ -377,18 +303,16 @@ pub struct ExecutionContract {
     /// public keys — §4.3(e)'s anchor for that signature.
     pub authorization_keys_sha256: Option<String>,
     /// v2, and mandatory under `Standing`: whose standing authorization this
-    /// is. **Now a verified binding and not merely a label**: it is compared
-    /// against the SIGNED document's `subjectRef.uid`.
+    /// is, compared against the signed document's `subjectRef.uid`.
     pub rehearsal_schedule_uid: Option<String>,
     /// v2: the digest of the mounted evidence-signing keyring, pinned exactly
     /// when the plan carries `source.point` (D3 §5.5 step 6).
     pub evidence_keys_sha256: Option<String>,
-    /// v2, PLAT-19.2's half: the approval-policy snapshot digest. Absent means
-    /// the synthesized `legacy-governed-v1` policy, which is what D0 says an
-    /// installation with no binding gets.
+    /// v2: the approval-policy snapshot digest. Absent means the synthesized
+    /// `legacy-governed-v1` policy.
     pub policy_snapshot_sha256: Option<String>,
-    /// v2, PLAT-19.2's half: the second of D0's "both public keys" — the
-    /// confirmation issuer's. Absent means the legacy single-key bundle.
+    /// v2: the second of D0's "both public keys", the confirmation issuer's.
+    /// Absent means the legacy single-key bundle.
     pub confirmation_key_sha256: Option<String>,
 }
 
@@ -501,13 +425,10 @@ pub fn execution_contract_from(
     }
 
     let authorization_kind = match authorization_kind_text.as_deref() {
-        // ABSENT MEANS `approval`, which is both the compatible reading and
-        // the fail-closed one: the standing path needs a scope to be admitted
-        // at all, so an environment that forgot to say `standing` takes the
-        // ordinary path and its unexpected scope file is refused below —
-        // rather than a scope check being quietly skipped.
+        // Absent means `approval`: compatible, and fail-closed, because an
+        // environment that forgot to say `standing` takes the ordinary path
+        // and its unexpected scope file is refused below.
         None => wire::AuthorizationKind::Approval,
-        // (the parse arm below)
         Some(text) => wire::AuthorizationKind::parse(text).ok_or_else(|| -> DrillError {
             GuardRefusal(format!(
                 "unsupported Restore execution contract authorization kind {text:?}; expected \
@@ -560,14 +481,10 @@ pub fn execution_contract_from(
         .into());
     }
 
-    // **The eleven mandatory variables are read FIRST, in their original
-    // order**, so an incomplete contract still refuses by naming the first
-    // MANDATORY variable it is missing. Hoisted out of the struct literal by
-    // PLAT-14.3b only because the approval-slot decision below has to run
-    // between them and the value — moving the refusal order would have been a
-    // silent behaviour change to a guard that
-    // `contract_transport_is_all_or_nothing_while_standalone_is_compatible`
-    // pins.
+    // The eleven mandatory variables are read first, in their original order,
+    // so an incomplete contract refuses by naming the first mandatory variable
+    // it is missing
+    // (`contract_transport_is_all_or_nothing_while_standalone_is_compatible`).
     let subject_api_version = required(wire::SUBJECT_API_VERSION_ENV)?;
     let subject_kind = required(wire::SUBJECT_KIND_ENV)?;
     let subject_name = required(wire::SUBJECT_NAME_ENV)?;
@@ -579,10 +496,8 @@ pub fn execution_contract_from(
     let approver_key_sha256 = required(wire::APPROVER_KEY_SHA256_ENV)?;
     let allowed_clusters_sha256 = required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?;
 
-    // **The per-run approval slot, required under `approval` and refused
-    // under `standing`** — PLAT-14.3b. Read through `optional` and then
-    // decided here, rather than through `required`, because whether it is
-    // mandatory is a function of the authorization kind.
+    // The per-run approval slot: required under `approval`, refused under
+    // `standing`, so it is read through `optional` and decided here.
     let approval_sha256 = optional(wire::APPROVAL_SHA256_ENV);
     let approval_sidecar_sha256 = optional(wire::APPROVAL_SIDECAR_SHA256_ENV);
     if authorization_kind == wire::AuthorizationKind::Standing {
@@ -782,21 +697,15 @@ pub fn validate_execution_contract(
             .into());
         }
     }
-    // **Bundle contract v2's optional members, and BOTH directions.**
-    //
-    // A pinned digest with nothing mounted is a bundle that lost a member —
-    // PLAT-01.2's "lost bundle" case, which must fail before any client. A
-    // mounted member with no pinned digest is worse: it is material this run
-    // would act on that the controller never committed to, so it is refused
-    // rather than ignored.
+    // Bundle contract v2's optional members, in both directions: a pinned
+    // digest with nothing mounted is a bundle that lost a member and fails
+    // before any client; a mounted member with no pinned digest is material
+    // the controller never committed to, so it is refused, not ignored.
     /// One optional bundle-v2 member: its label, the digest the contract pins
     /// for it, and the bytes that were mounted.
     type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
     let optional_members: [OptionalMember; 5] = [
-        // The per-run approval slot is one of these — PLAT-14.3b: a pinned
-        // digest with nothing mounted is a bundle that lost its approval, and
-        // a mounted approval the contract never committed to is material this
-        // run would otherwise verify and act on.
+        // The per-run approval slot is one of these.
         (
             "approval",
             contract.approval_sha256.as_ref(),
@@ -857,72 +766,23 @@ pub fn validate_execution_contract(
 
 /// The log filter used when `RUST_LOG` is unset or blank.
 ///
-/// SCOPED ON PURPOSE, and the scope is the documented guarantee. A bare
-/// `"info"` sets the default level for EVERY target, not only Logweir's, and
-/// the third-party crates that emit `tracing` here run on tokio worker
-/// threads. The `drill` span carrying `run_id` is entered with
-/// `info_span!(..).entered()`, and an `EnteredSpan` is THREAD-LOCAL — so an
-/// INFO event from a worker thread would render with neither `fields.run_id`
-/// nor (with `.with_current_span(true)`, which renders only the CURRENT span)
-/// `span.run_id`. README's and `docs/kubernetes.md`'s "every line Logweir
-/// emits at the default level carries the run id" would then be a universal
-/// claim over a stream containing lines that cannot carry it — exactly the
-/// documented-guarantee-versus-code defect this stage exists to close.
-/// `task-12-brief.md` §5 step 2a blesses this narrowing by name.
+/// Scoped on purpose: a bare `"info"` would admit INFO events from third-party
+/// crates on tokio worker threads, where the thread-local `drill` span is not
+/// entered, so those lines would carry no `run_id` and break the documented
+/// "every line at the default level carries the run id".
 ///
-/// The WARN list is not a guess. It is every crate in `Cargo.lock` that can
-/// put an event into THIS stream, and there are TWO ways to do that, not one:
-///
-/// * a direct `tracing` dependency (`h2`, `hyper_util`, `object_store`); and
-/// * a direct `log` dependency (`rdkafka`, `reqwest`, `rustls`,
-///   `rustls_platform_verifier`, `ureq`, `iana_time_zone`). `try_init()` below
-///   installs `tracing_log::LogTracer` — tracing-subscriber 0.3's `try_init`
-///   does it under `#[cfg(feature = "tracing-log")]`, and that feature is on
-///   through `tracing-subscriber`'s default features — so every `log` record
-///   is converted into a `tracing` event carrying the emitting crate's target
-///   and then passes through this same `EnvFilter`. The earlier version of
-///   this list closed over `tracing` dependants only, so `rustls` and `rdkafka`
-///   INFO chatter reached the default stream from tokio worker threads with no
-///   `fields.run_id` and no `span` object at all.
-///
-/// Excluded: this workspace's own crates (they MUST stay at `info`),
-/// `tracing` (the facade — every event carries the EMITTING module's target,
-/// never `tracing`), `tracing-subscriber` (the subscriber, which emits
-/// nothing) and `tracing-log` (the bridge itself, likewise). Target names are
-/// MODULE paths, so hyphens become underscores.
-///
-/// Also excluded, and this is the second half of the derivation: a crate that
-/// is in `Cargo.lock` but **not in the resolved graph**. The lockfile records
-/// optional dependencies no feature activates — `quinn`, `quinn-proto` and
-/// `quinn-udp` arrive through `reqwest`'s HTTP/3 feature and are compiled by
-/// nothing (`cargo tree -p logweir -i quinn -e normal` prints "nothing to
-/// print"), and `jni` likewise. They were pinned here and are now gone: naming
-/// a crate that is not in the binary is decoration, and decoration in a
-/// security-adjacent constant reads as coverage it does not provide.
-///
+/// The WARN list is every crate in the resolved graph that can emit into this
+/// stream: a direct `tracing` dependant, or a direct `log` dependant (bridged
+/// by `tracing_log::LogTracer`, which `try_init` installs through
+/// tracing-subscriber's default `tracing-log` feature). Excluded: this
+/// workspace's own crates (they stay at `info`; `weirkeeper` installs its own
+/// subscriber and is not linked here), the `tracing` facade, subscriber and
+/// bridge (events carry the emitting module's target), and lockfile crates no
+/// feature compiles (naming them would read as coverage). Target names are
+/// module paths, so hyphens become underscores.
 /// `every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn`
-/// re-derives the whole set — both bridges, narrowed to what this build
-/// actually compiled — on every run, so a new emitter arriving with a future
-/// dependency bump fails a test instead of silently widening the stream.
-///
-/// FIVE NAMES ADDED BY TASK 15, and this is the "future dependency bump" the
-/// paragraph above was written for. `crates/weirkeeper` took `kube` and
-/// `k8s-openapi`, and five crates that were already in `Cargo.lock` became
-/// emitters as a result: `hyper_rustls`, `kube_client`, `kube_runtime`, `tower`
-/// and `tower_http`. Their `tracing` edge is OPTIONAL upstream — `tower`'s and
-/// `tower_http`'s behind their tracing/log features, `hyper_rustls`'s behind
-/// `logging` — and nothing in the workspace activated it until `kube-client`
-/// did, which is why they sat in the lockfile for several tasks without
-/// appearing here. That is the gate doing its job: the emitters arrived
-/// without a version bump anywhere, and the test named them on the first run
-/// after the client landed.
-///
-/// `weirkeeper` itself is NOT here, and not because it cannot emit — it
-/// depends on `tracing` directly. It is one of this workspace's own crates,
-/// which the paragraph above excludes because they MUST stay at `info`, and it
-/// installs its own subscriber in `crates/weirkeeper/src/main.rs`; the
-/// `logweir` binary never links it. The exclusion predicate in the test below
-/// names it for that reason.
+/// re-derives the set on every run, so a new emitter fails a test instead of
+/// widening the stream.
 const DEFAULT_LOG_DIRECTIVE: &str = "info,\
      h2=warn,\
      hyper_rustls=warn,\
@@ -941,10 +801,8 @@ const DEFAULT_LOG_DIRECTIVE: &str = "info,\
 
 /// The observer phase 6 hands to the engine, carrying THIS run's id.
 ///
-/// A named function rather than an inline `PhaseLogger::new(run_id)` at the
-/// call site so the join between the run's identity and the engine's captured
-/// output — the line that makes §2.6's stream real in production — is
-/// reachable from a test without a live broker. `PhaseLogger` re-emits every
+/// A function so a test can reach the join between the run's id and the
+/// engine's captured output without a broker. `PhaseLogger` re-emits every
 /// captured child line under this id; the child is never told it (GC3).
 fn phase_observer(run_id: &str) -> crate::metrics::PhaseLogger {
     crate::metrics::PhaseLogger::new(run_id)
@@ -971,13 +829,10 @@ pub enum InvokedAs {
 pub const DRILL_RUN_DEPRECATION: &str =
     "logweir drill run is the tag-0 name for logweir restore run and will be removed in tag 2";
 
-/// The deprecation line, through a writer seam, for the same reason
-/// `crate::exit::print_refusal_to` has one: a `eprintln!` nobody can
-/// observe is a contract nothing pins.
-///
-/// It goes on STDERR and it is the ONLY thing the alias adds. Stdout is
-/// interface I8's channel and a deprecation notice on it would land between a
-/// controller and the three keys it reads.
+/// The deprecation line, through a writer seam so a test can observe it. It
+/// goes on stderr and is the only thing the alias adds: stdout is interface
+/// I8's channel, where a notice would land between a controller and the keys
+/// it reads.
 pub fn print_deprecation_to<W: std::io::Write>(
     w: &mut W,
     invoked_as: InvokedAs,
@@ -993,9 +848,9 @@ pub fn print_deprecation_to<W: std::io::Write>(
 /// kind. A function rather than a `format!` at each call site so the line a
 /// test asserts and the line an operator reads are the same bytes.
 ///
-/// ONE LINE whatever the archive holds (PROD-15.1 review 2, M1's sweep): the
-/// backup id is the plan's and the key and reason are the store's, and none
-/// of them may start a line of the pod log (`crate::exit::one_line`).
+/// One line whatever the archive holds: the backup id is the plan's and the
+/// key and reason are the store's, and none of them may start a line of the
+/// pod log (`crate::exit::one_line`).
 pub fn archive_notice_line(
     backup_id: &str,
     notice: &logweir_core::engine::ArchiveNotice,
@@ -1051,25 +906,12 @@ pub fn run(args: RunArgs) -> ExitCode {
 pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
     let run_id = crate::ids::new_run_id();
-    // T0-10. `EnvFilter::from_default_env()` builds with
-    // `.with_default_directive(LevelFilter::ERROR)` [VERIFIED
-    // tracing-subscriber-0.3.23 `filter/env/mod.rs:289-293`], so with RUST_LOG
-    // unset the effective level is ERROR. The `drill` span carrying `run_id` is
-    // an INFO span, so at ERROR it is never entered and `with_current_span`
-    // below has nothing to render; and `exiting()`'s INFO line — the only place
-    // the exit-code MEANING reaches a log aggregator, see its doc comment —
-    // disappeared entirely. That is this comment's line breaking the guarantee
-    // stated two lines above it.
-    //
-    // So the default is computed here and RUST_LOG still wins whenever it is
-    // set to anything non-blank. `try_from_default_env()` is NOT used: for a
-    // BLANK RUST_LOG (`env: - name: RUST_LOG` with an empty `value:`, a
-    // Kubernetes-manifest reality) `env::var` returns `Ok("")`, which parses to
-    // the empty directive set — Ok, not Err — so an `unwrap_or_else` fallback
-    // never fires and the level silently stays ERROR. Blank is treated as
-    // unset here instead. `EnvFilter::new` is `parse_lossy` [VERIFIED
-    // `filter/env/mod.rs:350-354`]: a malformed RUST_LOG is dropped with a note
-    // on stderr, never unwrapped into a panic.
+    // With RUST_LOG unset, `EnvFilter::from_default_env()` defaults to ERROR,
+    // which disables the INFO `drill` span and `exiting()`'s INFO line. So
+    // the default is computed here, and a blank RUST_LOG (a Kubernetes `env:`
+    // with an empty `value:`, which parses to an empty directive set, not an
+    // error) counts as unset. `EnvFilter::new` is `parse_lossy`: a malformed
+    // RUST_LOG is dropped with a note on stderr, never a panic.
     let filter = match std::env::var("RUST_LOG") {
         Ok(v) if !v.trim().is_empty() => tracing_subscriber::EnvFilter::new(v),
         _ => tracing_subscriber::EnvFilter::new(DEFAULT_LOG_DIRECTIVE),
@@ -1093,16 +935,6 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
 
 /// `run_named` with the run's handles SUPPLIED rather than constructed — the
 /// seam a whole invocation can be driven through over doubles.
-///
-/// `run_named` needs a live broker, a bucket and the engine binary (that is
-/// what `context` builds), so nothing could previously assert what one full
-/// invocation of either CLI name does without them. This is the same
-/// `run`/`run_with` split the crate already uses for `execute`/`execute_with`,
-/// and it is what
-/// `crates/logweir/tests/restore_mode.rs::
-/// cli_drill_run_is_an_alias_for_restore_run` calls: one function, one args
-/// value parsed from either command line, and the deprecation line captured
-/// through `stderr` instead of trusted.
 ///
 /// It does NOT install a tracing subscriber and does not enter the `drill`
 /// span. Those are process-global and belong to the binary's entry point;
@@ -1131,21 +963,12 @@ pub fn run_with(
 }
 
 /// Everything `run` does with `execute`'s answer, split out so it can be
-/// tested. `run` itself builds the real `Ctx` and therefore needs a live
-/// broker and the engine binary, and this is the product's PRIMARY OUTPUT:
-/// the difference between exit 1 ("Logweir could not do its job; there is no
-/// artifact") and exit 2 ("a drill ran and did not pass; the signed scorecard
-/// is in the bucket") is the whole point of the tool, and it must not be the
-/// one decision with no coverage.
+/// tested without a broker: exit 1 (no artifact) versus exit 2 (a signed
+/// scorecard in the bucket) is the product's primary output.
 ///
-/// NOTE the shape: no arm here names an `ExitCode` literal except `Ok`.
-/// `DrillError::exit_code` is the single place the contract lives (its own doc
-/// comment says so), and a second mapping written out here —
-/// `Err(NotPass(..)) => ExitCode::DrillNotPass` — would be exactly the
-/// duplication that comment forbids: two places to keep in step, and only one
-/// of them under the exit-code tests. So this function decides only what to
-/// PRINT and whether a drill result exists to finish; the code comes from the
-/// conversion.
+/// No arm names an `ExitCode` literal except `Ok`: [`DrillError::exit_code`]
+/// is the one mapping, so this function decides only what to print and
+/// whether a drill result exists to finish.
 fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillError>) -> ExitCode {
     let sc: Option<&Scorecard> = match &outcome {
         Ok(o) => Some(&o.scorecard),
@@ -1165,10 +988,7 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillErr
         _ => None,
     };
     if sc.is_none() {
-        // The no-scorecard branch: exits 1, 3 and 4. This replaces the `_ =>`
-        // arm of the `3e448da` inner `match &e` — there is no `_ =>` arm any
-        // more, and no second place where a DrillError becomes an ExitCode
-        // (R-11d). `run_id` is in scope here and stays in scope.
+        // The no-scorecard branch: exits 1, 3 and 4.
         if let Err(e) = &outcome {
             // `run_id` on the EVENT, not only on the entered span: an operator
             // at `RUST_LOG=warn` has the INFO span disabled, and any
@@ -1176,22 +996,17 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillErr
             // field extractor) reads the event object and not its span. The
             // identity has to be on the line that survives both.
             tracing::error!(run_id = %run_id, error = %e, "drill failed");
-            // ON ONE LINE (PROD-15.1 review 2, M1). The text can echo a
-            // string this process did not write (a plan's `source.backup`, a
-            // broker's error), and the pod log has no stream selector: a line
-            // break in it would let that string START a line a controller
-            // reads by key. The structured event above is JSON and already
-            // escapes it.
+            // On one line: the text can echo a string this process did not
+            // write (a plan's `source.backup`, a broker's error), and a line
+            // break would let it start a line a controller reads by key. The
+            // structured event above is JSON and already escapes it.
             eprintln!("{}", crate::exit::one_line(&e.to_string()));
         }
     }
-    // The diagnostics above are emitted BEFORE the code is derived, which is
-    // the order `aae4c3b` had (the conversion ran last there). `exit_code()`
-    // PANICS on a `RestoreNoOp` that leaked past the orchestrator's
-    // interception, so deriving the code first would silently swallow the
-    // "drill failed" line and the stderr message an operator gets ahead of the
-    // panic. Nothing between the two statements emits anything, so this
-    // ordering is observable only on that path (review fix round 1, F3).
+    // The diagnostics above are emitted before the code is derived:
+    // `exit_code()` panics on a `RestoreNoOp` that leaked past the
+    // orchestrator, and deriving it first would swallow the "drill failed"
+    // line an operator gets ahead of the panic.
     let code = match &outcome {
         Ok(_) => ExitCode::Ok,
         Err(e) => e.exit_code(),
@@ -1208,18 +1023,16 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillErr
         Err(DrillError::NotPass(_, keys)) => keys.as_ref(),
         Err(_) => None,
     };
-    // GUARD **G-TS**'s observation, plan erratum **E10(c)**'s producer half.
-    // Available only on `Ok`, because `RestoreOutcome` is what carries it and
-    // every other path returns a `DrillError` instead — so a run that was
-    // refused at phase 0, or that died before phase 0 finished, prints no
-    // preflight line and `Restore.status.topicPreflight` stays absent. That is
-    // the truthful answer for a run that never read the target's config.
+    // Guard G-TS's observation. Only `Ok` carries it, so a run refused at or
+    // dying before phase 0 prints no preflight line and
+    // `Restore.status.topicPreflight` stays absent: the truthful answer for a
+    // run that never read the target's config.
     let preflight = match &outcome {
         Ok(o) => Some(&o.topic_preflight),
         Err(_) => None,
     };
-    // PROD-15.1 review M4: a stopped creation step says which names appeared
-    // and which topics this run created and left, where a controller reads it.
+    // A stopped creation step says which names appeared and which topics this
+    // run created and left, where a controller reads it.
     let race = match &outcome {
         Err(DrillError::CreationStopped(stop)) => Some(stop.as_ref()),
         _ => None,
@@ -1239,15 +1052,13 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillErr
 /// scorecard exists. This does not sign, does not upload, and does not touch
 /// the exit code — GC11 is decided above and passed in.
 ///
-/// T0-7: before this existed, exits 1, 3 and 4 wrote nothing at all, so a
-/// CronJob whose pod died and a CronJob that was never scheduled produced the
-/// same observation — none — and the dashboard's `1`/`3`/`4` value mappings
-/// were unreachable by any code path.
+/// Exits 1, 3 and 4 publish metrics too, so a CronJob whose pod died is
+/// distinguishable from one that was never scheduled.
 fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>) {
     match sc {
         Some(sc) => finish(args, sc),
         None => {
-            // No `--metrics-file`, no file: never a default path (M13).
+            // No `--metrics-file`, no file: never a default path.
             let Some(p) = &args.metrics_file else { return };
             if let Err(e) = crate::metrics::write_minimal_textfile(p, None, run_id, code) {
                 // GC11 discipline: a metrics write is a local operational
@@ -1261,16 +1072,11 @@ fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>)
 
 /// Logs the exit code and what it means, then returns it unchanged.
 ///
-/// This exists for a delivery-layer reason, verified on a live cluster: a
-/// Kubernetes Job's exit code is visible ONLY in
-/// `pod.status.containerStatuses[].state.terminated.exitCode` — it is absent
-/// from Job status and `kubectl get pods` renders every non-zero code as a
-/// generic "Error". So an operator cannot tell exit 1 ("Logweir could not do
-/// its job; there is no artifact") from exit 2 ("a drill ran and did not
-/// pass; go and read the signed scorecard") from the delivery layer at all.
-/// The log line is the one place that distinction survives into a log
-/// aggregator. Documenting it for operators is Tasks 22/23's job; emitting it
-/// is this one's.
+/// A Job's exit code is visible only in
+/// `pod.status.containerStatuses[].state.terminated.exitCode` (`kubectl get
+/// pods` shows every non-zero code as "Error"), so this log line is the one
+/// place exit 1 (no artifact) and exit 2 (read the signed scorecard) stay
+/// distinct in a log aggregator.
 fn exiting(
     run_id: &str,
     code: ExitCode,
@@ -1290,76 +1096,42 @@ fn exiting(
         }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
-    // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout —
-    // a controller tailing the pod log reads the final line, and the pod log
-    // API has no stream selector, so stderr would not be distinguishable at
-    // all (`crate::exit::print_refusal`'s doc comment carries the
-    // measurement). Global Constraint 11: EVERY guard refusal prints it.
-    //
-    // `unwrap_or("")` is the fail-safe direction, not a shrug: `GuardRefused`
-    // is reachable only from `DrillError::Guard`, which always carries a
-    // message, and an empty message classifies as `GuardRefused` — so a future
-    // path that reaches exit 3 without one still satisfies the contract
-    // instead of printing nothing.
-    //
-    // FX-34: `print_refusal` writes `refusal-detail=` (the reason code and
-    // the sentence, cleaned and bounded) and THEN `refusal-reason=`, so the
-    // state line is still the last one.
+    // [I9] After the tracing line, so the reason is the last thing on stdout:
+    // a controller reads the pod log's final line, and the pod log API has no
+    // stream selector. Every guard refusal prints it (Global Constraint 11).
+    // `print_refusal` writes `refusal-detail=` first, so the state line stays
+    // last. `unwrap_or("")` is fail-safe: an empty message classifies as
+    // `GuardRefused`.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal(
             logweir_core::refusal_detail::RefusingRun::Restore,
             refusal_message.unwrap_or(""),
         );
     }
-    // **PROD-15.1 review M4: the stopped creation step, named.** Exit 1 like
-    // any operational failure, but the controller lifts `failure-reason=` (the
-    // RECEIPT-DUP mechanism, `logweir_core::guard::RESTORE_FAILURE_REASONS`)
-    // onto `status.exitReason`, and the one bounded line before it onto
-    // `status.targetTopicsAppeared` — the names that appeared, the topics
-    // this run created and LEFT (nothing is deleted), and the names it asked
-    // for and cannot account for. The reason is the LAST line
-    // (`print_creation_stop_to`).
+    // The stopped creation step, named. Exit 1 like any operational failure,
+    // but the controller lifts `failure-reason=` onto `status.exitReason` and
+    // the bounded line before it onto `status.targetTopicsAppeared`. The
+    // reason is the last line (`print_creation_stop_to`).
     if let (ExitCode::Operational, Some(race)) = (code, race) {
         // A closed stdout is not a reason to change the exit code, which
         // GC11 has already decided.
         let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);
     }
-    // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
-    // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
-    // a run that signed a scorecard, with nothing after them — the same shape
-    // `logweir backup run` uses for interface I7's two keys
-    // (`crate::backup::mod`'s `exiting`), because a controller cannot tell
-    // stdout from stderr through the pod log API and reads a bounded tail by
-    // KEY NAME (plan erratum E4).
+    // [I8], and the order is the contract: `scorecard-key=`, `sidecar-key=`,
+    // `offset-report-key=` are the final stdout lines of a run that signed a
+    // scorecard, after the tracing and summary lines, as `logweir backup run`
+    // does for I7: a controller reads a bounded tail of the pod log by key
+    // name. Printed on exit 0 and on exit 2 (a signed failure nobody can name
+    // is lost evidence); exits 1, 3 and 4 wrote no artifact. The keys are what
+    // the put returned (`EvidenceKeys::of`), never derived here, and the exit
+    // code, not the keys, says whether the run passed. The third line is
+    // printed only when an offset report was put
+    // (`phase8_score::Signed::offset_report_key`).
     //
-    // AFTER the tracing line and after `finish`'s summary line, both of which
-    // are emitted before `exiting` is reached. Printed on exit 0 AND ON EXIT 2
-    // (I8 as amended for FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5): exit 2
-    // is "a drill ran and did not pass; a SIGNED scorecard was written", and a
-    // signed failure nobody can name is evidence lost — the controller could
-    // never record `Restore.status.evidence`, its verification or `outcome`,
-    // and a failed rehearsal would carry no proof of why it failed. The keys
-    // are whatever the orchestrator handed out of the put (`EvidenceKeys::of`),
-    // never derived here. Exits 1, 3 and 4 wrote no artifact, and a line
-    // naming a key nothing was written to would be the worst possible output.
-    // The exit code, not the presence of keys, still says whether the run
-    // passed: a reader that sees keys at exit 2 has a signed FAILURE to verify.
-    //
-    // The third line is printed only when there IS an offset report — see
-    // `phase8_score::Signed::offset_report_key`. Two lines is a truthful
-    // answer; a third naming an object that was never put is not.
-    // **GUARD G-TS, AND IT GOES BEFORE INTERFACE I8's KEYS.** Plan erratum
-    // **E10(c)**: `Restore.status.topicPreflight` was declared with no
-    // producer, and this line is it — one key, one line, scanned by name out
-    // of the controller's bounded tail exactly as the evidence keys are
-    // (erratum E4). It is printed BEFORE the three key lines so I8's "the
-    // FINAL stdout lines, with nothing after them" is unchanged; a reader that
-    // took the last line would still take a key.
-    //
-    // Printed only on exit 0, for the same reason the keys are: a refused or
-    // crashed run has no completed phase 0 to report, and a line naming a
-    // preflight nobody performed would be worse than the absence the operator
-    // already renders.
+    // Guard G-TS's line, the producer of `Restore.status.topicPreflight`: one
+    // key, scanned by name like the evidence keys, and printed before them so
+    // they stay the final lines. Only on exit 0: a refused or crashed run has
+    // no completed phase 0 to report.
     if let (ExitCode::Ok, Some(p)) = (code, topic_preflight) {
         println!(
             "{}{}",
@@ -1367,33 +1139,14 @@ fn exiting(
             p.status_line_value()
         );
     }
-    // **D3 §2.4's `teardown-key=`, and it goes BEFORE interface I8's keys.**
-    //
-    // I8's contract is "`scorecard-key=`, `sidecar-key=`, `offset-report-key=`,
-    // as the FINAL stdout lines of a successful run with NOTHING AFTER THEM",
-    // and landed tests read it that way (`tests/restore_mode.rs` takes the last
-    // three lines). So the new line goes in front, exactly as PLAT-15.1's
-    // `catalog-key=` does on the backup path: every reader of these lines
-    // scans a bounded tail by PREFIX (erratum E4), so a line in front costs
-    // nothing and a line behind would break a published interface.
-    //
-    // **Conditional on phase 9 having ATTESTED**, which is the same rule
-    // `offset-report-key=` follows: a line naming a key nothing was written to
-    // is the worst possible output. It is NOT restricted to exit 0, and that
-    // is deliberate — a rehearsal that did not pass (exit 2) is precisely the
-    // run whose leftover topics block the next slot (D3 §4.4). Before
-    // FAILED-DRILL-EVIDENCE-UNPUBLISHED an exit-2 run printed no evidence keys
-    // at all; it now prints them after this line, exactly as exit 0 does. The
-    // note this reads is pushed after phase 8 signed, so nothing here can
-    // reach the signed document.
-    //
-    // **AND IT IS GATED ON THE EXIT CODE**, because interface I9 states that
-    // `refusal-reason=` is the process's FINAL stdout line for exit 3 and
-    // `exiting` prints that line just above. Unreachable today — a run refused
-    // by a guard has no phase-9-attested scorecard — and harmless if it were,
-    // since every reader matches by prefix over a bounded tail. But an
-    // invariant that holds only by accident is one a future change breaks
-    // silently, and restoring it structurally costs one condition.
+    // D3 §2.4's `teardown-key=`, before I8's keys for the same reason: readers
+    // scan a bounded tail by prefix, so a line in front costs nothing and a
+    // line behind would break I8 (`tests/restore_mode.rs` takes the last three
+    // lines). Printed only when phase 9 attested (a key nothing was written to
+    // is the worst output), on exit 2 as well as 0: a rehearsal that did not
+    // pass is the run whose leftover topics block the next slot. Never on exit
+    // 3, where I9 makes `refusal-reason=` the final line; unreachable today,
+    // but kept structural. The note it reads was pushed after phase 8 signed.
     if code != ExitCode::GuardRefused {
         if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
             println!(
@@ -1412,11 +1165,9 @@ fn exiting(
     code
 }
 
-/// **The stopped creation step's TWO stdout lines, through a writer seam**
-/// (PROD-15.1 review 2, L1), for the reason `crate::exit::
-/// print_refusal_to` has one: these two lines carry everything a
-/// controller learns about the stop, and a `println!` nobody can observe is a
-/// contract nothing pins.
+/// The stopped creation step's two stdout lines, through a writer seam like
+/// `crate::exit::print_refusal_to`'s: they carry everything a controller
+/// learns about the stop.
 ///
 /// EXACTLY these bytes, in this order, each ended by one newline:
 ///
@@ -1428,9 +1179,6 @@ fn exiting(
 /// `failure-reason=` is LAST: the controller lifts the pair only when it is
 /// the log's last non-empty line with the lists on the line before it, so
 /// nothing may be printed between them or after them on exit 1.
-///
-/// # Errors
-/// The writer's.
 pub fn print_creation_stop_to<W: std::io::Write>(
     w: &mut W,
     stop: &phase0_admit::CreationStop,
@@ -1457,26 +1205,14 @@ fn finish(args: &RunArgs, sc: &Scorecard) {
 
 /// The value `last_phase_completed` carries in the SIGNED document.
 ///
-/// `phase8_score::run` is handed a frozen clone, so phase 8's own record — and
-/// phase 9's, which happens after the put — are pushed onto the in-memory
-/// document AFTER the bytes were signed. Both are legitimate facts about the
-/// run and neither can be in the artifact, so a successful drill genuinely
-/// ends at `last_phase_completed: 9` in memory and `7` on disk.
-///
-/// THE SIGNED ARTIFACT IS THE AUTHORITY. An auditor reads the console line
-/// beside the artifact, and it printed `last phase completed 9` for a document
-/// that says `7` — a contradiction whose only documented resolution
-/// (`docs/formats/drill-scorecard.md`) would have led them to conclude
-/// teardown never ran, when in fact it did and is attested in a separate
-/// signed document. So the line quotes the artifact.
-///
-/// The definition is exactly `record`'s, restricted to the phases that can be
-/// in the signed bytes: the highest phase below 8 that completed. It is right
-/// on all three signing paths — the phase-5 `Verdict::Block` jump (5), the
-/// phase-6 `RestoreNoOp` interception (5, because phase 6 errored and `record`
-/// does not advance on an error) and the normal run (7) — and it is pinned
-/// against a real signed document, not against itself, by
-/// `the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy`.
+/// Phase 8 signs a frozen clone, so phase 8's and phase 9's records reach only
+/// the in-memory copy: a successful drill ends at 9 in memory and 7 on disk.
+/// The signed artifact is the authority, so the console line quotes it (a `9`
+/// beside a document saying `7` would read as "teardown never ran"). This is
+/// `record`'s definition restricted to phases below 8, right on all three
+/// signing paths (phase-5 block: 5, phase-6 `RestoreNoOp`: 5, normal: 7);
+/// `the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy` pins
+/// it against a real signed document.
 pub fn signed_last_phase_completed(sc: &Scorecard) -> i8 {
     sc.phases
         .iter()
@@ -1486,30 +1222,17 @@ pub fn signed_last_phase_completed(sc: &Scorecard) -> i8 {
         .unwrap_or(-1)
 }
 
-/// One line on stdout so `drill run` is not silent.
+/// One line on stdout so `drill run` is not silent; the table is `drill
+/// show`'s.
 ///
-/// This helper carried a "Task 21b replaces this call with
-/// `crate::show::render_table(sc)` … this helper is then deleted" marker. Task
-/// 21b landed the table, it is tested against the compiled binary, and the
-/// replacement was NOT made — `drill run` deliberately prints one line and
-/// leaves the fourteen-row table to `drill show`, which is a separate command
-/// an operator runs against the artifact. The marker described an edit nobody
-/// intends to make, so it is gone rather than left to age.
+/// Every value is the signed document's, in its spelling (`Outcome::wire_name`,
+/// `signed_last_phase_completed`): a console line that disagrees with the
+/// artifact is worse than none.
 ///
-/// Every value here is the SIGNED document's, in the SIGNED document's
-/// spelling: `outcome_str` is `Outcome::wire_name`, and the phase number is
-/// `signed_last_phase_completed`. A console line an operator cannot reconcile
-/// with the artifact it just wrote is worse than no console line.
-///
-/// T0-11's clause is CONDITIONAL, and that is a requirement rather than a
-/// convenience. An unconditional suffix — "teardown left 0 scratch topics
-/// behind" — would change the console line of EVERY clean run, which is churn
-/// a reviewer cannot distinguish from a regression, and would put a reassuring
-/// sentence in front of an operator on the ninety-nine runs where nothing was
-/// wrong, teaching them to skim past it on the hundredth. The metric is the
-/// surface that must be unconditional (an absent Prometheus series and a clean
-/// run are indistinguishable to PromQL); a console line has a reader who is
-/// already looking, and for them silence means clean.
+/// The teardown clause is conditional on purpose: the metric must be
+/// unconditional (an absent series reads as clean to PromQL), but on the
+/// console silence means clean, and a reassuring suffix on every run teaches
+/// operators to skim past the one that matters.
 pub fn summary_line(sc: &Scorecard) -> String {
     let mut line = format!(
         "run {} — outcome {} — last phase completed {} (as signed; \
@@ -1565,12 +1288,10 @@ fn write_scorecard_artifact(args: &RunArgs, run_id: &str, signed: &phase8_score:
 /// on the live path, a double in `tests/fixtures/mod.rs`.
 pub trait TargetClient: ClusterReader + TopicCreator + TopicDeleter {
     fn as_reader(&self) -> &dyn ClusterReader;
-    /// **Guard G-TS**, Task 8. The SECOND write seam, beside `as_deleter`:
-    /// since `restore.yaml` renders `create_topics: false`, the target topics
-    /// are created here and nowhere else. It is a separate trait rather than a
-    /// method on `ClusterReader` for the same reason `TopicDeleter` is — a
-    /// reader is read-only — and it is on `TargetClient` so `crates/logweir`
-    /// still never takes an rdkafka dependency.
+    /// Guard G-TS. The second write seam, beside `as_deleter`: `restore.yaml`
+    /// renders `create_topics: false`, so target topics are created here and
+    /// nowhere else. A separate trait because a reader is read-only; on
+    /// `TargetClient` so `crates/logweir` never takes an rdkafka dependency.
     fn as_creator(&self) -> &dyn TopicCreator;
     fn as_deleter(&self) -> &dyn TopicDeleter;
 }
@@ -1593,24 +1314,19 @@ impl<T: ClusterReader + TopicCreator + TopicDeleter> TargetClient for T {
 /// what lets `tests/orchestrator.rs` drive the whole sequence against doubles
 /// with no broker and no engine binary.
 ///
-/// Every field here is built WITHOUT a network round trip. That is
-/// load-bearing, not incidental: phase 0 must be able to REFUSE a plan (exit
-/// 3) on a host whose archive bucket is unreachable and whose engine binary
-/// is absent. Reading the archive from here — as an earlier draft of this
-/// task did — turns every such refusal into exit 1, "Logweir could not do its
-/// job", which is precisely the exit-code confusion this task exists to get
-/// right. The archive read therefore lives in `execute_with`, AFTER phase 0
-/// and phase 1; `crates/logweir/tests/guard_cli.rs` pins the consequence.
+/// Every field is built without a network round trip, so phase 0 can refuse a
+/// plan (exit 3) on a host whose bucket is unreachable and whose engine binary
+/// is absent. The archive read therefore lives in `execute_with`, after
+/// phases 0 and 1; `crates/logweir/tests/guard_cli.rs` pins the consequence.
 pub struct Ctx {
     pub spec: DrillSpec,
     pub spec_text: String,
     pub allowed: AllowedClusters,
     pub client: Box<dyn TargetClient>,
     pub engine: Box<dyn DataEngine>,
-    /// The engine binary `engine` executes, when it is a real one (`context`
-    /// sets it; a double has none). PROD-00.2 review L3/L4: right after phase 0
-    /// the drill runs it with `--version` and refuses unless it prints the
-    /// `engine.version` the scorecard would sign
+    /// The engine binary `engine` executes, when it is a real one (a double
+    /// has none). Right after phase 0 the drill runs it with `--version` and
+    /// refuses unless it prints the `engine.version` the scorecard would sign
     /// (`crate::engine_identity::verify_engine_reports`).
     pub engine_binary: Option<std::path::PathBuf>,
     /// Reads the OSO ARCHIVE. Phase 7 reads segment bytes back through this
@@ -1624,45 +1340,42 @@ pub struct Ctx {
     /// `Store::from_url` refuses an evidence prefix outside `logweir/` at
     /// construction, so a bad spec fails before phase 0.
     pub store: Store,
-    /// The projected private CA file for the TARGET connection (PLAT-07.1),
-    /// read once in `context` from `LOGWEIR_TARGET_TLS_CA_FILE`. The reader was
-    /// built with it; the plan's `target_auth` is given the same path before
-    /// the engine renders, so both TLS clients trust one file. `None` for a
-    /// connection that names no CA.
+    /// The projected private CA file for the TARGET connection, read once in
+    /// `context` from `LOGWEIR_TARGET_TLS_CA_FILE`. The reader was built with
+    /// it; the plan's `target_auth` is given the same path before the engine
+    /// renders, so both TLS clients trust one file. `None` for a connection
+    /// that names no CA.
     pub target_tls_ca_file: Option<String>,
-    /// **PROD-01.3.** The projected client-certificate pair of an `mtls`
-    /// TARGET connection, read once in `context` from
-    /// `LOGWEIR_TARGET_TLS_{CERT,KEY}_FILE` — paths, never PEM. Handed to the
-    /// reader and to the plan's `target_auth`, so both clients present the
-    /// same certificate. `None` for every other mode.
+    /// The projected client-certificate pair of an `mtls` TARGET connection,
+    /// read once in `context` from `LOGWEIR_TARGET_TLS_{CERT,KEY}_FILE`:
+    /// paths, never PEM. Handed to the reader and to the plan's `target_auth`,
+    /// so both clients present the same certificate. `None` for every other
+    /// mode.
     pub target_client_certificate: Option<logweir_core::connection::ClientCertificateFiles>,
-    /// **PROD-15.1.** What the runner holds about an original-name restore's
-    /// source cluster and declarative owners beyond the plan: the verified
-    /// receipt's measured source cluster id and recorded owners, and the
-    /// Strimzi owners in the `KafkaTopic` resources it was given. Phase 0
-    /// reads it only for an original-name plan.
+    /// What the runner holds about an original-name restore's source cluster
+    /// and declarative owners beyond the plan: the verified receipt's measured
+    /// source cluster id and recorded owners, and the Strimzi owners in the
+    /// `KafkaTopic` resources it was given. Phase 0 reads it only for an
+    /// original-name plan.
     pub original_name: phase0_admit::OriginalNameInputs,
-    /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
-    /// backup receipt the plan's recovery point binds — VERIFIED (signature,
-    /// digest, manifest) by `binding::verify_point_binding` before this
-    /// context existed. [`SourceConfigCoverage::unknown`] for a plan bound to
-    /// no point: there is then no signed record of what was captured, and
-    /// phases 3 and 7 report every topic's configuration parity `notAssessed`
-    /// rather than comparing against a manifest record nobody vouched for.
+    /// Each SOURCE topic's configuration capture coverage, from the backup
+    /// receipt the plan's recovery point binds, verified (signature, digest,
+    /// manifest) by `binding::verify_point_binding` before this context
+    /// existed. [`SourceConfigCoverage::unknown`] for a plan bound to no point:
+    /// there is then no signed record of what was captured, and phases 3 and 7
+    /// report every topic's configuration parity `notAssessed`.
     pub source_config_coverage: SourceConfigCoverage,
-    /// **FX-16.** The backup set the verified point's receipt describes —
-    /// from the SAME `binding::VerifiedPoint` as `source_config_coverage` —
-    /// which `binding::check_restored_set` compares with the set `describe`
-    /// read, before the time basis is decided and before phase 2. `None` for a
-    /// plan bound to no point.
+    /// The backup set the verified point's receipt describes (the same
+    /// `binding::VerifiedPoint` as `source_config_coverage`), which
+    /// `binding::check_restored_set` compares with the set `describe` read,
+    /// before the time basis is decided and before phase 2. `None` for a plan
+    /// bound to no point.
     pub bound_set: Option<binding::BoundSet>,
 }
 
-/// `source_config_coverage` is what the VERIFIED point binding established
-/// (FX-4): the context is BORN with it, so no later assignment can be dropped
-/// between the binding check and the phases that read it (review L1, X4).
-/// `bound_set` is the set that same binding's receipt describes (FX-16), born
-/// with the context for the same reason.
+/// The context is born with `source_config_coverage` and `bound_set`, what the
+/// verified point binding established, so no later assignment can be dropped
+/// between the binding check and the phases that read them.
 fn context(
     spec_text: String,
     allowed_text: String,
@@ -1676,33 +1389,27 @@ fn context(
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
         .map_err(|e| DrillError::Operational(format!("allowed-clusters does not parse: {e}")))?;
 
-    // **Interface I1.** Was a hard-coded plaintext arm with a comment saying
-    // `TargetSpec` carried no auth block to render one from;
-    // Task 6 gave `TargetSpec` that block, so the mode is the spec's and this
-    // is the one construction site
-    // (`logweir_kafka::reader::AuthConfig::from_spec`).
-    //
-    // The environment read happens ONCE, here, and not inside the closure:
-    // the closure is called twice (see the `with_scratch_prefix` fallback
-    // below) and `AuthConfig` is `Clone`, so re-reading would be two reads of
-    // a Secret for one run. An unrenderable value refuses with exit 3 before
-    // any client exists; an ABSENT value under `mode: scramSha512` is exit 1,
-    // named by `naming_the_password_var`.
+    // Interface I1: the one construction site of the target's auth
+    // (`AuthConfig::from_spec`). The environment is read once, here, not in
+    // the closure, which runs twice (the `with_scratch_prefix` fallback below)
+    // and would read a Secret twice. An unrenderable value refuses with exit 3
+    // before any client exists; an absent one under `mode: scramSha512` is
+    // exit 1, named by `naming_the_password_var`.
     let target_tls_ca_file =
         crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR)
             .map_err(DrillError::Operational)?;
-    // PROD-01.3: the `mtls` certificate pair, read once like the CA.
+    // The `mtls` certificate pair, read once like the CA.
     let target_client_certificate =
         crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target)
             .map_err(DrillError::Operational)?;
     let target_auth =
         AuthConfig::from_spec(&spec.target.auth, validated_password(TARGET_PASSWORD_VAR)?)
             .map_err(|e| naming_the_password_var(e, TARGET_PASSWORD_VAR))?
-            // PLAT-07.1: librdkafka's `ssl.ca.location`. Refuses a CA for a
-            // target whose plan is not TLS, before any client exists.
+            // librdkafka's `ssl.ca.location`. Refuses a CA for a target whose
+            // plan is not TLS, before any client exists.
             .with_tls_ca_file(target_tls_ca_file.clone())?
-            // PROD-01.3: `ssl.certificate.location` / `ssl.key.location`.
-            // Refuses a certificate for a mode that presents none.
+            // `ssl.certificate.location` / `ssl.key.location`. Refuses a
+            // certificate for a mode that presents none.
             .with_client_certificate(target_client_certificate.clone())?;
     let connect = || {
         logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
@@ -1727,26 +1434,19 @@ fn context(
             connect()?
         }
     }
-    // PROD-15.1: the source topics' own names are never deleted, whatever
-    // the scratch prefix — teardown, the probe and any later caller alike.
+    // The source topics' own names are never deleted, whatever the scratch
+    // prefix: teardown, the probe and any later caller alike.
     .with_protected_names(spec.source.topics.iter().cloned());
 
-    // === THE THREE HANDLES, UNDER THE STORE CONTRACT OR NOT (D2 §3.5) ===
-    //
-    // A SECOND read-only handle over the same archive: `Store` is not `Clone`
-    // and `OsoCliEngine` takes ownership of the one it reads through, while
-    // phase 7 reads segment bytes through `Ctx::archive`. Both are read-only.
-    //
-    // Under the contract, `*_with` takes the credential provider the controller
-    // NAMED and the CA it projected; the LOCATION still comes from the approved
-    // plan at both arities, and `from_url`/`read_only_from_url` are the legacy
-    // constructors that still honour `AWS_ENDPOINT_URL` and friends — which is
-    // exactly why a destination-backed run does not use them.
-    //
-    // THE EVIDENCE OPTIONS ARE DERIVED FROM THE ARCHIVE'S. `evidence_options`
-    // needs them: `LOGWEIR_EVIDENCE_CREDENTIALS=archive` means "the same grant",
-    // and the only honest way to say that is to hand it the archive's own
-    // options rather than re-deriving a second copy that could differ.
+    // The three handles, under the store contract or not (D2 §3.5). A second
+    // read-only archive handle because `Store` is not `Clone` and
+    // `OsoCliEngine` owns the one it reads through. Under the contract,
+    // `*_with` takes the credential and CA the controller named; the location
+    // always comes from the approved plan, and the legacy
+    // `from_url`/`read_only_from_url` honour `AWS_ENDPOINT_URL`, which is why
+    // a destination-backed run does not use them. The evidence options derive
+    // from the archive's, so `LOGWEIR_EVIDENCE_CREDENTIALS=archive` is the
+    // same grant, not a second copy.
     let (store, archive, engine_archive) = if contract {
         let archive_options = crate::backup::store_contract::archive_options()?;
         let evidence_options = crate::backup::store_contract::evidence_options(&archive_options)?;
@@ -1764,33 +1464,18 @@ fn context(
         )
     };
 
-    // Engine identity. The binary is built into the runner image (Logweir's
-    // build of the vendored source, or OSO's release under the rollback); the
-    // version and digest describe THAT engine and end up in the signed
-    // scorecard, so they are read from what the image declares, or from the
-    // environment where there is no image, rather than guessed here. A
-    // malformed image declaration is refused here, before phase 0: it is a
-    // defect of the image, not of the plan. `execute_with` refuses an empty
-    // version or digest immediately after phase 0 — see `assert_engine_identity`
-    // — rather than here, so a plan the guard would REFUSE still exits 3 on a
-    // host with no engine environment at all.
-    //
-    // `crate::engine_bin::engine_path` and NOT a local default: this line used
-    // to read `$LOGWEIR_ENGINE_BIN` or fall back to the literal
-    // `.engine/kafka-backup`, while `logweir doctor` walked
-    // `$LOGWEIR_ENGINE_BIN` -> `/usr/local/bin/kafka-backup` -> a `$PATH` scan.
-    // `Command::new` performs no `$PATH` search for a path containing `/`, so
-    // the install `README.md` documents (the engine on `$PATH`) gave a green
-    // `doctor` — seven `ok` lines, including `ok engine version` — and then a
-    // drill that read the target cluster and the archive manifest through
-    // phases 0-4 and died at phase 5 the first time it tried to execute the
-    // engine. One resolution now, for both commands.
+    // Engine identity: the version and digest the scorecard signs, read from
+    // what the runner image declares, or from the environment where there is
+    // no image. A malformed image declaration is refused here, before phase 0;
+    // an empty version or digest is refused after phase 0
+    // (`assert_engine_identity`), so a plan the guard refuses still exits 3 on
+    // a host with no engine environment. `engine_bin::engine_path` is the one
+    // resolution `logweir doctor` also uses, so a green `doctor` means the
+    // drill can execute the engine.
     let binary = crate::engine_bin::engine_path();
-    // PROD-00.2: the image's own declaration of its engine wins over the two
-    // variables a Job carries (`crate::engine_identity`); a host with no image
-    // file reads the variables exactly as before. A broken identity file is a
-    // broken image, refused here rather than signed under the environment's
-    // claim.
+    // The image's declaration wins over the Job's two variables; a broken
+    // identity file is a broken image, refused rather than signed under the
+    // environment's claim.
     let crate::engine_identity::EngineIdentity {
         version, digest, ..
     } = crate::engine_identity::resolve().map_err(DrillError::Operational)?;
@@ -1818,10 +1503,7 @@ fn context(
         store,
         target_tls_ca_file,
         target_client_certificate,
-        // PROD-15.1: what the runner holds about the source and the owners.
         original_name,
-        // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
-        // point, because there is then no signed capture record to read.
         source_config_coverage,
         // FX-16: the set that record describes; `None` when nothing is bound.
         bound_set,
@@ -1833,14 +1515,10 @@ fn context(
 /// controller named (`archive_options`: the named credential, the projected
 /// CA, no `AWS_*` relocation), otherwise with the legacy constructor.
 ///
-/// **FX-16 class sweep.** The point binding used to build its own handle with
-/// `Store::read_only_from_url` whatever the contract said, so on a
-/// destination-backed run the receipt, its signature and the manifest the
-/// binding verified (and FX-7's pin, judged by version) were read through a
-/// client that ignored the archive's CA and could be relocated by a stray
-/// `AWS_ENDPOINT_URL`, while the engine and phase 7 read through this one. Two
-/// clients can answer for two archives; one constructor cannot.
-/// `tests::every_archive_handle_is_built_by_one_constructor` pins it.
+/// The point binding reads its receipt, signature and manifest through this
+/// same constructor as the engine and phase 7: two clients could answer for
+/// two archives. `tests::every_archive_handle_is_built_by_one_constructor`
+/// pins it.
 fn archive_read_handle(
     storage: &logweir_core::engine::StorageUrl,
     contract_options: Option<&logweir_engine_oso::storage::StoreOptions>,
@@ -1852,57 +1530,27 @@ fn archive_read_handle(
     .map_err(|e| DrillError::Operational(e.to_string()))
 }
 
-/// The phase sequence, over handles this function does not build. `pub`
-/// because `tests/orchestrator.rs` drives it directly: it is the only check
-/// that phases 7 and 8 are wired in the scoring order, and a `Ctx` built from
-/// doubles is the only way to reach that check without a live broker and the
-/// engine binary (which belong to Task 21c).
 /// The two environment variables through which a projected SASL password
-/// reaches this process. Named here, once, so the runner's read and Task 6's
+/// reaches this process. Named here, once, so the runner's read and the
 /// rendered `${…}` placeholder cannot drift
 /// (`logweir_engine_oso::yaml::PLACEHOLDER_SOURCE_PASSWORD`).
 pub const SOURCE_PASSWORD_VAR: &str = "LOGWEIR_SOURCE_PASSWORD";
 /// The target cluster's twin of `SOURCE_PASSWORD_VAR`.
 pub const TARGET_PASSWORD_VAR: &str = "LOGWEIR_TARGET_PASSWORD";
 
-/// Interface **I11**, the runner's half: validate every projected password
-/// this process can see, at the moment it reads it, and REFUSE an
-/// unrenderable one before anything runs.
+/// Interface I11, the runner's half: validate every projected password this
+/// process can see and refuse an unrenderable one before anything runs.
 ///
-/// # Why the runner and not the controller
+/// The runner and not the controller: `weirkeeper` holds no `get` on Secrets
+/// (spec §9), so it never sees the value; this is the only caller of
+/// `credential_is_renderable`. Before `context`, so the exit-3 refusal
+/// constructs no client and cannot be confused with a spec refusal.
 ///
-/// `weirkeeper` holds no `get` on Secrets anywhere (spec §9), so it never sees
-/// the projected value and has nothing to validate. Spec §7 amendment 4 —
-/// "the runner refuses, not the controller" — settles it in writing, and
-/// Task 20 forbids the controller re-using the predicate. This is the only
-/// place in the workspace that calls `credential_is_renderable`.
-///
-/// # Why here, before `context`
-///
-/// Global Constraint 11 reserves exit 3 for "refused by a guard, BEFORE
-/// anything runs". This runs ahead of `context`, so no broker client and no
-/// object-store handle is constructed on the refusal path, and ahead of phase
-/// 0, so the refusal cannot be confused with a spec refusal.
-///
-/// # Scope, precisely
-///
-/// It validates the variables that are PRESENT, whatever the spec asks for.
-/// Since Task 6 a `DrillSpec` CAN ask for SASL (`spec.target.auth`), so a
-/// projected value normally has a consumer — but the check is deliberately
-/// not conditional on the mode: a value that cannot be substituted into
-/// pre-parse text is a fact worth refusing on before anything runs, and a
-/// spec switched back to plaintext with the Secret still projected is the
-/// case where a mode-conditional check would let it through.
-///
-/// It runs a SECOND time, per variable, at the moment of use
-/// (`validated_password`, which is this function's own body). That is not
-/// redundancy to be tidied away: the predicate is pure, and the two calls
-/// answer two questions — "is this process's environment renderable at all"
-/// and "is the value I am about to hand a client renderable".
-///
-/// A non-UTF-8 value is refused, not skipped: it cannot be substituted into a
-/// text document at all, and `std::env::var`'s `NotUnicode` is exactly the
-/// case a bare `if let Ok(..)` would silently admit.
+/// It validates every variable that is present, whatever the spec's auth
+/// mode: a spec switched back to plaintext with the Secret still projected is
+/// the case a mode-conditional check would let through. `validated_password`
+/// repeats the check per variable at the moment of use. A non-UTF-8 value is
+/// refused, not skipped.
 pub fn check_projected_credentials() -> Result<(), logweir_core::guard::GuardRefusal> {
     for var in [SOURCE_PASSWORD_VAR, TARGET_PASSWORD_VAR] {
         validated_password(var)?;
@@ -1910,28 +1558,20 @@ pub fn check_projected_credentials() -> Result<(), logweir_core::guard::GuardRef
     Ok(())
 }
 
-/// Interface **I1**'s environment half: read one variable, validate it, and
-/// hand back what `logweir_kafka::reader::AuthConfig::from_spec` takes.
+/// Interface I1's environment half: read one variable, validate it, and hand
+/// back what `logweir_kafka::reader::AuthConfig::from_spec` takes.
 ///
-/// **`Ok(None)` for an ABSENT variable, deliberately.** Whether absence is
-/// fatal depends on the spec's `auth.mode`, which this function does not see;
-/// `from_spec` is the half that does, and it answers with an operational
-/// `KafkaError` (exit 1), never a refusal. Splitting it that way is what keeps
-/// the exit-3 case ("this value can never be rendered") and the exit-1 case
-/// ("nobody projected the Secret yet") from collapsing into one code — which
-/// would tell Task 18's cron reconciler to retry a plan forever, or to stop
-/// retrying a condition an operator is about to fix.
+/// `Ok(None)` for an absent variable: whether absence is fatal depends on the
+/// spec's `auth.mode`, and `from_spec` answers it with exit 1, never a
+/// refusal, so "can never be rendered" (exit 3) and "nobody projected the
+/// Secret yet" (exit 1) stay distinct for a retrying reconciler.
 ///
-/// It refuses (exit 3, `refusal-reason=CredentialNotRenderable`) exactly what
-/// `check_projected_credentials` refuses, by calling the same code: this IS
-/// that function's per-variable body, so the guard the runner applies at
-/// startup and the guard applied at the moment of use cannot drift.
+/// It refuses exactly what `check_projected_credentials` refuses; this is that
+/// function's per-variable body.
 ///
-/// **The value never reaches a log, an error message or a return path other
-/// than the caller's `AuthConfig`.** `CredentialRefusal`'s `Display` is a pure
-/// function of the offending character CLASS (`logweir_core::guard`), so two
-/// different unrenderable passwords with the same first offending character
-/// produce byte-identical messages.
+/// The value never reaches a log, an error message or any return path but the
+/// caller's `AuthConfig`: `CredentialRefusal`'s `Display` is a pure function
+/// of the offending character class.
 pub fn validated_password(var: &str) -> Result<Option<String>, logweir_core::guard::GuardRefusal> {
     let secret = match std::env::var(var) {
         Ok(v) => v,
@@ -1973,11 +1613,10 @@ pub fn naming_the_password_var(
     e: logweir_kafka::reader::KafkaError,
     var: &str,
 ) -> logweir_kafka::reader::KafkaError {
-    // ONLY the missing-password error is rewritten (PROD-01.3): `from_spec`
-    // has other `Client` errors now — its PlainWithoutTls / MtlsWithoutTls
-    // backstops — and re-stating one of those as "the password is unset"
-    // would send an operator to a Secret when the fault is the transport.
-    // The mode is carried over from `from_spec`'s own text, which names it.
+    // Only the missing-password error is rewritten: `from_spec`'s other
+    // `Client` errors (its PlainWithoutTls / MtlsWithoutTls backstops) are
+    // transport faults, not an unset password. The mode is carried over from
+    // `from_spec`'s own text, which names it.
     match e {
         logweir_kafka::reader::KafkaError::Client(message)
             if message.contains("no SASL password was projected") =>
@@ -2001,11 +1640,6 @@ pub fn naming_the_password_var(
     }
 }
 
-/// Returns the whole `RestoreOutcome`, not the scorecard alone, because
-/// interface **I8**'s three stdout lines are keys the run PUT AT and `report`
-/// is what prints them. `execute_with` stays the scorecard-returning half for
-/// the ~40 existing call sites in `tests/orchestrator.rs` and
-/// `tests/teardown.rs`.
 struct StartupInputs {
     spec_text: String,
     allowed_text: String,
@@ -2026,9 +1660,8 @@ fn load_startup_inputs(
     signing_key: &logweir_evidence::keys::VerifyingKey,
     contract: Option<&ExecutionContract>,
 ) -> Result<StartupInputs, DrillError> {
-    // **A standing rehearsal authorization is withdrawn** (PROD-17.1 C1): a
-    // contract that names one is refused by name, whatever is mounted, before
-    // any file is read.
+    // A standing rehearsal authorization is withdrawn: a contract that names
+    // one is refused by name, whatever is mounted, before any file is read.
     if contract.is_some_and(|c| {
         c.authorization_kind == logweir_core::execution_contract::AuthorizationKind::Standing
     }) {
@@ -2099,11 +1732,10 @@ fn load_startup_inputs(
     let allowed_text = String::from_utf8(bundle.allowed_clusters.clone()).map_err(|error| {
         DrillError::Operational(format!("allowed-clusters is not UTF-8: {error}"))
     })?;
-    // **PLAT-19.2: WHICH verifier is the BUNDLE's decision, never the
-    // document's.** A v2 bundle — one the controller pinned a policy snapshot
-    // and a confirmation key into — is verified as authorization document v2;
-    // every other bundle as today's v1 approval, whose verifier refuses a v2
-    // payload type outright. Half a v2 bundle is refused by name.
+    // Which verifier is the bundle's decision, never the document's: a v2
+    // bundle (policy snapshot and confirmation key pinned) is verified as
+    // authorization document v2, every other as a v1 approval, whose verifier
+    // refuses a v2 payload type. Half a v2 bundle is refused by name.
     let v2 =
         match (&bundle.policy_snapshot, &bundle.confirmation_key) {
             (None, None) => None,
@@ -2171,6 +1803,8 @@ fn load_startup_inputs(
     })
 }
 
+/// Returns the whole `RestoreOutcome`, not the scorecard alone: interface
+/// I8's stdout lines are keys the run put at, and `report` prints them.
 pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
     execute_for_reporting(args, run_id)
 }
@@ -2182,20 +1816,15 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         execution_contract_for_invocation(args.execution_contract_version.as_deref(), |name| {
             std::env::var(name).ok()
         })?;
-    // THE STORE CONTRACT, BEFORE ANY CLIENT AND BEFORE ANY FILE IS READ — D2
-    // §3.5. A version this build does not implement is exit 3 here, for the
-    // reason the pinned-approver guard was moved to this seam: `context`
+    // The store contract, before any client and before any file is read (D2
+    // §3.5). An unimplemented version is exit 3 here because `context`
     // constructs the rdkafka reader, and construction alone opens bootstrap
-    // connections, so a refusal below it would have dialled the target before
-    // saying it refused.
+    // connections.
     let store_contract =
         crate::backup::store_contract::admit(args.store_contract_version.as_deref())?;
-    // **D3 §2.4's channel version, once, before the first phase line.** A
-    // reader that knows which grammar follows can parse the `progress-phase=`
-    // lines without guessing; a reader that sees no such line is talking to a
-    // runner that predates the channel, which §2.4 says is not an error. A
-    // standalone invocation announces the version this BUILD implements,
-    // because that is the only true answer when no controller stamped one.
+    // D3 §2.4's channel version, once, before the first phase line. No such
+    // line means a runner that predates the channel, which is not an error. A
+    // standalone invocation announces the version this build implements.
     println!(
         "{}",
         logweir_core::execution_contract::progress_contract_line(
@@ -2205,29 +1834,18 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
                     .version)
         )
     );
-    // PROD-01.3 security follow-up, FIRST: a projected credential whose
-    // binding does not name the connection this Job was built for is refused
-    // before it is even validated (`CredentialBindingMismatch`, exit 3).
+    // First: a projected credential whose binding does not name the
+    // connection this Job was built for is refused before it is validated
+    // (`CredentialBindingMismatch`, exit 3).
     crate::credential_binding::check_projected_bindings()?;
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     check_projected_credentials()?;
-    // The pinned approver set, at the SAME seam and for the same reason (Task
-    // 22 fix round 1, review finding MED-1). It began one frame lower, at the
-    // top of `execute_with_outcome` — which is already past `context(args)`,
-    // and `context` constructs the rdkafka client, whose CONSTRUCTION alone
-    // begins bootstrap connections. So a refused run dialled the spec's
-    // bootstrap before printing a refusal whose own words say it had not:
-    // measured against a closed port, the process emitted
-    // `FAIL … Connect to ipv4#127.0.0.1:19092 … Connection refused` on stderr
-    // and a `BrokerTransportFailure` line on stdout, and only then the
-    // refusal. The guard reads nothing from `Ctx` — only `args.approver_key`
-    // (a file on disk) and `args.approver_key_ids` (an argv value) — so there
-    // was never a reason for it to sit behind the client. Here the shipped
-    // message's "before phase 0 dials anything" is true at the socket layer,
-    // which is what `tests/approval.rs::
-    // an_unpinned_approver_is_refused_without_dialling_the_bootstrap` asserts
-    // over the whole transcript of a run against a closed port.
+    // The pinned approver set, at the same seam: it reads only a file and an
+    // argv value, and `context` constructs the rdkafka client, whose
+    // construction alone dials the bootstrap. Here "before phase 0 dials
+    // anything" holds at the socket layer
+    // (`tests/approval.rs::an_unpinned_approver_is_refused_without_dialling_the_bootstrap`).
     phase1_approval::admit_pinned_approver_key_id(&args.approver_key, &args.approver_key_ids)?;
     // Signing readiness is established before `context` constructs the Kafka
     // client, object stores, or engine runner. Keep this parsed identity for
@@ -2242,27 +1860,25 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
             )))
         }
     };
-    // **PROD-01.3: SASL/PLAIN only over TLS**, over the AUTHENTICATED plan
-    // and BEFORE `context`, which builds the target client: a `plain` target
-    // without `tls: true` is refused here at exit 3 with
-    // `refusal-reason=PlainWithoutTls`, so the password is never sent to a
-    // listener the plan would reach in the clear. Phase 0 repeats the check
+    // SASL/PLAIN only over TLS, over the authenticated plan and before
+    // `context` builds the target client: a `plain` target without `tls: true`
+    // is refused at exit 3 (`refusal-reason=PlainWithoutTls`), so the password
+    // never reaches a listener in the clear. Phase 0 repeats the check
     // (`phase0_admit::local`) for every path that reaches it another way.
     logweir_core::guard::reject_auth_without_required_tls(
         "target.auth",
         &authenticated_spec.target.auth,
     )?;
-    // **PROD-17.1 B2**: a plan that still names a notification sink is
-    // refused here, exit 3, before the point binding reads the archive and
-    // before `context` dials. Phase 0 repeats the check.
+    // A plan that still names a notification sink is refused here, exit 3,
+    // before the point binding reads the archive and before `context` dials.
+    // Phase 0 repeats the check.
     logweir_core::guard::reject_withdrawn_notifications(&authenticated_spec.notifications)?;
-    // **FX-20 fix round (review F1)**: a storage region that is not a region
-    // name is refused here, exit 3 (`StorageRegionInvalid`), before the point
-    // binding below reads the archive and before any client exists. On an
-    // endpoint-less location the region IS the host the archive credential
-    // signs for, so `x@attacker/` beside the victim's bucket would carry it
-    // elsewhere. Phase 0 repeats the check; the store refuses to build such a
-    // client as a backstop.
+    // A storage region that is not a region name is refused here, exit 3
+    // (`StorageRegionInvalid`), before the point binding reads the archive and
+    // before any client exists. On an endpoint-less location the region IS the
+    // host the archive credential signs for, so `x@attacker/` beside the
+    // victim's bucket would carry it elsewhere. Phase 0 repeats the check; the
+    // store refuses to build such a client as a backstop.
     let region_refusal = logweir_core::guard::reject_invalid_storage_region(
         "source.storage",
         &authenticated_spec.source.storage,
@@ -2271,33 +1887,24 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         logweir_core::guard::reject_invalid_storage_region("evidence", &authenticated_spec.evidence)
     });
     region_refusal?;
-    // **PROD-15.1: the original-name SHAPE, over the authenticated plan and
-    // BEFORE anything is read or dialled.** The block is legal only in
-    // `newTopic` mode, beside `prefix: ""`, and in a plan that asks for
-    // COMPLETE verification: a sampled plan with the identity mapping is
-    // refused here by name, exit 3, with no broker asked anything. Phase 0
-    // repeats the check (`phase0_admit::local`) for every path that reaches
-    // it another way.
+    // The original-name shape, over the authenticated plan and before anything
+    // is read or dialled: the block is legal only in `newTopic` mode, beside
+    // `prefix: ""`, in a plan that asks for complete verification. Refused by
+    // name, exit 3. Phase 0 repeats the check (`phase0_admit::local`) for
+    // every path that reaches it another way.
     if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
         return Err(GuardRefusal(refusal).into());
     }
-    // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
-    // BEFORE anything is read or dialled.** An original-name plan needs its
-    // own approval subject, which an ordinary approval cannot satisfy; an
-    // `originalName` approval authorises nothing else. The controller made
-    // the same comparison before the Job existed; this is the runner's own
-    // half.
+    // The approval subject, over the authenticated plan and before anything is
+    // read or dialled: an original-name plan needs its own approval subject,
+    // which an ordinary approval cannot satisfy, and an `originalName`
+    // approval authorises nothing else. This is the runner's half of the
+    // controller's comparison.
     check_original_name_subject(&authenticated_spec, Some(&startup.approved))?;
-    // **Execution contract v2's point binding, and it goes HERE.**
-    //
-    // After `load_startup_inputs`, so the plan bytes they read are the bytes
-    // the contract digests and the approval signature already covered — a
-    // check over unauthenticated bytes proves nothing. Before `context`, so
-    // neither has a broker client in scope: `context` constructs the rdkafka
-    // reader, and construction alone opens bootstrap connections (the
-    // measurement is in `execute_for_reporting`'s own comment above). That is
-    // what makes "refused before any data-plane work" true at the socket
-    // layer, which is the claim D3 §4.3 and §5.5 both make.
+    // Execution contract v2's point binding: after `load_startup_inputs`, so
+    // it checks bytes the contract digests and the approval signature cover,
+    // and before `context`, so a refusal opens no broker connection (D3 §4.3,
+    // §5.5).
     let bindings = check_v2_bindings(
         &authenticated_spec,
         startup.evidence_keys.as_deref(),
@@ -2305,12 +1912,10 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         store_contract,
     )?;
     let approved = startup.approved;
-    // FX-4: the context is built WITH what the VERIFIED point binding
-    // established about each source topic's configuration capture (unknown for
-    // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
-    // PROD-15.1: what only the runner holds about an original-name restore's
-    // source and owners — the verified receipt's facts and the KafkaTopic
-    // resources it was given — read once, before any client exists.
+    // The context is built with the verified point binding's coverage
+    // (`tests::the_run_context_is_built_with_the_verified_coverage`) and with
+    // what only the runner holds about an original-name restore's source and
+    // owners, read once, before any client exists.
     let original_name = original_name_inputs(args, &authenticated_spec, bindings.point_source)?;
     match context(
         startup.spec_text,
@@ -2327,13 +1932,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
 
 /// What the execution-contract-v2 point binding established.
 struct V2Bindings {
-    /// **FX-4.** The verified recovery point's configuration capture coverage;
+    /// The verified recovery point's configuration capture coverage;
     /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
     source_config_coverage: SourceConfigCoverage,
-    /// **FX-16.** The set the verified point's receipt describes; `None` when
+    /// The set the verified point's receipt describes; `None` when
     /// the plan binds no point.
     bound_set: Option<binding::BoundSet>,
-    /// **PROD-15.1.** The verified receipt's measured source cluster id and
+    /// The verified receipt's measured source cluster id and
     /// recorded owners, from the same `VerifiedPoint`; `None` when the plan
     /// binds no point.
     point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
@@ -2346,13 +1951,10 @@ fn check_v2_bindings(
     contract: Option<&ExecutionContract>,
     store_contract: bool,
 ) -> Result<V2Bindings, DrillError> {
-    // **F3 / D3 §8: `source.point` is v2 material, so a v1 invocation may not
-    // carry it either.** The five environment items are refused in
-    // `execution_contract_from`; this is the sixth, and it is HERE rather than
-    // there because the plan is not parsed until the bundle has been
-    // digest-checked and the approval verified. `docs/stability.md` and
-    // `docs/formats/drill-spec.md` both state this rule, and a documented
-    // contract nothing enforces is worse than one nobody wrote down.
+    // `source.point` is v2 material, so a v1 invocation may not carry it (D3
+    // §8). Checked here, not in `execution_contract_from`, because the plan is
+    // parsed only after the bundle is digest-checked and the approval
+    // verified.
     if plan.source.point.is_some() {
         if let Some(refusal) = contract
             .map(|c| c.version)
@@ -2366,16 +1968,11 @@ fn check_v2_bindings(
     let mut bound_set = None;
     let mut point_source = None;
     if plan.source.point.is_some() {
-        // A READ-ONLY handle, built here and dropped here. `Store` is not
-        // `Clone` and `context` builds its own; a read-only handle cannot put
-        // at all (`put_create_only` refuses every key through it), so this
-        // read can never become the first write of a run that is about to be
-        // refused.
-        //
-        // FX-16 class sweep: built by `archive_read_handle`, with the store
-        // contract's options when this run is under it, so the archive the
-        // binding verifies is read through the same client configuration as
-        // the archive the engine restores and phase 7 reads.
+        // A read-only handle, built and dropped here: it cannot put at all, so
+        // this read can never become the first write of a run about to be
+        // refused. Built by `archive_read_handle`, so the binding reads the
+        // archive through the same client configuration as the engine and
+        // phase 7.
         let contract_options = if store_contract {
             Some(crate::backup::store_contract::archive_options()?)
         } else {
@@ -2388,9 +1985,9 @@ fn check_v2_bindings(
             binding::verify_point_binding(plan, &archive, evidence_keys, chrono::Utc::now())?
         {
             tracing::info!(point_id = %verified.point_id, "recovery point binding verified");
-            // FX-7: the receipt's pin could not be checked in this bucket (a
-            // copy, an unversioned bucket, an expired or deleted version), so
-            // the digest decided. Said, never refused.
+            // The receipt's pin could not be checked in this bucket (a copy, an
+            // unversioned bucket, an expired or deleted version), so the digest
+            // decided. Said, never refused.
             if let Some(note) = verified.pin_note.as_deref() {
                 tracing::warn!(point_id = %verified.point_id, "{note}");
             }
@@ -2442,23 +2039,17 @@ fn assert_engine_identity(id: &logweir_core::engine::EngineId) -> Result<(), Dri
     Ok(())
 }
 
+/// The phase sequence, over handles this function does not build.
+/// `tests/orchestrator.rs` drives it over doubles, the only way to check
+/// without a broker that phases 7 and 8 are wired in scoring order.
 pub fn execute_with(args: &RunArgs, run_id: &str, c: &Ctx) -> Result<Scorecard, DrillError> {
     execute_with_outcome(args, run_id, c).map(|o| o.scorecard)
 }
 
-/// The same phase sequence as `execute_with`, returning everything ONE RUN
-/// produced rather than the scorecard alone.
-///
-/// `TopicPreflight` (guard **G-TS**) is deliberately not a scorecard field —
-/// Global Constraint 12 as amended permits nested optional fields only and no
-/// new top-level property, and the scorecard is frozen at 21/17 — so it needs a
-/// carrier out of the run. `RestoreOutcome` is it: spec §10's G-TS row puts the
-/// preflight in `Restore.status.topicPreflight`, which the operator writes from
-/// the runner's outcome, and it goes no further inside this repository's
-/// evidence documents.
-///
-/// `execute_with` stays the scorecard-returning half so the ~40 existing call
-/// sites in `tests/orchestrator.rs` and `tests/teardown.rs` are untouched.
+/// The same phase sequence as `execute_with`, returning everything one run
+/// produced. `TopicPreflight` (guard G-TS) is not a scorecard field (Global
+/// Constraint 12 permits no new top-level property), so `RestoreOutcome`
+/// carries it out to `Restore.status.topicPreflight` and no further.
 pub fn execute_with_outcome(
     args: &RunArgs,
     run_id: &str,
@@ -2470,12 +2061,10 @@ pub fn execute_with_outcome(
     execute_with_signer(args, run_id, c, &signer)
 }
 
-/// **PROD-15.1 review M3.** [`execute_with`] for an authorization ALREADY
-/// verified — the shape `execute_for_reporting` hands the phases after its
-/// startup checks. Public so a test can drive the pre-phase-0 hold of the
-/// approval subject over doubles: that check is the one `execute_for_reporting`
-/// relies on for every caller it does not cover itself, and no other public
-/// path reaches it.
+/// [`execute_with`] for an authorization already verified, the shape
+/// `execute_for_reporting` hands the phases after its startup checks. Public
+/// so a test can drive the pre-phase-0 hold of the approval subject over
+/// doubles.
 pub fn execute_with_approved(
     args: &RunArgs,
     run_id: &str,
@@ -2512,30 +2101,22 @@ fn execute_with_validated_approval(
     signer: &ValidatedSigner,
     prevalidated_approval: Option<phase1_approval::Approved>,
 ) -> Result<RestoreOutcome, DrillError> {
-    // `--approver-key-ids` is deliberately NOT checked here, though phase 1 is
-    // where the approval is otherwise handled. This function takes a `&Ctx`,
-    // so by the time it runs the rdkafka client already exists and the
-    // bootstrap has already been contacted — Global Constraint 11 reserves
-    // exit 3 for a refusal made "before anything ran", and that promise cannot
-    // be kept from behind a constructed client. The check therefore lives in
-    // `execute`, beside I11's `check_projected_credentials()` and ahead of
-    // `context`, which is the only place it CAN be kept (Task 22 fix round 1,
-    // MED-1). Nothing is lost on this path: every in-repo caller of this
-    // function, of `execute_with` and of `run_with` drives it over doubles
-    // with an EMPTY `approver_key_ids` (`tests/fixtures/mod.rs`), for which
-    // the guard returns `Ok` unconditionally.
+    // `--approver-key-ids` is not checked here: the client already exists, and
+    // exit 3 means refused before anything ran, so the check lives in
+    // `execute`, ahead of `context`. Every in-repo caller of this path passes
+    // an empty set (`tests/fixtures/mod.rs`), for which the guard returns `Ok`.
     let mut sc = new_scorecard(run_id, args, c);
-    // Phase 9 deletes through the SAME client, and since Task 8 phase 0's
-    // preflight and the target-topic creation step write through it too. Named
-    // here so the layering rule — `logweir-kafka` is the only crate that dials
+    // Phase 9 deletes, and phase 0's preflight and the creation step write,
+    // through this same client; `logweir-kafka` is the only crate that dials a
+    // broker.
     // a broker — is visible.
     let deleter: &dyn TopicDeleter = c.client.as_deleter();
     let creator: &dyn TopicCreator = c.client.as_creator();
     let reader: &dyn ClusterReader = c.client.as_reader();
 
-    // PROD-15.1: a pre-validated approval's subject is held to the plan
-    // BEFORE phase 0, whose `LogAppendTime` arm may write; the production path
-    // checked it already, and this repeats it for every other caller.
+    // A pre-validated approval's subject is held to the plan before phase 0,
+    // whose `LogAppendTime` arm may write; the production path checked it
+    // already, and this repeats it for every other caller.
     if let Some(approved) = prevalidated_approval.as_ref() {
         check_original_name_subject(&c.spec, Some(approved))?;
     }
@@ -2563,11 +2144,10 @@ fn execute_with_validated_approval(
     let signing_pub = signer.verifying_key();
     let approved = record(&mut sc, 1, "approval", || match &prevalidated_approval {
         Some(approved) => Ok(approved.clone()),
-        // The path-based legacy/standalone entry point. `--approval` is
-        // `Option` since PLAT-14.3b, and absent here means a caller reached
-        // phase 1 with nothing to verify — refused by name rather than
-        // unwrapped. Unreachable through `execute_for_reporting`, which mints
-        // an `Approved` from one of the two authorizations before phase 0.
+        // The path-based legacy/standalone entry point. Absent `--approval`
+        // here means a caller reached phase 1 with nothing to verify: refused
+        // by name. Unreachable through `execute_for_reporting`, which mints an
+        // `Approved` before phase 0.
         None => match args.approval.as_ref() {
             Some(approval) => {
                 phase1_approval::verify(&c.spec_text, approval, &args.approver_key, &signing_pub)
@@ -2580,9 +2160,9 @@ fn execute_with_validated_approval(
             .into()),
         },
     })?;
-    // PROD-15.1: the subject, held to the plan once more now that phase 1
-    // has verified it on every path, and — for an original-name restore —
-    // signed with what phase 0 proved (`target.original_name`, format 1.8.0).
+    // The subject, held to the plan once more now that phase 1 has verified
+    // it on every path, and for an original-name restore signed with what
+    // phase 0 proved (`target.original_name`, format 1.8.0).
     check_original_name_subject(&c.spec, Some(&approved))?;
     sc.target.original_name = original_name_info(&admitted, &approved);
     sc.format_version = logweir_core::scorecard::format_version_with_original_name(
@@ -2592,7 +2172,7 @@ fn execute_with_validated_approval(
     .to_string();
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
-    // PROD-16.2: a restore a second person approved in the console signs who
+    // A restore a second person approved in the console signs who
     // approved and how (`approval.console`), which is format 1.9.0 — and 2.1.0
     // once the selection step below has chosen major 2 for a partition
     // subset. The step reads the major the earlier steps chose, so it is
@@ -2613,31 +2193,20 @@ fn execute_with_validated_approval(
     // told to the operator here, before any target is touched, rather than
     // dropped. It changes nothing this run does or signs.
     let (facts, notices) = c.engine.describe_with_notices(&set)?;
-    // **FX-16: THE SET IS THE BOUND POINT'S, checked here and before anything
-    // is decided from the point's receipt.** `pick_backup_set` chose `set` by
-    // `source.backup`, and the binding verified a receipt that describes ONE
-    // set; every decision below that reads the receipt — the time basis (its
-    // recorded timestamp types, FX-8), phases 3 and 7 (its capture coverage,
-    // FX-4) — and FX-7's pin verdict are about that set alone. So the set id,
-    // the manifest key, the digest `describe` just computed and the version it
-    // read must all be the ones the binding verified, or the run is refused
-    // exit 3 (`PointBindingSetMismatch`) before phase 2: no target topic of
-    // this restore is created and the engine never starts. A plan bound to no
-    // point compares nothing.
-    //
+    // The set must be the bound point's, checked before anything is decided
+    // from the point's receipt: the time basis, phases 3 and 7 and the pin
+    // verdict all read that receipt, which describes one set. Set id, manifest
+    // key, digest and version must match the binding or the run is refused,
+    // exit 3 (`PointBindingSetMismatch`), before any target topic is created.
     // `orchestrator.rs::a_restored_set_that_is_not_the_bound_points_creates_no_target_topic`
-    // fails if this moves after the creation step, and
-    // `a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt`
-    // if it moves after `time_basis::decide`.
+    // and `a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt`
+    // pin the position.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
-    // **PROD-02.1: AN EMPTY CAPTURE IS REFUSED BY NAME, HERE.** A set with no
-    // segment for any topic this restore names has nothing to restore (the
-    // manifest says so; the message names the empty capture as one reason
-    // and claims nothing a receipt has not said); it is
-    // refused exit 3 before phase 2 and before any other archive-based refusal,
-    // so no target topic is created and no engine starts — never phase 4's
-    // exit 1 over an "empty window".
+    // An empty capture is refused by name, here: a set with no segment for any
+    // topic this restore names is refused exit 3 before phase 2 and before any
+    // other archive-based refusal, never phase 4's exit 1 over an "empty
+    // window".
     let named: BTreeSet<&str> = admitted.topic_mapping.keys().map(String::as_str).collect();
     if facts.earliest_covered_timestamp_ms(&named).is_none() {
         return Err(DrillError::Guard(GuardRefusal(format!(
@@ -2649,55 +2218,41 @@ fn execute_with_validated_approval(
             named.iter().copied().collect::<Vec<&str>>().join(", ")
         ))));
     }
-    // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
-    // at which both of its records are in hand — the archive manifest just
-    // described (a topic's `message.timestamp.type` override) and the VERIFIED
-    // receipt's coverage the context was born with (its effective type, the
-    // broker-default arm) — and BEFORE phase 2, so a refused plan has read the
-    // target and nothing else: no target topic of this restore is created
-    // (`create_target_topics` runs after phase 5) and the engine never starts.
-    // Exit 3, `refusal-reason=PointInTimeByProducerTime`.
-    //
-    // Phase 0 has run, so on a target broker whose OWN default is
-    // `LogAppendTime` its override probe has created and deleted one probe
-    // topic first, as it does before every refusal after phase 0 — the one
-    // documented exception to exit 3 (`docs/stability.md`).
-    //
-    // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic`
-    // fails if this moves after the creation step.
+    // The time basis, decided here and nowhere later: the first point at which
+    // both its records (the manifest's timestamp-type override, the verified
+    // receipt's effective type) are in hand, and before phase 2, so a refused
+    // plan creates no target topic and starts no engine. Exit 3,
+    // `refusal-reason=PointInTimeByProducerTime`. On a target whose own
+    // default is `LogAppendTime`, phase 0's probe topic was already created
+    // and deleted (the documented exception, `docs/stability.md`).
+    // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic` pins
+    // the position.
     let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let time_basis =
         logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
             .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
     sc.source = source_info(&facts, time_basis);
-    // **PROD-11.1: THE REPLAY SELECTION, resolved against the archive here**,
-    // the first point at which the manifest is in hand, and BEFORE phase 2:
-    // a window start before the archive's coverage and a window no segment
-    // overlaps, and a subset naming a partition the archive does not list,
-    // are refused exit 3 with no target topic created and no engine started.
-    // `None` for a plan that states no selection, which runs exactly as
-    // before. The same function `build_plan` binds the window with, and
-    // the restore preflight previews it with (`logweir_core::replay_selection`).
+    // The replay selection, resolved against the archive before phase 2: a
+    // window outside the archive's coverage or a subset naming an unlisted
+    // partition is refused exit 3 with no target topic created and no engine
+    // started. `None` for a plan that states no selection. The same function
+    // binds the window in `build_plan` and previews it in the restore
+    // preflight (`logweir_core::replay_selection`).
     let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
-    // PROD-11.1: the selection is SIGNED (`source.selection`) in every
-    // document this run writes from here on — format 1.7.0 for a window start
-    // only, and (PROD-11.1b, OD-9 (a)) 2.0.0 for a partition subset, which
-    // every reader before it refuses as an unsupported major — and every
-    // phase below judges it: phase 4 samples only selected partitions from the
-    // stated start, phase 5 checks every rendered engine run against the
-    // spec, and phase 7 judges the count bound, presence and records over the
-    // selection. The version is raised HERE, with the block, and every later
-    // version step is monotonic, so no document this run signs carries the
-    // block under an older version.
+    // The selection is signed (`source.selection`) in every document this run
+    // writes from here on: format 1.7.0 for a window start only, 2.0.0 for a
+    // partition subset, which older readers refuse as an unsupported major.
+    // Phases 4, 5 and 7 judge it. The version is raised here, with the block,
+    // and every later step is monotonic.
     sc.source.selection = replay_selection.as_ref().and_then(selection_label);
     sc.format_version = logweir_core::scorecard::format_version_with_selection(
         &sc.format_version,
         sc.source.selection.as_ref(),
     )
     .to_string();
-    // PROD-16.2: a partition subset approved in the console is 2.1.0.
+    // A partition subset approved in the console is 2.1.0.
     raise_version_for_console_approval(&mut sc);
-    // **PROD-01.1a: TRANSACTION MARKERS, checked here**, before phase 2 and
+    // Transaction markers, checked here, before phase 2 and
     // in every target mode: an archive whose restored partitions hold records
     // shaped like transaction markers is refused exit 3,
     // `TransactionMarkersInArchive`, with no target topic created and no
@@ -2748,7 +2303,7 @@ fn execute_with_validated_approval(
     // 4
     let src_topics: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let mut sel = record(&mut sc, 4, "sample-select", || {
-        // PROD-11.1: only selected partitions, from the stated start.
+        // Only selected partitions, from the stated start.
         phase4_sample::run_selected(
             &facts,
             &c.spec.sample,
@@ -2756,30 +2311,28 @@ fn execute_with_validated_approval(
             replay_selection.as_ref().map(|r| &r.selection),
         )
     })?;
-    // Binding note appended to the brief during Task 16 fix round 1:
-    // `phase4_sample::run` emits `per_partition[..].set.manifest_key` EMPTY,
-    // and `OsoCliEngine::fingerprints` refuses loudly if it is still empty
-    // when phase 7 calls it. This is the only place the real `BackupSetRef`
-    // and the `Selection` are both in scope.
+    // `phase4_sample::run` emits `per_partition[..].set.manifest_key` empty,
+    // and `OsoCliEngine::fingerprints` refuses an empty one; this is the only
+    // place the real `BackupSetRef` and the `Selection` are both in scope.
     sel.bind_backup_set(&set);
     sc.sample = sample_info(&c.spec.sample, &sel);
-    // FX-23: every SAMPLED verification is a 1.6.0 document, so the version
-    // marks a build with FX-23's checks (review M2); a complete one keeps the
-    // version `new_scorecard` chose, byte for byte.
+    // Every sampled verification is a 1.6.0 document, marking a build with
+    // the sampled lane's checks; a complete one keeps the version
+    // `new_scorecard` chose, byte for byte.
     sc.format_version = logweir_core::scorecard::format_version_with_sample(
         &sc.format_version,
         &sc.sample,
         c.spec.sample.coverage,
     )
     .to_string();
-    // PROD-11.1: a narrowed restore's EXISTING `sample.coverage_note` opens
-    // with its window, so a reader that predates `source.selection` reads
-    // what was restored; under the sampled lane it also names the one limit
-    // a start adds (review L6). The version step above is monotonic, and so
-    // is this one, so the 1.7.0 chosen with the block stands.
+    // A narrowed restore's existing `sample.coverage_note` opens with its
+    // window, so a reader that predates `source.selection` reads what was
+    // restored; under the sampled lane it also names the one limit a start
+    // adds. Both version steps are monotonic, so the 1.7.0 chosen with the
+    // block stands.
     if let Some(label) = &sc.source.selection {
-        // The engine's segment rule at a START (review L6): only a plan that
-        // states one has it; a subset from the archive's floor does not.
+        // The engine's segment rule at a start: only a plan that states one
+        // has it; a subset from the archive's floor does not.
         let limit = if c.spec.sample.coverage == logweir_core::spec::Coverage::Sampled
             && label.window_start_ms.is_some()
         {
@@ -2800,30 +2353,22 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
-    // PROD-01.1a: the override, or the segments after the window the marker
-    // check could not read, in the note `logweir show` prints under the table
-    // (free text: no format change).
+    // The override, or the segments after the window the marker check could
+    // not read, in the note `logweir show` prints under the table (free text:
+    // no format change).
     if let Some(note) = marker_note {
         sc.sample.coverage_note = format!("{}; {note}", sc.sample.coverage_note);
     }
-    // PROD-16.2: THE LAST VERSION STEP, after every step that can choose the
-    // major (`format_version_with_console_approval`).
+    // The last version step, after every step that can choose the major
+    // (`format_version_with_console_approval`).
     raise_version_for_console_approval(&mut sc);
 
-    // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
-    // record's own `duration_ms` is the number `compute_measured` subtracts
-    // to produce `rto_excluding_preflight_seconds`. Measuring it anywhere
-    // else would score the header sweep no incident responder performs.
-    //
-    // T0-14: this single `plan` binding, handed to both the phase-5 closure
-    // below and `phase6_restore::run` further down, USED to be the only reason
-    // the two rendered `restore.yaml` documents were the same document. It is
-    // no longer load-bearing: `OsoCliEngine::preflight` now hashes the exact
-    // bytes it writes and `OsoCliEngine::restore` re-renders, re-hashes and
-    // refuses a divergence (ruling R-E: `EngineError::Operational`, exit 1, no
-    // artifact — see `docs/stability.md`). Building the plan once is now a
-    // convenience, not the guarantee, so a future phase-5/phase-6 split cannot
-    // dissolve the identity by moving these two call sites apart.
+    // 5. The engine's preflight runs inside the phase-5 record, so its
+    // `duration_ms` is what `compute_measured` subtracts for
+    // `rto_excluding_preflight_seconds`. The two rendered `restore.yaml`
+    // documents are identical because `OsoCliEngine::restore` re-renders,
+    // re-hashes and refuses a divergence from what `preflight` wrote (ruling
+    // R-E, exit 1); building the plan once is a convenience.
     let plan = build_plan(
         &c.spec,
         &set,
@@ -2832,32 +2377,25 @@ fn execute_with_validated_approval(
         run_id,
         args.offset_report_out.as_deref(),
     )?;
-    // PLAT-07.1: the engine's `ssl_ca_location`, the same file the reader in
-    // `c` was built with. `None` leaves the plan exactly as built.
+    // The engine's `ssl_ca_location`, the same file the reader in `c` was
+    // built with. `None` leaves the plan exactly as built.
     let plan = RestorePlan {
         target_auth: plan
             .target_auth
             .clone()
             .with_tls_ca_file(c.target_tls_ca_file.clone())
             .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?
-            // PROD-01.3: the engine's `ssl_certificate_location` /
-            // `ssl_key_location`, the same files the reader presents.
+            // The engine's `ssl_certificate_location` / `ssl_key_location`, the
+            // same files the reader presents.
             .with_client_certificate(c.target_client_certificate.clone())
             .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?,
         ..plan
     };
     // The engine writes its restore checkpoint to `plan.checkpoint_state` and
-    // does NOT create that file's parent directory. `context` creates the
-    // workdir it renders restore.yaml into (`logweir-<pid>`); the checkpoint
-    // lives beside it under `logweir-<run_id>`, which nothing created — so
-    // `kafka-backup restore` exited 1 with a bare
-    // `IO error: No such file or directory (os error 2)` on EVERY run, on any
-    // host. Found by Task 21c the first time the orchestrator was pointed at a
-    // real archive; before that, no test in the workspace ever reached the
-    // engine's `restore` subcommand with a real binary behind it.
-    //
-    // `Operational`, not a guard refusal: a scratch directory that cannot be
-    // created says nothing about the archive.
+    // does not create its parent directory (`logweir-<run_id>`, which nothing
+    // else creates), so without this `kafka-backup restore` exits 1 with a
+    // bare `No such file or directory`. `Operational`, not a refusal: a
+    // scratch directory that cannot be created says nothing about the archive.
     if let Some(dir) = plan.checkpoint_state.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
@@ -2875,18 +2413,12 @@ fn execute_with_validated_approval(
             .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
     }
     let (verdict, report) = record(&mut sc, 5, "preflight", || {
-        // **GUARD G-WIN, THE REFUSING HALF**, and it runs BEFORE
-        // `engine.preflight` writes anything: `check_rendered_selection`
-        // renders every run's document itself, reads the `time_window_start`
-        // line back off the bytes, and compares THAT against the instant it
-        // re-derives from the manifest's floor and the spec's stated start
-        // (PROD-11.1's amendment). Exit 3, "refused by a guard, before anything ran" —
-        // NOT the exit 1 of ruling R-E's phase-5/phase-6 render mismatch,
-        // which is a different failure at a later point (see the function's
-        // own doc comment).
-        // PROD-11.1: and the rendered selection of EVERY engine run, against
-        // what the approved spec states (window start (`restore.point_in_time: "<start>/<end>"`),
-        // `restore.partitions`) — re-derived, never read off the plan.
+        // Guard G-WIN, the refusing half, before `engine.preflight` writes
+        // anything: `check_rendered_selection` renders every engine run's
+        // document itself and compares the rendered selection (window start,
+        // `restore.partitions`) with what it re-derives from the manifest's
+        // floor and the approved spec, never from the plan. Exit 3, unlike
+        // ruling R-E's later phase-5/phase-6 render mismatch (exit 1).
         phase5_preflight::check_rendered_selection(
             &plan,
             &facts,
@@ -2916,11 +2448,8 @@ fn execute_with_validated_approval(
         sc.integrity.level = IntegrityLevel::NotAttempted;
         sc.integrity.result = IntegrityResult::Fail;
         sc.measured.rto_seconds = None;
-        // Carried obligation from Task 17: `PhaseRecord.notes` exists so a
-        // `preflight-failed` scorecard states WHICH ground blocked the
-        // restore, not merely that one did. This orchestrator is its sole
-        // writer; without this loop phase 5 adjudicates correctly and then
-        // discards its reasoning.
+        // `PhaseRecord.notes` says which ground blocked the restore, not
+        // merely that one did; this orchestrator is its sole writer.
         if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 5) {
             p.notes = findings
                 .iter()
@@ -2931,14 +2460,9 @@ fn execute_with_validated_approval(
         // offset-mapping report to describe. The engine writes one only from a
         // completed restore.
         let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
-        // NO teardown here, deliberately, and the asymmetry with the phase-6
-        // branch below is the point: a blocked preflight means `restore` never
-        // ran, so this drill created NOTHING on the target. Phase 0 now
-        // refuses a plan whose mapped targets already exist (spec §6.1), so
-        // those names should be absent here — but "should be" is not a fact
-        // this branch established, and deleting a topic this run did not
-        // create, on a plan that never executed, would destroy someone else's
-        // data to tidy up after a drill that touched nothing.
+        // No teardown here: `restore` never ran, so this drill created nothing
+        // on the target, and deleting a topic this run did not create, on a
+        // plan that never executed, would destroy someone else's data.
         // [I8] AT EXIT 2 TOO: the keys of the document just put, so a
         // controller can fetch and verify the signed `preflight-failed`
         // finding exactly as it would a pass.
@@ -2946,28 +2470,19 @@ fn execute_with_validated_approval(
         return Err(DrillError::NotPass(Box::new(signed.scorecard), Some(keys)));
     }
 
-    // **Guard G-TS**, the creating half — the last thing before the restore,
-    // and NOT inside phase 0. `phase0_admit::create_target_topics`'s doc
-    // comment carries the reasons; the short version is that phase 1 verifies
-    // the approval, phases 2 and 3 must see the target's PRE-EXISTING state,
-    // and the partition count is the archive manifest's, which is read after
-    // phase 1 by design.
+    // Guard G-TS, the creating half: the last thing before the restore and
+    // not inside phase 0 (`phase0_admit::create_target_topics` says why), and
+    // after the phase-5 verdict, because the `Verdict::Block` branch above
+    // relies on this drill having created nothing (`e2e/tests/full_drill.rs`'s
+    // `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`).
+    // The engine's preflight, `validate-restore`, writes nothing and needs no
+    // target topic.
     //
-    // AFTER the phase-5 verdict, deliberately. The `Verdict::Block` branch
-    // above returns without a teardown, on the stated ground that a blocked
-    // preflight means `restore` never ran and this drill created NOTHING on the
-    // target — `e2e/tests/full_drill.rs`'s
-    // `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
-    // asserts `!topic_exists("drill-orders")` and caught an earlier version of
-    // this line placed before phase 5. The engine's preflight is
-    // `validate-restore`, which force-sets `dry_run = true` and writes nothing,
-    // so it needs no target topic; `restore` does.
-    //
-    // **FX-44: a run that fails AFTER the restore started tears down what the
-    // creation step created**, by phase 9's rule, and names what it left.
-    // Defined here, before the creation step, and called only from the error
-    // returns of phases 6 to 8 that are not a signed `NotPass` (whose path
-    // runs phase 9): a stopped creation step itself still deletes nothing.
+    // A run that fails after the restore started tears down what the creation
+    // step created, by phase 9's rule, and names what it left: called only
+    // from the error returns of phases 6 to 8 that are not a signed `NotPass`
+    // (whose path runs phase 9). A stopped creation step still deletes
+    // nothing.
     let remove_created = |created: &[String]| {
         phase9_teardown::after_failure(
             deleter,
@@ -3008,36 +2523,19 @@ fn execute_with_validated_approval(
         )
     }) {
         Ok(r) => r,
-        // task-21a-addendum.md ruling A8. Mirrors the phase-5 `Verdict::Block`
-        // branch above: a restore that ran, exited 0, and left every selected
-        // partition at end offset <= 0 is a positively established fact ABOUT
-        // THE ARCHIVE, not an operational failure — never exit 1 for the most
-        // valuable negative finding phase 6 can produce.
+        // Mirrors the phase-5 `Verdict::Block` branch: a restore that ran,
+        // exited 0 and left every selected partition at end offset <= 0 is a
+        // fact about the archive, never exit 1.
         Err(DrillError::RestoreNoOp(msg)) => {
-            // `FailIntegrity`, not a new `Outcome` variant. A8 leaves the
-            // variant open and demands an explicit GC12 determination; here
-            // it is. GC12's text is "`format_version` is `1.0.0` and semver:
-            // a minor adds optional fields only; a major changes an identity
-            // rule. Readers ignore unknown fields and refuse a higher major."
-            // A new `Outcome` value is NOT an added optional field: `outcome`
-            // is a required field whose JSON Schema pins its allowed value
-            // set, and "readers ignore unknown fields" gives no cover for an
-            // unknown VALUE of a known field — the auditor's own verifier
-            // (docs/verify_scorecard.py) validating against the published
-            // 1.0.0 schema would REJECT `outcome: "restore-no-op"` outright.
-            // That is a major change, and GC12 fixes the version at 1.0.0, so
-            // minting the variant is not available to this task.
-            //
-            // `FailIntegrity` is also the honest answer, not merely the
-            // permitted one: it is exactly what `phase8_score::decide`
-            // returns for `integrity.result != Pass`, and the two lines below
-            // set precisely that. What makes a no-op restore DISTINGUISHABLE
-            // in the signed document from phase 5's block and from a genuine
-            // phase-7 reconciliation failure is three facts a reader can
-            // check: `outcome` (`fail-integrity` vs `preflight-failed`),
-            // `integrity.level` (`not-attempted` vs `byte-fingerprint`), and
-            // the phase-6 record itself, whose `outcome` begins
-            // "failed: drill-not-pass:" and whose `notes` carry the reason.
+            // `FailIntegrity`, not a new `Outcome` value: `outcome`'s schema
+            // pins its value set, so a new value is a major change that every
+            // older verifier (docs/verify_scorecard.py) rejects. It is also the
+            // honest answer, what `phase8_score::decide` returns for
+            // `integrity.result != Pass`. A reader tells a no-op restore from
+            // phase 5's block and a phase-7 failure by `outcome`,
+            // `integrity.level` (`not-attempted`) and the phase-6 record, whose
+            // `outcome` begins "failed: drill-not-pass:" and whose `notes`
+            // carry the reason.
             sc.outcome = Outcome::FailIntegrity;
             sc.integrity.level = IntegrityLevel::NotAttempted;
             sc.integrity.result = IntegrityResult::Fail;
@@ -3050,17 +2548,10 @@ fn execute_with_validated_approval(
             // nothing, so any offset mapping it wrote would describe no records.
             let signed =
                 sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(torn_down)?;
-            // ...and then PHASE 9 STILL RUNS. This branch differs from the
-            // phase-5 one in the fact that matters here: the restore actually
-            // executed, so whatever it created on the operator's cluster is
-            // still there. Returning straight to exit 2 would leave scratch
-            // topics behind on the one failure path where a drill wrote to
-            // their broker — the residue that makes people stop running
-            // drills. A8 requires the interception to reach exit 2 with a
-            // signed scorecard; it says nothing about skipping cleanup, and
-            // its own snippet is explicitly "not prescribed here as final
-            // code". A teardown that itself fails is attested honestly by
-            // `phase9_teardown` (`topics_failed`), never swallowed.
+            // ...and phase 9 still runs: unlike phase 5's branch, the restore
+            // executed, so whatever it created is still on the operator's
+            // cluster. A teardown that fails is attested (`topics_failed`),
+            // never swallowed.
             let keys = EvidenceKeys::of(&signed);
             let mut out = signed.scorecard.clone();
             teardown(
@@ -3095,13 +2586,13 @@ fn execute_with_validated_approval(
             &admitted.topic_mapping,
             &plan,
             &c.source_config_coverage,
-            // FX-3: the spec's mode, the one `target_info` signs as
+            // The spec's mode, the one `target_info` signs as
             // `target.mode`, decides `intended` versus `not_reconstructed`.
             c.spec.target.mode,
-            // PROD-08.1: the approved plan's coverage and its bound.
+            // The approved plan's coverage and its bound.
             c.spec.sample.coverage,
             c.spec.sample.complete_max_records,
-            // FX-23: the engine's offset report, which phase 7 refuses when
+            // The engine's offset report, which phase 7 refuses when
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
         )
@@ -3112,11 +2603,9 @@ fn execute_with_validated_approval(
     sc.sample.records_restored = verified.records_restored;
     complete_sample_info(&mut sc.sample, &sc.integrity);
 
-    // 7 -> 8: SCORE BEFORE SIGNING. `phase8_score::run` signs the document it is
-    // handed and never recomputes, so `measured`, `outcome` and `objectives`
-    // must be final at this point. This is the spec §14 SP1c exit criterion —
-    // "a signed scorecard whose measured.rto_seconds and measured.rpo_seconds
-    // are numbers" — and it has no other implementing step.
+    // 7 -> 8: score before signing. `phase8_score::run` signs the document it
+    // is handed and never recomputes, so `measured`, `outcome` and
+    // `objectives` must be final here.
     let timeline = phase8_score::Timeline {
         requested_at: sc.requested_at,
         approval_validated_at: approved.validated_at,
@@ -3132,14 +2621,10 @@ fn execute_with_validated_approval(
     };
     sc.measured = phase8_score::compute_measured(
         &timeline,
-        // The requested recovery point: the END of the window this plan
-        // restores, read off the plan itself so it cannot drift from what
-        // `build_plan` bound and `render_restore` printed as
-        // `restore.time_window_end`. Since Task 9 that is
-        // `spec.restore.point_in_time` when the spec states one and
-        // `spec.sample.window_end` otherwise — reading `sample.window_end`
-        // here would score a `point_in_time` restore against a recovery point
-        // it was never asked to reach.
+        // The requested recovery point: the end of the window this plan
+        // restores, read off the plan so it cannot drift from what
+        // `build_plan` bound (`spec.restore.point_in_time` when stated, else
+        // `spec.sample.window_end`).
         plan.time_window.1.timestamp_millis(),
         verified.newest_restored_ts_ms,
     );
@@ -3147,12 +2632,8 @@ fn execute_with_validated_approval(
         phase8_score::decide(&sc.measured, &c.spec.objectives, &sc.integrity);
     sc.outcome = outcome;
     sc.objectives = objectives;
-    // NOTHING assigns to `sc.integrity.pass_rate_measured` here, and no third
-    // return value invites it to. Phase 7 set that field in `roll_up` and is
-    // the only writer; the line that used to stand here overwrote phase 7's
-    // deliberate `None` with a ratio recomputed from the two counters with
-    // `whole_sample_reconciled` dropped — see `phase8_score::decide`'s doc
-    // comment for the signed document that produced.
+    // Nothing assigns `sc.integrity.pass_rate_measured` here: phase 7's
+    // `roll_up` is its only writer (see `phase8_score::decide`).
 
     // 8
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
@@ -3175,18 +2656,10 @@ fn execute_with_validated_approval(
         &admitted.topic_mapping,
         &signed_bytes_sha256,
     );
-    // THE MAINLINE EXIT-2 GATE. A drill that ran every phase, was measured and
-    // was scored `fail-objective` or `fail-integrity` is a drill RESULT: exit
-    // 2, with the signed scorecard already in the bucket. Deleting this
-    // comparison makes Logweir report SUCCESS for a restore that missed its
-    // RTO — the review's mutant R3, which survived the whole suite because
-    // the two exit-2 paths that were covered both return early from phases 5
-    // and 6 and never reach here. Pinned by
-    // `a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase`.
-    //
-    // AND IT CARRIES THE KEYS (FAILED-DRILL-EVIDENCE-UNPUBLISHED): the signed
-    // `fail-objective`/`fail-integrity` document is the evidence a failed
-    // rehearsal owes, and a controller can only verify what it can name.
+    // The mainline exit-2 gate: a drill that ran every phase and was scored
+    // `fail-objective` or `fail-integrity` is a drill result, exit 2, with the
+    // signed scorecard already in the bucket and its keys carried out
+    // (`a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase`).
     if sc.outcome != Outcome::Pass {
         return Err(DrillError::NotPass(Box::new(sc), Some(evidence)));
     }
@@ -3276,18 +2749,10 @@ fn teardown(
             run_id,
             scorecard_sha256,
         );
-        // T0-11, channel 2 of 3. `topics_failed` was correct from the day it
-        // was written and reached no `tracing::` call, no `metrics.rs` and no
-        // `summary_line()` — so a drill that left five scratch topics on a
-        // production broker printed the same line and exited 0 as one that
-        // cleaned up.
-        //
-        // The names travel in the `topics` FIELD and in the message both: a
-        // JSON-line consumer reads `fields.topics`, a plain-text consumer reads
-        // the message, and a mutant that emits a count without the names must
-        // fail on both. `run_id` is on the EVENT and not only on the entered
-        // `drill` span, for Task 12's reason — a single-line consumer reads the
-        // event object, never its span.
+        // A teardown that left topics is a warning event: the names travel in
+        // the `topics` field and in the message (JSON and plain-text
+        // consumers), and `run_id` is on the event, not only on the span,
+        // which a single-line consumer never reads.
         if let Some(msg) = phase9_teardown::teardown_warning(&a) {
             tracing::warn!(
                 run_id = %run_id,
@@ -3296,7 +2761,7 @@ fn teardown(
                 "{msg}"
             );
         }
-        // FX-44: and the line the controller copies to `status.teardown`.
+        // And the line the controller copies to `status.teardown`.
         phase9_teardown::print_left(&a.topics_failed);
         // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
         // The attestation is the durable record of the teardown; a key line
@@ -3350,29 +2815,17 @@ fn sign_and_publish(
         phase8_score::run_with_signer(&to_sign, signer, &c.store, offset_report)
     })?;
     write_scorecard_artifact(args, run_id, &signed);
-    // Carried obligation from Task 20. Phase 8 signs BEFORE it puts — bytes
-    // cannot be signed before they are serialised — so the four storage facts
+    // Phase 8 signs before it puts, so the four storage facts
     // (`create_only_enforced`, `immutable`, `retain_until`, `version_id`) are
-    // unknowable at signing time and the signed scorecard neutralises all
-    // four. Until this receipt existed, Logweir published NO verifiable
-    // evidence that its own upload was create-only, and `docs/stability.md`
-    // said so. The receipt is a second, separately signed document carrying
-    // the real post-put readback — the same pattern phase 9 uses for the
-    // teardown attestation, and for the same reason.
+    // unknowable at signing time and the scorecard neutralises them. The
+    // receipt is a second, separately signed document carrying the real
+    // post-put readback, as phase 9's teardown attestation is.
     let receipt = phase8_score::put_receipt(&signed);
     if let Err(e) = phase8_score::persist_put_receipt_with_signer(&receipt, signer, &c.store) {
         // A warning, never an outcome: the drill result is already signed and
-        // uploaded, and a receipt that could not be written must not retract
-        // a measurement. It also must not be silent.
-        //
-        // It goes to the LOG and nowhere else, deliberately. The obvious
-        // alternative — a note on the phase-8 record — cannot work and would
-        // only look like it did: the document was frozen and signed before
-        // this line runs, and `execute_with` then adopts that signed document,
-        // so any note written here is discarded a few lines later. A field
-        // that appears to carry evidence and provably cannot is worse than no
-        // field at all. The receipt's ABSENCE from the bucket is the durable
-        // signal (`docs/stability.md` says so in those words).
+        // uploaded. Only the log: a phase-8 note would be discarded, because
+        // the document was signed before this runs. The receipt's absence from
+        // the bucket is the durable signal.
         tracing::warn!(error = %e, "post-put evidence receipt not persisted");
     }
     Ok(signed)
@@ -3384,17 +2837,11 @@ fn sign_and_publish(
 /// different backup than the approved plan named would make the whole
 /// approval chain meaningless.
 ///
-/// **A bound plan's set is selected by KEY (FX-16 fix round, review M-1 and
-/// L-1).** `list_backup_sets` lists every `…/manifest.json` under the prefix,
-/// recursively and sorted, naming each set by its parent directory, so two
-/// manifests can carry the bound id — a copy under a sub-prefix, a nested set.
-/// Choosing the FIRST by id let the drill describe one of them while the
-/// engine, told only the prefix and the id, restored
-/// `<prefix>/<backup_id>/manifest.json`; and let a same-id copy that sorts
-/// first refuse a truthful plan. For a bound plan `bound.manifest_key` is that
-/// engine key (the binding refuses any other), so the set chosen here, the set
-/// `describe` reads and the set the engine restores are one object. A plan
-/// bound to no point keeps the selection by id.
+/// A bound plan's set is selected by key: two manifests can carry the bound
+/// id (a copy under a sub-prefix, a nested set), and `bound.manifest_key` is
+/// the key the engine restores, so the set chosen here, the set `describe`
+/// reads and the set the engine restores are one object. A plan bound to no
+/// point keeps the selection by id.
 fn pick_backup_set(
     engine: &dyn DataEngine,
     spec: &DrillSpec,
@@ -3445,15 +2892,11 @@ fn pick_backup_set(
 /// identity is what binds the approved plan to the executed one (see
 /// `logweir_engine_oso::render_restore`'s module doc).
 ///
-/// **`pub` for guard G-ID**, and for nothing else. It is the seam where the
-/// approved spec BYTES become the plan `plan_hash` covers, so it is the seam
-/// where "the rendered `sasl_username` comes from the plan and never from a
-/// cluster object" is a testable claim rather than a comment:
-/// `crates/logweir/tests/auth_binding.rs::
-/// rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object`
-/// calls it with a live cluster view in scope and asserts the view cannot
-/// reach the document. A test that constructed a `RestorePlan` literal
-/// instead would be asserting a property of the test.
+/// `pub` for guard G-ID: it is where the approved spec bytes become the plan
+/// `plan_hash` covers, so
+/// `tests/auth_binding.rs::rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object`
+/// can show the rendered `sasl_username` comes from the plan, never from a
+/// cluster object.
 pub fn build_plan(
     spec: &DrillSpec,
     set: &BackupSetRef,
@@ -3462,30 +2905,19 @@ pub fn build_plan(
     run_id: &str,
     offset_report_out: Option<&std::path::Path>,
 ) -> Result<RestorePlan, DrillError> {
-    // **GUARD G-WIN, THE BINDING HALF.** `RestorePlan.time_window.0` is
-    // computed from the archive set's earliest covered timestamp as recorded
-    // in the manifest — never from the spec and never from an inherited
-    // tuple. `time_window.1` is `spec.restore.point_in_time` when present,
-    // else `spec.sample.window_end`, which preserves every existing drill's
-    // behaviour for the END of the window; the START widens to the archive
-    // floor for every mode, which cannot lose records and is the direction
-    // the guard requires.
-    //
-    // And the binding lives HERE, where the plan is built, not where it is
-    // printed: `logweir_engine_oso::render_restore::render` is a printer, so a
-    // mutant applied there is byte-identical to correct output whenever the
-    // plan handed to it is already right — which is exactly why spec §10's
-    // earlier G-WIN row had two mutants that both passed.
-    // The floor is the minimum over the topics THIS RESTORE NAMES — the keys
-    // of the admitted topic mapping — so it reports the same instant the
-    // backup receipt's `covered.from_ms` reports for the same archive and the
-    // same topics (plan erratum E7(b)). Phase 5 re-derives it from the same
-    // field of the plan built here.
+    // Guard G-WIN, the binding half, here where the plan is built (the
+    // renderer only prints it). `time_window.0` is the archive's earliest
+    // covered timestamp from the manifest, never the spec's: widening the
+    // start to the archive floor cannot lose records. `time_window.1` is
+    // `spec.restore.point_in_time` when present, else `spec.sample.window_end`.
+    // The floor is the minimum over the topics this restore names, the
+    // instant the backup receipt's `covered.from_ms` reports for the same
+    // topics; phase 5 re-derives it from the same field.
     let named_topics: BTreeSet<&str> = mapping.keys().map(String::as_str).collect();
-    // PROD-11.1: a stated window start (`restore.point_in_time: "<start>/<end>"`) is resolved by the shared
-    // selection function, which refuses it before the floor (never moves it
-    // there) and reports the claim the plan makes about it. A plan that states
-    // none takes the archive's floor below, exactly as before.
+    // A stated window start (`restore.point_in_time: "<start>/<end>"`) is
+    // resolved by the shared selection function, which refuses one before the
+    // floor (never moves it there) and reports the plan's claim about it. A
+    // plan that states none takes the archive's floor below.
     let resolved = resolve_selection(spec, mapping, facts)?;
     let manifest_floor_ms = facts
         .earliest_covered_timestamp_ms(&named_topics)
@@ -3537,17 +2969,16 @@ pub fn build_plan(
     )
 }
 
-/// **PROD-11.1.** The plan's replay selection resolved against the archive
-/// set it restores, through the ONE function the restore preflight previews
-/// it with (`logweir_core::replay_selection::ReplaySelection::resolve`).
+/// The plan's replay selection resolved against the archive set it restores,
+/// through the one function the restore preflight previews it with
+/// (`logweir_core::replay_selection::ReplaySelection::resolve`).
 ///
-/// `Ok(None)` for a plan that states no window start and no partition subset:
-/// nothing is resolved and every caller does exactly what it did before
-/// PROD-11.1. Otherwise the selection is resolved over the mapped source
-/// topics (the keys of `mapping`, the set the G-WIN floor is taken over), and
-/// every refusal — a shape error, a start before the archive's coverage, a
-/// partition the archive does not list, a selection no segment overlaps — is
-/// exit 3, `DrillError::Guard`, before anything runs.
+/// `Ok(None)` for a plan that states no window start and no partition
+/// subset. Otherwise the selection is resolved over the mapped source topics
+/// (the keys of `mapping`, the set the G-WIN floor is taken over), and every
+/// refusal (a shape error, a start before the archive's coverage, a partition
+/// the archive does not list, a selection no segment overlaps) is exit 3,
+/// `DrillError::Guard`, before anything runs.
 pub fn resolve_selection(
     spec: &DrillSpec,
     mapping: &BTreeMap<String, String>,
@@ -3568,7 +2999,7 @@ pub fn resolve_selection(
     selection.resolve(&facts.topics).map(Some).map_err(refused)
 }
 
-/// **PROD-01.1a.** What the transaction-marker check found.
+/// What the transaction-marker check found.
 struct MarkerScan {
     /// Marker-shaped records per topic and partition.
     counts: logweir_core::transaction_markers::MarkerCounts,
@@ -3576,21 +3007,21 @@ struct MarkerScan {
     unread_after_window: Vec<String>,
 }
 
-/// **PROD-01.1a.** The records shaped like a transaction marker in the
-/// selected partitions' segments that the window overlaps (the engine's own
-/// rule, `ReplaySelection::segment_overlaps`) AND in every segment after the
+/// The records shaped like a transaction marker in the selected partitions'
+/// segments that the window overlaps (the engine's own rule,
+/// `ReplaySelection::segment_overlaps`) and in every segment after the
 /// window's end: a marker there closes a transaction that can have records in
 /// the window. Segments whose last record is before the window's start are
 /// skipped (out-of-order timestamps can put a closing marker there:
-/// `docs/stability.md` lists it as not detected). Each is
-/// streamed through the bounded `kbak::scan_segment` (one stored segment and a
-/// few hundred KiB held at a time).
+/// `docs/stability.md` lists it as not detected). Each is streamed through the
+/// bounded `kbak::scan_segment` (one stored segment and a few hundred KiB held
+/// at a time).
 ///
 /// A segment the restore reads and the scan cannot decode refuses the run
-/// (`GuardRefused`); one the store does not hold is left to the restore, as
-/// before. A segment after the window that is absent or cannot be read never
-/// refuses (the restore does not read it, PROD-08.1); it is listed in
-/// `unread_after_window`, which the run reports.
+/// (`GuardRefused`); one the store does not hold is left to the restore. A
+/// segment after the window that is absent or cannot be read never refuses
+/// (the restore does not read it); it is listed in `unread_after_window`,
+/// which the run reports.
 fn count_transaction_markers(
     archive: &Store,
     facts: &BackupSetFacts,
@@ -3661,12 +3092,11 @@ fn count_transaction_markers(
     Ok(scan)
 }
 
-/// **PROD-11.1.** The signed `source.selection` block of a resolved
-/// selection: its stated start (when the plan states its own,
-/// `InheritedFromSpec`) and its end, and (PROD-11.1b, format 2.0.0) its
-/// per-topic partition subsets over the restored topics and how many engine
-/// runs restore them. `None` when the plan states neither a start nor a
-/// subset.
+/// The signed `source.selection` block of a resolved selection: its stated
+/// start (when the plan states its own, `InheritedFromSpec`) and its end, and
+/// (format 2.0.0) its per-topic partition subsets over the restored topics and
+/// how many engine runs restore them. `None` when the plan states neither a
+/// start nor a subset.
 #[must_use]
 pub fn selection_label(
     r: &logweir_core::replay_selection::ResolvedSelection,
@@ -3700,7 +3130,7 @@ pub fn selection_label(
 /// against the value it describes, by a test as well as at runtime.
 ///
 /// `window_floor_source == ArchiveManifest` while `time_window.0` was read
-/// from the spec is a lie the enum cannot catch on its own (critique A F22).
+/// from the spec is a lie the enum cannot catch on its own.
 /// Passing the three values TOGETHER is what makes the lie constructible, and
 /// therefore refusable: `build_plan_with_floor` ends by checking that
 /// `ArchiveManifest` implies `start.timestamp_millis() == manifest_floor_ms`.
@@ -3718,14 +3148,10 @@ pub struct WindowFloor {
 /// The per-run workdir both pod-local engine files live in:
 /// `<temp>/logweir-<run_id>`.
 ///
-/// A named function rather than the same `temp_dir().join(...)` written twice,
-/// because the two paths have to be siblings — `execute_with_outcome` creates
-/// this directory once, from `plan.checkpoint_state.parent()`, and the engine
-/// creates neither file's parent
-/// [U:crates/kafka-backup-core/src/restore/engine.rs:1382-1388 uses a bare
-/// `tokio::fs::write`, whose failure is only a `warn!`]. Two independently
-/// spelled paths could drift into two directories, one of which would not
-/// exist, and the offset report would then silently never be written.
+/// One function because both files must be siblings: `execute_with_outcome`
+/// creates this directory once and the engine creates neither file's parent
+/// (its offset-report write failure is only a `warn!`), so a second spelling
+/// could silently lose the offset report.
 pub fn run_workdir(run_id: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("logweir-{run_id}"))
 }
@@ -3759,9 +3185,9 @@ pub fn build_plan_with_floor(
         topic_mapping: mapping.clone(),
         time_window: (floor.start, window_end),
         window_floor_source: floor.source,
-        // PROD-11.1: the spec's per-topic subsets over the mapped topics,
-        // each sorted and unique (the selection's shape refusals ran in
-        // phase 0 and again here). Empty for every plan that states none.
+        // The spec's per-topic subsets over the mapped topics, each sorted and
+        // unique (the selection's shape refusals ran in phase 0 and again
+        // here). Empty for every plan that states none.
         source_partitions: logweir_core::replay_selection::ReplaySelection::from_spec(spec)
             .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
             .partitions
@@ -3783,18 +3209,12 @@ pub fn build_plan_with_floor(
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| run_workdir(run_id).join("offsets.json")),
     };
-    // **THE ENUM IS CHECKED AGAINST THE VALUE IT CLAIMS** (critique A F22).
-    // An EXPLICIT check, deliberately NOT a `debug_assert!`: that macro is
-    // compiled out in release, which is the profile every shipped binary is
-    // built in, so the one assertion standing between a lying plan and a
-    // signed `pass` would exist only in the test profile.
-    //
-    // Exit 3, before anything runs (Global Constraint 11, `crate::exit`).
-    // **AND THE OTHER ARM, since PROD-11.1's G-WIN amendment**: a plan that
-    // says its start came from the spec may state a LATER start than the
-    // archive's floor, never an earlier one. A start before the floor names
-    // instants the archive does not cover; it is refused, never moved to the
-    // floor (which would restore a window nobody approved).
+    // The enum is checked against the value it claims, with an explicit
+    // check: a `debug_assert!` is compiled out of the release binaries that
+    // sign. Exit 3, before anything runs. A start inherited from the spec may
+    // be later than the archive's floor, never earlier: an earlier start names
+    // instants the archive does not cover, and is refused, never moved to the
+    // floor.
     if plan.window_floor_source == WindowFloorSource::InheritedFromSpec
         && plan.time_window.0.timestamp_millis() < floor.manifest_floor_ms
     {
@@ -3818,32 +3238,14 @@ pub fn build_plan_with_floor(
             floor.manifest_floor_ms
         ))));
     }
-    // **AND THE WINDOW IS NEVER INVERTED OR EMPTY** (plan erratum E7(a)).
-    // `time_window.0` is the archive's floor and `time_window.1` is the
-    // requested recovery point, so a recovery point at or before the floor
-    // describes an interval holding no instant at all. The engine validates
-    // only `start <= end` [U:crates/kafka-backup-core/src/config.rs:1184-1187],
-    // so before this check an inverted window reached `engine.preflight` and
-    // came back as the engine's own config-validator text — ruling R-E's
-    // `EngineError`, exit **1, operational**, after phases 0-4 had run. That
-    // misfiled the one failure an operator can actually fix: asking for a
-    // recovery point from before the archive begins is not an operational
-    // fault, it is a plan the archive cannot satisfy.
-    //
-    // `>=`, not `>`: at equality the window is `[t, t]` for a filter the
-    // engine reads as `>= start && <= end`, which is one instant wide and
-    // restores whatever shares that exact millisecond — almost always nothing,
-    // and never the recovery the operator asked for. An empty restore that
-    // reports `pass` is precisely G-WIN's silent loss.
-    //
-    // Exit 3, refused before anything runs (Global Constraint 11), and it
-    // names BOTH integers plus the spec field the end came from, so the
-    // refusal is actionable without reading the manifest by hand.
-    //
-    // It lives HERE, at the one place a `RestorePlan` is constructed, so no
-    // caller — `build_plan`, a restore mode of Task 9b, or a test — can
-    // produce an inverted window at all. Not a `debug_assert!`, for the same
-    // reason as the check above: that macro is compiled out in release.
+    // The window is never inverted or empty: a recovery point at or before
+    // the archive's floor holds no instant. The engine validates only
+    // `start <= end`, and its error would be exit 1 after phases 0-4,
+    // misfiling a plan the archive cannot satisfy. `>=`, not `>`: `[t, t]`
+    // restores whatever shares that millisecond, almost always nothing, and an
+    // empty restore reporting `pass` is G-WIN's silent loss. Exit 3, naming
+    // both integers and the spec field the end came from. Here, at the one
+    // place a `RestorePlan` is built, and not a `debug_assert!`.
     if plan.time_window.0 >= plan.time_window.1
         && plan.window_floor_source == WindowFloorSource::InheritedFromSpec
     {
@@ -3874,10 +3276,10 @@ pub fn build_plan_with_floor(
 fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
     let id = c.engine.id();
     Scorecard {
-        // PROD-01.3: 1.5.0 when the target's auth mode is one PROD-01.3 added
+        // 1.5.0 when the target's auth mode is one that version added
         // (`target_info` fills `target.auth.mode` from the same spec field),
-        // the 1.4.0 document otherwise — so no scorecard of a `plaintext` or
-        // `scramSha512` target changes by a byte.
+        // the 1.4.0 document otherwise, so no `plaintext` or `scramSha512`
+        // scorecard changes by a byte.
         format_version: logweir_core::scorecard::format_version_for_target(Some(&AuthSummary {
             mode: c.spec.target.auth.mode_str().into(),
             username: None,
@@ -3904,45 +3306,30 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
                 dry_run_check_segments: LeverState::UnknownNotObservable,
                 unknown_key_warnings: Vec::new(),
             },
-            // The claims-nothing STARTING value, raised only by phase 5's own
-            // per-run lever readback and then resolved, at signing time, by
-            // `phase8_score::matrix_verdict_for`.
-            //
-            // It reads "not yet established" here while
-            // `docs/support-matrix.md` defines the variant as "the engine
-            // accepted a lever and did not act on it", and the gap between
-            // those two readings never reaches an artifact: NO scorecard is
-            // signed before phase 5 has run. Phases 0-4 fail with exit 1 or 3
-            // and write nothing, and all three signing paths (the phase-5
-            // `Verdict::Block` jump, the phase-6 `RestoreNoOp` interception
-            // and the normal run) are downstream of the readback. So by the
-            // time this value can be signed it means exactly what the
-            // support matrix says: phase 5 looked, and the engine did not
-            // honour the lever.
+            // The claims-nothing starting value, raised by phase 5's lever
+            // readback and resolved at signing by
+            // `phase8_score::matrix_verdict_for`. No scorecard is signed before
+            // phase 5 has run, so by the time it can be signed it means what
+            // `docs/support-matrix.md` says: phase 5 looked, and the engine did
+            // not honour the lever.
             matrix_verdict: MatrixVerdict::FailLeverNotHonoured,
             // `matrix_verdict_reason` is REQUIRED only for `fail` and must be
             // null otherwise (`Scorecard::validate_invariants`).
             matrix_verdict_reason: None,
         },
-        // `captured_by_logweir` is true iff phase −1 ran (Global Constraint 18,
-        // reversed 2026-09-03; global ruling GR4 Part A). `validate_invariants`
-        // does NOT refuse `true`: it requires that `true` implies
-        // `last_phase_completed >= -1` and a non-null
-        // `measured.rpo_source_relative_seconds` with a null
-        // `rpo_source_relative_unmeasured_reason`, and that `false` implies the
-        // reverse. This orchestrator never runs phase −1 — the `--from-cluster`
-        // path is Task 24 (GR4 Part B) — so `false` stands and the invariant
-        // holds dormant but correct.
+        // `captured_by_logweir` is true iff phase −1 ran; this orchestrator
+        // never runs it, so `false` stands (`validate_invariants` ties each
+        // value to `last_phase_completed` and the `rpo_source_relative_*` pair).
         source: SourceInfo {
             backup_id: String::new(),
             manifest_sha256: String::new(),
             manifest_version_id: None,
             captured_by_logweir: false,
-            // FX-8: decided after the archive is described, by
+            // Decided after the archive is described, by
             // `time_basis::decide`; a draft that never got that far has not
             // decided it.
             time_basis: None,
-            // PROD-11.1: written once the selection is resolved.
+            // Written once the selection is resolved.
             selection: None,
         },
         target: TargetInfo {
@@ -3958,12 +3345,9 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             topic_mapping_prefix: c.spec.target.topic_mapping_prefix.clone(),
             topic_mapping_sha256: String::new(),
             topic_mapping_entries: 0,
-            // Task 5b declares the SHAPE of `target.auth`; Task 6 fills it.
-            // `None` is the honest value for a draft nothing has measured
-            // yet — and absent means plaintext, which is what every
-            // scorecard this tree has written says by omission.
+            // `None` on a draft nothing has measured; `target_info` fills it.
             auth: None,
-            // PROD-15.1: written once phase 1 has verified the approval
+            // Written once phase 1 has verified the approval
             // subject (`original_name_info`), never on a draft.
             original_name: None,
         },
@@ -4025,12 +3409,12 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),
             unexpected_divergence: Vec::new(),
-            // NOT RECORDED until phase 7 runs (FX-4): a scorecard signed after
+            // Not recorded until phase 7 runs: a scorecard signed after
             // an earlier phase failed has not assessed any configuration, and
             // `Some(vec![])` would claim it had assessed every topic.
             not_assessed: None,
-            // The same for FX-3's field: `Some(vec![])` would claim phase 7
-            // found nothing left unreconstructed.
+            // The same for `not_reconstructed`: `Some(vec![])` would claim
+            // phase 7 found nothing left unreconstructed.
             not_reconstructed: None,
         },
         engine_subreport: None,
@@ -4059,26 +3443,17 @@ fn source_info(
         backup_id: facts.backup_id.clone(),
         manifest_sha256: facts.manifest_sha256.clone(),
         manifest_version_id: facts.manifest_version_id.clone(),
-        // See `new_scorecard`: phase −1 is Task 24's (GR4 Part B).
+        // See `new_scorecard`: this orchestrator never runs phase −1.
         captured_by_logweir: false,
-        // FX-8: ALWAYS written once decided, so a 1.3.0 document's empty lists
-        // are a claim and an absent block means "not recorded" (pre-1.3.0).
+        // Always written once decided, so a 1.3.0 document's empty lists are a
+        // claim and an absent block means "not recorded" (pre-1.3.0).
         time_basis: Some(time_basis),
-        // PROD-11.1: set by the caller once the plan's selection is resolved.
+        // Set by the caller once the plan's selection is resolved.
         selection: None,
     }
 }
 
-/// Fallible only because of **G-EXP**: `render_topic_mapping_block` now
-/// escapes through `yaml_scalar_checked`, which REFUSES a `${`. The refusal is
-/// unreachable from here — `phase0_admit::run` has already refused a `${` in
-/// any selected topic and in `target.topic_mapping_prefix`, and
-/// `admitted.topic_mapping` is built from exactly those two — so this is a
-/// fail-closed propagation rather than a live path. It is a `?` and not an
-/// `expect`: an unreachable refusal that becomes reachable through somebody
-/// else's edit must exit 3 with its `refusal-reason=` line, not abort the
-/// process.
-/// **PROD-15.1.** The approval's subject must be the plan's: an original-name
+/// The approval's subject must be the plan's: an original-name
 /// plan needs an `originalName` approval, which an ordinary approval cannot
 /// satisfy and a standing authorization never is (`approved: None` here is
 /// the standing path at startup); an `originalName` approval authorises
@@ -4097,9 +3472,9 @@ fn check_original_name_subject(
         None => ApprovalSubject::Ordinary,
     };
     check_approval_subject(needed, signed).map_err(GuardRefusal)?;
-    // OD-10: a one-person confirmation (v2 under `Ordinary`) of an
-    // original-name plan carries every original topic name re-typed, exactly,
-    // inside the signed bytes; held here to the plan this run executes.
+    // A one-person confirmation (v2 under `Ordinary`) of an original-name plan
+    // carries every original topic name re-typed, exactly, inside the signed
+    // bytes; held here to the plan this run executes.
     let one_person =
         approved.is_some_and(|a| a.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY);
     logweir_core::original_name::check_typed_confirmation(
@@ -4111,7 +3486,7 @@ fn check_original_name_subject(
     .map_err(|e| GuardRefusal(e).into())
 }
 
-/// **PROD-15.1.** What only the runner holds about an original-name restore,
+/// What only the runner holds about an original-name restore,
 /// read once before any client exists: the verified receipt's measured
 /// source cluster id and recorded owners, and — when given — the Strimzi
 /// owners of the restored names in the target's `KafkaTopic` resources.
@@ -4168,7 +3543,7 @@ fn original_name_inputs(
     })
 }
 
-/// **PROD-15.1 review M2 and L2: the owner condition fails CLOSED.** A
+/// The owner condition fails closed. A
 /// `KafkaTopic` that manages a restored name but whose reference cannot be
 /// recorded, a `KafkaTopic` whose topic cannot be read, and a file holding no
 /// `KafkaTopic` at all (unless it is the explicit empty `List` `kubectl`
@@ -4208,7 +3583,7 @@ fn refuse_unreadable_owners(
     .into())
 }
 
-/// **PROD-15.1.** The signed `target.original_name` block: what phase 0
+/// The signed `target.original_name` block: what phase 0
 /// proved (the cluster condition, the owners) and what phase 1 verified (the
 /// approval subject and the document it was in). `None` for every restore
 /// that is not an original-name restore.
@@ -4236,8 +3611,8 @@ fn original_name_info(
             })
             .collect(),
         owner_path: proved.owners.owner_path,
-        // OD-10: the check above admitted a one-person confirmation only with
-        // every name typed, so the document says how it was confirmed.
+        // The check above admitted a one-person confirmation only with every
+        // name typed, so the document says how it was confirmed.
         confirmation: (approved.approval_mode == phase1_approval::APPROVAL_MODE_ORDINARY)
             .then(|| logweir_core::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.to_string()),
         kafka_topic_resources_sha256: proved.kafka_topic_resources_sha256.clone(),
@@ -4257,6 +3632,10 @@ fn marker_topic_for(spec: &DrillSpec) -> Option<String> {
     }
 }
 
+/// Fallible only because of G-EXP: `render_topic_mapping_block` refuses a
+/// `${`, which `phase0_admit::run` already refused in every selected topic
+/// and in the prefix. A `?`, not an `expect`, so a refusal that becomes
+/// reachable exits 3 with its `refusal-reason=` line instead of aborting.
 fn target_info(
     spec: &DrillSpec,
     admitted: &phase0_admit::Admitted,
@@ -4266,19 +3645,13 @@ fn target_info(
             .map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     Ok(TargetInfo {
         cluster_id: admitted.target_cluster_id.clone(),
-        // The DISCRIMINATOR the signed document was missing (review F1). It
-        // is `skip_serializing_if`-absent for `Scratch`, so no byte of any
-        // scratch document moves, and present for `NewTopic` — the one run
-        // whose phase 0 skipped the marker and allowlist checks.
+        // The discriminator: absent for `Scratch`, so no byte of a scratch
+        // document moves, and present for `NewTopic`, the one run whose phase
+        // 0 skipped the marker and allowlist checks.
         mode: spec.target.mode,
-        // ABSENT in `newTopic` mode. The field's own doc comment defines it as
-        // the phase-0 segregation proof — `cluster_id ∈ allowedClusterIds` AND
-        // this topic exists — and in `newTopic` mode neither is checked, so
-        // writing the spec's value here would put a verified-sounding claim
-        // about an unrun check into a DSSE-signed document. The reviewer
-        // measured exactly that: a real run with `logweir.scratch` DELETED and
-        // an EMPTY allowlist still reported `target.marker_topic:
-        // "logweir.scratch"`.
+        // Absent in `newTopic` mode: the field is the phase-0 segregation
+        // proof (`cluster_id ∈ allowedClusterIds` and this topic exists), which
+        // that mode never checks.
         marker_topic: marker_topic_for(spec),
         // The prefix PHASE 0 ACTUALLY MAPPED THROUGH, taken off `Admitted`
         // rather than re-read from the spec. In `newTopic` mode the name comes
@@ -4293,32 +3666,18 @@ fn target_info(
         // engine was handed cannot drift.
         topic_mapping_sha256: logweir_core::ids::sha256_prefixed(block.as_bytes()),
         topic_mapping_entries: admitted.topic_mapping.len() as u32,
-        // **Interface I1's scorecard end, now closed on both sides.** Task 5b
-        // declares `AuthSummary`/`TargetInfo.auth` and pays Global Constraint
-        // 12's price for it (both readers, the corpus, the schema); TASK 6
-        // owns the VALUE, and this is the assignment its own `target_info`
-        // comment spelled out verbatim while the field did not yet exist on
-        // its branch. Applied at the rebase of 5b onto Task 6, which is the
-        // first tree where both halves are present.
-        //
-        // `mode_str()` returns one of a closed set of `&'static str`
-        // (`spec.rs::mode_str`; five since PROD-01.3) that is the
-        // `KafkaCluster` CRD's `auth.mode` enum byte for byte, the receipt's
-        // `source.auth.mode`, and exactly what BOTH readers accept for this
-        // field under the version `new_scorecard` wrote (1.4.0 for the three
-        // PROD-01.3 modes). `crates/logweir/tests/auth_binding.rs::
-        // the_scorecard_auth_block_and_auth_spec_agree` asserts the two
-        // strings and the `{mode, username}` round trip; the two readers'
-        // `target.auth` arms refuse any third spelling.
-        //
-        // Always `Some` on a measured drill: a scorecard whose target block
-        // says nothing about auth is read as plaintext by omission, and
-        // omission is the one thing a SCRAM run must not be recorded as.
+        // Interface I1's scorecard end. `mode_str()` is one of a closed set
+        // that is the `KafkaCluster` CRD's `auth.mode` enum byte for byte, the
+        // receipt's `source.auth.mode`, and what both readers accept under the
+        // version `new_scorecard` wrote
+        // (`tests/auth_binding.rs::the_scorecard_auth_block_and_auth_spec_agree`).
+        // Always `Some` on a measured drill: absent reads as plaintext, which a
+        // SCRAM run must never be recorded as.
         auth: Some(AuthSummary {
             mode: spec.target.auth.mode_str().into(),
             username: spec.target.auth.username().map(str::to_string),
         }),
-        // PROD-15.1: filled after phase 1 (`original_name_info`), the first
+        // Filled after phase 1 (`original_name_info`), the first
         // point at which the approval subject is VERIFIED; a block written
         // here would sign a subject nobody had checked yet.
         original_name: None,
@@ -4334,14 +3693,11 @@ fn sample_info(
         window_end: sel.window.1,
         topics: sel.topics,
         partitions: sel.partitions,
-        // THE CANARY SIZE — the number of records this drill set out to
-        // reconcile — and deliberately NOT `Selection::records_expected`,
-        // which answers a different question (how many records the manifest
-        // says the whole window holds). The two share a name and differ by
-        // orders of magnitude on any real archive; substituting one for the
-        // other would make the signed document overstate what was verified.
-        // Both definition sites carry this note (Task 16's parked item).
-        // `integrity.records_sampled` is measured against THIS figure.
+        // The canary size, the records this drill set out to reconcile, and
+        // not `Selection::records_expected` (what the manifest says the whole
+        // window holds): the two differ by orders of magnitude, and
+        // substituting one would overstate what was verified.
+        // `integrity.records_sampled` is measured against this figure.
         records_expected: sel.per_partition.iter().map(|s| s.count as u64).sum(),
         // Phase 7 measures this; phase 4 cannot know it.
         records_restored: 0,
@@ -4351,20 +3707,19 @@ fn sample_info(
         } else {
             sel.notes.join("; ")
         },
-        // FX-23: absent unless `max_partitions` left a topic unsampled; every
+        // Absent unless `max_partitions` left a topic unsampled; every
         // sampled document is 1.6.0 (`format_version_with_sample`).
         unsampled_topics: (!sel.unsampled_topics.is_empty()).then(|| sel.unsampled_topics.clone()),
     }
 }
 
-/// **PROD-08.1.** A COMPLETE verification set out to reconcile every
-/// expected record of every restored partition, so `sample` says so: its
-/// canary is the expected output of every COMPARED partition
-/// (`records_expected`, which `integrity.records_sampled` is held to) — the
-/// whole expected output only when the block is `covered`, since a partition
-/// the bound stopped is never decoded and contributes 0 (review L-3) — over
-/// every partition and topic the complete block lists. A sampled
-/// verification's `sample` is phase 4's, untouched.
+/// A complete verification set out to reconcile every expected record of
+/// every restored partition, so `sample` says so: its canary is the expected
+/// output of every compared partition (`records_expected`, which
+/// `integrity.records_sampled` is held to), the whole expected output only
+/// when the block is `covered`, since a partition the bound stopped is never
+/// decoded and contributes 0, over every partition and topic the complete
+/// block lists. A sampled verification's `sample` is phase 4's, untouched.
 fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::scorecard::Integrity) {
     let Some(c) = integrity
         .verification
@@ -4379,10 +3734,7 @@ fn complete_sample_info(sample: &mut SampleInfo, integrity: &logweir_core::score
     sample.topics = u32::try_from(topics.len()).unwrap_or(u32::MAX);
 }
 
-// =======================================================================
-// PROD-15.1 review 2, M1 and L1 — what this process puts at the start of a
-// line of its pod log
-// =======================================================================
+// What this process puts at the start of a line of its pod log.
 
 #[cfg(test)]
 mod pod_log_lines_pin {
@@ -4406,8 +3758,8 @@ mod pod_log_lines_pin {
     /// `exit::one_line_tests` and, through the real binary,
     /// `tests/original_name_cli.rs::a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`;
     /// this pins the call site, and that no raw print of an error is left in
-    /// either runner. KILLS: printing the error raw again (the review's
-    /// forgery: two key lines inside a plan string).
+    /// either runner. KILLS: printing the error raw again (two key lines
+    /// inside a plan string).
     #[test]
     fn an_errors_text_reaches_stderr_only_on_one_line() {
         // Built from two halves so this row's own source is not a match.
@@ -4425,7 +3777,7 @@ mod pod_log_lines_pin {
         assert_eq!(backup.matches(raw).count(), 0, "no raw print of an error");
     }
 
-    /// **Review 2, L1: `exiting` prints the stopped creation step's two lines
+    /// **`exiting` prints the stopped creation step's two lines
     /// through the seam, on exit 1 only, and nothing else in this file prints
     /// a `failure-reason=`.** The bytes are pinned by
     /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
@@ -4474,12 +3826,9 @@ mod pod_log_lines_pin {
 
 #[cfg(test)]
 mod tests {
-    //! `finish` and `summary_line` are private and are reached only from
-    //! `run`, which needs a live broker and the engine binary. Their call
-    //! sites therefore have no integration-test coverage available to them,
-    //! and "the metrics file is never written" is exactly the kind of silent
-    //! omission this build keeps shipping — so they are pinned here, inside
-    //! the crate, where the private items are nameable.
+    //! `finish` and `summary_line` are private and reached only from `run`,
+    //! which needs a live broker, so they are pinned here, where private
+    //! items are nameable.
     use super::*;
 
     /// The text of the top-level `fn <name>(` in this file, up to its closing
@@ -4495,28 +3844,12 @@ mod tests {
         &rest[..end + 2]
     }
 
-    /// **FX-4 review L1: the glue mutant X4.** The coverage the VERIFIED point
-    /// binding established must reach the context phases 3 and 7 read.
-    /// `execute_for_reporting` is the only path from a verified binding to a
-    /// running phase, and the unit suite cannot drive it past `context`
-    /// without dialling a broker, so this guard reads the source: `context`
-    /// takes the coverage and builds the `Ctx` WITH it, and the one call site
-    /// passes `bindings.source_config_coverage`. Nothing on that path may
-    /// substitute UNKNOWN. X4 (the call site passing
-    /// `SourceConfigCoverage::unknown()`, or `context` storing UNKNOWN whatever
-    /// it is given) fails here. The behavioural twin is the live row
-    /// `e2e/tests/config_coverage.rs::capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity`,
-    /// whose point-bound restore reads `captureDenied`/`notCaptured`, never
-    /// `unknown`.
-    /// **FX-4 fix round: the glue's FIRST half (mutant X6).** The test below
-    /// guards `execute_for_reporting` → `context` → `Ctx`; this one guards
-    /// where the coverage enters the run. `check_v2_bindings` must keep what
-    /// `binding::verify_point_binding` returned and hand it out in
-    /// `V2Bindings`, and nothing may reset it in between. X6 (the assignment
-    /// dropped, so every bound run reads UNKNOWN) survived every unit and
-    /// integration suite of `logweir` (measured 2026-10-05); like the test
-    /// below, this reads the source, and the same live row is its
-    /// behavioural twin.
+    /// The coverage `binding::verify_point_binding` returned is kept by
+    /// `check_v2_bindings` and handed out in `V2Bindings`; nothing resets it.
+    /// Reads the source: the unit suite cannot drive `execute_for_reporting`
+    /// past `context` without a broker. The behavioural twin is
+    /// `e2e/tests/config_coverage.rs::capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity`.
+    /// KILLS: the assignment dropped, so every bound run reads UNKNOWN.
     #[test]
     fn the_verified_binding_hands_its_coverage_to_the_run() {
         let src = include_str!("mod.rs");
@@ -4547,26 +3880,12 @@ mod tests {
         );
     }
 
-    /// **FX-14 (FX-7 merge review MR-L2): a NOTED point keeps its verified
-    /// coverage, through `check_v2_bindings` itself.** The two source scans
-    /// around this row pin the assignment's text; this one drives the function
-    /// over a real archive and reads what it returns.
-    ///
-    /// The archive is a pinned point COPIED into an unversioned store (a
-    /// local filesystem, which serves no version): the receipt pins a version
-    /// this bucket never issued, so the binding proves the point by its digest
-    /// and notes that the pin could not be checked (FX-7, review H-1). That
-    /// note is a warning, never a reason to trust the receipt less: the
-    /// receipt's `captureDenied` must reach the run, or phases 3 and 7 read
-    /// every topic as `notAssessed (unknown)` although the receipt the run
-    /// verified recorded more.
-    ///
-    /// KILLS MR8 (the merge review's mutant, which survived every suite): the
-    /// assignment wrapped in `if verified.pin_note.is_none() { … }`. Also
-    /// kills the assignment deleted, or replaced by UNKNOWN, for a noted point.
-    /// The control is the same archive's unnoted reading: the binding proves
-    /// it with the note set, so the row is about the noted path and not about
-    /// a point whose pin happened to be checked.
+    /// A noted point keeps its verified coverage, through `check_v2_bindings`
+    /// itself over a real archive. The archive is a pinned point copied into
+    /// an unversioned store, so the binding proves it by digest and notes that
+    /// the pin could not be checked; the note is a warning, and the receipt's
+    /// `captureDenied` must still reach the run. KILLS: the assignment skipped
+    /// for a noted point, deleted, or replaced by UNKNOWN.
     #[test]
     fn a_noted_point_hands_its_verified_coverage_through_check_v2_bindings() {
         use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
@@ -4655,7 +3974,7 @@ mod tests {
         );
     }
 
-    /// **FX-16: the set the verified receipt describes travels WITH its
+    /// **The set the verified receipt describes travels WITH its
     /// coverage**, from the same `VerifiedPoint`, through `V2Bindings` and
     /// `context` into `Ctx::bound_set` — so a run whose coverage came from a
     /// receipt always has that receipt's set to compare. A behaviour test over
@@ -4701,7 +4020,7 @@ mod tests {
         );
     }
 
-    /// **FX-16 class sweep: the archive the binding verifies is read through
+    /// **The archive the binding verifies is read through
     /// the same client configuration as the archive the run restores.** Every
     /// read-only archive handle in this module comes from
     /// `archive_read_handle`, and the binding passes it the store contract's
@@ -4710,7 +4029,7 @@ mod tests {
     /// reads exactly as to the engine's and phase 7's.
     ///
     /// KILLS: the binding building its own `Store::read_only_from_url` again
-    /// (the pre-FX-16 shape: no archive CA, relocatable by `AWS_ENDPOINT_URL`);
+    /// (no archive CA, relocatable by `AWS_ENDPOINT_URL`);
     /// the binding ignoring `store_contract`.
     #[test]
     fn every_archive_handle_is_built_by_one_constructor() {
@@ -4750,10 +4069,10 @@ mod tests {
         );
     }
 
-    /// **FX-16: WHERE the restored set is checked.** Exactly once, after
+    /// **Where the restored set is checked.** Exactly once, after
     /// `describe` produced the facts it compares, and before every reader of
-    /// the receipt's word in the phase sequence: the time basis (FX-8), phase
-    /// 2, phase 3's diff and phase 7's parity (FX-4). The behaviour rows in
+    /// the receipt's word in the phase sequence: the time basis, phase 2,
+    /// phase 3's diff and phase 7's parity. The behaviour rows in
     /// `tests/orchestrator.rs` prove the refusal creates no target topic and
     /// pre-empts the time basis; this pins the order against the rest.
     #[test]
@@ -4783,6 +4102,9 @@ mod tests {
         }
     }
 
+    /// `context` builds the `Ctx` with the coverage it is given, and the one
+    /// call site passes `bindings.source_config_coverage`. KILLS: UNKNOWN
+    /// substituted anywhere on that path.
     #[test]
     fn the_run_context_is_built_with_the_verified_coverage() {
         let src = include_str!("mod.rs");
@@ -4813,7 +4135,7 @@ mod tests {
         );
     }
 
-    /// **FX-8 review X3b: the time-basis opt-in is read in ONE place, from
+    /// **The time-basis opt-in is read in ONE place, from
     /// the approved plan, and from nothing else.** A behaviour test cannot see
     /// an opt-in that is ALSO honoured from an environment variable or a
     /// flag: every plan it runs is honoured the same way. So the sources are
@@ -4894,10 +4216,8 @@ mod tests {
             .expect("the checked-in fixture parses")
     }
 
-    /// The fixture scorecard as `report` now takes it — a whole
-    /// `RestoreOutcome`, because interface I8's three stdout lines are keys the
-    /// RUN put at and `report` is what prints them (Task 9b). The keys here are
-    /// the ones `phase8_score::run` builds for this fixture's run id.
+    /// The fixture scorecard as a whole `RestoreOutcome`, with the keys
+    /// `phase8_score::run` builds for this fixture's run id.
     fn an_outcome() -> RestoreOutcome {
         let sc = a_scorecard();
         let run_id = sc.run_id.clone();
@@ -4998,11 +4318,8 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Task 12 fix round 1. These three need `DEFAULT_LOG_DIRECTIVE` and
-    // `phase_observer`, both module-private, so they live here rather than in
-    // `crates/logweir/tests/logging.rs` with their eleven siblings.
-    // -----------------------------------------------------------------------
+    // These need the module-private `DEFAULT_LOG_DIRECTIVE` and
+    // `phase_observer`, so they live here rather than in `tests/logging.rs`.
 
     /// Runs `body` under a thread-local JSON subscriber built with the SAME
     /// directive `run()` uses when `RUST_LOG` is unset, and returns the lines
@@ -5022,23 +4339,15 @@ mod tests {
             .collect()
     }
 
-    /// Review finding M1, widened by Task 12's re-review finding N1 to the
-    /// `log` bridge. A dependency's INFO event must NOT reach the stream the
-    /// documentation makes a universal claim about.
+    /// A dependency's INFO event, `tracing` or bridged from `log`, does not
+    /// reach the default stream, where it could carry no `run_id` (it is
+    /// emitted on a tokio worker thread). A bare `"info"` directive fails
+    /// here.
     ///
-    /// Those crates emit from tokio worker threads, where the `drill`
-    /// `EnteredSpan` is not current, so such a line could carry neither
-    /// `fields.run_id` nor `span.run_id`. The fix is to keep it out of the
-    /// stream rather than to weaken the claim. A bare `"info"` directive lets
-    /// it through and fails here.
-    ///
-    /// The last three emissions are the `log`-bridge half. `LogTracer`
-    /// converts a `log` record into a `tracing` event whose TARGET is the log
-    /// record's target — `rustls::client` for a `log::info!` inside `rustls` —
-    /// and that event then meets this same `EnvFilter`. Emitting with an
-    /// explicit `target:` is therefore the bridged line as the filter sees it,
-    /// and it needs no globally-installed `LogTracer` (`log::set_logger` is
-    /// once-per-process and a unit test cannot own it).
+    /// The last three emissions are the `log` bridge as the filter sees it:
+    /// `LogTracer` gives the event the log record's target, so an explicit
+    /// `target:` needs no global `LogTracer` (`log::set_logger` is
+    /// once-per-process).
     #[test]
     fn a_dependency_info_event_is_filtered_at_the_default_directive() {
         let lines = under_the_default_directive(|| {
@@ -5074,24 +4383,11 @@ mod tests {
         );
     }
 
-    /// Every crate name this build actually COMPILED, read from the artifact
-    /// directory the running test binary lives in.
-    ///
-    /// `Cargo.lock` is not the resolved graph: it records optional
-    /// dependencies that no enabled feature activates, which is why `quinn`,
-    /// `quinn-proto`, `quinn-udp` (through `reqwest`'s HTTP/3 feature) and
-    /// `jni` appear there while `cargo tree -p logweir -i quinn -e normal`
-    /// prints "nothing to print". A crate cargo never compiled cannot emit,
-    /// and `DEFAULT_LOG_DIRECTIVE`'s own doc comment refuses to name crates
-    /// that cannot emit — so the closure below narrows the lockfile set by
-    /// this one.
-    ///
-    /// Reading the artifact directory rather than shelling out to
-    /// `cargo tree` is deliberate: `cargo tree` takes the package-cache lock,
-    /// and three agents building concurrently would turn a 15 s per-test
-    /// budget into a lock wait. This is a filesystem listing and is instant.
-    /// Artifact names are `lib<crate_name>-<16 hex>.<ext>` with the crate name
-    /// already in module spelling, so no hyphen mapping is needed here.
+    /// Every crate name this build compiled, read from the artifact directory
+    /// the test binary lives in. `Cargo.lock` also records optional
+    /// dependencies no feature activates, and a crate never compiled cannot
+    /// emit. Not `cargo tree`, which takes the package-cache lock. Artifact
+    /// names are `lib<crate_name>-<16 hex>.<ext>`, already in module spelling.
     fn crates_compiled_into_this_build() -> std::collections::BTreeSet<String> {
         let exe = std::env::current_exe().expect("the running test binary has a path");
         let deps = exe
@@ -5132,17 +4428,10 @@ mod tests {
         out
     }
 
-    /// Closed arithmetic over the WARN list, in this repository's established
-    /// idiom: the expected set is DERIVED, never hand-listed twice. A
-    /// dependency bump that introduces a new emitter fails here instead of
-    /// silently widening the default stream a year from now.
-    ///
-    /// The name says `tracing_emitting` for the history; the set is wider than
-    /// that, because there are TWO routes into this stream. Task 12 closed over
-    /// direct `tracing` dependants only, and its own re-review (N1) showed with
-    /// a live subscriber that `rustls` and `rdkafka` INFO records arrive
-    /// anyway, through the `tracing_log::LogTracer` that `try_init()` installs.
-    /// A `log` dependency is therefore counted exactly as a `tracing` one.
+    /// Closed arithmetic over the WARN list: the expected set is derived,
+    /// never hand-listed twice, so a dependency bump that adds an emitter
+    /// fails here. A direct `log` dependant counts like a `tracing` one,
+    /// because `try_init` installs the `tracing_log::LogTracer` bridge.
     #[test]
     fn every_tracing_emitting_dependency_in_the_lockfile_is_pinned_to_warn() {
         let lock = std::fs::read_to_string(
@@ -5153,28 +4442,14 @@ mod tests {
         // is the subscriber and `tracing-log` is the bridge; neither emits an
         // event of its own, and `tracing-log` would otherwise be counted purely
         // for depending on `log`.
-        // `weirkeeper` joins this predicate with Task 15 rather than joining
-        // the WARN list: it is one of ours, it depends on `tracing` directly,
-        // and it installs its OWN subscriber in `crates/weirkeeper/src/main.rs`
-        // — the `logweir` binary never links it, so pinning it here would be
-        // decoration in a constant whose doc comment refuses decoration. The
-        // crate is not named `logweir-*`, which is the only reason the prefix
-        // test does not already cover it.
+        // `weirkeeper` is ours too: it installs its own subscriber, the
+        // `logweir` binary never links it, and it is not named `logweir-*`.
         let ours = |n: &str| n == "logweir" || n.starts_with("logweir-") || n == "weirkeeper";
-        // `tracing` — the FACADE — joins this predicate with Task 15, for the
-        // same reason the other two are already here: it emits no event of its
-        // own. Every `tracing` event carries the EMITTING module's target
-        // (`logweir::drill`, `kube_client::client`), never `tracing`, so a
-        // `tracing=warn` directive would silence nothing and would be exactly
-        // the decoration `DEFAULT_LOG_DIRECTIVE`'s doc comment refuses. It
-        // arrived in the oracle because `kube-client` enables `tracing`'s
-        // optional `log` feature (`cargo tree -e features -i tracing`:
-        // `tracing feature "log" └── kube-client v0.99.0`), which put a direct
-        // `"log"` line into `tracing`'s own `Cargo.lock` entry where there was
-        // none before. That feature makes tracing forward to the `log` facade
-        // only when no subscriber is interested in the event, so it does not
-        // widen this stream — the run-id assertions in this module are the
-        // check on that, and they stay green.
+        // `tracing`, the facade, emits no event of its own: every event
+        // carries the emitting module's target. It appears in the oracle
+        // because `kube-client` enables its optional `log` feature, which
+        // forwards to `log` only when no subscriber is interested, so it does
+        // not widen this stream.
         let plumbing = |n: &str| n == "tracing" || n == "tracing-subscriber" || n == "tracing-log";
         let compiled = crates_compiled_into_this_build();
         let mut emitters: Vec<String> = vec![];
@@ -5240,10 +4515,9 @@ mod tests {
         }
     }
 
-    /// Review finding M2: the line that joins the run's identity to the
-    /// engine's captured output — `phase_observer(run_id)`, handed to phase 6
-    /// — was referenced by no test, so an observer built with the wrong id
-    /// could not be killed without a live broker.
+    /// `phase_observer(run_id)`, the join between the run's identity and the
+    /// engine's captured output, carries the run's id. KILLS: an observer
+    /// built with the wrong id.
     #[test]
     fn the_phase_observer_the_orchestrator_builds_carries_the_runs_id() {
         use logweir_core::engine::PhaseObserver;
@@ -5265,23 +4539,11 @@ mod tests {
         );
     }
 
-    /// GC11's swallow discipline, which nothing asserted: a metrics write that
-    /// FAILS is logged and swallowed, and never moves the exit code the drill
-    /// already decided. The textfile is a local operational side-channel on a
-    /// node-local volume — it is not the artifact and not the upload — so a
-    /// full disk, a read-only mount or a deleted `hostPath` must not turn a
-    /// pass into an operational error, and must not turn a guard refusal into
-    /// one either.
-    ///
-    /// Both writers are driven, because the mutant that matters makes `publish`
-    /// report failure and `report` demote the code on it: `finish` ->
-    /// `write_textfile` on exits 0 and 2, and `publish` -> `write_minimal_textfile`
-    /// on 1, 3 and 4. A test that drove only one arm would let the other half
-    /// through.
-    ///
-    /// The unwritable sink is a path UNDER A FILE, not a `chmod 500`
-    /// directory: `ENOTDIR` comes back whoever the process is, so this does not
-    /// quietly stop testing anything when it runs as root.
+    /// A failed metrics write is logged and swallowed and never moves the exit
+    /// code (GC11): the textfile is a node-local side-channel, not the
+    /// artifact. Both writers are driven (`finish` on exits 0 and 2, `publish`
+    /// on 1, 3 and 4). The unwritable sink is a path under a file: `ENOTDIR`
+    /// holds even as root, where a `chmod 500` directory would not.
     #[test]
     fn a_failed_metrics_write_is_swallowed_and_never_moves_the_exit_code() {
         let dir = tempfile::tempdir().unwrap();
@@ -5357,15 +4619,12 @@ mod tests {
         }
     }
 
-    /// The other half of "no `--metrics-file` means no file, not a default
-    /// path", and the half `finish_writes_no_metrics_file_when_the_flag_is_absent`
-    /// structurally cannot see: that test inspects a tempdir the writer was
-    /// never told about, so a default invented RELATIVE TO THE WORKING
-    /// DIRECTORY — `PathBuf::from("logweir.prom")`, which is how anyone would
-    /// actually write this bug — walks straight past it and lands in the
-    /// process's CWD instead. This watches the working directory itself, and
-    /// it watches it across `finish` AND across every terminal path of
-    /// `report`, because since T0-7 there are two places that read the flag.
+    /// The other half of "no `--metrics-file` means no file": a default
+    /// invented relative to the working directory
+    /// (`PathBuf::from("logweir.prom")`) walks past
+    /// `finish_writes_no_metrics_file_when_the_flag_is_absent`'s tempdir. This
+    /// watches the working directory itself, across `finish` and every
+    /// terminal path of `report`, the two places that read the flag.
     #[test]
     fn no_terminal_path_invents_a_metrics_file_when_the_flag_is_absent() {
         fn cwd_entries() -> std::collections::BTreeSet<PathBuf> {
@@ -5430,9 +4689,8 @@ mod tests {
 
     /// THE routing, and the product's primary output. A drill RESULT must
     /// reach exit 2 with its metrics written; an operational failure must
-    /// reach exit 1 — and, since T0-7, must ALSO leave a record. The file no
-    /// longer distinguishes the paths by its existence; `logweir_drill_exit_code`
-    /// inside it does, and the absence of `logweir_drill_runs_total` says no
+    /// reach exit 1 and also leave a record. `logweir_drill_exit_code` tells
+    /// the paths apart, and the absence of `logweir_drill_runs_total` says no
     /// scorecard was ever built.
     #[test]
     fn a_drill_result_reports_exit_2_and_an_operational_failure_reports_exit_1() {
@@ -5500,9 +4758,8 @@ mod tests {
         }
     }
 
-    /// T0-7. Exit 1 wrote nothing at all, so a CronJob whose broker was
-    /// unreachable and a CronJob that never ran produced the same observation:
-    /// none.
+    /// Exit 1 leaves a record, so a CronJob whose broker was unreachable is
+    /// distinguishable from one that never ran.
     #[test]
     fn metrics_written_on_operational_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -5575,9 +4832,8 @@ mod tests {
     /// says what terminal path produces it and what record it leaves.
     #[test]
     fn metrics_terminal_paths_are_exhaustive() {
-        // `DrillError::RestoreNoOp` is deliberately not represented: reaching
-        // the ExitCode conversion with it is an `unreachable!` (ruling A8), and
-        // this task does not change that.
+        // `DrillError::RestoreNoOp` is not represented: reaching the ExitCode
+        // conversion with it is `unreachable!`.
         fn representative(code: ExitCode) -> Result<RestoreOutcome, DrillError> {
             match code {
                 ExitCode::Ok => Ok(an_outcome()),
@@ -5696,18 +4952,16 @@ mod tests {
         );
     }
 
-    /// **FX-16 fix round (review M-1, L-1): a bound plan's set is the one at
-    /// the point's key, whatever sorts first.** The listing returns three
-    /// manifests with id `nightly-7` — a copy under `0copy/`, a nested set
-    /// under `a/`, and the set at the engine's key `nightly-7/manifest.json` —
-    /// in key order. Bound to the last, the bound plan gets the last; bound to
-    /// a key the listing does not show, it is exit 1 naming the key, never
-    /// another set by id.
+    /// **A bound plan's set is the one at the point's key, whatever sorts
+    /// first.** The listing returns three manifests with id `nightly-7` (a
+    /// copy under `0copy/`, a nested set under `a/`, and the set at the
+    /// engine's key `nightly-7/manifest.json`) in key order. Bound to the last,
+    /// the bound plan gets the last; bound to a key the listing does not show,
+    /// it is exit 1 naming the key, never another set by id.
     ///
-    /// KILLS: the bound selection removed (the first, `0copy/…`, is chosen —
-    /// L-1's false refusal; with a nested bound key, M-1's wrong restore).
-    /// The unbound control documents what a plan bound to no point still
-    /// does: the first by id (the class item owed in the report).
+    /// KILLS: the bound selection removed (the first, `0copy/…`, is chosen: a
+    /// false refusal, or with a nested bound key a wrong restore). The unbound
+    /// control shows a plan bound to no point still takes the first by id.
     #[test]
     fn a_bound_plan_picks_the_set_at_the_points_key_whatever_sorts_first() {
         use logweir_core::engine::*;
@@ -5828,20 +5082,11 @@ mod tests {
         assert_eq!(seen, vec![0, 1, 2, 3, 4]);
     }
 
-    /// **The signed document says WHICH MODE the run was in, and names a
-    /// marker topic only in the mode that verified one** (fix round 1, review
-    /// F1).
-    ///
-    /// Through `target_info`, not through `marker_topic_for` alone: the helper
-    /// is the rule's owner but `target_info` is the CALL SITE, and the mutant
-    /// this row exists for — write `spec.target.marker_topic` into a
-    /// `newTopic` document, which is what shipped — is spellable at either.
-    ///
-    /// The reviewer's live counterexample is the reason: a real run with
-    /// `logweir.scratch` DELETED from the cluster and an EMPTY allowlist
-    /// exited 0 and signed `target.marker_topic: "logweir.scratch"` anyway,
-    /// with nothing in the document to say the two checks behind that field
-    /// had been skipped.
+    /// **The signed document says which mode the run was in, and names a
+    /// marker topic only in the mode that verified one.** Through
+    /// `target_info`, the call site, not `marker_topic_for` alone: writing
+    /// `spec.target.marker_topic` into a `newTopic` document is spellable at
+    /// either.
     #[test]
     fn the_target_block_carries_the_mode_and_the_marker_topic_only_in_scratch() {
         use logweir_core::spec::TargetMode;
@@ -5904,15 +5149,14 @@ mod tests {
         );
     }
 
-    /// **FX-23: the writer's version follows the lane.** `sample_info` signs
-    /// the topics phase 4 left unsampled (absent when none), and
-    /// `execute_with_validated_approval` raises every SAMPLED document to 1.6.0
-    /// right after setting the block, from the plan's coverage, so the version
-    /// marks a build with FX-23's checks and a document naming an unsampled
-    /// topic is never written under a version arm US-1 refuses. KILLS:
-    /// dropping the field in `sample_info`; writing `Some(vec![])`; deleting or
-    /// moving the version step, or handing it anything but the plan's
-    /// coverage.
+    /// **The writer's version follows the lane.** `sample_info` signs the
+    /// topics phase 4 left unsampled (absent when none), and
+    /// `execute_with_validated_approval` raises every sampled document to
+    /// 1.6.0 right after setting the block, from the plan's coverage, so a
+    /// document naming an unsampled topic is never written under a version arm
+    /// US-1 refuses. KILLS: dropping the field in `sample_info`; writing
+    /// `Some(vec![])`; deleting or moving the version step, or handing it
+    /// anything but the plan's coverage.
     #[test]
     fn a_sampled_document_is_written_as_1_6_0() {
         let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
@@ -5976,7 +5220,7 @@ mod tests {
     }
 }
 
-/// **PROD-16.2.** Raises `sc.format_version` to the first version of its
+/// Raises `sc.format_version` to the first version of its
 /// major that defines `approval.console`, when the document carries the
 /// block; a no-op for every other document, which keeps the version it had
 /// byte for byte. Monotonic, and it never changes the major, so it is safe to
@@ -5990,9 +5234,7 @@ fn raise_version_for_console_approval(sc: &mut Scorecard) {
     .to_string();
 }
 
-// =======================================================================
-// PROD-15.1 — the runner holds the signed approval subject to the plan
-// =======================================================================
+// The runner holds the signed approval subject to the plan.
 
 #[cfg(test)]
 mod original_name_subject_tests {
@@ -6080,7 +5322,7 @@ mod original_name_subject_tests {
         ));
     }
 
-    /// OD-10, the runner's half: a one-person confirmation (v2 under
+    /// A one-person confirmation (v2 under
     /// `Ordinary`) of an original-name plan needs every original topic name
     /// re-typed, exactly, inside the signed bytes; a v1 or `Governed` approval
     /// has a second person and needs none. KILLS: dropping the typed check
@@ -6129,9 +5371,7 @@ mod original_name_subject_tests {
     }
 }
 
-// =======================================================================
-// PROD-15.1 review L5 (R05) — the run's reader protects the source names
-// =======================================================================
+// The run's reader protects the source names.
 
 #[cfg(test)]
 mod protected_names_pin {

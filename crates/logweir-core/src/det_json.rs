@@ -3,7 +3,7 @@ use serde::Serialize;
 /// Deterministic JSON: two-space pretty print; struct fields in DECLARATION
 /// order; Rust `BTreeMap` fields in key order; an embedded `serde_json::Value`
 /// map in the order it was READ, because `serde_json/preserve_order` is enabled
-/// (Task 1). RFC3339 `Z` timestamps.
+/// RFC3339 `Z` timestamps.
 ///
 /// This function does NOT itself guarantee "no NaN/Inf reaches the wire": the
 /// `serde_json::to_value` round-trip below turns a non-finite `f64` into
@@ -19,7 +19,7 @@ use serde::Serialize;
 /// through a typed `f64` field) that could carry a genuine non-finite
 /// `Number` variant.
 /// Mirrors OSO's own `to_deterministic_json` intent so an auditor comparing
-/// the two documents sees the same shape (spec §6 C1).
+/// the two documents sees the same shape.
 #[derive(Debug, thiserror::Error)]
 pub enum DetJsonError {
     #[error(transparent)]
@@ -33,7 +33,7 @@ pub enum DetJsonError {
 
 pub fn to_deterministic_json<T: Serialize>(value: &T) -> Result<Vec<u8>, DetJsonError> {
     // The `to_value` round-trip preserves ordering because `serde_json` is built
-    // with `preserve_order` (Task 1), so a Map keeps insertion order and struct
+    // with `preserve_order`, so a Map keeps insertion order and struct
     // fields keep declaration order.
     let v = serde_json::to_value(value)?;
     reject_non_finite(&v, "")?;

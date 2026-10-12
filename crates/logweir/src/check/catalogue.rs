@@ -53,7 +53,7 @@ pub const EXPIRY_TOPICS_DESCRIBABLE: Duration = Duration::from_secs(10 * 60);
 pub const EXPIRY_ARCHIVE: Duration = Duration::from_secs(30 * 60);
 /// **Five** minutes — `target.mappedTopics` and `target.topicCreate`. The
 /// shortest in the catalogue, because a topic can appear on the target between
-/// a preview and a run and that is exactly the race PLAT-03.2 names.
+/// a preview and a run.
 pub const EXPIRY_TARGET_COLLISION: Duration = Duration::from_secs(5 * 60);
 
 /// Every row this runner may relay, with the gating and expiry D2 §6.3 gives
@@ -98,7 +98,7 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Gating::Advisory,
         Some(EXPIRY_DEFAULT),
     ),
-    // FX-20c: BLOCKING, whatever the gating of the per-role row the grant
+    // BLOCKING, whatever the gating of the per-role row the grant
     // would answer — a grant a run presents and refuses is a run that fails,
     // and the default expiry because a Secret can be rebound at any time.
     (
@@ -158,7 +158,7 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Some(EXPIRY_DEFAULT),
     ),
     (CheckId::TargetLogAppendTime, Gating::ExecutionOnly, None),
-    // PROD-01.2, the capability rows (`kinds::capability`), each emitted only
+    // The capability rows (`kinds::capability`), each emitted only
     // when the plan lists it. The two engine-protocol rows are BLOCKING: an
     // endpoint that does not serve a request version the engine sends cannot
     // be backed up from, or restored into, at all. The other two are
@@ -261,12 +261,9 @@ pub fn outcome_gated(
 /// CHOKEPOINT fix.
 ///
 /// `CheckOutcome::with_message` / `with_remedy` / `with_fact` redact and
-/// `with_scope` / `with_detail` do not, which makes "nothing the runner
-/// prints is credential-shaped" a claim with two exceptions that a reader has
-/// to remember. The mutant round for M4 found exactly that shape: a planted
-/// AWS key survived in `scope.name` and in a `detail` sample while every
-/// message was clean, and the assertion that was supposed to notice was
-/// reading the base64 wrapper instead of the payload.
+/// `with_scope` / `with_detail` do not, which would make "nothing the runner
+/// prints is credential-shaped" a claim with two exceptions a reader has to
+/// remember.
 ///
 /// Running the same rules over the scope costs nothing — `redact` fires only
 /// on credential shapes, so `prod-archive`, `User:backup` and an ordinary

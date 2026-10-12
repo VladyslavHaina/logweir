@@ -1,37 +1,31 @@
 // pages/history.js -- Restores and Backups interleaved by creation time, and
 // the Restore detail view.
 //
-// THE RESTORE HALF OF THE BADGE RULE lives here: green requires
-// `evidence.verification.result == "Valid"` (on a basis `validVerification`
-// admits) AND `status.outcome === "pass"` AND no recorded non-zero `status.exitCode`
-// (an exit-2 run publishes a signed failure since interface I8's amendment). Only `pass` is green. A `fail-integrity` run produced a perfectly valid,
-// perfectly signed document SAYING THE RESTORE DID NOT RECONCILE, and a green
-// badge over it would invert the single most valuable thing this product
-// reports. The verification half is shared with the Backup rule and imported
-// from `./backups.js`; the second condition is not shared, because the two
-// kinds do not carry the same field.
+// THE RESTORE HALF OF THE BADGE RULE lives here (see [`restoreBadge`]): a
+// `fail-integrity` run produced a perfectly valid, signed document SAYING THE
+// RESTORE DID NOT RECONCILE, and a green badge over it would invert the most
+// valuable thing this product reports. The verification half is shared with
+// the Backup rule and imported from `./backups.js`; the outcome half is not,
+// because the two kinds do not carry the same field.
 //
-// THREE ROWS THE FROZEN `drill show` TABLE OMITS ARE RENDERED HERE, BECAUSE A
-// PAGE THAT OMITS THEM MAKES A DIFFERENT CLAIM FROM THE TRUTH.
+// THREE ROWS THE FROZEN `drill show` TABLE OMITS ARE RENDERED HERE, because
+// omitting them makes a different claim:
 //
-//   `engine sub-report` -- `engine_subreport` is null in EVERY scorecard this
-//   product writes, because the engine adapter never overrides the validation
-//   -run hook. Omitting the row renders "no caveat"; the row says "not
-//   produced by this engine version", which is what actually happened.
+//   `engine sub-report` -- null in every scorecard this product writes (the
+//   engine adapter never overrides the validation-run hook); omitting the
+//   row reads as "no caveat", so it says "not produced by this engine
+//   version".
 //
-//   `integrity.partialReason` -- a `partial` integrity result with no reason
-//   beside it is a verdict an auditor cannot act on.
+//   `integrity.partialReason` -- a `partial` result with no reason beside it
+//   is a verdict an auditor cannot act on.
 //
-//   `objectives` -- what was ASKED FOR. `measured` alone says what happened
-//   without saying whether it was enough.
-
+//   `objectives` -- what was ASKED FOR; `measured` alone does not say whether
+//   it was enough.
 //
-// THE RESTORE DETAIL IS THE DURABLE OPERATION VIEW (PLAT-12.1). The restore
-// wizard's guided submit ends here when an Approval already authorises the
-// Restore it created, so the view opens with where that operation stands --
-// its recorded progress, the plan hash of its own bytes, and its Approval's
-// state -- read from the objects themselves and never remembered by the page.
-// A refresh reads them again and creates nothing.
+// THE RESTORE DETAIL OPENS WITH WHERE ITS OPERATION STANDS -- its recorded
+// progress, the hash of its own plan bytes and its Approval's state -- read
+// from the objects and never remembered by the page; a refresh reads them
+// again and creates nothing.
 
 import { CONSOLE, apiClient, granted } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
@@ -111,18 +105,15 @@ export const NO_HISTORY_SENTENCE =
  *  verifies Valid, and the exit code stays authoritative for success. An
  *  absent `exitCode` is judged on the outcome, as the controller does.
  *
- *  THE NOT-GREEN CAPTION NAMES ITS CASE, exactly as the Backup rule's does.
- *  `Untrusted` means the bytes are authentic and this installation does not
- *  accept the key; `NotAttempted` means the controller could not check at all;
- *  `Invalid` means the document itself did not verify. Three different repairs
- *  behind one word was the defect D3 section 7.4 names, and the word is kept while
- *  the case is added beside it. */
+ *  THE NOT-GREEN CAPTION NAMES ITS CASE, as the Backup rule's does:
+ *  `Untrusted` (authentic bytes, a key this installation does not accept),
+ *  `NotAttempted` (the controller could not check), `Invalid` (the document
+ *  did not verify) -- three repairs behind one word (D3 section 7.4). */
 export function restoreBadge(status) {
   const s = status || {};
-  // PROD-08.1a: A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS NEVER
-  // GREEN, whatever else the status says -- the controller's own rule
-  // (`CompleteNotCovered`), applied here too so no row or detail can read it
-  // as a pass, in either mode.
+  // A COMPLETE VERIFICATION THAT DID NOT COVER THE RESTORE IS NEVER GREEN,
+  // whatever else the status says: the controller's own rule
+  // (`CompleteNotCovered`), applied in both modes.
   if (notCovered(completeOf(s))) {
     return captionBadge("unverified", UNVERIFIED + ": " + NOT_COVERED_CAPTION);
   }
@@ -139,11 +130,11 @@ export function restoreBadge(status) {
 }
 
 /** The caption a Restore badge carries over a complete verification that did
- *  not cover the restore (PROD-08.1a). */
+ *  not cover the restore. */
 export const NOT_COVERED_CAPTION =
   "complete coverage did not cover this restore -- not a pass";
 
-/** PROD-08.1a: the recorded complete block, from whichever document this page
+/** The recorded complete block, from whichever document this page
  *  is looking at -- the product API's full `verificationScope.complete` on a
  *  console detail, else the custom resource's (or a console list row's)
  *  `status.integrity.complete`. `null` when none is recorded. */
@@ -157,7 +148,7 @@ export function completeOf(status) {
   return integrity.complete && typeof integrity.complete === "object" ? integrity.complete : null;
 }
 
-/** PROD-08.1a: one Restore's coverage -- what it ASKS for (`spec.coverage`,
+/** One Restore's coverage -- what it ASKS for (`spec.coverage`,
  *  absent read as sampled; the controller has held it to the plan) and what
  *  its signed scorecard RECORDED (`status.integrity.coverage`, or the API's
  *  `verificationScope.coverage`; absent is not recorded, never complete). */
@@ -176,7 +167,7 @@ export function coverageOf(object) {
   };
 }
 
-/** PROD-11.1b: one Restore's signed selection, from whichever document this
+/** One Restore's signed selection, from whichever document this
  *  page is looking at -- the product API's `verificationScope.selection` on a
  *  console detail, else the custom resource's (or a console list row's)
  *  `status.integrity.selection`. `null` when none is recorded: every partition
@@ -187,7 +178,7 @@ export function selectionOf(object) {
 }
 
 /** The list row's coverage line, under the RESULT -- and, for a narrowed
- *  restore, the line that says so (PROD-11.1b). */
+ *  restore, the line that says so. */
 function coverageLine(object) {
   const c = coverageOf(object);
   const narrowed = selectionWords(selectionOf(object));
@@ -202,30 +193,23 @@ function coverageLine(object) {
 /** HOW MUCH OF ONE RESTORE WAS COMPARED, from whichever document this page
  *  is looking at.
  *
- *  `status.verificationScope` is the product API's own block and is used
- *  verbatim when it is there. A custom resource carries the same facts under
- *  two other names -- `status.integrity.level` and `status.completion`'s
- *  counts -- and they are read through D3 section 2.5's own table
- *  ([`SCOPE_LEVEL_OF_INTEGRITY`]), which is a vocabulary map and not a verdict:
- *  the level is whatever the runner recorded, translated, never inferred from
- *  a count or from a pass.
- *
- *  A LEVEL THIS TABLE DOES NOT KNOW PRODUCES NO SCOPE AT ALL, and the sentence
- *  for an absent scope says how much was compared is not known here -- which is
- *  true, and is not "complete". */
+ *  The product API's `status.verificationScope` is used verbatim. A custom
+ *  resource carries the same facts as `status.integrity.level` and
+ *  `status.completion`'s counts, read through D3 section 2.5's table
+ *  ([`SCOPE_LEVEL_OF_INTEGRITY`]): a vocabulary map, not a verdict, never
+ *  inferred from a count or a pass. A level the table does not know produces
+ *  no scope, and the absent-scope sentence says the amount compared is not
+ *  known here -- which is true, and is not "complete". */
 export function scopeOf(object) {
   const status = (object && object.status) || {};
   if (status.verificationScope !== null && status.verificationScope !== undefined) {
     return status.verificationScope;
   }
-  // A CONSOLE PROJECTION'S SCOPE IS THE API'S OWN BLOCK, OR NONE (FX-48). The
-  // table below is the custom resource's vocabulary, for the mode that has no
-  // `logweir-api` to do the mapping. A console detail now carries the
-  // scorecard's integrity level too (`status.integrity.level`, from the
-  // operation route's `completion`), and reading a scope out of it here would
-  // be this page computing what the API is there to compute -- and printing a
-  // sampled-check sentence with no counts for a run whose route published no
-  // scope at all.
+  // A CONSOLE PROJECTION'S SCOPE IS THE API'S OWN BLOCK, OR NONE. The table
+  // below is for the mode with no `logweir-api` to do the mapping; reading a
+  // scope out of a console detail's `status.integrity.level` would be this page
+  // computing what the API is there to compute, and would print a sampled-check
+  // sentence for a run whose route published no scope at all.
   if (((object || {}).__contract || {}).mode === CONSOLE) {
     return null;
   }
@@ -240,8 +224,7 @@ export function scopeOf(object) {
     recordsSampled: completion.recordsSampled,
     recordsSampledMatching: completion.recordsSampledMatching,
     recordsExpected: completion.recordsExpected,
-    // PROD-08.1a / FX-23: the custom resource's copies of the signed facts,
-    // under the API's names.
+    // The custom resource's copies of the signed facts, under the API's names.
     coverage: integrity.coverage,
     complete: integrity.complete,
     unsampledTopics: integrity.unsampledTopics,
@@ -249,11 +232,9 @@ export function scopeOf(object) {
   };
 }
 
-/** THE LINK A ROW OF EITHER KIND CARRIES TO THE DURABLE OPERATION VIEW.
- *
- *  Two kinds, two operation kinds, one route. The uid travels with the name so
- *  a link about a run that was deleted and recreated lands on a refusal rather
- *  than on a different run's evidence. */
+/** The link a row of either kind carries to the durable operation view. The
+ *  uid travels with the name, so a link about a run deleted and recreated
+ *  lands on a refusal rather than on a different run's evidence. */
 export function rowOperationCell(object, ns) {
   const meta = (object && object.metadata) || {};
   if (typeof meta.name !== "string" || meta.name.length === 0) {
@@ -300,10 +281,10 @@ function resultCell(object) {
       listRowVerified(status)) + coverageLine(object);
 }
 
-// A CONSOLE LIST ROW'S OWN GREEN (MCP-17): it carries no recorded verification
-// block, only the API's summary, whose `verifiedSuccess` is the controller's
-// badge rule computed server side -- the same word the SIGNED column reads. A
-// row whose SIGNED cell says verified must not call its outcome unverified.
+// A CONSOLE LIST ROW'S OWN GREEN: it carries no verification block, only the
+// API's summary, whose `verifiedSuccess` is the controller's badge rule
+// computed server side -- the word the SIGNED column reads -- so a row whose
+// SIGNED cell says verified never calls its outcome unverified.
 function listRowVerified(status) {
   const s = status || {};
   return ((s.evidence || {}).verification) === undefined && s.__summary !== undefined &&
@@ -317,25 +298,19 @@ function rowBadge(object) {
   return kindOf(object) === "Backup" ? backupBadge(status) : restoreBadge(status);
 }
 
-/** THE LINK THAT CARRIES A RECOVERY POINT'S IDENTITY INTO THE WIZARD
- *  (PLAT-11.1).
+/** THE LINK THAT CARRIES A RECOVERY POINT'S IDENTITY INTO THE WIZARD.
  *
  *  Only a `Backup` that IS a recovery point gets one -- Succeeded, with a
- *  backup set and a covered window -- because the wizard has nothing to build
- *  a plan from otherwise, and a link that opened a refusal would be this page
- *  offering an action it knows cannot work. The `Restore` rows get none: a
- *  restore is not a point to restore from.
- *
- *  BOTH HALVES OF THE IDENTITY TRAVEL. `restorePointRoute` spells the UID
- *  beside the name, and the UID is what the wizard resolves by, so a row
- *  clicked after the object was deleted and recreated under the same name ends
- *  in a refusal naming the point that is gone rather than in a plan over a
- *  different run. */
+ *  backup set and a covered window -- because otherwise the link would open a
+ *  refusal. `Restore` rows get none. The UID travels beside the name and is
+ *  what the wizard resolves by, so a row clicked after the object was
+ *  recreated under the same name ends in a refusal naming the point that is
+ *  gone, not in a plan over a different run. */
 export function restorePointCell(object, ns) {
   if (kindOf(object) !== "Backup" || !isRecoveryPoint(object)) {
     return cell(null);
   }
-  // A ROLE THAT CANNOT RESTORE HERE IS TOLD WHO CAN (MCP round 3, R3-2).
+  // A role that cannot restore here is told who can.
   return restorePointLink(restorePointRoute(ns, object), granted(ns, "restoreCreate"));
 }
 
@@ -371,8 +346,8 @@ export function renderHistoryList(input, second, ns) {
     const follow = rowOperationCell(object, ns);
     return [
       nameCell(object, ns) + (follow === cell(null) ? "" : "<span class=\"cell-sub\">" + follow + "</span>"),
-      // THE ROW'S ACTION BESIDE ITS NAME (MCP-25's rule): as the last column
-      // "Restore this point" was what a 1024 px window scrolled out of sight.
+      // The row's action beside its name: as the last column it was what a
+      // 1024 px window scrolled out of sight.
       restorePointCell(object, ns),
       esc(kindOf(object)),
       when(createdAt(object)),
@@ -430,11 +405,11 @@ export function renderRestoreOperation(object, operation) {
   );
 }
 
-/** The signed time basis (FX-8 review M-2), in words: `status.timeBasis` --
- *  the scorecard's `source.time_basis` as the controller copied it. ABSENT is
- *  not recorded and is never read as "every selection used the topics' own
- *  clocks"; two empty lists are the run's claim, as far as the archive
- *  manifest's segment bounds show. */
+/** The signed time basis, in words: `status.timeBasis`, the scorecard's
+ *  `source.time_basis` as the controller copied it. ABSENT is not recorded
+ *  and is never read as "every selection used the topics' own clocks"; two
+ *  empty lists are the run's claim, as far as the archive manifest's segment
+ *  bounds show. */
 export function signedTimeBasisText(timeBasis) {
   if (timeBasis === null || timeBasis === undefined || typeof timeBasis !== "object") {
     return "not recorded: this run carries no signed time basis (a scorecard before format " +
@@ -465,15 +440,14 @@ export function creationStopMore(stopped, key) {
   return Number.isInteger(count) && count > list.length ? count - list.length : 0;
 }
 
-/** What a Restore whose creation step stopped left on the target cluster
- *  (PROD-15.1), from `status.targetTopicsAppeared`: the mapped names someone
- *  else created while the restore was admitted (never written to), EVERY
- *  topic this restore created and left, empty, with what to do about it, and
- *  every name it asked for and CANNOT ACCOUNT FOR, with its own sentence
- *  (review 2, M2) -- never called this restore's. A list the 100-name bound
- *  cut says how many more there are. Logweir deletes none of them, so the
- *  operator must be told they are there. Empty when the status carries no
- *  such block. Every name is escaped, in all three lists. */
+/** What a Restore whose creation step stopped left on the target cluster,
+ *  from `status.targetTopicsAppeared`: the mapped names someone else created
+ *  while the restore was admitted (never written to), every topic this
+ *  restore created and left empty, with what to do about it, and every name
+ *  it asked for and CANNOT ACCOUNT FOR, with its own sentence -- never called
+ *  this restore's. A list the 100-name bound cut says how many more there
+ *  are. Logweir deletes none of them, so the operator must be told they are
+ *  there. Empty when the status carries no such block; every name escaped. */
 export function creationStoppedWarning(stopped) {
   if (stopped === null || stopped === undefined || typeof stopped !== "object") {
     return "";
@@ -530,8 +504,8 @@ export function creationStoppedWarning(stopped) {
 }
 
 /** The warning a Restore detail carries when its signed time basis names a
- *  topic whose timestamp type was not recorded (FX-8 review M-2): the clock
- *  that topic's point in time was read on is unknown. Empty otherwise. */
+ *  topic whose timestamp type was not recorded: the clock that topic's point
+ *  in time was read on is unknown. Empty otherwise. */
 export function unrecordedTimeBasisWarning(timeBasis) {
   const unknown = timeBasis && Array.isArray(timeBasis.notRecorded) ? timeBasis.notRecorded : [];
   if (unknown.length === 0) {
@@ -545,11 +519,10 @@ export function unrecordedTimeBasisWarning(timeBasis) {
       "point, records it.") + "</p>";
 }
 
-// WHAT A RESTORE DETAIL'S CELL SAYS FOR A VALUE THE CONTROLLER KEEPS ON THE
-// RESTORE OBJECT AND THE PRODUCT API SERVING THIS CONSOLE DOES NOT PUBLISH
-// (FX-48, PoC batch 6 F-4). The words and the test for "not published" are
-// `ui/render.js`'s, shared with the connection detail; they are exported from
-// here too, where the rows of this view read them.
+// What a Restore detail's cell says for a value the controller keeps on the
+// Restore and the product API serving this console does not publish:
+// `ui/render.js`'s words and test, shared with the connection detail and
+// re-exported here, where this view's rows read them.
 export { NOT_PUBLISHED, notPublishedIn };
 
 /** Said once, under the Integrity table, when any cell of the view reads
@@ -586,14 +559,13 @@ export function renderRestoreDetail(object, operation) {
   const coverage = coverageOf(object);
   const selection = selectionOf(object);
   // A VALUE THIS VIEW WAS NOT GIVEN IS ONE OF TWO THINGS, AND THE CELL SAYS
-  // WHICH (FX-48, PoC batch 6 F-4). On a custom resource an absent field is
-  // one the controller did not record: "-". On a console projection that
-  // NAMES the field among what it could not supply, "-" would say the same
-  // thing about a value the product API simply does not publish -- which is
-  // how a shared console came to show an empty Integrity table for a restore
-  // whose status read `byte-fingerprint` / `pass`. `shown` renders the value
-  // when there is one and the not-published cell when the projection named
-  // its absence; the sentence under the Integrity table is printed once.
+  // WHICH. On a custom resource an absent field is one the controller did not
+  // record: "-". On a console projection that NAMES the field among what it
+  // could not supply, "-" would say the same about a value the API simply does
+  // not publish (an empty Integrity table for a restore whose status read
+  // `byte-fingerprint` / `pass`). `shown` renders the value, or the
+  // not-published cell when the projection named its absence; the sentence
+  // under the Integrity table is printed once.
   let unpublished = false;
   const shown = (field, value, render) => {
     if ((value === undefined || value === null) && notPublishedIn(object, field)) {
@@ -632,8 +604,8 @@ export function renderRestoreDetail(object, operation) {
     "<h2>Restore " + nameOf(object) + "</h2>" +
     restoreBadge(status) +
     (status.phase === "Queued" ? "<p class=\"note queued\">" + esc(QUEUED_RUN_SENTENCE) + "</p>" : "") +
-    // PROD-15.1: WHAT A STOPPED CREATION STEP LEFT ON THE CLUSTER, first, where
-    // it cannot be missed: nothing else on this page says a topic exists.
+    // WHAT A STOPPED CREATION STEP LEFT ON THE CLUSTER, first, where it cannot
+    // be missed: nothing else on this page says a topic exists.
     creationStoppedWarning(status.targetTopicsAppeared) +
     (operation ? renderRestoreOperation(object, operation) : "") +
     facts([
@@ -645,10 +617,10 @@ export function renderRestoreDetail(object, operation) {
       ["target mode", cell((spec.target || {}).mode)],
       ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
       ["point in time", when(spec.pointInTime)],
-      // FX-8: WHAT THE APPROVED PLAN ACCEPTED, read from its bytes. A
-      // `LogAppendTime` topic at a point is refused unless the plan accepted
-      // producer time. "Not found" is said as such and never as "the plan
-      // states none" (review L-3): the signed result is the row below.
+      // WHAT THE APPROVED PLAN ACCEPTED, read from its bytes. A `LogAppendTime`
+      // topic at a point is refused unless the plan accepted producer time. "Not
+      // found" is said as such and never as "the plan states none"; the signed
+      // result is the row below.
       ["time basis (plan)", "<span id=\"restore-time-basis\">" +
         esc(planTimeBasis(spec.planBytes) === "producerTime"
           ? "producer time (restore.time_basis: producerTime): a LogAppendTime topic at this " +
@@ -657,14 +629,14 @@ export function renderRestoreDetail(object, operation) {
             "LogAppendTime topic at a point is refused, and the signed result below is " +
             "authoritative") +
         "</span>"],
-      // FX-8 (review M-2): WHAT THE RUN SIGNED, from `status.timeBasis` -- the
-      // scorecard's `source.time_basis` as the controller read it. A claim
-      // until the evidence verifies, like every scorecard fact on this page.
+      // WHAT THE RUN SIGNED, from `status.timeBasis` (the scorecard's
+      // `source.time_basis`). A claim until the evidence verifies, like every
+      // scorecard fact on this page.
       ["time basis (signed)", "<span id=\"restore-time-basis-signed\">" +
         claim(signedTimeBasisText(status.timeBasis)) + "</span>"],
       ["backup set", cell(spec.backupSetRef)],
-      // PROD-08.1a: WHAT THIS RESTORE ASKED FOR, from `spec` (which the
-      // controller holds to the plan), and WHAT ITS SCORECARD SIGNED.
+      // WHAT THIS RESTORE ASKED FOR, from `spec` (which the controller holds to
+      // the plan), and WHAT ITS SCORECARD SIGNED.
       ["coverage (asked for)", "<span id=\"restore-coverage-requested\">" +
         esc(coverage.requested === "complete"
           ? "complete -- every record of every restored partition" +
@@ -676,8 +648,8 @@ export function renderRestoreDetail(object, operation) {
         (notCovered(coverage.complete) ? " data-covered=\"false\"" : "") + ">" +
         claim(coverageWords(coverage.recorded, coverage.requested, coverage.complete)) +
         "</span>"],
-      // PROD-11.1b: WHAT WAS RESTORED, when the signed scorecard says it was
-      // a selection; a restore of everything shows no row, as before.
+      // WHAT WAS RESTORED, when the signed scorecard says it was a selection; a
+      // restore of everything shows no row.
       ...(selection === null
         ? []
         : [["restored (signed)", "<span id=\"restore-selection-signed\" data-selection=\"partial\">" +
@@ -691,14 +663,12 @@ export function renderRestoreDetail(object, operation) {
     "<h3>Integrity</h3>" +
     integrityFacts +
     notPublishedNote +
-    // HOW MUCH OF THIS RESTORE WAS ACTUALLY COMPARED, BESIDE THE RESULT AND
-    // NEVER AWAY FROM IT (D3 section 2.5, section 3.5). A pass is a pass over a SAMPLE, and
-    // a result printed without its scope reads as an exhaustive comparison --
-    // which no level in v1 performs and none is called `complete`.
+    // HOW MUCH WAS ACTUALLY COMPARED, BESIDE THE RESULT AND NEVER AWAY FROM IT
+    // (D3 sections 2.5 and 3.5): a pass is a pass over a SAMPLE, and a result
+    // without its scope reads as an exhaustive comparison.
     "<p class=\"scope\">" + esc(verificationScopeSentence(scopeOf(object))) + "</p>" +
-    // PROD-08.1a: A RECORDED COMPLETE VERIFICATION, IN FULL -- covered or not,
-    // the reason, and every partition's exact counts. A sampled run renders
-    // nothing here.
+    // A RECORDED COMPLETE VERIFICATION, IN FULL -- covered or not, the reason,
+    // and every partition's exact counts. A sampled run renders nothing here.
     (coverage.recorded === "complete"
       ? renderCompleteCoverage(coverage.complete, claim, selection)
       : "") +
@@ -712,11 +682,10 @@ export function renderRestoreDetail(object, operation) {
     preflightFacts +
     "<h3>Topics</h3>" +
     facts([
-      // PROD-15.1: for a run whose creation step stopped, the row says what
-      // the restore actually created -- the topics it left -- so a name
-      // someone else created, or one the restore cannot account for, is never
-      // listed as this restore's. (This controller writes the same list into
-      // `status.newTopics`; an older one wrote the plan's mapped names.)
+      // For a run whose creation step stopped, the row says what the restore
+      // actually created -- the topics it left -- so a name someone else created,
+      // or one it cannot account for, is never listed as this restore's. (An
+      // older controller wrote the plan's mapped names into `status.newTopics`.)
       ["new topics", createdTopics.length === 0
         ? cell(null)
         : esc(createdTopics.join(", ") + (stoppedLeftMore === 0
@@ -733,8 +702,8 @@ export function renderRestoreDetail(object, operation) {
     "Python one.</p>" +
     independentCheck(
       "scorecard",
-      // THE PLAN'S EVIDENCE BUCKET, NEVER THE SOURCE ARCHIVE'S (PoC P5's class
-      // sweep): the scorecard is where the approved plan wrote it.
+      // The plan's evidence bucket, never the source archive's: the scorecard is
+      // where the approved plan wrote it.
       planEvidenceBucket(spec.planBytes) || bucketOf(""),
       evidence.scorecardKey || "",
       evidence.sidecarKey || "",
@@ -744,8 +713,6 @@ export function renderRestoreDetail(object, operation) {
     "</section>"
   );
 }
-
-// --------------------------------------------------------------- mount half
 
 export async function mountHistory(node, ns, parse, lifecycle) {
   try {

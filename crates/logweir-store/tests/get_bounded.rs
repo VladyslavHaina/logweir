@@ -1,4 +1,4 @@
-//! **PROD-03.0 — `Store::get_bounded`**, the read schema dependency detection
+//! **`Store::get_bounded`**, the read schema dependency detection
 //! fetches segments through: nothing over the cap is fetched, an object at the
 //! cap is read whole, a missing one is `NotFound`, and a read that cannot
 //! finish within its budget fails instead of waiting. Over the real

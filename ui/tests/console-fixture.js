@@ -1,16 +1,12 @@
 // console-fixture.js -- a console fixture AS THE PAGE IS HANDED IT, and the
 // published document every one of them is held to.
 //
-// WHY THIS FILE EXISTS (FX-48). A page never sees what the product API sent.
-// It sees what `ui/contract.js` DECODED: declared members only, an absent
-// optional as `null`, and every member the shape does not name dropped on the
-// way through. A test that hands a renderer the fixture file itself is
-// therefore testing a document the page is never given -- and that is exactly
-// how a defect reached a live install with every row green:
-// `PointTopicView` did not declare `schemaDependency`, the decoder dropped it,
-// and the rows that held the "Registry not captured" note fed
-// `fixtures/console/catalog-point-schema-dependency.json` straight to the
-// renderers (PoC batch 6, F-1).
+// A page never sees what the product API sent: it sees what `ui/contract.js`
+// DECODED -- declared members only, an absent optional as `null`, every
+// member the shape does not name dropped. A test that hands a renderer the
+// fixture file itself tests a document the page is never given, and a
+// member the decoder drops (a `schemaDependency` the shape forgot) stays
+// green that way.
 //
 // SO THERE ARE TWO WAYS TO HOLD A CONSOLE FIXTURE, AND THEY ARE NAMED APART.
 //
@@ -228,12 +224,12 @@ export const CONSOLE_FIXTURES = Object.freeze({
   "catalog-signers.json": { schema: "SignerPageResponse" },
   "retention-policy-enforce.json": { schema: "RetentionPolicyResponse" },
   "retention-policies-list.json": { schema: "RetentionPolicyList" },
-  // FX-22: the product API's answer for the two policies of
+  // The product API's answer for the two policies of
   // `fixtures/retention-held-back.json`, held to it by
   // `logweir-api/tests/retention_accounting.rs`.
   "retention-policies-held-back.json": { schema: "RetentionPolicyList" },
-  // PROD-16.2: a two-person request as the approver is shown it, in each
-  // state the page renders, and the policy view of such a namespace.
+  // A two-person request as the approver is shown it, in each state the page
+  // renders, and the policy view of such a namespace.
   "approval-request-pending.json": { schema: "ApprovalRequestResponse" },
   "approval-request-original-name.json": { schema: "ApprovalRequestResponse" },
   "approval-request-approved.json": { schema: "ApprovalRequestResponse" },
@@ -280,14 +276,13 @@ export function decoded(name, change) {
  *  through `decodeCatalogPoints` -- the decoder `readCatalogPoints` applies
  *  between the API and the catalog page, the wizard and the schedule page.
  *
- *  A ROW WRITTEN IN A TEST IS STILL THE PRODUCT API'S DOCUMENT, and until
- *  FX-48 the suite handed such rows straight to the page functions. Decoded,
- *  it is what the page is handed: an absent optional is `null`, and a member
- *  the product API does not publish is not on it -- which this refuses by
- *  name, so a row cannot teach a page a member the API never sends.
- *  `envelope` overrides the page's own members (`truncated`, `viewExpired`,
- *  `backupVerdictsIncomplete`, `page`); a member given as `undefined` is left
- *  out, as the API leaves an absent one out. */
+ *  A ROW WRITTEN IN A TEST IS STILL THE PRODUCT API'S DOCUMENT. Decoded, it
+ *  is what the page is handed: an absent optional is `null`, and a member the
+ *  product API does not publish is refused by name, so a row cannot teach a
+ *  page a member the API never sends. `envelope` overrides the page's own
+ *  members (`truncated`, `viewExpired`, `backupVerdictsIncomplete`, `page`);
+ *  a member given as `undefined` is left out, as the API leaves an absent one
+ *  out. */
 export function handedPoints(rows, envelope) {
   const body = JSON.parse(JSON.stringify(Object.assign({
     requestId: "handed-points", page: { limit: 200 }, truncated: false, viewExpired: false,
@@ -330,16 +325,13 @@ export function readSchemas() {
   return Object.keys(READERS);
 }
 
-// ---------------------------------------------------------------------------
-// the validator over the published document
-// ---------------------------------------------------------------------------
-
-// A `$ref` NODE MAY CARRY ITS OWN `nullable`, AND IT DOES ALL OVER THIS
-// DOCUMENT: `{"$ref": "#/.../VisibilityView", "nullable": true}` is how the
-// generator spells an optional nested object. Resolving the reference and
-// throwing the referencing node away lost that flag, so every fixture with an
-// explicit `null` in such a field read as a schema violation -- which is a
-// validator that refuses documents the server is allowed to send.
+// THE VALIDATOR OVER THE PUBLISHED DOCUMENT.
+//
+// A `$ref` NODE MAY CARRY ITS OWN `nullable`, and does all over this
+// document: `{"$ref": "#/.../VisibilityView", "nullable": true}` is how the
+// generator spells an optional nested object. Resolving the reference must
+// keep that flag, or an explicit `null` in such a field reads as a schema
+// violation the server is allowed to send.
 export function resolve(node) {
   if (node.$ref === undefined) {
     return node;
@@ -425,9 +417,7 @@ export function schemaFindings(name, value) {
   return findings;
 }
 
-// ---------------------------------------------------------------------------
-// what a decode lost
-// ---------------------------------------------------------------------------
+// WHAT A DECODE LOST.
 
 /** The JSON paths `wireValue` carries that `decodedValue` does not, compared
  *  leaf by leaf -- INDEPENDENT of the decoder's own `unknown` bookkeeping, so

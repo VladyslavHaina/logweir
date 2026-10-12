@@ -1,85 +1,60 @@
-//! The `TrustPolicy` reconciler: parse the keys, resolve each one against the
+//! The `TrustPolicy` reconciler: parse the keys, resolve each against the
 //! clock, say which namespaces this policy governs and which it contests, and
-//! retire the roster it replaces (PLAT-19.1, decision D3 §7.1).
+//! retire the roster it replaces (D3 §7.1).
 //!
-//! # It writes only status, and the status is the point
+//! # Status is the point
 //!
-//! Like [`super::trust_roster`], this reconciler has no side effect to
-//! reconcile: no Job, no topic, no object key. What it has is three claims an
-//! operator cannot check by reading the YAML — every `spkiPem` is a key this
-//! build can parse and hashes to the `keyId` beside it, this is where each key
-//! sits against the clock RIGHT NOW, and these are the namespaces this policy
-//! actually governs once conflicts are removed.
+//! There is no side effect to reconcile. The status carries three claims an
+//! operator cannot check by reading the YAML: every `spkiPem` parses and hashes
+//! to the `keyId` beside it, where each key sits against the clock now, and
+//! which namespaces this policy actually governs once conflicts are removed.
 //!
-//! # `evaluatedAt` is a HEARTBEAT, and that is why it is written on a timer
+//! # `evaluatedAt` is a debounced heartbeat
 //!
-//! D3 §7.7's keys view renders `unknown` — never `valid` — when `status` is
-//! absent, when `observedGeneration` lags `metadata.generation`, or when
-//! `evaluatedAt` is older than fifteen minutes. That rule only means something
-//! if a healthy controller keeps `evaluatedAt` moving, so this is the one
-//! status field in the crate that is deliberately refreshed when nothing has
-//! changed.
+//! D3 §7.7's keys view renders `unknown` when `status` is absent, when
+//! `observedGeneration` lags, or when `evaluatedAt` is older than fifteen
+//! minutes, so a healthy controller must keep `evaluatedAt` moving. A field
+//! refreshed on every pass would spin the reconciler on its own status patch,
+//! so `evaluatedAt` moves when the substance changed or [`HEARTBEAT`] has
+//! elapsed, and otherwise the stored value is written back and
+//! [`status_unchanged`] skips the patch: one write per policy per five
+//! minutes, and fifteen minutes of tolerance is three missed heartbeats.
 //!
-//! It is also exactly the field shape that spun `TrustRoster` at 133
-//! reconciles a second (erratum **E11(d)**, measured live: 12,107 patches in
-//! 91.2 s), because a reconciler's own status patch is what wakes it. The
-//! resolution is a DEBOUNCE, not a removal: `evaluatedAt` moves when the
-//! substance changed, or when [`HEARTBEAT`] has elapsed since the stored
-//! value, and otherwise the stored value is written back unchanged so
-//! [`status_unchanged`] skips the patch entirely. With the 300 s requeue that
-//! is one write per policy per five minutes, and fifteen minutes of staleness
-//! tolerance is three missed heartbeats — not one.
+//! # `Superseded` on the roster
 //!
-//! # `Superseded` on the roster, and why this controller writes it
-//!
-//! D3 §7.5: once a matching policy exists, `TrustRoster/default` gets
-//! `Superseded=True` and stops being consulted for bound namespaces. The
-//! roster's own reconciler cannot write that, because it watches rosters and a
-//! policy being created is not a roster event — it would report `Superseded`
-//! only the next time the roster's 300 s requeue came round, or never if the
-//! requeue were removed. So the fact is written by the controller that
-//! observes the cause.
-//!
-//! The roster is NOT deleted and its `spec` is NOT touched: rollback reads it
-//! unchanged (D3 §7.5), and a condition is the one status write that says "you
-//! have moved on" without taking anything away.
+//! Once a matching policy exists, `TrustRoster/default` gets `Superseded=True`
+//! (D3 §7.5). The roster's own reconciler watches rosters, and a policy being
+//! created is not a roster event, so the controller that observes the cause
+//! writes it. The roster is not deleted and its `spec` is not touched: rollback
+//! reads it unchanged.
 //!
 //! # The one write that is not status: a finalizer on a compromise record
 //!
-//! Defect `TRUSTPOLICY-DELETE-DROPS-REVOCATION`. A `KeyCompromise` revocation
-//! lives on the policy that records it, and [`crate::trust::resolve_in`]
-//! applies it to every namespace — but only while some object still records
-//! it. Deleting the only such policy used to hand every namespace it had
-//! governed back to `legacy-roster-v1`, whose roster still listed the key as
-//! ordinary, and every document the compromised key signed re-verified green.
-//!
-//! So a policy that records a compromise carries [`COMPROMISE_FINALIZER`],
-//! placed by this reconciler, and a deletion is RELEASED only when
-//! [`crate::trust::deletion_guard`] says the record may go: another live
-//! policy records the same revocation, or nothing in the cluster — no other
-//! policy, not the roster — lists the key as trusted any more. Until then the
-//! object stays, carrying its `deletionTimestamp`, and is still resolved
-//! through exactly as before: an older controller reading it after a rollback
-//! honours it too, because a finalizer is data on the object and not
-//! behaviour in this build. `CompromiseGuard` on its status says which key
+//! A `KeyCompromise` revocation lives on the policy that records it, and
+//! [`crate::trust::resolve_in`] applies it everywhere only while some object
+//! still records it; deleting the only such policy would hand its namespaces
+//! back to a roster that lists the key as ordinary. So a policy that records a
+//! compromise carries [`COMPROMISE_FINALIZER`], and a deletion is released only
+//! when [`crate::trust::deletion_guard`] says the record may go: another live
+//! policy records it, or nothing in the cluster lists the key as trusted.
+//! Until then the object stays, with its `deletionTimestamp`, and is resolved
+//! through as before; an older controller after a rollback honours it too,
+//! because a finalizer is data on the object. `CompromiseGuard` says which key
 //! holds it and what would release it.
 //!
-//! **What this costs.** The finalizer is `metadata`, and Kubernetes RBAC
-//! cannot grant a write narrower than the object, so this controller now holds
-//! `patch` on `trustpolicies` beside `patch` on `trustpolicies/status`. The
-//! ONE call site is [`reconcile_finalizer`], a merge patch whose body is
-//! `metadata.{name, resourceVersion, finalizers}` and nothing else
-//! (`tests/trust_revocation_durable.rs` pins the body), and every spec edit the
-//! verb could make is monotonic under G1–G9 and attributed to this field
-//! manager in `managedFields`. It never edits a key's lifecycle.
+//! The cost: Kubernetes RBAC cannot grant a write narrower than the object, so
+//! this controller holds `patch` on `trustpolicies` beside
+//! `trustpolicies/status`. The one call site is [`reconcile_finalizer`], whose
+//! body is `metadata.{name, resourceVersion, finalizers}` and nothing else
+//! (`tests/trust_revocation_durable.rs` pins it), and every spec edit the verb
+//! could make is monotonic under G1–G9 and attributed in `managedFields`.
 //!
-//! # No private key material, here or anywhere
+//! # No private key material
 //!
-//! `spkiPem` is a public key. This reconciler parses public keys and compares
-//! timestamps; it reads no Secret (`tests/linkage.rs`'s
-//! `the_controller_never_reads_a_secret`) and this crate links the VERIFYING
-//! half of the DSSE machinery and never the signing half (Global Constraint
-//! 27).
+//! `spkiPem` is a public key. This reconciler reads no Secret
+//! (`tests/linkage.rs`'s `the_controller_never_reads_a_secret`), and the crate
+//! links the verifying half of the DSSE machinery, never the signing half
+//! (Global Constraint 27).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,62 +90,38 @@ pub const HEARTBEAT: Duration = Duration::from_secs(300);
 
 /// How long before `notAfter` an `Active` key raises `ExpiringSoon`.
 ///
-/// THIRTY DAYS, AND IT IS A PLANNING HORIZON, NOT AN ALARM. Rotation
-/// (`docs/keys.md` §7.6) is four steps, one of which is "wait for in-flight
-/// Jobs"; a week's warning is a week in which somebody has to interrupt what
-/// they are doing. Nothing is blocked by this condition — a key inside the
-/// window still signs — so the cost of it being generous is a line in
-/// `kubectl get`, and the cost of it being tight is an expiry nobody planned.
+/// Thirty days, a planning horizon rather than an alarm: rotation
+/// (`docs/keys.md`) includes waiting for in-flight Jobs, and nothing is blocked
+/// by the condition (a key inside the window still signs), so being generous
+/// costs a line in `kubectl get` while being tight costs an unplanned expiry.
 pub const EXPIRING_SOON_DAYS: i64 = 30;
 
-/// The floor under a boundary requeue, so a deadline that is already upon us
-/// cannot become `Action::requeue(0)`.
-///
-/// A ZERO REQUEUE IS THE ONE WAY THIS COULD SPIN, and it is reachable only in
-/// the sub-second window before a boundary. The floor costs at most one second
-/// of overshoot, and only for a pass that woke inside that window — which is
-/// itself the rare case, since the previous pass aimed at the boundary exactly.
+/// The floor under a boundary requeue, so a deadline already upon us cannot
+/// become `Action::requeue(0)`, the one way this could spin. It costs at most
+/// one second of overshoot, in the sub-second window before a boundary.
 pub const MIN_REQUEUE: Duration = Duration::from_secs(1);
 
 /// The requeue for a status a CLOCK can change: at `deadline` if that is
 /// sooner than [`HEARTBEAT`], and at `HEARTBEAT` otherwise.
 ///
-/// # Why a deadline and not a shorter heartbeat — defect `TRUST-EXPIRY-LAG`
+/// A verdict about a key depends on the clock as well as the object, and
+/// nothing writes to the object when the clock passes a boundary, so a key past
+/// its `notAfter` would read valid until the next heartbeat (measured: an
+/// expired approver key kept `Verified=True` for 2 m 35 s). Expiry information
+/// that is unevaluated or stale must read unknown, not valid. A shorter
+/// heartbeat would trade the lag for write-free reconciles on every object and
+/// still leave a window; waking at the boundary costs one extra reconcile per
+/// key lifetime and closes it.
 ///
-/// A verdict about a key is a function of the key's declared history AND of
-/// the clock, and nothing writes to the object when the clock passes a
-/// boundary. On lab-refresh-4 an `Approval` whose approver key's `notAfter`
-/// had passed read `Verified=True` across **22 consecutive samples over
-/// 2 m 35 s**, at one unchanged `resourceVersion`, before the next heartbeat
-/// re-derived it to `KeyIdExpired`. PLAT-19.1's acceptance says to treat
-/// unevaluated or stale expiry information as **unknown, not valid**, and a
-/// green condition is neither.
+/// The wakeup lands on the boundary, not after it: the windows are half-open
+/// (`may_sign_new` refuses at `now >= notAfter`), so a pass waking exactly then
+/// computes the post-boundary verdict. Jitter self-corrects: a pass that wakes
+/// early asks for `deadline - now` again, now milliseconds, rather than falling
+/// back to a whole [`HEARTBEAT`]; padding would guarantee a stale window.
 ///
-/// Shortening the heartbeat would trade the lag for a permanent write-free
-/// reconcile on every object of these kinds — the hot loop erratum E11(d)
-/// exists to prevent — and would still leave a window. Waking exactly at the
-/// boundary costs ONE extra reconcile per key lifetime and closes it.
-///
-/// # The wakeup lands ON the boundary, not after it
-///
-/// The windows are half-open — `may_sign_new` refuses at `now >= notAfter` — so
-/// a pass that wakes exactly at the instant already computes the post-boundary
-/// verdict, and no slack is added. **Scheduler jitter is self-correcting rather
-/// than padded for:** a pass that wakes a hair EARLY re-derives the same
-/// verdict and asks for `deadline - now` again, which is now milliseconds, so
-/// it converges on the boundary instead of falling back to a whole
-/// [`HEARTBEAT`]. Padding would have been the other choice and it is strictly
-/// worse — it guarantees a window in which the verdict reads stale, which is
-/// the defect.
-///
-/// # Bounded, and never a hot loop
-///
-/// A deadline in the past is not a deadline: the transition has already been
-/// applied by the pass that computed it, so this returns [`HEARTBEAT`] rather
-/// than requeueing at zero, and one in the sub-second window is floored at
-/// [`MIN_REQUEUE`]. The result is therefore always in
-/// `[MIN_REQUEUE, HEARTBEAT]`, and the caller cannot spin however wrong its
-/// deadline is.
+/// A deadline already past returns [`HEARTBEAT`] (the pass that computed it
+/// applied the transition), and a sub-second one is floored at
+/// [`MIN_REQUEUE`], so the result is always in `[MIN_REQUEUE, HEARTBEAT]`.
 #[must_use]
 pub fn requeue_before(deadline: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration {
     let Some(deadline) = deadline else {
@@ -249,10 +200,9 @@ pub const COMPROMISE_FINALIZER: &str = "logweir.dev/compromise-revocation";
 
 /// How soon a policy HELD for deletion is looked at again.
 ///
-/// SHORTER THAN [`HEARTBEAT`], because what releases it — a successor policy
-/// applied, the roster re-created without the key — is an event on ANOTHER
-/// object, which does not wake this one. Fifteen seconds is one `list` and one
-/// roster `get` per held policy, and it writes nothing while nothing changed.
+/// Shorter than [`HEARTBEAT`], because what releases it (a successor policy, the
+/// roster re-created without the key) is an event on another object, which does
+/// not wake this one. It writes nothing while nothing changed.
 pub const HOLD_RECHECK: Duration = Duration::from_secs(15);
 
 /// The condition type reporting what a compromise record holds.
@@ -302,12 +252,10 @@ pub enum FinalizerAction {
 
 /// What to do with the finalizer, given the object and its guard — **pure**.
 ///
-/// # No `Add` on a deleting object
-///
-/// The API server refuses a NEW finalizer on an object that carries a
+/// The API server refuses a new finalizer on an object carrying a
 /// `deletionTimestamp`, so a record revoked and deleted before this controller
-/// saw it cannot be held after the fact. That window is the one residual; see
-/// `docs/keys.md`, *Replacing a TrustPolicy*.
+/// saw it cannot be held after the fact: the one residual (see `docs/keys.md`,
+/// *Replacing a TrustPolicy*).
 #[must_use]
 pub fn finalizer_action(policy: &TrustPolicy, guard: &DeletionGuard) -> FinalizerAction {
     let held = policy
@@ -325,14 +273,9 @@ pub fn finalizer_action(policy: &TrustPolicy, guard: &DeletionGuard) -> Finalize
     }
 }
 
-/// Parse and resolve one policy against the whole set and a clock — **pure**.
-///
-/// A PURE FUNCTION, for the same reason [`super::trust_roster::evaluate`] is
-/// one: the property is a function of the objects and the clock, and a test
-/// that needs a route table to reach it is a test about `kube`.
-///
-/// `policies` is every `TrustPolicy` in the cluster, INCLUDING this one: the
-/// conflict rule is not answerable from one object.
+/// Parse and resolve one policy against the whole set and a clock: pure, like
+/// [`super::trust_roster::evaluate`]. `policies` is every `TrustPolicy` in the
+/// cluster, including this one: the conflict rule needs the whole set.
 #[must_use]
 pub fn evaluate(
     policy: &TrustPolicy,
@@ -362,7 +305,7 @@ pub fn evaluate_in(
     let resolved = crate::trust::from_policy_in(policy, policies);
     let guard = deletion_guard(policy, policies, roster);
 
-    // ---- the per-key verdicts -------------------------------------------
+    // The per-key verdicts.
     let mut keys = Vec::with_capacity(resolved.keys.len());
     let mut load_failure: Option<(&'static str, String)> = None;
     for (key, spec) in resolved.keys.iter().zip(policy.spec.keys.iter()) {
@@ -373,10 +316,8 @@ pub fn evaluate_in(
         keys.push(KeyVerdict {
             key_id: key.trust.key_id.clone(),
             effective_state: state.as_str().to_string(),
-            // A KEY THAT DID NOT PARSE IS NEITHER. Reporting `false`/`None`
-            // rather than omitting the fields keeps a consumer from reading an
-            // absent value as "not evaluated" — the exact confusion
-            // `status.expiredKeyIds` could not resolve (D3 §7.2).
+            // A key that did not parse is neither: `false`/`None` rather than
+            // omitted, so a consumer cannot read the absence as "not evaluated".
             usable_for_new_signatures: Some(
                 key.is_usable() && usable_for_new_signatures(&key.trust, now),
             ),
@@ -392,7 +333,7 @@ pub fn evaluate_in(
         });
     }
 
-    // ---- binding and conflicts -------------------------------------------
+    // Binding and conflicts.
     let all_conflicts = conflicts(policies);
     let name = policy.name_any();
     let mine: Vec<NamespaceConflict> = all_conflicts
@@ -405,7 +346,7 @@ pub fn evaluate_in(
         .collect();
     let bound = bound_namespaces(policy, policies);
 
-    // ---- the three conditions --------------------------------------------
+    // The conditions.
     let (loaded, loaded_condition) = loaded_condition(&keys, load_failure.as_ref());
     let conditions = vec![
         condition(policy, CONDITION_LOADED, loaded_condition, now),
@@ -442,10 +383,10 @@ pub fn evaluate_in(
 /// `CompromiseGuard` — what this policy's compromise records hold, and what
 /// would release them.
 ///
-/// ONE CONDITION, FOUR READINGS, most actionable first: a deletion being held,
-/// a record being guarded, a revocation inherited from elsewhere, nothing.
-/// Every message is built from recorded facts only, never the clock, so an
-/// unchanged guard is never rewritten.
+/// One condition, four readings, most actionable first: a deletion being held,
+/// a record being guarded, a revocation inherited from elsewhere, nothing. Every
+/// message is built from recorded facts only, never the clock, so an unchanged
+/// guard is never rewritten.
 fn compromise_condition(
     policy: &TrustPolicy,
     keys: &[ResolvedKey],
@@ -462,7 +403,7 @@ fn compromise_condition(
             )
         })
         .collect();
-    // THE SAME SENTENCE whether it stands alone or follows another reading.
+    // The same sentence whether it stands alone or follows another reading.
     let inherited_sentence = format!(
         "this policy lists {}, which another TrustPolicy revoked for KeyCompromise. This \
          controller treats the key as revoked in this policy's namespaces as well, and an older \
@@ -555,10 +496,9 @@ fn compromise_condition(
 
 /// The key's `effectiveState`, with `Unparseable` overriding the clock.
 ///
-/// THE OVERRIDE IS THE POINT. [`logweir_core::trust::effective_state`] cannot
-/// return `Unparseable` — the pure layer never sees key material — and a key
-/// whose PEM does not parse must not be reported as `Active` merely because
-/// its declared window is open.
+/// The override is the point: [`logweir_core::trust::effective_state`] never
+/// sees key material and cannot return `Unparseable`, and a key whose PEM does
+/// not parse must not read `Active` because its window is open.
 fn key_state(key: &ResolvedKey, now: DateTime<Utc>) -> EffectiveState {
     if key.parsed.is_err() || key.declared_id_matches.is_err() {
         return EffectiveState::Unparseable;
@@ -568,9 +508,8 @@ fn key_state(key: &ResolvedKey, now: DateTime<Utc>) -> EffectiveState {
 
 /// The first thing wrong with one key, as a `(reason, message)` pair.
 ///
-/// ORDERED: material, then identity, then the declared algorithm. A PEM that
-/// does not parse has no id to compare and no algorithm to check, so reporting
-/// all three would name two faults that were never measured.
+/// Ordered: material, then identity, then the declared algorithm. A PEM that
+/// does not parse has no id or algorithm to check.
 fn first_fault(key: &ResolvedKey, spec: &TrustedKey) -> Option<(&'static str, String)> {
     if let Err(e) = &key.parsed {
         return Some((
@@ -626,13 +565,10 @@ fn loaded_condition(
 
 /// `Bound`.
 ///
-/// # Why a `default: true` policy reports no namespace list
-///
-/// It governs every namespace no other policy names — which includes
-/// namespaces that do not exist yet. Enumerating that would need `list` on
-/// `namespaces`, a verb this controller does not have and must not acquire in
-/// order to fill in a status field, and the list would be wrong the moment a
-/// namespace was created. The condition says so in words instead.
+/// A `default: true` policy reports no namespace list: it governs every
+/// namespace no other policy names, including ones that do not exist yet.
+/// Listing them would need `list` on `namespaces`, a verb this controller must
+/// not acquire for a status field, and would be wrong at the next namespace.
 fn bound_condition(
     policy: &TrustPolicy,
     bound: &[String],
@@ -824,25 +760,21 @@ pub async fn reconcile_policy(
     client: &kube::Client,
 ) -> Result<PolicyVerdict, ReconcileError> {
     let name = policy.name_any();
-    // ONE CLOCK READ, for the reason `trust_roster::reconcile_roster` records:
-    // two reads could put a key's expiry and the condition reporting it on
-    // either side of the same instant.
+    // One clock read, so a key's expiry and the condition reporting it cannot
+    // straddle two instants.
     let now = Utc::now();
 
-    // CLUSTER-SCOPED: `Api::all`, no namespace. The whole set, because the
-    // conflict rule is not answerable from one object — and a LIST from the
-    // API server, not the watch cache, because the finalizer's release below
-    // must see every other policy's `deletionTimestamp` as it is now
-    // (`trust::deletion_guard`).
+    // Cluster-scoped, the whole set (the conflict rule needs it), from a LIST
+    // rather than the watch cache, because the finalizer's release must see
+    // every other policy's `deletionTimestamp` as it is now.
     let api: Api<TrustPolicy> = Api::all(client.clone());
     let all = api
         .list(&ListParams::default())
         .await
         .map_err(ReconcileError::Api)?;
-    // THE ROSTER IS READ BEFORE ANYTHING IS DECIDED, and a failed read fails
-    // the pass: whether a compromise record may be dropped depends on whether
-    // the roster still lists the key, and "could not read it" must never be
-    // mistaken for "it lists nothing".
+    // The roster is read before anything is decided, and a failed read fails
+    // the pass: "could not read it" must never pass for "it lists nothing" when
+    // deciding whether a compromise record may go.
     let rosters: Api<TrustRoster> = Api::all(client.clone());
     let roster = rosters
         .get_opt(ROSTER_NAME)
@@ -851,23 +783,18 @@ pub async fn reconcile_policy(
     let verdict = evaluate_in(policy, &all.items, roster.as_ref().map(|r| &r.spec), now);
     let status = status_for(policy, &verdict, now);
 
-    // ---- THE FINALIZER FIRST (review finding L2) ---------------------------
-    //
-    // Placing it is what makes a compromise record durable, so it is not
-    // sequenced behind two writes it does not depend on: a persistent failure of
-    // the status patch or of `supersede_roster` used to mean the `Add` was never
-    // sent and the record stayed unguarded. Release stays fail-closed either way.
+    // The finalizer first: it is what makes a compromise record durable, so a
+    // failing status patch or `supersede_roster` must not keep it from being
+    // placed. Release stays fail-closed either way.
     let (action, patched) = reconcile_finalizer(policy, &verdict.guard, &api).await?;
 
-    // SEAM S7's precondition (review finding F6): the body carries
-    // `metadata.resourceVersion`, so a pass computing from a stale watch-cache
-    // copy gets `409 Conflict` rather than overwriting a newer verdict. When the
-    // finalizer patch above moved `resourceVersion`, the precondition is the
-    // object THAT write returned; the handed copy's would be refused 409.
+    // Seam S7's precondition, so a pass computing from a stale cache copy gets
+    // `409` rather than overwriting a newer verdict. When the finalizer patch
+    // moved `resourceVersion`, the precondition is the object it returned.
     let latest = patched.as_ref().unwrap_or(&policy.metadata);
     let patch = with_precondition(latest, &name, json!({ "status": status }))?;
-    // NO WRITE WHEN NOTHING CHANGED — erratum E11(d). With the debounce above,
-    // a steady policy reaches this branch on four reconciles out of five.
+    // No write when nothing changed: with the debounce, a steady policy skips
+    // the patch on four reconciles out of five.
     if status_unchanged(
         policy
             .status
@@ -886,9 +813,8 @@ pub async fn reconcile_policy(
             .await
         {
             Ok(_) => {}
-            // RELEASING THE LAST FINALIZER OF A TERMINATING OBJECT DELETES IT, so
-            // its status is not there to write. Nothing is lost: the object the
-            // status described is gone.
+            // Releasing the last finalizer of a terminating object deletes it, so
+            // its status is not there to write.
             Err(kube::Error::Api(e)) if e.code == 404 && action == FinalizerAction::Release => {}
             Err(e) => return Err(ReconcileError::Api(e)),
         }
@@ -913,32 +839,18 @@ pub async fn reconcile_policy(
 /// The `Superseded` condition `TrustRoster/default` should carry, given every
 /// `TrustPolicy` in the cluster (D3 §7.5).
 ///
-/// # "Once a **matching** policy exists" — and the matching one is the DEFAULT
+/// "Once a matching policy exists" means the default: a policy governing only
+/// `team-a` leaves every other namespace on `legacy-roster-v1`, synthesised
+/// from this roster, and a roster that advertised itself replaced could be
+/// abandoned or deleted, silently un-trusting every unbound namespace. Only a
+/// `spec.default: true` policy displaces the roster everywhere, since
+/// resolution reaches the roster only after the default. Two defaults are not a
+/// match: they contest each other and govern nobody.
 ///
-/// Review finding F2. The first version of this wrote `Superseded=True` as soon
-/// as ANY policy existed, which is broader than the contract and is wrong in a
-/// way an operator acts on: a policy governing only `team-a` leaves every other
-/// namespace resolving to `legacy-roster-v1`, **synthesised from this very
-/// roster**, while the roster advertises that it has been replaced. An operator
-/// reading that reasonably stops maintaining it — or deletes it — and silently
-/// un-trusts every unbound namespace.
-///
-/// The only policy that displaces the roster for every namespace is the one
-/// with `spec.default: true`, because the resolution order (§7.1) reaches the
-/// roster only after the default has been tried. So that, and nothing else, is
-/// a match. Two defaults are NOT a match either: they contest each other, every
-/// fallback namespace resolves to nothing rather than to either of them, and a
-/// roster marked superseded by a conflict would be superseded by something that
-/// governs nobody.
-///
-/// # It is a CONDITION WITH TWO STATES, not a flag that gets set
-///
-/// The other half of F2: `reconcile_policy` runs only for a policy that exists,
-/// so deleting every policy left `Superseded=True` on the roster forever —
-/// rollback-in-place advertised the opposite of what was happening. Returning
-/// `Superseded=False/RosterStillConsulted` makes the condition self-clearing,
-/// and [`super::trust_roster`] writes it too, from its own 300 s requeue, so
-/// the clearing pass does not depend on a policy existing to run it.
+/// A condition with two states, not a flag: deleting every policy returns
+/// `Superseded=False/RosterStillConsulted`, and [`super::trust_roster`] writes
+/// it too from its own requeue, so clearing does not depend on a policy
+/// existing.
 #[must_use]
 pub fn superseded_condition(
     roster: &TrustRoster,
@@ -1000,14 +912,9 @@ pub fn superseded_condition(
 
 /// Write [`superseded_condition`] onto `TrustRoster/default`.
 ///
-/// # Why the whole condition list is carried
-///
-/// A JSON merge patch REPLACES arrays (RFC 7386), so a patch carrying only
-/// `[Superseded]` would DELETE the `Loaded` condition [`super::trust_roster`]
-/// wrote — and that reconciler would put it back, deleting this one, forever.
-/// The existing list is read and merged, exactly as `verification::carry_verified`
-/// does for the same reason, and the roster reconciler carries conditions it
-/// does not own forward.
+/// The whole condition list is carried: an RFC 7386 merge patch replaces
+/// arrays, so a patch carrying only `[Superseded]` would delete the roster
+/// reconciler's `Loaded`, which would put it back and delete this one, forever.
 ///
 /// # Errors
 ///
@@ -1057,13 +964,10 @@ async fn supersede_roster(
 }
 
 /// Place, hold or release [`COMPROMISE_FINALIZER`] on `policy`, as
-/// [`finalizer_action`] decides — **the ONE write this reconciler makes to a
-/// `TrustPolicy` that is not `/status`**, and its body is
-/// [`finalizer_patch`]'s: `metadata.{name, resourceVersion, finalizers}` and
-/// nothing else.
-///
-/// It runs FIRST in [`reconcile_policy`] (review L2) and returns the patched
-/// object's metadata, which the status patch then takes its precondition from.
+/// [`finalizer_action`] decides: the one write this reconciler makes to a
+/// `TrustPolicy` that is not `/status`, with [`finalizer_patch`]'s body. It
+/// runs first in [`reconcile_policy`] and returns the patched object's
+/// metadata, which the status patch takes its precondition from.
 ///
 /// # Errors
 ///
@@ -1076,9 +980,8 @@ pub async fn reconcile_finalizer(
 ) -> Result<(FinalizerAction, Option<kube::api::ObjectMeta>), ReconcileError> {
     let name = policy.name_any();
     let action = finalizer_action(policy, guard);
-    // ONE OBJECT, read once: the list carried forward and the precondition come
-    // from the same copy `finalizer_action` decided on, so a lagging cache
-    // cannot make `Add` write the finalizer twice (review NIT).
+    // One object, read once: the list carried forward and the precondition come
+    // from the copy `finalizer_action` decided on.
     let current: Vec<String> = policy.metadata.finalizers.clone().unwrap_or_default();
     let next: Vec<String> = match action {
         FinalizerAction::None => return Ok((action, None)),
@@ -1092,9 +995,9 @@ pub async fn reconcile_finalizer(
             );
             return Ok((action, None));
         }
-        // EVERY OTHER CONTROLLER'S FINALIZER IS CARRIED FORWARD (review L1,
-        // RM1): an RFC 7386 merge patch REPLACES the list, so a body naming only
-        // this one would strip, say, a GitOps tool's.
+        // Every other controller's finalizer is carried forward: an RFC 7386
+        // merge patch replaces the list, so naming only this one would strip,
+        // say, a GitOps tool's.
         FinalizerAction::Add => {
             let mut next = current.clone();
             if !next.iter().any(|f| f == COMPROMISE_FINALIZER) {
@@ -1126,9 +1029,8 @@ pub async fn reconcile_finalizer(
 /// `metadata.finalizers` list — an RFC 7386 merge patch replaces an array, so
 /// the list carries every other controller's finalizer forward.
 ///
-/// NOTHING ELSE, and a test pins it: this is the one body this controller
-/// sends to the main `trustpolicies` resource, and a `spec` key here would be
-/// the controller editing trust.
+/// Nothing else, and a test pins it: a `spec` key here would be the controller
+/// editing trust.
 ///
 /// # Errors
 ///
@@ -1147,19 +1049,12 @@ pub fn finalizer_patch(
 /// Add seam **S7**'s optimistic-concurrency precondition to a `/status` merge
 /// patch.
 ///
-/// Review finding F6. Kubernetes applies `metadata.resourceVersion` in a patch
-/// body as an update precondition and answers `409 Conflict` on a mismatch;
-/// the object name beside it makes the body self-identifying and ties the
-/// precondition to the object the request path names. This is
-/// `backup_schedule::status_patch_with_preconditions`'s shape, kept separate
-/// because that one is typed to `BackupSchedule`.
-///
-/// IT MATTERS MORE HERE THAN ANYWHERE ELSE IN THE CRATE, and that is why it
-/// went in for a `low`. `TrustRoster/default`'s `status.conditions` now has
-/// **two** writers doing read-modify-write on an array an RFC 7386 merge patch
-/// REPLACES: without the precondition, a roster reconcile computing from a
-/// watch-cache copy that predates [`supersede_roster`]'s write silently deletes
-/// `Superseded`, and the roster advertises the wrong thing for up to 300 s.
+/// Kubernetes applies `metadata.resourceVersion` in a patch body as an update
+/// precondition and answers `409 Conflict` on a mismatch; the name beside it
+/// ties the precondition to the object the request path names. It matters most
+/// here: `TrustRoster/default`'s `status.conditions` has two read-modify-write
+/// writers on an array a merge patch replaces, and without it a stale roster
+/// reconcile would delete `Superseded`.
 ///
 /// # Errors
 ///
@@ -1188,24 +1083,18 @@ pub fn with_precondition(
 /// The `kube::runtime` reconcile entry point.
 async fn reconcile(policy: Arc<TrustPolicy>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let verdict = reconcile_policy(&policy, &ctx.client).await?;
-    // A HELD DELETION IS RELEASED BY ANOTHER OBJECT'S EVENT — a successor
-    // policy applied, the roster re-created — which does not wake this one, so
-    // it is looked at again on a short, bounded timer instead of the heartbeat.
+    // A held deletion is released by another object's event, which does not
+    // wake this one, so it is looked at again on a short, bounded timer.
     if finalizer_action(&policy, &verdict.guard) == FinalizerAction::Hold {
         return Ok(Action::requeue(HOLD_RECHECK));
     }
-    // A policy's verdict is a function of its spec AND OF THE CLOCK: a key
-    // whose `notAfter` passes at 03:00 must become `Expired` without anybody
-    // editing the object, and `evaluatedAt` must keep moving for D3 §7.7's
-    // fifteen-minute staleness rule to distinguish "stale" from "stopped".
-    //
-    // …AND 03:00 IS WHEN, NOT "SOMETIME IN THE NEXT FIVE MINUTES" (defect
-    // `TRUST-EXPIRY-LAG`). The heartbeat keeps `evaluatedAt` moving; the
-    // deadline makes the boundary itself exact, so `status.keys[].effectiveState`
-    // never reads `Active` after the window it names has closed.
+    // A policy's verdict is a function of its spec and of the clock: a key
+    // whose `notAfter` passes at 03:00 becomes `Expired` with nobody editing
+    // the object. The heartbeat keeps `evaluatedAt` moving for D3 §7.7's
+    // staleness rule, and the deadline makes the boundary itself exact.
     let now = Utc::now();
-    // THE POLICY'S OWN KEYS, read from the object this pass just reconciled —
-    // no second API call, and the same translation `reconcile_policy` used.
+    // The policy's own keys, from the object this pass reconciled: no second
+    // API call, and the translation `reconcile_policy` used.
     let deadline = next_clock_change(&crate::trust::from_policy(&policy).keys, now);
     Ok(Action::requeue(requeue_before(deadline, now)))
 }
@@ -1220,17 +1109,13 @@ fn error_policy(policy: Arc<TrustPolicy>, err: &ReconcileError, _ctx: Arc<Contex
     Action::requeue(Duration::from_secs(30))
 }
 
-/// The OTHER policies a policy event must re-evaluate — review finding M1's
-/// class sweep, on this reconciler's own status.
-///
-/// Every policy's `status.keys[]` and `CompromiseGuard` carry the compromise
-/// records of the WHOLE set (`from_policy_in`): a key another policy just
-/// revoked for compromise reads `Revoked` and `CompromiseInherited` there. The
-/// `Controller`'s own watch reconciles only the object that changed, so without
-/// this every other policy kept `Active` for up to a heartbeat. Only an event
-/// that touches a compromise record fans out (`PolicyScopeMemory::observe`
-/// returning [`crate::trust::PolicyScope::Everything`]), so a status heartbeat
-/// costs nothing here.
+/// The other policies a policy event must re-evaluate: every policy's
+/// `status.keys[]` and `CompromiseGuard` carry the whole set's compromise
+/// records (`from_policy_in`), and the `Controller`'s watch reconciles only the
+/// object that changed. Only an event that touches a compromise record fans out
+/// (`PolicyScopeMemory::observe` returning
+/// [`crate::trust::PolicyScope::Everything`]), so a status heartbeat costs
+/// nothing here.
 #[must_use]
 pub fn others_to_reevaluate(
     all: Vec<Arc<TrustPolicy>>,
@@ -1252,9 +1137,8 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
     let api: Api<TrustPolicy> = Api::all(client.clone());
     let peers: Api<TrustPolicy> = Api::all(client.clone());
     let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
-    // This reconciler holds NO archive handle and creates no runner Job —
-    // spelled out rather than defaulted, so the one context field that is a
-    // capability is visible at every construction site (`super::Context`).
+    // No archive handle and no runner Job, spelled out so the one context field
+    // that is a capability is visible at every construction site.
     let ctx = Arc::new(Context {
         client,
         archive: None,
@@ -1264,8 +1148,7 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
         let controller = Controller::new(api, watcher::Config::default());
         let store = controller.store();
         controller
-            // A COMPROMISE RECORDED ON ONE POLICY RE-EVALUATES THE OTHERS —
-            // see `others_to_reevaluate`.
+            // A compromise recorded on one policy re-evaluates the others.
             .watches(peers, watcher::Config::default(), move |policy| {
                 others_to_reevaluate(store.state(), &scopes, &policy)
             })

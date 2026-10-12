@@ -20,10 +20,8 @@
 //!   (`crates/logweir/src/drill/phase1_approval.rs:87`) covers bytes the engine
 //!   never executes.
 //!
-//! `crate::yaml::yaml_scalar`'s own doc comment already said this and then
-//! said no YAML-scalar escaper "this one or any other" can close it, because
-//! the expansion happens a layer below YAML syntax: `"orders${X}"` is expanded
-//! inside its own quotes. Nothing closed it before this file existed. The
+//! No YAML-scalar escaper can close it, because the expansion happens a layer
+//! below YAML syntax: `"orders${X}"` is expanded inside its own quotes. The
 //! closure is a REFUSAL, in two legs — `yaml_scalar_checked` over every
 //! interpolated VALUE, and `assert_no_unnamed_dollar_brace` over the finished
 //! DOCUMENT, before the digest is taken.
@@ -31,8 +29,7 @@
 //! Every fixture here names the container-side endpoints
 //! (`kafka-broker-1:9094`, `http://minio:9000`) and never a dial token
 //! (`crates/logweir/tests/no_network_in_unit_tests.rs`'s `DIAL_TOKENS`); this
-//! file constructs no client of any kind and belongs in no `ALLOWED` entry
-//! (STANDING RULE 18).
+//! file constructs no client of any kind and belongs in no `ALLOWED` entry.
 
 use logweir_core::engine::{
     AuthRender, BackupPlan, BackupSetRef, RestorePlan, StorageUrl, WindowFloorSource,
@@ -106,7 +103,7 @@ fn restore_plan() -> RestorePlan {
     }
 }
 
-/// **G-EXP.** Four arms, one module — the brief's named acceptance.
+/// **G-EXP.** Four arms, one module.
 mod rendered_engine_config_has_no_unnamed_dollar_brace {
     use super::*;
 
@@ -275,9 +272,8 @@ mod rendered_engine_config_has_no_unnamed_dollar_brace {
     /// The two named password placeholders are the ONE exception to G-EXP, and
     /// the exception is deliberate: the password must not be in the bytes
     /// Logweir hashes, so the document names the variable and the projected
-    /// Secret supplies the value. The SASL block that emits them is Task 6's;
-    /// this arm pins that the sweep already permits exactly these two and
-    /// nothing else, so Task 6 cannot land a document this guard would refuse.
+    /// Secret supplies the value. This arm pins that the sweep permits exactly
+    /// these two and nothing else.
     #[test]
     fn both_named_placeholders_pass() {
         let doc = format!(
@@ -304,9 +300,7 @@ mod rendered_engine_config_has_no_unnamed_dollar_brace {
         );
     }
 
-    /// **The third renderer, which had no sweep at all before this task.**
-    /// `render_and_digest` existed in only two of the three renderers, so
-    /// G-EXP's document leg missed a third of its surface (critique A F11).
+    /// **The third renderer has the sweep too.**
     /// `triggered_by` is the field a cron trigger or a ticket reference lands
     /// in, i.e. the most operator-templated string in the document.
     #[test]
@@ -465,21 +459,15 @@ fn every_renderer_calls_the_checked_escaper() {
     }
 }
 
-/// Task 2's review finding **F1**, as it stands after Task 6:
-/// `AuthRender::ScramSha512` was a public enum variant whose render arm was
-/// `todo!()` — the workspace's only shipped `todo!()`. Task 3 replaced it with
-/// a typed `RenderError::UnsupportedAuthMode`; **Task 6 replaced the refusal
-/// with the real render**, so the assertion here inverts: the arm no longer
-/// refuses, and what F1 was really about — that no reachable arm panics, and
-/// that no plan naming SASL is ever rendered unauthenticated — is what is
-/// asserted now.
+/// A SCRAM plan renders: no reachable arm panics, and no plan naming SASL is
+/// ever rendered unauthenticated.
 ///
 /// The three wrong answers this pins against:
 ///   * a `todo!()` PANICS, which aborts where Global Constraint 11 requires a
 ///     refusal and prints no `refusal-reason=` line at all;
 ///   * falling through to the `Plaintext` arm emits a document the engine runs
 ///     UNAUTHENTICATED, from a plan that named SCRAM — an authentication
-///     downgrade performed on the operator's behalf. That is still the mutant
+///     downgrade performed on the operator's behalf. That is the mutant
 ///     for this test, and it is the one a tired editor would actually write;
 ///   * refusing again, now that the capability exists, would take a whole
 ///     mode back out of the product silently.

@@ -1,51 +1,38 @@
 // plan.js -- the plan bytes, their hash, and the two names minted from them.
 //
 // THE PLAN BYTES ARE PRODUCED CLIENT-SIDE AND HASHED HERE. `planHash` binds
-// exact spec bytes, the API server normalises YAML, and a typed round-trip
-// silently invalidates every approval -- so the only design in which the hash
-// this page SHOWS is the hash the controller RECOMPUTES is one where the page
-// renders the bytes itself and never reserialises them. Nothing in this module
-// parses the document it emits, and nothing else in this tree re-emits it.
+// exact spec bytes and the API server normalises YAML, so a typed round-trip
+// would invalidate every approval: the hash this page SHOWS is the hash the
+// controller RECOMPUTES only because the page renders the bytes itself and
+// never reserialises them. Nothing here parses the document it emits, and
+// nothing else in this tree re-emits it.
 //
-// OPAQUE IS NOT ARBITRARY. `Restore.spec.planBytes` is an opaque string to the
-// API server and to the controller, and it is still not free-form: the
-// controller writes those bytes VERBATIM into the runner's plan ConfigMap as
-// `data["restore.yaml"]`, with no round-trip through a typed struct, and the
-// runner parses them with `serde_yaml::from_str::<RestoreSpec>`. The grammar
-// is stated ONCE, in `docs/mvp/03-spec.md` section 6.1's paragraph "The restore
-// plan document has ONE grammar, and it is the runner's `restore.yaml`
-// (amendment 4)", and this emitter cites that paragraph rather than restating
-// it. `examples/restore.yaml` is the shipped instance of it.
+// OPAQUE IS NOT ARBITRARY. The controller writes `Restore.spec.planBytes`
+// VERBATIM into the runner's plan ConfigMap (`data["restore.yaml"]`) and the
+// runner parses it as `RestoreSpec`. The grammar is stated once, in
+// `docs/mvp/03-spec.md` section 6.1 ("The restore plan document has ONE
+// grammar, and it is the runner's `restore.yaml`"); `examples/restore.yaml`
+// is the shipped instance.
 //
-// An invented shape would pass the API server's 201 (which stores an opaque
-// string), pass `logweir drill approve` (which hashes whatever bytes it reads),
-// pass all five approval checks (the hash matches), and fail only inside the
-// runner pod -- after every gate reported green. A hash-equality test cannot
-// catch that: sha256 of X in JavaScript equals sha256 of X in Rust whatever X
-// is. What catches it is the checked-in golden that Rust deserialises into
-// `RestoreSpec`, which is why `ui/tests/fixtures/plan.golden.yaml` exists.
+// An invented shape would pass the API's 201, `logweir drill approve` and
+// every approval check (the hash matches) and fail only inside the runner
+// pod. A hash-equality test cannot catch that; the checked-in golden that
+// Rust deserialises into `RestoreSpec`
+// (`ui/tests/fixtures/plan.golden.yaml`) does.
 //
 // THIS MODULE ISSUES NO REQUEST. It reads no clock and no storage; `crypto
 // .subtle` is the only platform API it touches.
 
-// THE SECURE-CONTEXT REFUSAL, AT MODULE LOAD.
+// THE SECURE-CONTEXT REFUSAL, AT MODULE LOAD. `crypto.subtle` is `undefined`
+// on an origin that is not "potentially trustworthy" (plain transport through
+// an ingress, or a LAN address), and `planHash` would then throw and the
+// security-critical string would vanish from the page. Refusing at load is
+// the difference between a page that cannot start and a page that renders a
+// plan with no hash beside it.
 //
-// `globalThis.crypto.subtle` is `undefined` on any origin that is not
-// "potentially trustworthy". The supported serving path -- loopback on port
-// 8001 -- IS trustworthy, so the happy path works. But spec section 8 invites
-// "Adopters wanting a shared URL front the same files with their own
-// OIDC-aware ingress", and any such ingress on plain transport, or any
-// `--address=0.0.0.0` plus a browse to a LAN address, leaves `subtle`
-// undefined: `planHash` would throw a `TypeError` reading a property of
-// undefined and the security-critical string would silently disappear from the
-// page. Refusing at load is the difference between a page that cannot start
-// and a page that renders a plan with no hash beside it.
-//
-// THE MESSAGE NAMES NO URL SCHEME, DELIBERATELY. `scripts/check-ui-offline.sh`
-// has no exemption inside `ui/**` and this file is inside it; a message that
-// spelled the schemes out would fail the gate that keeps every identifier in
-// this tree relative. So it names the requirement -- loopback, or TLS -- in
-// words.
+// The message names no URL scheme: `scripts/check-ui-offline.sh` has no
+// exemption inside `ui/**`, so it names the requirement -- loopback, or TLS
+// -- in words.
 if (!globalThis.crypto?.subtle) {
   throw new Error("this page must be served from a secure context: loopback (127.0.0.1 or localhost) " +
     "over plain transport, or any TLS origin. SubtleCrypto is unavailable here and the plan hash " +
@@ -57,12 +44,10 @@ if (!globalThis.crypto?.subtle) {
  *
  *  The compact form is for KAFKA TOPIC NAMES only, which permit the uppercase
  *  `T` and `Z`; Kubernetes object names are DNS-1123 and never use it. A pure
- *  function of its argument -- the mapped topic names a plan carries are a
- *  function of the approved bytes and of nothing else.
- *
- *  `crates/logweir/tests/ui_lint.rs::the_default_prefix_agrees_with_the_rust_one`
- *  computes the Rust half for the same instant and compares, so the two
- *  cannot drift. */
+ *  function of its argument, so the mapped topic names a plan carries depend
+ *  on the approved bytes alone.
+ *  `ui_lint.rs::the_default_prefix_agrees_with_the_rust_one` compares it with
+ *  the Rust half for the same instant. */
 export function defaultTopicPrefix(pointInTime) {
   const at = new Date(pointInTime);
   if (isNaN(at.getTime())) {
@@ -84,7 +69,7 @@ export function defaultTopicPrefix(pointInTime) {
   );
 }
 
-/** `restore.time_basis`'s one value (FX-8): `logweir_core::spec::TimeBasis::
+/** `restore.time_basis`'s one value: `logweir_core::spec::TimeBasis::
  *  ProducerTime`'s wire spelling. */
 export const TIME_BASIS_PRODUCER_TIME = "producerTime";
 
@@ -103,7 +88,7 @@ function timeBasisOf(value) {
   return value;
 }
 
-/** `sample.coverage`'s one non-default value (PROD-08.1a):
+/** `sample.coverage`'s one non-default value:
  *  `logweir_core::spec::Coverage::Complete`'s wire spelling. */
 export const COVERAGE_COMPLETE = "complete";
 
@@ -123,11 +108,9 @@ function coverageOf(value) {
   return value;
 }
 
-/** Renders the restore plan document as a UTF-8 string. Its grammar is the
- *  runner's restore.yaml, defined once in spec 03-spec.md section 6.1: the
- *  document logweir/examples/restore.yaml shows and RestoreSpec deserialises
- *  (Task 9b). Byte-for-byte what goes into Restore.spec.planBytes; never
- *  re-serialised anywhere else. */
+/** Renders the restore plan document as a UTF-8 string, in the runner's
+ *  restore.yaml grammar (03-spec.md section 6.1). Byte-for-byte what goes into
+ *  Restore.spec.planBytes; never re-serialised anywhere else. */
 export function renderPlanBytes(fields) {
   const f = fields || {};
   const source = f.source || {};
@@ -164,10 +147,10 @@ export function renderPlanBytes(fields) {
   );
   const auth = target.auth;
   if (auth && auth.mode !== "plaintext") {
-    // PROD-01.3: the runner's `AuthSpec` arms, byte for byte. The three SASL
-    // modes carry a username; `mtls` carries none (the identity is the client
-    // certificate, which no plan names). PLAIN and mTLS without TLS are
-    // refused here as the runner refuses them (`PlainWithoutTls`).
+    // The runner's `AuthSpec` arms, byte for byte. The three SASL modes carry a
+    // username; `mtls` carries none (the identity is the client certificate,
+    // which no plan names). PLAIN and mTLS without TLS are refused here as the
+    // runner refuses them (`PlainWithoutTls`).
     const sasl = ["scramSha512", "scramSha256", "plain"];
     if (sasl.indexOf(auth.mode) === -1 && auth.mode !== "mtls") {
       throw new TypeError(
@@ -191,12 +174,12 @@ export function renderPlanBytes(fields) {
   out.push("  mode: " + quote(requireMode(target.mode)));
   out.push("  topic_naming:");
   if (target.originalName === true) {
-    // PROD-15.1: A RESTORE UNDER THE ORIGINAL TOPIC NAMES -- the empty prefix
-    // (the identity mapping, which an older runner refuses) beside the block
-    // that opts in, in `newTopic` mode only, with the operator's owner
-    // statement: `owners: []` says no declarative owner manages any restored
-    // name. A plan without the statement is one the runner refuses
-    // (`OriginalNameOwnerNotChecked`), so it is never rendered.
+    // A RESTORE UNDER THE ORIGINAL TOPIC NAMES: the empty prefix (the identity
+    // mapping, which an older runner refuses) beside the block that opts in, in
+    // `newTopic` mode only, with the operator's owner statement (`owners: []`
+    // says no declarative owner manages any restored name). The runner refuses
+    // a plan without the statement (`OriginalNameOwnerNotChecked`), so one is
+    // never rendered.
     if (target.mode !== "newTopic") {
       throw new TypeError(
         "OriginalNameNotNewTopic: a restore under the original topic names is a newTopic " +
@@ -227,10 +210,8 @@ export function renderPlanBytes(fields) {
     out.push("    prefix: " + quote(needed(target.topicPrefix, "target.topicPrefix")));
   }
   // UNREAD in `newTopic` mode and still required by the grammar: it is the
-  // SCRATCH prefix and has no serde default, because an empty prefix maps
-  // every source topic onto ITSELF. A document that omitted it would not
-  // deserialise -- which is the whole reason this emitter renders the runner's
-  // shape and not one of its own.
+  // SCRATCH prefix and has no serde default, because an empty prefix maps every
+  // source topic onto ITSELF. A document that omitted it would not deserialise.
   out.push(
     "  topic_mapping_prefix: " +
       quote(needed(target.topicMappingPrefix, "target.topicMappingPrefix")),
@@ -244,18 +225,17 @@ export function renderPlanBytes(fields) {
 
   // THE RECOVERY POINT, and the only half of the window a spec may state. The
   // window's START is the archive's earliest covered timestamp, read from the
-  // manifest by the runner (guard G-WIN); a spec-supplied floor is what that
-  // guard exists to refuse, so this emitter has no field for one.
+  // manifest by the runner; a spec-supplied floor is what that guard exists to
+  // refuse, so this emitter has no field for one.
   out.push("restore:");
   out.push("  point_in_time: " + quote(needed(f.pointInTime, "pointInTime")));
-  // WHICH CLOCK THAT POINT IS READ ON (FX-8), and only when the operator chose
-  // one. The archive holds each record's PRODUCER timestamp, so for a
-  // `LogAppendTime` topic the point selects by the producers' clocks; the
-  // runner refuses that (`PointInTimeByProducerTime`) unless the plan says
-  // `time_basis: producerTime`. Absent, the bytes are what they were before
-  // FX-8, so every existing plan and its hash are unchanged. One value, and
-  // anything else throws: a typo here must never become the opt-in, and the
-  // runner's grammar would refuse it after the approval anyway.
+  // WHICH CLOCK THAT POINT IS READ ON, and only when the operator chose one.
+  // The archive holds each record's PRODUCER timestamp, so for a
+  // `LogAppendTime` topic the point selects by the producers' clocks, which
+  // the runner refuses (`PointInTimeByProducerTime`) unless the plan says
+  // `time_basis: producerTime`. Absent, the bytes and every existing plan's
+  // hash are unchanged. One value, and anything else throws: a typo must never
+  // become the opt-in.
   const timeBasis = timeBasisOf(f.timeBasis);
   if (timeBasis !== null) {
     out.push("  time_basis: " + quote(timeBasis));
@@ -269,12 +249,11 @@ export function renderPlanBytes(fields) {
       integer(sample.recordsPerPartition, "sample.recordsPerPartition"),
   );
   out.push("  anchor: " + quote(needed(sample.anchor, "sample.anchor")));
-  // PROD-08.1a: COMPLETE COVERAGE, and only when the operator chose it.
-  // Absent, the bytes are what they were, so every existing plan and its hash
-  // are unchanged. One value, and anything else throws: a typo must never
-  // become the costlier check, and the runner's grammar would refuse it after
-  // the approval anyway. The record bound is rendered only beside it; a bound
-  // beside a sampled plan is refused here, as phase 0 refuses it.
+  // COMPLETE COVERAGE, and only when the operator chose it. Absent, the bytes
+  // and every existing plan's hash are unchanged. One value, and anything else
+  // throws: a typo must never become the costlier check. The record bound is
+  // rendered only beside it; a bound beside a sampled plan is refused here, as
+  // phase 0 refuses it.
   const coverage = coverageOf(sample.coverage);
   const bound = sample.completeMaxRecords;
   const bounded = bound !== undefined && bound !== null && bound !== "";
@@ -294,11 +273,11 @@ export function renderPlanBytes(fields) {
     );
   }
 
-  // THE THREE OBJECTIVES ARE OPTIONAL IN THE GRAMMAR AND OPTIONAL HERE. Each
-  // is an `Option` with a serde default, so an absent one is "not asked for"
-  // and an invented one would be this page putting a number into a signed
-  // document that nobody stated. An empty block is `objectives: {}`, which is
-  // what the grammar means by all three absent.
+  // THE THREE OBJECTIVES ARE OPTIONAL IN THE GRAMMAR AND OPTIONAL HERE. Each is
+  // an `Option` with a serde default, so an absent one is "not asked for" and
+  // an invented one would put a number nobody stated into a signed document.
+  // An empty block is `objectives: {}`, the grammar's spelling of all three
+  // absent.
   const stated = [];
   if (objectives.rtoSeconds !== undefined && objectives.rtoSeconds !== null) {
     stated.push("  rto_seconds: " + integer(objectives.rtoSeconds, "objectives.rtoSeconds"));
@@ -328,54 +307,43 @@ export function renderPlanBytes(fields) {
 }
 
 /** SHA-256 over exactly those bytes, via crypto.subtle, formatted
- *  `sha256:<lowercase hex>` -- the form logweir_core::ids::sha256_prefixed
- *  produces (ids.rs:9-13), so the string the page shows is the string the CLI
- *  prints (approve.rs:108). */
+ *  `sha256:<lowercase hex>` -- the form `logweir_core::ids::sha256_prefixed`
+ *  produces, so the string the page shows is the string the CLI prints. */
 export async function planHash(bytes) {
   return "sha256:" + (await sha256Hex(bytes));
 }
 
 /** The two metadata.name values, minted from the plan bytes BEFORE either
- *  object is created: {restoreName, approvalName} =
- *  {`restore-${suffix}`, `approval-${suffix}`} where suffix is the first 8
- *  lowercase hex characters of sha256(planBytes). Spec section 7, amendment 4.
+ *  object is created: `restore-${suffix}` and `approval-${suffix}`, where the
+ *  suffix is the first 8 lowercase hex characters of sha256(planBytes) (spec
+ *  section 7).
  *
- *  BOTH NAMES FIRST, BECAUSE THE TWO REFERENCES ARE CIRCULAR AND BOTH SPECS
- *  ARE IMMUTABLE. `Restore.spec.approvalRef` and `Approval.spec.subjectRef`
- *  name each other; every `.spec` carries `self == oldSelf` except
- *  `BackupSchedule.spec.suspend`, so neither reference can be filled in
- *  afterwards, and two peer "create" actions with no stated order cannot
- *  produce a working pair. The `Restore` is created first with a DANGLING
- *  `approvalRef`, and the reconciler requeues at 30 s on `ApprovalNotVerified`
- *  until the `Approval` arrives. The same suffix on both is what lets an
- *  operator read a pair off a `kubectl get` without a join. */
+ *  Both names first, because the two references are circular and both specs
+ *  immutable: `Restore.spec.approvalRef` and `Approval.spec.subjectRef` name
+ *  each other and neither can be filled in afterwards. The `Restore` is
+ *  created first with a DANGLING `approvalRef`, and the reconciler requeues
+ *  on `ApprovalNotVerified` until the `Approval` arrives. The shared suffix
+ *  lets an operator read a pair off a `kubectl get` without a join. */
 export async function mintNames(bytes) {
   const suffix = (await sha256Hex(bytes)).slice(0, 8);
   return { restoreName: "restore-" + suffix, approvalName: "approval-" + suffix };
 }
 
 /** THE ONE PREPARED PLAN: the bytes, their hash and the two names minted from
- *  them, as ONE FROZEN OBJECT that is produced ONCE per distinct document.
+ *  them, as ONE FROZEN OBJECT produced ONCE per distinct document.
  *
- *  WHY IDENTITY AND NOT EQUALITY (PLAT-18.1's "plan review and submission use
- *  the same bytes"). Before this, the wizard rendered the plan to review it and
- *  rendered it AGAIN to submit it, and compared the two hashes. Equal hashes
- *  are good evidence and they are not the property: a mutant that re-rendered
- *  on submit produced an equal string and passed, and a mutant that re-rendered
- *  slightly differently was caught only because the hash changed -- after the
- *  page had already shown the other one. Here the second call for the same
- *  bytes returns THE SAME OBJECT, so a test can assert `submitted === reviewed`
- *  and a reserialisation is a different object and fails.
+ *  IDENTITY, NOT EQUALITY: plan review and submission use the same bytes.
+ *  Equal hashes are good evidence but not the property -- a re-render on
+ *  submit would produce an equal string and pass. Here the second call for
+ *  the same bytes returns THE SAME OBJECT, so a test can assert `submitted
+ *  === reviewed` and a reserialisation is a different object and fails.
  *
- *  `options.bytes` is a document the caller already has -- the wizard's
- *  `state.planBytes`, set when a plan is being resubmitted -- and skips the
- *  renderer. Everything else comes from `renderPlanBytes(fields)` and from
- *  nothing else: this module still parses nothing it emits.
+ *  `options.bytes` is a document the caller already has (the wizard's
+ *  `state.planBytes`, set when a plan is resubmitted) and skips the renderer;
+ *  everything else comes from `renderPlanBytes(fields)`.
  *
- *  THE MEMO IS BOUNDED. A wizard field change produces a new document, so an
- *  unbounded table would grow with every keystroke for the life of the loaded
- *  page. The most recent [`PREPARED_KEPT`] are kept, which is many more than
- *  the one a review-then-submit needs, and the oldest is dropped first. */
+ *  THE MEMO IS BOUNDED: every field change makes a new document, so the most
+ *  recent [`PREPARED_KEPT`] are kept and the oldest is dropped first. */
 export async function preparePlanDocument(fields, options) {
   const supplied = (options || {}).bytes;
   const bytes = typeof supplied === "string" ? supplied : renderPlanBytes(fields);
@@ -400,18 +368,14 @@ export const PREPARED_KEPT = 16;
 
 /** The prepared document for exactly these bytes, or `null`.
  *
- *  SYNCHRONOUS AND ON PURPOSE. `ui/client.js` needs the hash to put beside the
- *  bytes in a product-API create body, and the ONE hash it may put there is
- *  the one that was on screen. Asking this module rather than hashing again is
- *  what makes that true by construction: bytes that were never prepared --
- *  bytes some other code path produced -- have no answer here, and the create
- *  is refused rather than sent with a hash nobody reviewed. */
+ *  Synchronous on purpose: `ui/client.js` puts the hash beside the bytes in a
+ *  product-API create body, and the ONE hash it may put there is the one that
+ *  was on screen. Bytes that were never prepared have no answer here, so the
+ *  create is refused rather than sent with a hash nobody reviewed. */
 export function preparedFor(bytes) {
   const document = prepared.get(bytes);
   return document === undefined ? null : document;
 }
-
-// --------------------------------------------------------------- private half
 
 // The bounded memo behind `preparePlanDocument`. A Map iterates in insertion
 // order, so the oldest key is the first one it yields.
@@ -444,11 +408,10 @@ async function sha256Hex(bytes) {
   return hex;
 }
 
-// A storage block: the discriminant plus its fields. Rendered as the runner's
-// `StorageUrl`, which is an internally tagged enum -- `backend` first, then the
-// variant's own keys. Only the `s3` variant is reachable from this page; an
-// adopter on another backend hand-writes the document, which is a supported
-// path precisely because the grammar is the runner's and not the page's.
+// A storage block, rendered as the runner's `StorageUrl`: an internally
+// tagged enum, `backend` first, then the variant's own keys. Only `s3` is
+// reachable from this page; an adopter on another backend hand-writes the
+// document, which works because the grammar is the runner's.
 function pushStorage(out, indent, block) {
   out.push(indent + "storage:");
   pushStorageFields(out, indent + "  ", block);
@@ -466,36 +429,29 @@ function pushStorageFields(out, indent, block) {
     out.push(indent + "endpoint: " + quote(b.endpoint));
   }
   out.push(indent + "path_style: " + (b.pathStyle === true ? "true" : "false"));
-  // The key is spelled as a concatenation because `check-ui-offline.sh`'s rule
-  // 1 forbids the byte sequence `http` followed by a colon anywhere under
-  // `ui/**`, and this YAML key puts one there. The `api.js` precedent is
-  // `SCHEME_SEPARATOR`: build it visibly in ASCII rather than hide it in a
-  // codepoint nobody can see in a diff.
+  // Spelled as a concatenation: `check-ui-offline.sh`'s rule 1 forbids `http`
+  // followed by a colon anywhere under `ui/**`, and this YAML key puts one
+  // there (the `api.js` precedent is `SCHEME_SEPARATOR`).
   out.push(indent + "allow_" + "http" + ": " + (b.allowHttp === true ? "true" : "false"));
 }
 
-/** THE RECOVERY POINT A CATALOG-BACKED PLAN IS BOUND TO (PLAT-15.2, D3
- *  section 5.5 step 4): `source.point {point_id, receipt_key, receipt_sha256,
+/** THE RECOVERY POINT A CATALOG-BACKED PLAN IS BOUND TO (D3 section 5.5 step
+ *  4): `source.point {point_id, receipt_key, receipt_sha256,
  *  manifest_sha256}`, execution contract v2's `PointBinding`.
  *
- *  ABSENT IS THE OLD DOCUMENT, BYTE FOR BYTE. A plan built from a `Backup`
- *  whose own window the controller wrote carries no binding, and emitting an
- *  empty block would change the hash of every such plan for no change of
- *  meaning. So `point` absent (or `null`) renders nothing at all.
+ *  ABSENT IS THE OLD DOCUMENT, BYTE FOR BYTE: a plan built from a `Backup`
+ *  carries no binding, and an empty block would change every such plan's
+ *  hash for no change of meaning.
  *
  *  PRESENT, IT IS WHOLE OR IT IS REFUSED. The runner re-reads the receipt the
- *  binding names BEFORE it constructs a client, re-derives the point id from
- *  its bytes and compares both digests; a malformed field is exit 3
- *  `PointBindingMismatch` there (`crates/logweir/src/drill/binding.rs`
- *  `check_point_shape`). The same four shapes are refused HERE, so an approver
- *  is never asked to sign a document that cannot pass that check: a point id
- *  of `lwp1-` plus 32 lowercase hex characters, a non-empty receipt key, and
- *  two `sha256:` digests of 64 lowercase hex characters (the form
- *  `sha256_prefixed` computes, and the only form the runner's comparison can
- *  match). `RestoreSpec` has no
- *  `deny_unknown_fields`, so a misspelt key would be ignored rather than
- *  refused -- which is why `ui_lint.rs` deserialises the point golden and
- *  asserts the four values arrive. */
+ *  binding names before it constructs a client and refuses a malformed field
+ *  with exit 3 `PointBindingMismatch` (`crates/logweir/src/drill/binding.rs`
+ *  `check_point_shape`). The same shapes are refused HERE, so an approver is
+ *  never asked to sign a document that cannot pass: `lwp1-` plus 32 lowercase
+ *  hex characters, a non-empty receipt key, and two `sha256:` digests of 64
+ *  lowercase hex characters. `RestoreSpec` has no `deny_unknown_fields`, so a
+ *  misspelt key would be ignored -- which is why `ui_lint.rs` deserialises
+ *  the point golden and asserts the four values arrive. */
 function pushPointBinding(out, point) {
   if (point === undefined || point === null) {
     return;
@@ -535,11 +491,11 @@ function pushList(out, indent, key, values, render) {
   }
 }
 
-// THE ONE SCALAR WRITER. Every string this document carries goes through it, so
-// a topic name carrying a colon, a `#`, a leading digit or a quote cannot
-// change the document's SHAPE -- which for a document whose sha256 is an
-// approval's subject is not a cosmetic concern. Double-quoted YAML takes the
-// same escapes JSON does for every character this page can produce.
+// THE ONE SCALAR WRITER. Every string goes through it, so a topic name
+// carrying a colon, a `#`, a leading digit or a quote cannot change the
+// document's SHAPE -- which matters for a document whose sha256 is an
+// approval's subject. Double-quoted YAML takes the same escapes JSON does for
+// every character this page can produce.
 function quote(value) {
   const text = String(value);
   let out = "\"";
@@ -575,10 +531,9 @@ function integer(value, field) {
  *  `target.default_replication_factor` is an `i16` in `logweir_core::spec`. */
 export const MAX_REPLICATION_FACTOR = 32767;
 
-// THE ONE REPLICATION FACTOR A BROKER CAN PLACE, OR NO DOCUMENT. A value above
-// the `i16` bound does not parse in the runner, `0` is refused by every
-// broker, and a negative one is `-1` at best -- which asks the broker for its
-// own `default.replication.factor`, a number the signed plan would then not
+// THE ONE REPLICATION FACTOR A BROKER CAN PLACE, OR NO DOCUMENT. Above the
+// `i16` bound the runner cannot parse it, `0` every broker refuses, and `-1`
+// asks the broker for its own default, a number the signed plan would not
 // state. So a whole number from 1 to the bound renders, and anything else is
 // a `RangeError` the wizard shows instead of a hash.
 function replicationFactor(value, field) {

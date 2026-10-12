@@ -1,23 +1,19 @@
-//! The `TopicDiscovery` reconciler — D2 §5, PLAT-09.1.
+//! The `TopicDiscovery` reconciler.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST. Nothing
-//! dials a broker, nothing waits on a Job, and the double PANICS on a request
-//! it was not given a route for — which is what turns "the reconciler did not
-//! read that pod's log", "it created nothing while queued" and "it never
-//! touched the previous discovery" into assertions rather than absences of
-//! evidence.
+//! Every test here is a pure-function or `mock_client` test. The double
+//! PANICS on an unrouted request, which turns "the reconciler did not read
+//! that pod's log", "it created nothing while queued" and "it never touched
+//! the previous discovery" into assertions rather than absences of evidence.
 //!
 //! READ THESE THREE FIRST, in this order:
 //!
 //! 1. [`a_successful_listing_alone_is_unknown_and_never_attested_complete`] —
-//!    D-SEAMS **S3** and the whole honesty claim of PLAT-09.1. Kafka silently
-//!    omits topics a principal cannot describe, so a clean listing proves
-//!    nothing about completeness. The mutant is the one-line change that would
-//!    make a green run claim `attestedComplete`.
-//! 2. [`a_label_wearing_pod_that_the_job_does_not_own_is_never_read`] —
-//!    D-SEAMS **S6**, defect `SEC-PODLOG`. A check's stdout becomes a status
-//!    and then an API response, and `batch.kubernetes.io/job-name` is writable
-//!    by anything that can create a pod.
+//!    the honesty claim. Kafka silently omits topics a principal cannot
+//!    describe, so a clean listing proves nothing about completeness.
+//! 2. [`a_label_wearing_pod_that_the_job_does_not_own_is_never_read`] — a
+//!    check's stdout becomes a status and then an API response, and
+//!    `batch.kubernetes.io/job-name` is writable by anything that can create
+//!    a pod.
 //! 3. [`the_chunks_are_written_before_the_status_and_the_ttl_after_it`] — the
 //!    commit point. A restart anywhere in that sequence has to leave either
 //!    nothing or a complete, readable result.
@@ -45,15 +41,13 @@ use weirkeeper::crds::topic_discovery::TopicDiscovery;
 use weirkeeper::job::RunnerImage;
 use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Recorder, Route};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 const NS: &str = "logweir-d2-w8";
 const NAME: &str = "td-orders";
 /// The subject UID. The Job name below is `sha256(this)`'s first 20 hex
 /// characters, and `the_job_name_is_a_pure_function_of_this_objects_uid` holds
-/// the two together so a change to either has to be argued for twice.
+/// the two together.
 const UID: &str = "9f2b1c44-0000-4000-8000-0000000000a1";
 const JOB: &str = "lwc-td-288fecc03251c1c31851";
 const JOB_UID: &str = "1a2b3c4d-0000-4000-8000-0000000000b2";
@@ -72,8 +66,8 @@ const STATUS_PATH: &str = "/topicdiscoveries/td-orders/status";
 const CLUSTER_PATH: &str = "/kafkaclusters/source";
 
 /// The digest the plan `ConfigMap` annotation carries and the end frame
-/// declares. Any value works; what matters is that ONE value is in both
-/// places, because that is the comparison the relay verification is.
+/// declares. Any value works; ONE value in both places is the comparison the
+/// relay verification makes.
 const PLAN_SHA: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
 fn now() -> chrono::DateTime<Utc> {
@@ -355,9 +349,8 @@ fn finished_routes(log: String, extra: Vec<Route>) -> Vec<Route> {
     routes
 }
 
-/// An events list with nothing in it — FX-11's read of a Job with no provable
-/// pod, answered "no Event says why", so the classification is the one it was
-/// before Events were read.
+/// An events list with nothing in it: the read of a Job with no provable pod,
+/// answered "no Event says why".
 fn no_events() -> Route {
     Route {
         method: "GET",
@@ -417,9 +410,7 @@ fn status_of(bodies: &BodyRecorder) -> Value {
     body_of(bodies, "PATCH", "/topicdiscoveries/")["status"].clone()
 }
 
-// ---------------------------------------------------------------------------
-// The start path — D2 §5.2 steps 2–4
-// ---------------------------------------------------------------------------
+// The start path
 
 /// The Job's name is `lwc-td-<first 20 hex of sha256(uid)>`, independent of the
 /// object's name — so there is no `NameTooLong` path for this kind and a
@@ -544,10 +535,9 @@ async fn a_new_request_renders_one_plan_and_creates_one_owned_check_job() {
     );
 }
 
-/// **D-SEAMS S2, and the credential rule.** The plan is an input to a CHECK
-/// Job: its kind is `topicInventory`, it names the environment variable the
-/// kubelet projects the SASL password into, and it carries no password, no
-/// bucket and nothing a `Backup` would execute.
+/// **The plan is a CHECK input.** Its kind is `topicInventory`, it names the
+/// environment variable the kubelet projects the SASL password into, and it
+/// carries no password, no bucket and nothing a `Backup` would execute.
 #[tokio::test]
 async fn the_plan_is_a_check_input_that_names_a_variable_and_never_a_credential() {
     let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
@@ -579,7 +569,7 @@ async fn the_plan_is_a_check_input_that_names_a_variable_and_never_a_credential(
         "internal topics are out by default"
     );
 
-    // The whole document, as bytes, carries no credential-shaped anything. The
+    // The whole document, as bytes, carries nothing credential-shaped: the
     // plan `ConfigMap` is readable by anything that can read `ConfigMap`s in
     // this namespace.
     for forbidden in ["password\":\"", "secretRef", "AWS_SECRET", "hunter2"] {
@@ -749,19 +739,16 @@ async fn over_the_per_connection_ceiling_the_request_is_queued_and_creates_nothi
     assert_eq!(status["conditions"][0]["status"], json!("Unknown"));
 }
 
-// ---------------------------------------------------------------------------
-// FX-10 — the installation policy's numbers reach this controller
-// ---------------------------------------------------------------------------
+// The installation policy's numbers reach this controller.
 //
-// Every row below is served the chart's OWN tuned document —
-// `charts/logweir/rendered/tuned.yaml`, the render of
-// `examples/tuned.values.yaml`, every value off its default — through
-// the policy reference a running controller is given, and runs the same pass
-// against the compiled-in defaults as its control. Before these rows every
-// other row in this file read the defaults, so a reconciler that consulted
-// `Policy::defaults()` (or a constant) where it should read the loaded
-// document passed all of them. The values are followed end to end: values
-// file, template, `check::policy::parse`, this controller.
+// Every row below is served the chart's OWN tuned document
+// (`charts/logweir/rendered/tuned.yaml`, the render of
+// `examples/tuned.values.yaml`, every value off its default) through the
+// policy reference a running controller is given, and runs the same pass
+// against the compiled-in defaults as its control, so a reconciler that
+// consulted `Policy::defaults()` (or a constant) instead of the loaded
+// document fails. The values are followed end to end: values file,
+// template, `check::policy::parse`, this controller.
 
 const POLICY_NS: &str = "logweir-system";
 const POLICY_NAME: &str = "weirkeeper-policy";
@@ -896,11 +883,10 @@ fn planned_max_topics(bodies: &BodyRecorder) -> u32 {
     request.max_topics
 }
 
-/// **FX-10: the installation policy's check ceilings and topic ceiling reach
-/// discovery admission and the plan — at the chart's tuned values.**
-///
-/// The chart's tuned document says `maxActiveDiscoveriesPerConnection: 3`,
-/// `maxActivePerNamespace: 1` and `hardMaxTopics: 100`.
+/// **The installation policy's check ceilings and topic ceiling reach discovery
+/// admission and the plan, at the chart's tuned values**
+/// (`maxActiveDiscoveriesPerConnection: 3`, `maxActivePerNamespace: 1`,
+/// `hardMaxTopics: 100`).
 ///
 /// * Beside ONE active discovery of this connection, a request is ADMITTED
 ///   (three may run) and its plan is cut at 100 topics, although it asked for
@@ -910,8 +896,8 @@ fn planned_max_topics(bodies: &BodyRecorder) -> u32 {
 ///   QUEUED, `ConcurrencyLimited`, with nothing created. CONTROL: under the
 ///   defaults (`4` per namespace) it is admitted.
 ///
-/// MUTANTS (FX-10 report): pass `&ChecksPolicy::default()` to
-/// `limits::admit` at `controllers/topic_discovery.rs`, or
+/// MUTANTS: pass `&ChecksPolicy::default()` to `limits::admit` at
+/// `controllers/topic_discovery.rs`, or
 /// `Policy::defaults().discovery.hard_max_topics` to `effective_max_topics`.
 #[tokio::test]
 async fn the_installation_policys_ceilings_reach_discovery_admission_and_the_plan() {
@@ -970,28 +956,26 @@ async fn the_installation_policys_ceilings_reach_discovery_admission_and_the_pla
     );
 }
 
-/// **FX-10 fix round (review L1): the installation's `hardMaxTopics` reaches
-/// the HARVEST too, not only the plan.**
+/// **The installation's `hardMaxTopics` reaches the HARVEST too, not only the
+/// plan.**
 ///
-/// `hardMaxTopics` has two readers that decide something. The plan asks the
-/// runner for at most that many entries
+/// The plan asks the runner for at most that many entries
 /// ([`the_installation_policys_ceilings_reach_discovery_admission_and_the_plan`]);
-/// and a runner that did not honour its plan — a bug, or a skewed runner image
-/// — has its surplus cut on harvest to the SAME ceiling, before a single chunk
-/// is written. The second reader had no row: the review's mutant M5 (the
-/// harvest's ceiling read as the compiled-in 50 000) survived all 1 719 tests.
+/// a runner that did not honour its plan (a bug, or a skewed runner image) has
+/// its surplus cut on harvest to the SAME ceiling, before a single chunk is
+/// written.
 ///
 /// The chart's tuned document says `hardMaxTopics: 100`, and the request asks
 /// for 20 000:
 ///
-/// * a relay of 101 entries is STORED as 100 — one chunk, `counts.returned`
-///   100, `truncated`, `MaxTopics`, and the digest over the 100 stored — while
+/// * a relay of 101 entries is STORED as 100: one chunk, `counts.returned`
+///   100, `truncated`, `MaxTopics`, and the digest over the 100 stored, while
 ///   `counts.listed` keeps the broker's 101;
 /// * CONTROL: the same relay under the compiled-in defaults (50 000, so the
 ///   request's own 20 000 binds) is stored whole: 101, not truncated.
 ///
-/// MUTANT (FX-10 review M5): `storable_entry_ceiling(effective_max_topics(…,
-/// 50_000))` at the harvest. The guard
+/// MUTANT: `storable_entry_ceiling(effective_max_topics(…, 50_000))` at the
+/// harvest. The guard
 /// `chart_policy::every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value`
 /// fails on it too: it counts every read of the field.
 #[tokio::test]
@@ -1052,7 +1036,7 @@ async fn the_installation_policys_topic_ceiling_cuts_what_the_harvest_stores() {
     );
 }
 
-/// **FX-10: the installation policy's fresh window reaches `freshUntil`.**
+/// **The installation policy's fresh window reaches `freshUntil`.**
 ///
 /// The chart's tuned document says `freshSeconds: 60`, so an inventory the
 /// runner observed at 11:59:00 is fresh until 12:00:00. CONTROL:
@@ -1108,7 +1092,7 @@ fn deleted_names(recorder: &Recorder) -> Vec<String> {
     deleted
 }
 
-/// **FX-10: the installation policy's collector rules reach the collector.**
+/// **The installation policy's collector rules reach the collector.**
 ///
 /// The chart's tuned document says `keepPerConnection: 2` and
 /// `retentionSeconds: 180`.
@@ -1201,13 +1185,10 @@ async fn the_installation_policys_collector_rules_reach_the_collector() {
     assert!(deleted_names(&recorder).is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// The tracker's required cases
-// ---------------------------------------------------------------------------
+// The required cases
 
 /// **Large catalog.** 5,003 entries become exactly three chunks, each within
-/// BOTH of D2 §5.5's bounds, and the status carries the index and not the
-/// names.
+/// BOTH chunk bounds, and the status carries the index and not the names.
 ///
 /// MUTANT: raise `chunks::MAX_CHUNK_LINES`, or write one `ConfigMap` for the
 /// whole inventory. The chunk count, the per-chunk line count and the per-chunk
@@ -1313,10 +1294,9 @@ async fn a_large_catalog_spans_three_chunks_inside_both_size_bounds() {
     );
 }
 
-/// **Empty cluster.** `counts.returned: 0` with an empty chunk index — a FACT,
-/// and never "unknown". PLAT-09.1's acceptance is that a user can tell empty
-/// from failed from stale from permission-limited, and this is the first of the
-/// four.
+/// **Empty cluster.** `counts.returned: 0` with an empty chunk index: a FACT,
+/// and never "unknown". A user can tell empty from failed from stale from
+/// permission-limited, and this is the first of the four.
 #[tokio::test]
 async fn an_empty_cluster_is_a_count_of_zero_and_not_a_failure() {
     let entries: Vec<TopicEntry> = Vec::new();
@@ -1343,8 +1323,8 @@ async fn an_empty_cluster_is_a_count_of_zero_and_not_a_failure() {
 }
 
 /// **ACL-limited principal.** One expected topic the broker refused to describe
-/// makes the whole observation `limited`, and the basis says which of D2 §5.4's
-/// two detections fired.
+/// makes the whole observation `limited`, and the basis says which of the two
+/// detections fired.
 #[tokio::test]
 async fn an_expected_topic_the_broker_refuses_makes_the_observation_limited() {
     let entries = vec![TopicEntry::new("orders", 6)];
@@ -1379,7 +1359,7 @@ async fn an_expected_topic_the_broker_refuses_makes_the_observation_limited() {
     assert_eq!(status["result"]["expected"]["requested"], json!(2));
 }
 
-/// A listing entry that carried `TopicAuthorizationFailed` is D2 §5.4's other
+/// A listing entry that carried `TopicAuthorizationFailed` is the other
 /// detection, and it is `limited` on its own.
 #[tokio::test]
 async fn a_listing_authorization_error_is_limited_on_its_own() {
@@ -1407,13 +1387,13 @@ async fn a_listing_authorization_error_is_limited_on_its_own() {
 }
 
 /// **THE HONESTY CLAIM.** A completely successful listing, with every expected
-/// topic visible and no error anywhere, is `unknown` — because Kafka silently
-/// omits topics a principal may not describe, so a clean list proves nothing.
+/// topic visible and no error anywhere, is `unknown`: Kafka silently omits
+/// topics a principal may not describe, so a clean list proves nothing.
 ///
 /// MUTANT: make a `Succeeded` phase write `attestedComplete`, or make the
-/// absence of an authorization error mean completeness. Either fails here, and
+/// absence of an authorization error mean completeness.
 /// `an_administrator_attestation_is_the_only_route_to_attested_complete` is the
-/// other half — the ONE thing that does upgrade it.
+/// other half: the ONE thing that does upgrade it.
 #[tokio::test]
 async fn a_successful_listing_alone_is_unknown_and_never_attested_complete() {
     let entries = vec![TopicEntry::new("orders", 6), TopicEntry::new("payments", 3)];
@@ -1488,15 +1468,12 @@ fn attestation(principal: &str, cluster_id: &str, expires: &str) -> Value {
 /// REAL clock, for every row that goes through `reconcile_discovery`.
 ///
 /// `reconcile_discovery` judges an attestation at `Utc::now()` (the one clock
-/// read `the_reconciler_reads_one_clock_in_one_place` pins), so these rows
-/// follow the rule `listed` states for the collector: date the fixture
-/// relative to the real clock. They used the literal `2026-12-15`, and FX-9's
-/// shifted-clock sweep showed what that date does. The `attestedComplete` row
-/// goes red. The truncated-listing and blank-principal rows go VACUOUS: they
-/// keep passing because the EXPIRY refuses the attestation, not the rule each
-/// row exists to prove, and their own mutants survive 366 days ahead. The pure
-/// `attestation_candidate` and `attestation_for` rows read no clock and keep
-/// their literals.
+/// read `the_reconciler_reads_one_clock_in_one_place` pins). A literal date
+/// would turn the `attestedComplete` row red and make the truncated-listing
+/// and blank-principal rows VACUOUS once it passed: they would keep passing
+/// because the EXPIRY refuses the attestation, not the rule each row proves.
+/// The pure `attestation_candidate` and `attestation_for` rows read no clock
+/// and keep their literals.
 fn unexpired() -> String {
     (Utc::now() + chrono::Duration::days(365)).to_rfc3339()
 }
@@ -1769,17 +1746,12 @@ async fn internal_topics_are_excluded_by_default_and_counted() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// D2 §4.3 `gc.rs` / §5.8 retention — the collector, wired by W11
-// ---------------------------------------------------------------------------
+// The collector
 
-/// One terminal discovery in a LIST answer, dated RELATIVE TO THE REAL CLOCK.
-///
-/// `reconcile_discovery` takes its instant from `Utc::now()` — the one clock
-/// read `the_reconciler_reads_one_clock_in_one_place` asserts — so a fixture
-/// dated with an absolute literal would be collected or not depending on what
-/// day the suite runs. Every age below is an offset from the same `Utc::now()`
-/// the reconciler will read microseconds later.
+/// One terminal discovery in a LIST answer, dated RELATIVE TO THE REAL CLOCK:
+/// `reconcile_discovery` takes its instant from `Utc::now()`, so a fixture
+/// dated with an absolute literal would be collected or not depending on the
+/// day the suite runs.
 fn listed(
     name: &str,
     uid: &str,
@@ -1833,10 +1805,9 @@ fn terminal_subject() -> TopicDiscovery {
 }
 
 /// **Refresh.** A refresh is a new object; the previous one is terminal and is
-/// never re-read or re-written. Since W11 wired the collector it costs exactly
-/// ONE call — the GC's listing — and the table holds nothing else, so the
-/// double panics if the reconciler touched this object, its Job, its plan or
-/// its chunks.
+/// never re-read or re-written. It costs exactly ONE call, the collector's
+/// listing, and the table holds nothing else, so the double panics if the
+/// reconciler touched this object, its Job, its plan or its chunks.
 #[tokio::test]
 async fn a_terminal_discovery_is_never_reconciled_again() {
     let done = terminal_subject();
@@ -1953,10 +1924,10 @@ async fn the_collector_deletes_only_expired_terminal_discoveries_and_names_their
 
 /// **Keep-last-five per connection**, and the per-pass cap.
 ///
-/// Eight terminal discoveries against ONE connection UID, all of them INSIDE
-/// the retention window. The newest five stay; the other three go — which is
-/// what keeps a namespace refreshing an inventory every minute from filling
-/// etcd long before 24 h have passed.
+/// Eight terminal discoveries against ONE connection UID, all INSIDE the
+/// retention window. The newest five stay; the other three go, which keeps a
+/// namespace refreshing an inventory every minute from filling etcd long
+/// before 24 h have passed.
 ///
 /// MUTANT: replace `keep_per_connection` with `u32::MAX` in the wiring (which
 /// is what a truncated page does on purpose) and nothing is deleted at all.
@@ -2001,11 +1972,10 @@ async fn the_collector_keeps_the_newest_five_per_connection() {
 /// **A truncated listing applies the retention window ALONE.**
 ///
 /// The API server returns items in NAME order, not in `observedAt` order, so
-/// one page of a truncated listing is not "the newest" anything: applying the
-/// cohort rule to it could delete the newest observation a namespace has. The
-/// eight objects below are all inside the window, the page carries a
-/// `continue` token, and NOTHING is deleted — the route table holds no DELETE,
-/// so a collector that applied the cohort rule anyway panics.
+/// one page of a truncated listing is not "the newest" anything: the cohort
+/// rule applied to it could delete the newest observation a namespace has.
+/// The eight objects below are all inside the window, the page carries a
+/// `continue` token, and NOTHING is deleted: the route table holds no DELETE.
 ///
 /// MUTANT: drop the `truncated` branch and three objects are deleted.
 #[tokio::test]
@@ -2029,7 +1999,7 @@ async fn a_truncated_listing_never_applies_the_cohort_rule() {
 }
 
 /// **The per-pass cap.** Twenty-five expired objects, one pass, twenty
-/// deletes — a namespace that has accumulated thousands is drained over many
+/// deletes: a namespace that has accumulated thousands is drained over many
 /// passes rather than in one burst against the API server.
 ///
 /// MUTANT: remove the `.take(GC_MAX_DELETES_PER_PASS)` and the twenty-first
@@ -2107,9 +2077,9 @@ async fn a_refused_collection_is_logged_and_the_pass_still_succeeds() {
 }
 
 /// **Refresh, the other half.** While a NEW observation is running, its own
-/// status patch carries no `result` key at all — a merge patch with no `result`
-/// leaves whatever is there alone, which is what "the old result stays readable
-/// until the new one lands" means for a consumer paging an object.
+/// status patch carries no `result` key at all: a merge patch with no `result`
+/// leaves whatever is there alone, so the old result stays readable until the
+/// new one lands.
 ///
 /// MUTANT: write `result: null` (or an empty result) on a `Running` patch. The
 /// old inventory would vanish the instant a refresh started.
@@ -2146,8 +2116,8 @@ async fn a_running_pass_never_writes_a_result_and_never_writes_a_chunk() {
         },
     ];
     // NO POST ROUTE, NO pods/log ROUTE. A running check has no end frame yet,
-    // so reading its stdout would always be `ResultUnreadable`; the framework
-    // does not read it and the double proves the reconciler did not either.
+    // so its stdout is not read, and the double proves the reconciler did not
+    // read it.
     let (client, _r, bodies) = mock_client_recording_bodies(routes);
     let outcome = td::reconcile_discovery(&running(), &context(client, None))
         .await
@@ -2212,23 +2182,19 @@ async fn a_re_run_projects_the_secret_the_connection_resolves_to_now() {
     );
 
     // And the binding records the generation and principal a later reader
-    // compares against to decide the result is stale (D2 §5.7).
+    // compares against to decide the result is stale.
     let status = status_of(&bodies);
     assert_eq!(status["binding"]["connectionGeneration"], json!(4));
     assert_eq!(status["binding"]["principal"], json!("User:backup-v2"));
 }
 
-// ---------------------------------------------------------------------------
 // The seams
-// ---------------------------------------------------------------------------
 
-/// **D-SEAMS S6, defect `SEC-PODLOG`.** A pod wearing
-/// `batch.kubernetes.io/job-name` whose controller owner is a DIFFERENT Job is
-/// never read. The route table has no `pods/log` route for it, so the double
-/// panics if it were.
+/// A pod wearing `batch.kubernetes.io/job-name` whose controller owner is a
+/// DIFFERENT Job is never read. The route table has no `pods/log` route for
+/// it, so the double panics if it were.
 ///
-/// MUTANT: match pods by label instead of by controller-owner UID. The impostor
-/// would be read and this test panics inside the double.
+/// MUTANT: match pods by label instead of by controller-owner UID.
 #[tokio::test]
 async fn a_label_wearing_pod_that_the_job_does_not_own_is_never_read() {
     let entries = vec![TopicEntry::new("orders", 6)];
@@ -2354,7 +2320,7 @@ async fn a_plan_config_map_owned_by_another_subject_is_a_terminal_conflict() {
 }
 
 /// **The commit ordering.** Chunks, then the status patch that indexes them,
-/// then the Job's TTL. Nothing else is an acceptable order.
+/// then the Job's TTL.
 ///
 /// MUTANT: drop the TTL patch, or move it before the status write. The first
 /// leaves finished check Jobs forever; the second lets garbage collection race
@@ -2390,8 +2356,8 @@ async fn the_chunks_are_written_before_the_status_and_the_ttl_after_it() {
     );
 }
 
-/// **D-SEAMS S7.** Every status write is a merge PATCH whose BODY carries
-/// `metadata.resourceVersion` as the update precondition — never a `PUT`, which
+/// Every status write is a merge PATCH whose BODY carries
+/// `metadata.resourceVersion` as the update precondition, never a `PUT`, which
 /// the API server authorises as `update` and this role grants on nothing.
 #[tokio::test]
 async fn every_status_write_is_a_resource_version_preconditioned_merge_patch() {
@@ -2457,9 +2423,7 @@ async fn a_status_conflict_leaves_the_pod_alive_for_the_next_pass() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Cancellation, staleness and the result guards
-// ---------------------------------------------------------------------------
 
 /// **Cancel.** The owned Job's deadline is collapsed, the object becomes
 /// `Cancelled`, and NO chunk is written — the route table has no `POST`.
@@ -2587,8 +2551,7 @@ async fn a_vanished_job_becomes_stalled_only_after_the_grace() {
 
     // And inside the grace it is NOT stalled, and creates nothing. The instant
     // is taken from THIS machine's clock, because the reconciler reads the real
-    // one: a fixture timestamp would make "inside the grace" a claim about the
-    // day the fixture was written.
+    // one.
     let recent = discovery(
         json!({"phase": PHASE_RUNNING, "reason": "PodNotStarted", "jobRef": {"name": JOB},
                "queuedAt": Utc::now().to_rfc3339()}),
@@ -2650,8 +2613,8 @@ async fn a_topics_digest_the_runner_invented_is_refused() {
     assert_eq!(outcome.reason, CheckCode::ResultUnreadable.as_str());
 }
 
-/// A truncated inventory records the reason in D2 §5.1's CamelCase spelling and
-/// can never be `attestedComplete`, however good the attestation is.
+/// A truncated inventory records the reason in the status's CamelCase spelling
+/// and can never be `attestedComplete`, however good the attestation is.
 #[tokio::test]
 async fn a_truncated_inventory_records_its_reason_and_cannot_be_attested() {
     let entries = vec![TopicEntry::new("orders", 6)];
@@ -2699,8 +2662,8 @@ async fn a_truncated_inventory_records_its_reason_and_cannot_be_attested() {
 }
 
 /// `observedAt` is the RUNNER CONTAINER's `finishedAt` and never `now`, so a
-/// re-read of the same Job produces a byte-identical patch. That is what stopped
-/// the `KafkaCluster` probe's measured 3,388-reconciles-in-ninety-seconds loop.
+/// re-read of the same Job produces a byte-identical patch and a watch never
+/// feeds itself.
 #[tokio::test]
 async fn observed_at_is_the_runners_own_instant_and_not_a_clock_read() {
     let entries = vec![TopicEntry::new("orders", 6)];
@@ -2725,25 +2688,20 @@ async fn observed_at_is_the_runners_own_instant_and_not_a_clock_read() {
     assert_eq!(status["freshUntil"], json!("2026-09-16T12:14:00Z"));
 }
 
-// ---------------------------------------------------------------------------
-// A relayed classification is the reason — defect `D2-RESULTUNREADABLE`
-// ---------------------------------------------------------------------------
+// A relayed classification is the reason.
 //
-// The D2 live run (`artifacts/d2-live/20260918T030840Z`) put an unreachable
-// bootstrap (S11) and a broker-side password change (S12) in front of the real
-// controller. Both ended `Failed` with `status.reason: ResultUnreadable` while
-// the pod's own relayed frame carried `connection.authenticated
-// notReady/BrokerUnreachable` and `…/AuthenticationFailed` with a message and a
-// remedy — so the console could not tell an unreachable broker from a rejected
-// password. The strings below are the ones those dumps hold.
+// An unreachable bootstrap and a broker-side password change must not both
+// end `Failed` with `status.reason: ResultUnreadable` while the pod's own
+// relayed frame carries `connection.authenticated
+// notReady/BrokerUnreachable` and `…/AuthenticationFailed` with a message and
+// a remedy. The strings below are the runner's own.
 
-/// S11's relayed sentence and remedy, verbatim from
-/// `objects/s11/td-timeout-relayed.json`.
+/// The runner's relayed sentence and remedy for an unreachable bootstrap.
 const S11_MESSAGE: &str = "all-topics metadata reported BrokerUnreachable";
 const S11_REMEDY: &str = "Check that the bootstrap addresses resolve from this namespace and \
                           that a NetworkPolicy or mesh policy allows egress to the broker port.";
-/// S12's, from `results.json#S12.relayedCheckResult`, shortened past the
-/// bootstrap URL the live frame quotes.
+/// The runner's relayed sentence and remedy for a rotated password,
+/// shortened past the bootstrap URL the frame quotes.
 const S12_MESSAGE: &str =
     "fetch_cluster_id reported MetadataTimeout, but the client's error callback observed \
      AuthenticationFailed first: SASL authentication error with SCRAM-SHA-512";
@@ -2751,7 +2709,7 @@ const S12_REMEDY: &str = "Check the SASL mechanism, the username and the project
                           on the connection's Secret; rotate the credential if it was changed \
                           on the broker.";
 
-/// A complete, verifiable relay for a check that produced NO inventory — the
+/// A complete, verifiable relay for a check that produced NO inventory, the
 /// shape `logweir::check::kinds::inventory` emits for a broker it could not
 /// reach: a result document with `checks` and no `inventory` block, and an end
 /// frame whose `topicLines` summary is ABSENT, because "the inventory did not
@@ -2789,15 +2747,15 @@ async fn reconcile_failure_relay(checks: Vec<CheckOutcome>) -> (td::Outcome, Val
     (outcome, status)
 }
 
-/// **S11, the unreachable broker.** `td-timeout`'s bootstrap `10.255.255.1:9096`
-/// answered nothing; the runner classified it and relayed the row. The reason is
-/// the runner's own code and the message carries the remedy an operator has to
-/// act on — not `ResultUnreadable`, which says only that the controller did not
-/// look.
+/// **The unreachable broker.** `td-timeout`'s bootstrap `10.255.255.1:9096`
+/// answered nothing; the runner classified it and relayed the row. The reason
+/// is the runner's own code and the message carries the remedy an operator has
+/// to act on, not `ResultUnreadable`, which says only that the controller did
+/// not look.
 ///
-/// MUTANT: bind `result.inventory` instead of the whole document in `commit`
-/// (the `e7d0e79` behaviour). `reason` goes back to `ResultUnreadable` and this
-/// row fails on its first assertion.
+/// MUTANT: bind `result.inventory` instead of the whole document in `commit`.
+/// `reason` goes back to `ResultUnreadable` and this row fails on its first
+/// assertion.
 #[tokio::test]
 async fn a_relayed_broker_unreachable_is_the_reason_with_its_remedy() {
     let row = broker_failure(
@@ -2836,13 +2794,12 @@ async fn a_relayed_broker_unreachable_is_the_reason_with_its_remedy() {
     assert_eq!(status["conditions"][0]["status"], json!("False"));
 }
 
-/// **S12, the rotated password.** The broker's SCRAM password for the
-/// `rotating` principal was changed without touching the Secret. An operator
-/// reading this object must be able to tell it apart from S11 — that is the
-/// whole consequence the defect row records.
+/// **The rotated password.** The broker's SCRAM password for the `rotating`
+/// principal was changed without touching the Secret. An operator reading this
+/// object must be able to tell it apart from an unreachable broker.
 ///
 /// MUTANT: same as above; also, project `CheckCode::ResultUnreadable` instead of
-/// `failed.code` and the two scenarios become indistinguishable again.
+/// `failed.code` and the two become indistinguishable again.
 #[tokio::test]
 async fn a_relayed_authentication_failure_is_distinguishable_from_an_unreachable_broker() {
     let row = broker_failure(
@@ -2864,10 +2821,9 @@ async fn a_relayed_authentication_failure_is_distinguishable_from_an_unreachable
     assert_eq!(status["result"], Value::Null);
 }
 
-/// **S11's second accepted reason.** `MetadataTimeout` is an `unknown` code
-/// (`logweir::check::kinds::is_unknown_code`), not a `notReady` one, and D2
-/// §14.4 S11 accepts it beside `BrokerUnreachable`. A projection that read only
-/// `notReady` rows would leave exactly the timeout it was written for reading
+/// **`MetadataTimeout` is projected too.** It is an `unknown` code
+/// (`logweir::check::kinds::is_unknown_code`), not a `notReady` one, and a
+/// projection that read only `notReady` rows would leave the timeout reading
 /// `ResultUnreadable`.
 ///
 /// MUTANT: drop the `unknown | skipped` arm of `blocking_failure`. This row
@@ -2886,8 +2842,8 @@ async fn a_relayed_metadata_timeout_projects_metadata_timeout() {
     assert_eq!(outcome.reason, CheckCode::MetadataTimeout.as_str());
 }
 
-/// **A `notReady` blocking row outranks an `unknown` one**, exactly as D2 §6.4
-/// aggregates — and the order in the document does not decide it.
+/// **A `notReady` blocking row outranks an `unknown` one**, as the aggregate
+/// does, and the order in the document does not decide it.
 ///
 /// MUTANT: return `checks.iter().find(|c| c.gating == Gating::Blocking)`. The
 /// first row wins and this asserts `MetadataTimeout`.
@@ -2910,10 +2866,9 @@ async fn a_not_ready_row_outranks_an_unknown_one_whatever_the_document_order() {
     assert_eq!(outcome.reason, CheckCode::AuthenticationFailed.as_str());
 }
 
-/// **An ADVISORY `notReady` is a warning and never the terminal reason.** D2
-/// §6.4 says an advisory row never changes the aggregate; a reason taken from
-/// one would name the wrong cause, and the object would claim a classification
-/// nothing blocking supports.
+/// **An ADVISORY `notReady` is a warning and never the terminal reason.** An
+/// advisory row never changes the aggregate; a reason taken from one would
+/// name the wrong cause.
 ///
 /// MUTANT: remove the `gating == Blocking` filter. This row reads
 /// `TopicAuthorizationFailed` instead of `ResultUnreadable` and fails.
@@ -2938,20 +2893,19 @@ async fn an_advisory_not_ready_row_is_never_the_terminal_reason() {
     );
 }
 
-/// **An `executionOnly` row is never the terminal reason either.** D2 §6.3: an
-/// execution-only check "cannot be checked before execution", so
+/// **An `executionOnly` row is never the terminal reason either.** An
+/// execution-only check cannot be checked before execution, so
 /// `CheckOutcome::new` forces it to `unknown` and `check_contract::aggregate`
-/// excludes it entirely. A reason taken from one would have the object claim a
-/// classified failure for a check **that never ran**.
+/// excludes it; a reason taken from one would claim a classified failure for a
+/// check **that never ran**.
 ///
-/// This is the complement of the advisory row above, and it needs its own: the
-/// filter is `gating == Blocking`, and each of the two ways to relax it lets a
-/// different kind through. The reviewer's R3 found that gap — with the filter at
-/// `!= Advisory` all sixty-two other rows stayed green.
+/// The complement of the advisory row above: the filter is `gating ==
+/// Blocking`, and each of the two ways to relax it lets a different kind
+/// through.
 ///
 /// MUTANT: relax the filter to `c.gating != Gating::Advisory`. This row reads
 /// `BrokerUnreachable` and fails; `an_advisory_not_ready_row_is_never_the_terminal_reason`
-/// stays green, which is exactly why one row could not cover both.
+/// stays green, which is why one row could not cover both.
 #[tokio::test]
 async fn an_execution_only_row_is_never_the_terminal_reason() {
     let execution_only = CheckOutcome::new(
@@ -2994,19 +2948,19 @@ async fn an_empty_check_set_with_no_inventory_is_still_result_unreadable() {
     assert_eq!(status["result"], Value::Null);
 }
 
-/// **No result document at all is a THIRD fact**, and it gets its own sentence:
-/// nothing was read, so nothing is inferred — including from the exit code. A
-/// relay that decodes (the end frame is there, and it verifies against the plan
-/// digest and the subject UID) but declares no `result` stream is exactly that.
+/// **No result document at all is a THIRD fact**, with its own sentence:
+/// nothing was read, so nothing is inferred, including from the exit code. A
+/// relay that decodes (the end frame is there, and it verifies against the
+/// plan digest and the subject UID) but declares no `result` stream is exactly
+/// that.
 ///
-/// It is NOT the empty pod log, which never reaches this arm at all: that is
-/// refused one step earlier as "no end frame", and
-/// `an_ownerless_label_wearing_pod_leaves_the_result_unreadable` holds it.
+/// It is NOT the empty pod log, which is refused one step earlier as "no end
+/// frame" (`an_ownerless_label_wearing_pod_leaves_the_result_unreadable`).
 ///
 /// MUTANT: pass `Some(&[])` in place of `None` for a missing document. The
-/// reason is unchanged, so only this message assertion catches the conflation of
-/// "the runner printed no result" with "the runner printed a result that checked
-/// nothing".
+/// reason is unchanged, so only this message assertion catches the conflation
+/// of "the runner printed no result" with "the runner printed a result that
+/// checked nothing".
 #[tokio::test]
 async fn a_relay_with_no_result_document_says_nothing_was_read() {
     let end = frames::end_frame(PLAN_SHA, UID, &BTreeMap::new(), None);
@@ -3027,9 +2981,9 @@ async fn a_relay_with_no_result_document_says_nothing_was_read() {
 }
 
 /// **Whatever is projected is a member of the closed vocabulary.** The reason
-/// travels into a `metav1.Condition.reason`, which is a constrained string, and
-/// it is derived from a document a runner wrote — so the guard is that
-/// `CheckCode::parse` accepts every reason this path can produce.
+/// travels into a `metav1.Condition.reason`, a constrained string, and it is
+/// derived from a document a runner wrote, so `CheckCode::parse` must accept
+/// every reason this path can produce.
 ///
 /// MUTANT: project `failed.message` in place of `failed.code.as_str()`. Every
 /// row here fails.
@@ -3058,22 +3012,20 @@ async fn every_projected_reason_is_a_member_of_the_closed_code_vocabulary() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The schema bound on the chunk index (review M1)
-// ---------------------------------------------------------------------------
+// The schema bound on the chunk index
 
-/// **The reviewer's measured case.** A runner that honours its relay budget but
-/// not its plan's `maxTopics` relays 165,000 frames — 5,115,000 bytes, inside
-/// the plan's own 6 MiB budget, inside the decoder's budget and inside the 8 MiB
-/// `pods/log` read. Split unbounded that is **66** chunks, three over the CRD's
-/// `maxItems: 64`, so 66 `ConfigMap`s land in etcd and then the `/status` PATCH
-/// is refused 422: the object never reaches a terminal phase, the Job's TTL is
-/// never set, and `error_policy` requeues the same doomed pass every thirty
-/// seconds forever.
+/// **A relay that ignores its plan is cut to what the status can index.** A
+/// runner that honours its relay budget but not its plan's `maxTopics` can
+/// relay 165,000 frames (5,115,000 bytes, inside the plan's 6 MiB budget, the
+/// decoder's budget and the 8 MiB `pods/log` read). Split unbounded that is
+/// **66** chunks, three over the CRD's `maxItems: 64`: 66 `ConfigMap`s would
+/// land in etcd and the `/status` PATCH would be refused 422, so the object
+/// would never reach a terminal phase and the same doomed pass would requeue
+/// forever.
 ///
 /// The entries are cut to the plan's ceiling BEFORE anything is written, so the
-/// chunks, the index and `topicsSha256` are one set and the API's §5.6
-/// integrity triple still holds.
+/// chunks, the index and `topicsSha256` are one set and the API's integrity
+/// triple still holds.
 ///
 /// MUTANT: split `relay.topics` instead of the clamped slice. The chunk count,
 /// the `truncated` flag and the digest each fail.
@@ -3205,22 +3157,19 @@ fn clamping_keeps_the_chunks_the_index_and_the_digest_one_set() {
     assert!(!untouched.truncated);
 }
 
-// ---------------------------------------------------------------------------
-// The TTL on the Failed path (review M2)
-// ---------------------------------------------------------------------------
+// The TTL on the Failed path
 
 /// **A terminal status that 409'd did not land**, so this pass's conclusion is
 /// not on the server and the pod that still holds the relay must stay alive for
 /// the pass that reads the newer object. The route table holds no `PATCH` for
 /// the Job, so the double panics if the TTL were set.
 ///
-/// The scenario is two replicas: A classifies `Failed/DeadlineExceeded`, its
-/// commit 409s against B's stale `Running`, and if A sets the TTL the TTL
-/// controller deletes the Job **and its pod together** 600 s later, taking the
-/// relay — and the reason the operator has to act on — with them.
+/// Two replicas: A classifies `Failed/DeadlineExceeded`, its commit 409s
+/// against B's stale `Running`, and a TTL set by A would delete the Job **and
+/// its pod together** 600 s later, taking the relay and the reason the
+/// operator has to act on with them.
 ///
-/// MUTANT: call `finish_job` unconditionally on the `Failed` arm, which is what
-/// the code did before this fix.
+/// MUTANT: call `finish_job` unconditionally on the `Failed` arm.
 #[tokio::test]
 async fn a_failed_status_conflict_never_patches_the_ttl() {
     let job = json!({
@@ -3296,15 +3245,13 @@ async fn a_failed_status_that_lands_does_patch_the_ttl() {
     assert!(outcome.ttl_patched);
 }
 
-// ---------------------------------------------------------------------------
-// The attestation fails closed on an absent value (review L1)
-// ---------------------------------------------------------------------------
+// The attestation fails closed on an absent value
 
 /// **An unknown principal is not a wildcard.** The binding's principal reaches
-/// the policy matcher as `""` when no binding was ever recorded — reachable
-/// when the start-path status patch 409'd — and `""` compares EQUAL to an
-/// attestation whose own `principal` is empty. That is a false
-/// `attestedComplete` produced by two values being unknown.
+/// the policy matcher as `""` when no binding was ever recorded (reachable
+/// when the start-path status patch 409'd), and `""` compares EQUAL to an
+/// attestation whose own `principal` is empty: a false `attestedComplete`
+/// produced by two values being unknown.
 ///
 /// MUTANT: call `attestation_for` instead of `attestation_candidate`.
 #[tokio::test]
@@ -3387,9 +3334,7 @@ fn an_attestation_candidate_needs_every_value_on_both_sides() {
     assert!(td::attestation_candidate(&blank, NS, "source", "", "").is_none());
 }
 
-// ---------------------------------------------------------------------------
 // Pure functions
-// ---------------------------------------------------------------------------
 
 /// The policy may LOWER a request's ceiling and never raise it.
 #[test]
@@ -3402,7 +3347,7 @@ fn the_policy_ceiling_lowers_a_request_and_never_raises_it() {
     assert_eq!(td::effective_max_topics(-7, 50_000), 1);
 }
 
-/// `freshUntil` is `observedAt` plus the policy window, and nothing else — the
+/// `freshUntil` is `observedAt` plus the policy window, and nothing else: the
 /// other two staleness rules are the API's, because both compare this object
 /// against something that changes after it is written.
 #[test]
@@ -3415,9 +3360,9 @@ fn fresh_until_is_observed_at_plus_the_policy_window() {
     );
 }
 
-/// D2 §5.1's status spelling of a truncation reason is CamelCase, beside every
-/// other reason in this repository; the wire contract's is camelCase. ONE seam
-/// maps them, so a third spelling cannot appear.
+/// The status spelling of a truncation reason is CamelCase, beside every other
+/// reason in this repository; the wire contract's is camelCase. ONE seam maps
+/// them, so a third spelling cannot appear.
 #[test]
 fn a_truncation_reason_has_exactly_one_status_spelling() {
     assert_eq!(
@@ -3437,11 +3382,7 @@ fn a_truncation_reason_has_exactly_one_status_spelling() {
 }
 
 /// Retention and the per-connection cohort, each on its own, over a total
-/// order — D2 §4.3's `gc.rs` and §5.8.
-///
-/// NOTHING CALLS THIS YET: the `delete` verb it implies is granted nowhere and
-/// `manifest_lint` asserts twice that it is. The rule is tested here so wiring
-/// it is a grant plus a call site rather than a design.
+/// order: the collector's pure rule.
 #[test]
 fn expired_terminal_keeps_the_newest_five_per_connection_and_honours_retention() {
     let at = |minutes: i64| now() - chrono::Duration::minutes(minutes);
@@ -3525,9 +3466,7 @@ fn an_attestation_for_another_namespace_is_not_a_candidate() {
     assert!(td::attestation_for(&att, NS, "other-cluster").is_none());
 }
 
-// ---------------------------------------------------------------------------
 // Source-level guards
-// ---------------------------------------------------------------------------
 
 fn source() -> String {
     let path =
@@ -3550,19 +3489,12 @@ fn code_only(src: &str) -> String {
 /// **The reconciler reads no Secret and builds no `Api<Event>`, and the ONE
 /// destructive call it makes is the collector's.**
 ///
-/// NARROWED BY D2 W11, DELIBERATELY, AND THIS IS THE RECORD. `.delete(`,
-/// `.delete_opt(` and `DeleteParams` used to be in the forbidden list beside
-/// `Api<Secret>`, because `config/rbac/role.yaml` granted `delete` on nothing.
-/// The role now grants it on `topicdiscoveries` and `preflights` — the two
-/// TRANSIENT check kinds, D2 §4.3's `gc.rs` and §5.8's retention — so the
-/// claim this test can honestly make changed shape: not "there is no delete"
-/// but "there is exactly one, it is `Api<TopicDiscovery>`'s, it carries a UID
-/// precondition, and it is inside `collect_expired`". `Api<Secret>` and
-/// `replace_status` are still absent because the role grants neither.
-/// `Api<Event>` is absent for a different reason since FX-11: the role grants
-/// `events: list`, and this reconciler reads them through
-/// `check::job_events` — the shared, bounded read — rather than a handle of
-/// its own.
+/// The role grants `delete` on `topicdiscoveries` and `preflights` (the two
+/// TRANSIENT check kinds) and nothing else, so the claim is: there is exactly
+/// one delete, it is `Api<TopicDiscovery>`'s, it carries a UID precondition,
+/// and it is inside `collect_expired`. `Api<Secret>` and `replace_status` are
+/// absent because the role grants neither. `Api<Event>` is absent because
+/// Events are read through `check::job_events`, the shared, bounded read.
 ///
 /// MUTANT: delete the `preconditions:` line, or move the `.delete(` call out
 /// of `collect_expired`, or add a second one. Each fails an assertion below.
@@ -3613,8 +3545,8 @@ fn the_reconciler_names_no_grant_this_role_does_not_hold() {
     // depend on that: `scripts/check-no-archive-write.sh`'s control-plane
     // delete token is anchored to store-shaped identifiers and `api` is not
     // one, and `manifest_lint::every_granted_verb_has_a_caller` pairs a method
-    // with the `Api<T>` declaration it was called on — a delete issued through
-    // an alias is a call that lint cannot see at all.
+    // with the `Api<T>` declaration it was called on: a delete issued through
+    // an alias is a call that lint cannot see.
     assert!(
         body.contains("api.delete("),
         "the collector's receiver is the `Api<TopicDiscovery>` handle itself; an alias hides \
@@ -3623,9 +3555,9 @@ fn the_reconciler_names_no_grant_this_role_does_not_hold() {
 }
 
 /// The reconciler takes its instant ONCE, from `Utc::now()` in
-/// `reconcile_discovery` and nowhere else — every other `now` is an argument,
-/// which is what makes a boundary like [`td::STALLED_GRACE_SECONDS`] assertable
-/// rather than observable only by waiting.
+/// `reconcile_discovery` and nowhere else; every other `now` is an argument,
+/// which makes a boundary like [`td::STALLED_GRACE_SECONDS`] assertable rather
+/// than observable only by waiting.
 #[test]
 fn the_reconciler_reads_one_clock_in_one_place() {
     let code = code_only(&source());
@@ -3640,11 +3572,10 @@ fn the_reconciler_reads_one_clock_in_one_place() {
     }
 }
 
-/// **FX-2's class sweep: `TopicDiscovery.spec.request.timeoutSeconds`**, "the
-/// in-Job Kafka budget". The Job-shape row above uses 60 — the field's own
-/// default — so a controller that ignored the request and used the default
-/// passed it. A non-default budget reaches the plan the runner enforces AND
-/// the Job's `activeDeadlineSeconds` (budget plus the pod-start margin).
+/// **`TopicDiscovery.spec.request.timeoutSeconds`, the in-Job Kafka budget**,
+/// reaches the plan the runner enforces AND the Job's `activeDeadlineSeconds`
+/// (budget plus the pod-start margin). Non-default, since 60 is the field's
+/// default.
 ///
 /// MUTANTS: the Job's `timeout_seconds` or the plan's `timeout_seconds` set
 /// from `DEFAULT_TIMEOUT_SECONDS` instead of the request.
@@ -3671,10 +3602,9 @@ async fn a_discoverys_own_budget_reaches_its_plan_and_its_job_deadline() {
     );
 }
 
-/// **FX-2's class sweep: `TopicDiscovery.spec.request.maxTopics`**, "the
-/// ceiling on returned entries", which reaches the plan the runner enforces.
-/// Every reconcile row used 20,000 — the field's own default — so a plan
-/// rendered from the default instead of the request passed them all.
+/// **`TopicDiscovery.spec.request.maxTopics`**, the ceiling on returned
+/// entries, reaches the plan the runner enforces. Non-default, since 20,000 is
+/// the field's default.
 ///
 /// MUTANT: `effective_max_topics(DEFAULT_MAX_TOPICS, …)` where the plan is
 /// rendered, ignoring the request.
@@ -3700,11 +3630,9 @@ async fn a_discoverys_own_topic_ceiling_reaches_its_plan() {
     );
 }
 
-/// **FX-2's class sweep: `TopicDiscovery.spec.request.includeInternal` and
-/// `expectedTopics`**, what the runner lists and what it reports missing. Both
-/// reach only the plan the runner enforces, and every reconcile row left them
-/// at their defaults (`false`, absent), so a plan rendered without them passed
-/// them all.
+/// **`TopicDiscovery.spec.request.includeInternal` and `expectedTopics`**,
+/// what the runner lists and what it reports missing, reach the plan the
+/// runner enforces, at non-default values.
 ///
 /// MUTANTS: `include_internal: false` / `expected_topics: Vec::new()` where the
 /// plan is rendered, ignoring the request.
@@ -3738,9 +3666,7 @@ async fn a_discoverys_own_topic_selection_reaches_its_plan() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-11 — a check pod the namespace refuses at creation
-// ---------------------------------------------------------------------------
+// A check pod the namespace refuses at creation
 
 /// The admission's words for a quota-refused check pod.
 const QUOTA_REFUSAL: &str = "Error creating: pods \"lwc-td-288fecc03251c1c31851-q8z4m\" is \
@@ -3824,12 +3750,10 @@ fn event_lists(recorder: &Recorder) -> Vec<String> {
         .collect()
 }
 
-/// **FX-11: A QUOTA-REFUSED CHECK POD IS `PodCreateRejected` AT ONCE, WITH THE
+/// **A QUOTA-REFUSED CHECK POD IS `PodCreateRejected` AT ONCE, WITH THE
 /// QUOTA'S WORDS, AND THE JOB IS CANCELLED.** The check Job has no pod and the
-/// Job controller's `FailedCreate` Event says the `ResourceQuota` refused it.
-/// Before FX-11 this reconciler handed the classifier `events: &[]` and the
-/// object read `PodNotStarted` until the Job's deadline, then
-/// `DeadlineExceeded`.
+/// Job controller's `FailedCreate` Event says the `ResourceQuota` refused it,
+/// so the object does not read `PodNotStarted` until the Job's deadline.
 ///
 /// KILLS: the Events read dropped; the message not propagated; the early
 /// cancel dropped; a list by name instead of by UID.
@@ -3872,8 +3796,8 @@ async fn fx11_a_check_pod_the_quota_refuses_fails_fast_naming_the_quota() {
     );
 }
 
-/// **FX-11, THE `LimitRange` VARIANT.** A `LimitRange` maximum refuses the pod
-/// the same way, and its words — not a quota's — are what the object carries.
+/// **The `LimitRange` variant.** A `LimitRange` maximum refuses the pod the
+/// same way, and its words, not a quota's, are what the object carries.
 #[tokio::test]
 async fn fx11_a_check_pod_a_limit_range_refuses_names_the_limit_range() {
     let (client, recorder, bodies) = mock_client_recording_bodies(refused_routes(failed_create(
@@ -3899,10 +3823,9 @@ async fn fx11_a_check_pod_a_limit_range_refuses_names_the_limit_range() {
     );
 }
 
-/// **FX-11 NEGATIVE CONTROL.** The same Job with no pod and no `FailedCreate`
-/// Event — or one naming ANOTHER Job — is still `Running` /
-/// `PodNotStarted`, nothing is cancelled, and the Job's own deadline remains
-/// the only clock, exactly as before FX-11.
+/// **NEGATIVE CONTROL.** The same Job with no pod and no `FailedCreate` Event,
+/// or one naming ANOTHER Job, is still `Running` / `PodNotStarted`, nothing is
+/// cancelled, and the Job's own deadline remains the only clock.
 #[tokio::test]
 async fn fx11_control_no_event_or_a_foreign_one_leaves_the_check_running() {
     for events in [
@@ -3924,8 +3847,8 @@ async fn fx11_control_no_event_or_a_foreign_one_leaves_the_check_running() {
     }
 }
 
-/// **FX-11, THE COST BOUND.** A pod that exists and runs is the healthy case,
-/// and it costs no events list at all.
+/// **The cost bound.** A pod that exists and runs is the healthy case, and it
+/// costs no events list at all.
 #[tokio::test]
 async fn fx11_a_running_pod_costs_no_events_list() {
     let mut routes = refused_routes(failed_create(&[(JOB, JOB_UID, QUOTA_REFUSAL)]));
@@ -3949,17 +3872,15 @@ async fn fx11_a_running_pod_costs_no_events_list() {
     );
 }
 
-/// **FX-11 review L4: once the pod exists, its OWN Events are read — by the
-/// POD's UID.** A check pod whose `runner` container has sat in
-/// `ContainerCreating` past the 60 s mount grace, with a `FailedMount` Event
-/// on the pod, is `VolumeMountFailed`, naming the volume — the `FailedMount`
-/// row the module header and `docs/reference.md` (*Preflight rows*) say these check paths
-/// read. The one events list carries `involvedObject.uid=<pod uid>`, never the
-/// Job's: a `FailedMount` is recorded against the pod, so a list by the Job's
-/// UID would come back without it on a real API server.
+/// **Once the pod exists, its OWN Events are read, by the POD's UID.** A check
+/// pod whose `runner` container has sat in `ContainerCreating` past the 60 s
+/// mount grace, with a `FailedMount` Event on the pod, is
+/// `VolumeMountFailed`, naming the volume. The one events list carries
+/// `involvedObject.uid=<pod uid>`, never the Job's: a `FailedMount` is
+/// recorded against the pod, so a list by the Job's UID would come back
+/// without it on a real API server.
 ///
-/// KILLS: `check::job_events` listing by the Job's UID while a pod exists
-/// (review mutant RM4).
+/// KILLS: `check::job_events` listing by the Job's UID while a pod exists.
 #[tokio::test]
 async fn fx11_a_pending_mount_is_read_from_the_pods_own_events() {
     const POD_UID: &str = "5e5e5e5e-0000-4000-8000-0000000000e5";

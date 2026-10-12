@@ -1,39 +1,32 @@
-// pages/protection.js -- PROTECTION HEALTH (PLAT-14.2).
+// pages/protection.js -- protection health.
 //
-// THE QUESTION THIS PAGE ANSWERS IS NOT "DID THE BACKUP RUN". It is "is there
-// a recovery point I could actually restore from, and how old is it". Those
-// are different questions and a console that answered the first while somebody
-// asked the second is the failure this whole surface exists to prevent: an
-// enabled, green, never-failing schedule can have no recoverable backup at all
-// -- because its evidence never verified, because the archive lost the object,
-// or because every run covered topics the objective is not about.
+// THE QUESTION IS NOT "DID THE BACKUP RUN" but "is there a recovery point I
+// could actually restore from, and how old is it". An enabled, green,
+// never-failing schedule can have no recoverable backup at all -- its
+// evidence never verified, the archive lost the object, or every run covered
+// topics the objective is not about.
 //
-// SO THE TWO HEALTHS SIT SIDE BY SIDE AND ARE NEVER COLLAPSED. Schedule health
-// is `BackupSchedule.status.conditions[Ready]`, and it is rendered in its own
-// column beside protection health, which is `ProtectionPolicy.status.health`.
-// D3 section 3.2 is explicit about this, and `TWO_HEALTHS_SENTENCE` says it on the
-// page rather than only in a decision document.
+// SO THE TWO HEALTHS SIT SIDE BY SIDE AND ARE NEVER COLLAPSED: schedule
+// health (`BackupSchedule.status.conditions[Ready]`) in its own column beside
+// protection health (`ProtectionPolicy.status.health`), as D3 section 3.2
+// requires and `TWO_HEALTHS_SENTENCE` says on the page.
 //
 // THREE MORE RULES THIS PAGE CARRIES.
 //
-//   1. `Protected` HAS THREE STATUSES, NOT TWO. `True` only for `Healthy`,
-//      `Unknown` when the evaluation could not happen, `False` otherwise. A
-//      `False` rendered for an evaluation that never ran reads as "Logweir
-//      checked and you are not protected", which is a claim nothing made. The
-//      condition's own `status` is printed, and `Unknown` stays `Unknown`.
+//   1. `Protected` HAS THREE STATUSES. `True` only for `Healthy`, `Unknown`
+//      when the evaluation could not happen, `False` otherwise. A `False` for
+//      an evaluation that never ran would read as "Logweir checked and you
+//      are not protected", so `Unknown` stays `Unknown`.
 //   2. TWO INSTANTS, TWO LABELS. `recoveryPointAt` is when the capture
-//      STARTED -- what the objective is measured against -- and
-//      `newestRecordAt` is the newest archived record. An idle topic makes the
-//      second look old for a reason that is not a gap in protection, so they
-//      are never printed as one number (D3 section 3.2).
-//   3. THE ALERT LEDGER IS A LEDGER. Each alert's kind, state and instants;
-//      alert sinks are withdrawn (release notes, item 74), so nothing is
-//      delivered and the page shows no delivery state.
+//      STARTED (what the objective is measured against), and `newestRecordAt`
+//      the newest archived record; an idle topic makes the second look old
+//      without a gap in protection, so they are never one number.
+//   3. THE ALERT LEDGER IS A LEDGER: each alert's kind, state and instants.
+//      Alert sinks are withdrawn, so nothing is delivered and the page shows
+//      no delivery state.
 //
-// IT SUBMITS NOTHING. There is no test-notification button here: D3 section 10 gives
-// that route an operator role and a rate limit, and a control that fired a
-// page at an on-call rota is not one this task adds without the role check
-// that belongs with it.
+// IT SUBMITS NOTHING. A test-notification control needs the operator role
+// and rate limit D3 section 10 gives that route, and this page has neither.
 
 import {
   ABSENT,
@@ -96,9 +89,8 @@ export function conditionOf(conditions, type) {
   return null;
 }
 
-/** The `Protected` condition as a badge, with its three statuses kept apart.
- *
- *  `Unknown` IS NOT ROUNDED DOWN. That is the whole of this function. */
+/** The `Protected` condition as a badge, with its three statuses kept apart:
+ *  `Unknown` is not rounded down. */
 export function protectedBadge(conditions) {
   const condition = conditionOf(conditions, "Protected");
   if (condition === null) {
@@ -346,8 +338,6 @@ export function renderConditions(conditions) {
     "</section>"
   );
 }
-
-// --------------------------------------------------------------- mount half
 
 export async function mountProtection(node, ns, parse, lifecycle, deps) {
   try {

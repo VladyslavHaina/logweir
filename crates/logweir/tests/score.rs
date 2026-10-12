@@ -109,8 +109,7 @@ fn a_missed_rpo_is_fail_objective() {
 /// The pass-rate objective is ENFORCED, not decorative. `integrity_rate` keeps
 /// `result: Pass` so `decide` reaches the objectives at all — with
 /// `integrity_fail()` the run short-circuits to `FailIntegrity` and the rate
-/// comparison is never consulted, which is exactly why no earlier test pinned
-/// it.
+/// comparison is never consulted.
 #[test]
 fn a_measured_pass_rate_below_the_objective_is_fail_objective() {
     let integ = fixtures::integrity_rate(8, 10);
@@ -264,10 +263,9 @@ fn decide_reads_the_published_rate_and_never_recomputes_one_from_the_counters() 
 }
 
 /// `all()` over an empty slice is vacuously TRUE. All three objective fields
-/// are optional, so `objectives: {}` used to sign `met: true` under three `—`
-/// rows — the identical defect `phase7_verify::roll_up` answers first and
-/// explicitly for an empty ledger. Nothing was requested, so there is nothing
-/// to report.
+/// are optional, so `objectives: {}` must not sign `met: true` under three `—`
+/// rows: nothing was requested, so there is nothing to report (as
+/// `phase7_verify::roll_up` answers an empty ledger).
 #[test]
 fn no_objective_requested_leaves_met_null_never_vacuously_true() {
     let (outcome, obj) = decide(
@@ -490,8 +488,7 @@ fn an_existing_key_is_refused_and_the_first_drills_bytes_are_untouched() {
 /// `immutable` is set ONLY from a provider readback. A caller's claim of `true`
 /// reaches neither the in-memory scorecard (step 7 overwrites it with what the
 /// store actually reported) nor the signed artifact (step 3 zeroes it before
-/// the bytes exist). Both halves are asserted, because only asserting the
-/// in-memory half is what let the divergence hide the first time.
+/// the bytes exist). Both halves are asserted.
 #[test]
 fn immutable_is_false_without_a_provider_readback_even_when_the_input_claimed_true() {
     let store = fixtures::recording_store();
@@ -690,12 +687,10 @@ fn extra_objects_under_the_engine_validation_prefix_are_named_not_silently_dropp
         notes: vec![],
     });
     let prefix = format!("logweir/{}/engine-validation", sc.run_id);
-    // Written in REVERSE lexicographic order. Note this does NOT prove
-    // `list_keys` sorts: the in-memory backend is a BTreeMap and returns keys
-    // ordered whether or not `out.sort()` runs (mutant Z4 survives, and
-    // `storage.rs` documents that honestly). What this DOES pin is the
-    // phase-8 call site's choice of `keys[0]` over `keys[last]` (mutant Z3)
-    // and that the retained key is named rather than assumed.
+    // Written in REVERSE lexicographic order. This does NOT prove `list_keys`
+    // sorts (the in-memory backend is a BTreeMap and returns keys ordered
+    // either way); it pins the phase-8 call site's choice of `keys[0]` over
+    // `keys[last]`, and that the retained key is named rather than assumed.
     store
         .put_create_only(&format!("{prefix}/b.json"), b"{\"second\":true}")
         .unwrap();
@@ -769,7 +764,7 @@ fn each_drill_error_maps_to_its_contracted_exit_code() {
 /// `RestoreNoOp` is a drill RESULT and must be intercepted by the orchestrator
 /// and turned into a SIGNED scorecard before any exit code is derived. Letting
 /// it fall through to a bare exit code would produce an exit-2 with no
-/// artifact — the exact defect `task-21a-addendum.md` ruling A8 forbids.
+/// artifact, which ruling A8 forbids.
 #[test]
 #[should_panic(expected = "RestoreNoOp must be intercepted")]
 fn a_restore_no_op_may_never_be_converted_straight_to_an_exit_code() {

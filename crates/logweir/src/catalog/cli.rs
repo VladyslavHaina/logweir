@@ -1,12 +1,12 @@
 //! `logweir catalog sync` and `logweir catalog list` — the OPERATOR's two
 //! catalog commands.
 //!
-//! # What these are, and what they are not (seam S1)
+//! # What these are, and what they are not
 //!
-//! `D-SEAMS.md` S1 fixes ONE check runner: a controller that wants a catalog
-//! synchronised runs `logweir check run --plan <file>` with D2's plan kind
-//! `catalogSync`, in a Job, with a destination-backed credential and D2's
-//! result frames. **These two subcommands are not that.** They are what
+//! A controller that wants a catalog synchronised runs the ONE check runner,
+//! `logweir check run`, with D2's plan kind `catalogSync`, in a Job, with a
+//! destination-backed credential and D2's result frames. **These two
+//! subcommands are not that.** They are what
 //! decision D3 §5.3 calls "an operator CLI that reads with the operator's own
 //! credentials and creates no Job": a person at a workstation with a bucket
 //! they can already read.
@@ -19,7 +19,7 @@
 //! * they build the store through `Store::from_url`, the INLINE path that
 //!   reads the ambient credential chain — the operator's environment IS the
 //!   credential source here, which is exactly what a destination-backed Job
-//!   must never do (D-SEAMS S5, defect SEC-ENVHTTP). Transport is still never
+//!   must never do. Transport is still never
 //!   DERIVED: `--allow-http` is an explicit flag and no URL scheme or
 //!   endpoint shape turns it on;
 //! * `sync` writes ONLY under `logweir/catalog/v1/`, create-only, and `list`
@@ -65,7 +65,7 @@ pub struct Location {
     pub endpoint: Option<String>,
     pub path_style: bool,
     /// EXPLICIT, always. Never derived from the endpoint's scheme, from the
-    /// addressing style, or from anything else (D-SEAMS S5).
+    /// addressing style, or from anything else.
     pub allow_http: bool,
 }
 
@@ -100,9 +100,7 @@ pub struct ListArgs {
     pub days: u32,
 }
 
-// ---------------------------------------------------------------------------
-// The URL
-// ---------------------------------------------------------------------------
+// The URL.
 
 /// `--url` -> the EVIDENCE location, with Global Constraint 6's `logweir/`
 /// root imposed rather than accepted from the operator.
@@ -248,9 +246,7 @@ fn assert_evidence_prefix(tail: &[&str], scheme: &str) -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // sync
-// ---------------------------------------------------------------------------
 
 /// What one receipt turned into. Ordered as the walk decides them, so a reader
 /// of the source can see which check runs before which.
@@ -277,7 +273,7 @@ pub enum PointOutcome {
     /// sidecar. Never collapsed into any of the above — "could not look" is
     /// not "not there".
     Unreadable,
-    /// **PROD-02.1.** The receipt is an EMPTY CAPTURE: its source held no
+    /// The receipt is an EMPTY CAPTURE: its source held no
     /// record, so it is not a recovery point and no record is written — as
     /// `logweir backup run` writes none for it.
     EmptyCapture,
@@ -308,7 +304,7 @@ pub struct SyncReport {
     pub unsupported_format: usize,
     pub unverified_signer: usize,
     pub unreadable: usize,
-    /// PROD-02.1: receipts of empty captures, which get no record.
+    /// Receipts of empty captures, which get no record.
     pub empty_capture: usize,
     /// The cursor that resumes the receipt walk, present only when this run
     /// stopped at its `--max` bound with more to see.
@@ -400,7 +396,7 @@ pub fn sync_with(
         if !key.ends_with(".receipt.json") {
             continue;
         }
-        // FX-31: under the signed-document cap; an object over it is
+        // Under the signed-document cap; an object over it is
         // `Unreadable`, like any receipt this command could not read.
         let Ok((bytes, _version)) = evidence.get_capped(&key, caps::SIGNED_DOCUMENT) else {
             report.record(&key, "", PointOutcome::Unreadable);
@@ -427,7 +423,7 @@ pub fn sync_with(
             report.record(&key, &id, PointOutcome::UnverifiedSigner);
             continue;
         };
-        // PROD-02.1: an EMPTY CAPTURE gets no record. Decided only over bytes
+        // An EMPTY CAPTURE gets no record. Decided only over bytes
         // whose signature just verified AND whose arms hold (arm 4 admits the
         // empty window only beside the watermarks that arm 45 proves), so
         // unsigned or tampered bytes are `unverified-signer` above, never this.
@@ -455,20 +451,11 @@ pub fn sync_with(
             }
         };
         let entry = CatalogLogEntry::of(&point);
-        // **THE EXIT-CODE DECISION, AND IT IS MADE ON THE ERROR'S KIND, NOT ON
-        // HOW FAR THE WALK GOT** (review finding F1).
-        //
-        // Global Constraint 11's exit 4 says "signing or lock-proof failed —
-        // and NOTHING was uploaded". The first version of this arm mapped the
-        // FIRST point's failure to 4 whatever caused it, so a denied PUT under
-        // `logweir/catalog/*` or a 503 told an operator to rotate signing
-        // material over a bucket policy — and, in the case where `record.json`
-        // landed and `record.sig` did not, asserted "nothing was uploaded"
-        // while an unsigned record sat in the bucket.
-        //
-        // `PutError::nothing_was_uploaded()` answers the only question exit 4
-        // actually asks. A store failure is exit 1 with a message that says
-        // which key, what the store said, and what is and is not in the bucket.
+        // The exit code is decided on the error's KIND, not on how far the
+        // walk got: exit 4 means "signing or lock-proof failed and nothing was
+        // uploaded", which `PutError::nothing_was_uploaded()` answers. A store
+        // failure is exit 1 with a message that says which key, what the store
+        // said, and what is and is not in the bucket.
         let outcome = writer::put_point(&point, &entry, signer, evidence).map_err(|e| {
             if e.nothing_was_uploaded() {
                 return SyncError::Signing(format!(
@@ -574,9 +561,7 @@ fn verified_signer(
     None
 }
 
-// ---------------------------------------------------------------------------
 // list
-// ---------------------------------------------------------------------------
 
 /// What one `list` established: the rows, and what it could NOT read.
 ///
@@ -584,7 +569,7 @@ fn verified_signer(
 /// "refusal is per entry, not per catalog", and a listing that silently
 /// dropped what it skipped would keep that promise while breaking the one
 /// underneath it — an operator would read a short page as "these are all the
-/// points" (review finding F3).
+/// points".
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ListReport {
     /// Newest first.
@@ -595,7 +580,7 @@ pub struct ListReport {
     /// Could not tell: a `get` that failed, bytes that are not JSON, a shape
     /// major 1 cannot hold.
     pub unreadable: usize,
-    /// Review finding F6: an entry whose `record_key` is not the one its
+    /// An entry whose `record_key` is not the one its
     /// `point_id` implies, or whose `point_id` is malformed.
     pub inconsistent: usize,
     /// How many day shards this run looked in.
@@ -611,21 +596,16 @@ pub struct ListReport {
 /// **The testable seam** for `list`: the newest `max` index entries, newest
 /// first, read one DAY SHARD at a time.
 ///
-/// # Why it walks shards and not the whole prefix (review finding F5)
+/// # Why it walks shards and not the whole prefix
 ///
-/// The first version paged forward over the entire `logweir/catalog/v1/log/`
-/// prefix keeping a ring of the newest `max` keys. That is correct and it is
-/// O(n²/page) object-metadata reads, because `Store::list_page` walks the whole
-/// post-offset prefix on every call — 50 000 points cost about 1.25 million
-/// streamed entries to print fifty rows. It also made the day shard buy
-/// nothing, which is the one structure D3 §5.2 introduced precisely so that
-/// "newest first" would be bounded.
-///
-/// So: walk days BACKWARDS from `today`, list one shard at a time, and stop the
-/// moment `max` rows are held. On an archive with a recent backup that is one
-/// or two small listings. The lookback is `args.days`, and the report says how
-/// far it looked, so an empty page is "nothing in the last N days" and never
-/// "there are no points".
+/// Paging the whole `logweir/catalog/v1/log/` prefix costs O(n²/page)
+/// metadata reads (`Store::list_page` walks the whole post-offset prefix on
+/// every call); the day shard (D3 §5.2) exists so "newest first" is bounded.
+/// So it walks days backwards from `today`, one shard at a time, and stops the
+/// moment `max` rows are held: one or two small listings on an archive with a
+/// recent backup. The lookback is `args.days`, and the report says how far it
+/// looked, so an empty page is "nothing in the last N days" and never "there
+/// are no points".
 ///
 /// `today` is a parameter: this function reads no clock, so a test can pin the
 /// window.
@@ -735,9 +715,7 @@ fn day_of_log_key(key: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::from_ymd_opt(y, m, d)
 }
 
-// ---------------------------------------------------------------------------
-// The two entry points `main.rs` dispatches
-// ---------------------------------------------------------------------------
+// The two entry points `main.rs` dispatches.
 
 /// `logweir catalog sync`. **The only function in this module that names a
 /// store constructor**, which is what keeps every test above socket-free.
@@ -759,7 +737,7 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
             }
         }
     }
-    // FX-20: a projected store credential whose Secret is not bound to the
+    // A projected store credential whose Secret is not bound to the
     // location this process was built for is refused FIRST — before the signer
     // is even opened, and before the store exists.
     if let Err(refusal) = crate::credential_binding::check_store_bindings() {
@@ -878,7 +856,7 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
 /// rather than one `get` per point; the signed document is `record.json` and
 /// the verification root is the backup receipt it names. A listing that did
 /// not say so would be a surface presenting unverified metadata as evidence,
-/// which is the one thing PLAT-15.1's acceptance forbids.
+/// which this listing must never be.
 pub fn print_list(report: &ListReport) {
     for e in &report.rows {
         println!(
@@ -895,7 +873,7 @@ pub fn print_list(report: &ListReport) {
         );
     }
     println!("catalog-listed={}", report.rows.len());
-    // WHAT WAS SKIPPED, ALWAYS PRINTED (review finding F3). Refusal is per
+    // WHAT WAS SKIPPED, ALWAYS PRINTED. Refusal is per
     // entry and never fatal — and a page that dropped what it could not read
     // without saying so would let a short listing read as "these are all the
     // points".

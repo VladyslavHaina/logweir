@@ -1,8 +1,8 @@
-//! Audit attribution on the durable objects the API creates (PLAT-17.2).
+//! Audit attribution on the durable objects the API creates.
 //!
 //! D0 §"Audit attribution": created CRs carry the audit ID, the request and
 //! idempotency hashes and a non-secret actor reference in reserved
-//! annotations. PLAT-17.2 adds what an investigator needs next to them — how
+//! annotations, and what an investigator needs next to them -- how
 //! the actor authenticated, which product action and binding revision
 //! authorized the write, which Kubernetes principal the write was made as
 //! (the name Kubernetes audit records for the same call), and, for a restore,
@@ -21,8 +21,6 @@ use logweir_api::audit::{self, AuditContext};
 use logweir_api::authz::Role;
 use serde_json::{json, Value};
 use support::{FakeKube, SharedApp, SharedOptions, TestApp, ISSUER, KUBERNETES_PRINCIPAL, NS_A};
-
-// ------------------------------------------------------------ log capture
 
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -100,8 +98,6 @@ fn annotations(object: &Value) -> serde_json::Map<String, Value> {
         .cloned()
         .unwrap_or_default()
 }
-
-// ------------------------------------------------------------------ rows
 
 /// **A restore created in shared mode names who asked, how they signed in,
 /// under which binding revision and action, as which Kubernetes principal, and
@@ -323,8 +319,6 @@ fn cluster() -> weirkeeper::crds::kafka_cluster::KafkaCluster {
     object.as_object_mut().unwrap().remove("status");
     serde_json::from_value(object).expect("the fixture is a KafkaCluster")
 }
-
-// ------------------------------------------------------ the recovery point
 
 #[test]
 fn the_recovery_point_is_read_from_the_request_and_never_carries_a_credential() {

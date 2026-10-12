@@ -1,20 +1,17 @@
-//! `ProtectionPolicy` — the objective a set of schedules is meant to meet.
+//! `ProtectionPolicy`: the objective a set of schedules is meant to meet.
 //!
 //! # Why it is a kind, and why its spec is the one that is NOT sealed
 //!
-//! An objective spans several schedules, outlives any one of them — schedules
-//! are immutable and are replaced by drain-and-retain (`docs/kubernetes.md`
-//! §9) — and is about a source and a topic set rather than about storage, so
-//! it belongs on neither a `BackupSchedule` nor a `BackupDestination` (ADR 0008
-//! Amendment G).
+//! An objective spans several schedules, outlives any one of them, and is
+//! about a source and a topic set rather than storage, so it belongs on
+//! neither a `BackupSchedule` nor a `BackupDestination` (ADR 0008 Amendment
+//! G).
 //!
-//! It is **evaluation policy, never an execution input**. Nothing here is
-//! frozen into a run, no run reads it, and editing it cannot change a recorded
-//! result — it can only change what Logweir SAYS about results that already
-//! exist. That is the whole reason this is the one kind in the group with no
-//! CEL seal on `.spec`: there is nothing here whose mutation could rewrite
-//! history, and an objective an operator cannot tighten is an objective nobody
-//! adopts.
+//! It is **evaluation policy, never an execution input**: nothing here is
+//! frozen into a run, no run reads it, and editing it changes only what
+//! Logweir says about results that already exist. That is why `.spec` has no
+//! CEL seal: no mutation here can rewrite history, and an objective an
+//! operator cannot tighten is one nobody adopts.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

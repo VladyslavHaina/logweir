@@ -1,4 +1,4 @@
-//! THE DOCUMENTS A STRANGER ACTS ON — Task 29.
+//! THE DOCUMENTS A STRANGER ACTS ON.
 //!
 //! WHAT THESE TESTS PROVE. That the five documents nobody runs a test against
 //! before acting on them — `NOTICE`, `THIRD_PARTY_NOTICES.md`,
@@ -19,11 +19,8 @@
 //! shrunken expectation, because the expectation is upstream's file.
 //!
 //! AND A LICENCE TEST NEVER SKIPS. If `LICENSES.txt` is not where it is looked
-//! for, the test **fails naming the path**. A skipping licence test is a check
-//! that cannot fail, which is the defect class this task exists to remove: the
-//! plan's own first draft froze twelve components where the file names
-//! fourteen, and a test that had skipped on a cold cache would have certified
-//! that as complete.
+//! for, the test **fails naming the path**: a skipping licence test is a check
+//! that cannot fail.
 //!
 //! COSTS NOTHING AND REACHES NOTHING. Every test here reads checked-in files
 //! (plus, in one case, the resolved crate source already on disk). Nothing
@@ -203,10 +200,9 @@ fn notice_component_table(notice: &str) -> BTreeMap<String, String> {
 ///
 /// The expected set is every `^LICENSE.<component>` header in librdkafka's own
 /// `LICENSES.txt`, read out of the `rdkafka-sys` source directory resolved
-/// from `Cargo.lock`'s recorded version. Fourteen today —
-/// `tinycthread` and `wingetopt` among them, which the specification's prose
-/// and this plan's first draft both omitted while naming twelve. A fifteenth
-/// after an upstream bump FAILS this test rather than passing it.
+/// from `Cargo.lock`'s recorded version: fourteen today, `tinycthread` and
+/// `wingetopt` among them. A fifteenth after an upstream bump FAILS this test
+/// rather than passing it.
 #[test]
 fn the_notice_names_every_librdkafka_component_in_licenses_txt() {
     let lock = read("Cargo.lock");
@@ -266,21 +262,11 @@ fn the_notice_names_every_librdkafka_component_in_licenses_txt() {
 
     let notice = read("NOTICE");
 
-    // THE GUARD READS THE TABLE, AND READS IT BOTH WAYS.
-    //
-    // An earlier shape asserted `notice.contains(component)` over the WHOLE
-    // file, and that is not the assertion it looks like. `tinycthread` and
-    // `wingetopt` are named twice in NOTICE — once in the attribution table
-    // and once in the paragraph explaining that the first draft omitted them —
-    // so deleting either component's ATTRIBUTION LINE left the test green.
-    // The two components this file exists to stop losing were the two the
-    // guard could not see lost. It was also one-directional: an invented
-    // fifteenth component added to the table passed, because nothing asserted
-    // NOTICE ⊆ LICENSES.txt.
-    //
-    // So: parse the table into a set and assert SET EQUALITY with the derived
-    // fourteen. A missing component fails naming it; an extra one fails naming
-    // it; the prose is prose again.
+    // THE GUARD READS THE TABLE, AND READS IT BOTH WAYS. `tinycthread` and
+    // `wingetopt` are also named in NOTICE's prose, so a whole-file
+    // `contains` cannot see an attribution line deleted, and a one-way check
+    // cannot see an invented component added. So: parse the table into a set
+    // and assert SET EQUALITY with the derived fourteen.
     let components_in_notice = notice_component_table(&notice);
 
     let missing: Vec<&String> = components
@@ -383,8 +369,6 @@ fn locked_packages(lock: &str) -> BTreeSet<String> {
 /// Authors; `aws-lc-sys` names eleven. The generator emits one
 /// `- Copyright:` line per notice and then the single `- Copyright source:`
 /// line, so this parser collects a `Vec` rather than overwriting a `String`.
-/// An earlier shape kept the last line only, which would have hidden exactly
-/// the defect this parse now makes visible.
 fn inventory_entries(text: &str) -> BTreeMap<String, (String, Vec<String>)> {
     let mut entries: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
     let mut current: Option<String> = None;
@@ -528,25 +512,18 @@ fn entry_for<'a>(
 /// **Arm 1 carries EVERY holder its licence files name, not the first one.**
 ///
 /// The obligation MIT, BSD and Apache-2.0 impose is to reproduce the copyright
-/// notices — plural. A generator that returned the first matching line of the
-/// first matching file attributed `ring` to "The Go Authors" (its
-/// `LICENSE-BoringSSL` sorts before `LICENSE-other-bits`, where Brian Smith
-/// is) and printed nine of `aws-lc-sys`'s eleven notices nowhere at all. And a
-/// notice with no `(c)` and no year is still a notice: `aws-lc-sys`'s
-/// `LICENSE:9` is `Copyright Amazon.com, Inc. or its affiliates.` — skipping
-/// it attributed an Amazon crate to Google, and told the reader that
-/// `aws-lc-rs` and `utf8_iter` carried no licence-file notice while both ship
-/// one.
-///
-/// These four crates are the measured witnesses of those two defects, so they
-/// are the four asserted here. Reads two checked-in files and nothing else
-/// (Global Constraint 22): no cargo, no registry, no network.
+/// notices, plural, and a notice with no `(c)` and no year is still a notice
+/// (`aws-lc-sys`'s `LICENSE:9` is `Copyright Amazon.com, Inc. or its
+/// affiliates.`). `ring`'s own notice is in the file that sorts LAST, and
+/// `aws-lc-sys` names eleven holders. These four crates are the measured
+/// witnesses, so they are the four asserted here. Reads two checked-in files
+/// and nothing else (Global Constraint 22).
 #[test]
 fn the_inventory_carries_every_holder_a_licence_file_names() {
     let inventory = read("THIRD_PARTY_NOTICES.md");
     let entries = inventory_entries(&inventory);
 
-    // (F2) Every holder in the file, not the first. `ring`'s own notice lives
+    // Every holder in the file, not the first. `ring`'s own notice lives
     // in the file that sorts LAST.
     let (ring_key, ring) = entry_for(&entries, "ring");
     for holder in ["Brian Smith", "The Go Authors"] {
@@ -567,8 +544,8 @@ fn the_inventory_carries_every_holder_a_licence_file_names() {
         ring.len()
     );
 
-    // (F1) A holder line with no `(c)` and no year is still a notice, and
-    // (F2) again: the OpenSSL-family notices aws-lc-sys vendors.
+    // A holder line with no `(c)` and no year is still a notice, and every
+    // holder again: the OpenSSL-family notices aws-lc-sys vendors.
     let (aws_key, aws) = entry_for(&entries, "aws-lc-sys");
     for holder in ["Amazon", "OpenSSL"] {
         assert!(
@@ -808,7 +785,6 @@ fn copy_instructions(dockerfile: &str) -> Vec<Vec<String>> {
 ///
 /// The runner and the controller are read here; the console image's three
 /// licence files are `manifest_lint.rs`'s and `scripts/check-image-api.sh`'s.
-/// (The `logweir-ui` image's arm went with that image, PROD-17.1 C4.)
 ///
 /// WHAT EACH IMAGE OWES, AND ONLY WHAT IT OWES. A licence notice is a statement
 /// about what is inside, not decoration, so a notice for something an image
@@ -932,27 +908,17 @@ fn section_markers(line: &str) -> Vec<(usize, usize, u32)> {
 
 /// **A pointer at the UI section names the number that section actually has.**
 ///
-/// `docs/kubernetes.md`'s UI section was `## 15.` when `docs/install.md` and
-/// `docs/kubernetes.md` were written to point at it, and Task 24 inserted a new
-/// `## 15.` ahead of it, renumbering it to `## 16.`. The rebase was clean —
-/// nothing in git notices that a number in prose became a pointer at the wrong
-/// section — so this arm exists to notice it: the heading is PARSED, the
-/// pointers are found, and the two must agree.
+/// A number in prose is a pointer git never checks, so the heading is PARSED,
+/// the pointers are found, and the two must agree. The guide's headings are
+/// unnumbered; the old numbers live in its *Section numbers before v1* table,
+/// because code, messages and other documents still cite them, and the UI
+/// section's number is the one that table's `Serving the UI` row gives.
 ///
 /// Finding a pointer: a `§N` or `section N` marker with `Serving the UI` or
 /// `UI section` within 60 characters on the same line, where the window stops
 /// at the NEXT marker. That bound is what keeps the `§14` in
 /// "`§14`'s X-DIGEST transcript and `§16`'s UI section" from being read as a
 /// pointer at the UI section — it belongs to the transcript beside it.
-///
-/// A `§15` that means Task 24's own `## 15. The evidence credential…` is not a
-/// UI pointer and is untouched by all of this.
-///
-/// PROD-17.1 B10 rewrote the guide by task, with unnumbered headings, and kept
-/// the old numbers in one table, *Section numbers before v1*, because code,
-/// messages and other documents still cite them. The UI section's number is
-/// now the one that table's `Serving the UI` row gives, and every pointer is
-/// still checked against it.
 #[test]
 fn ui_section_pointers_name_the_heading_that_exists() {
     let kubernetes = read("docs/kubernetes.md");
@@ -1156,13 +1122,10 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
 
     // NO DIGEST LITERAL, IN ANY SHAPE. A locally built digest changes on every
     // build, so a digest copied into prose is a measurement that stops being
-    // true. An earlier shape of this guard split on `sha256:` and required the
-    // NEXT 64 characters to be hex, which caught exactly one spelling.
-    // Measured against that guard: a truncated `sha256:a5aa6dc1…`, a bare
-    // 64-hex run with no prefix, and a digest wrapped across a line break all
-    // passed. All three are a digest in prose; a reader copies them the same
-    // way. So the scan now takes every shape, over the file as written AND
-    // over the file with its whitespace removed.
+    // true. A truncated `sha256:a5aa6dc1…`, a bare 64-hex run and a digest
+    // wrapped across a line break are all a digest in prose, so the scan
+    // takes every shape, over the file as written AND with its whitespace
+    // removed.
     //
     // The legitimate `@sha256:<digest>` placeholder carries no hex at all and
     // is untouched — which is the distinction the document actually draws.
@@ -1446,11 +1409,10 @@ fn stability_lists_the_deferred_items() {
         );
     }
 
-    // OD-2 (2026-10-05) narrowed Never #1 to a LIVE topic, and the tracker's
-    // rule 8 lands a Never-entry change only with its owner decision and this
-    // lint together. Its row names the decision, keeps the live-topic refusal,
-    // and names the one path it no longer covers — so an edit that drops the
-    // narrowing, its citation, or the refusal fails here (PROD-15.1).
+    // OD-2 narrowed Never #1 to a LIVE topic. Its row names the decision,
+    // keeps the live-topic refusal, and names the one path it no longer
+    // covers, so an edit that drops the narrowing, its citation, or the
+    // refusal fails here.
     let never_1 = section
         .lines()
         .find(|l| l.starts_with("| 1 | **Restore-in-place into a live topic**"))
@@ -1527,106 +1489,18 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 }
 
 /// **The release notes exist, the checklist's release-notes row points at
-/// them, and they carry every operator action PLAT-20.2 collected.**
+/// them, and they carry every operator action.**
 ///
-/// `docs/tag1-checklist.md` row 9 ("release notes describe limitations …")
-/// had no release notes to point at, and README.md promised a `ui/` bundle
-/// "listed by digest in the release notes" that no file listed. The ten
-/// operator-facing changes were collected from merged changes on 2026-09-23.
-///
-/// EACH ITEM IS CHECKED INSIDE ITS OWN SECTION. A token searched over the
+/// EACH ITEM IS CHECKED INSIDE ITS OWN SECTION: a token searched over the
 /// whole file also matches the *Required operator actions* summary and the
-/// *Verification scope* section, so deleting a whole item could stay green
-/// (review M1: items 1, 4, 6 and 10 were deletable). The notes are split on
-/// their `#### N.` headings, there must be exactly ten numbered 1 to 10 in
-/// order, and each item's token must be in that item's own body, together
-/// with the three things every item owes: a scope and a rollback.
-///
-/// NEGATIVE CONTROLS (fix round, 2026-09-23): deleting each of the ten
-/// `#### N.` sections in turn fails this test ten times out of ten; so does
-/// pointing row 9 back at `docs/stability.md` alone, and dropping one of the
-/// six required upgrade actions.
-///
-/// The count has since grown to twenty (items 11–16 from the lab and PoC
-/// rounds, 17–20 from the PoC's in-place upgrades: P9, P11, P12, P14). The
-/// notes as they stood at `4e58d330`, with sixteen items, fail the twenty pin,
-/// and so does deleting any one of items 17–20 (release-docs-final, 2026-09-25).
-///
-/// Then to twenty-one: item 21 is FX-2's upgrade behaviour change, which the
-/// FX-2 review (M1) found only in `docs/kubernetes.md`. Its token is the
-/// pre-upgrade inventory itself, so an item 21 that loses the command an
-/// operator runs before the upgrade fails here. The notes at FX-2's `3147f498`,
-/// with twenty items, fail the twenty-one pin (FX-2 fix round, 2026-10-05).
-///
-/// Then to twenty-two: item 22 is FX-5's console change (the replication
-/// factor's default, its input and its refusal, and the topic subset a resumed
-/// draft lost), which the FX-5 review (M2) found in no release note. Its token
-/// is the operator action that gives the new default, and it is held, below,
-/// to what it owes beyond that: what an operator sees after the upgrade, what
-/// a larger factor costs, and the read that audits a Restore made from a
-/// resumed draft. The notes at main's `b8b9263f`, with twenty-one items, fail
-/// the twenty-two pin (FX-5 fix round, 2026-10-05).
-///
-/// Then to twenty-three: item 23 is FX-10's withdrawal of the two inert policy
-/// values. Its token is the install-notes warning an upgrade that still
-/// carries one prints, so an item 23 that stops telling an operator what they
-/// will see fails here. The notes at main's `80336916`, with twenty-two items,
-/// fail the twenty-three pin (FX-10 fix round, 2026-10-05).
-///
-/// AND EVERY LINE THAT LISTS THE ITEMS AFTER `fdb48cd8` NAMES EACH OF THEM
-/// (FX-10 review L4). The entry's opening paragraph, the paragraph under the
-/// count heading and the upgrade path in *Migration and rollback* each list
-/// the product-expansion items by number; an item added without them made
-/// all three false while every pin here stayed green.
-///
-/// Then to twenty-four: item 24 is FX-3's scorecard change, a `newTopic`
-/// restore's not-reconstructed source settings. Its token is the new field's
-/// name, so an item 24 that stops naming what an operator reads after a
-/// restore fails here, and the notes at main `19b5ecd9`, with twenty-three
-/// items, fail the twenty-four pin (FX-3 fix round, 2026-10-07).
-///
-/// Then to twenty-five: item 25 is FX-13's sign-in limit, counted per client
-/// behind the trusted ingress instead of per socket peer. Its token is the
-/// audit note an operator reads to tell which counter a refused sign-in
-/// spent. The notes at main's `fcaae178`, with twenty-four items, fail the
-/// twenty-five pin, and so does an item 25 without its token (FX-13, after
-/// FX-3 took 24, 2026-10-07).
-///
-/// Then to twenty-six: item 26 is FX-11's — every Job-owning controller now
-/// reports a pod the namespace refused at creation, with new reason values
-/// where alert rules match and a refused discovery no schedule retries. Its
-/// token is the read that shows an operator which namespaces refuse Logweir
-/// pods today. The notes at main's `99e3802e`, with twenty-five items, fail
-/// the twenty-six pin (FX-11, after FX-13 took 25, 2026-10-07).
-///
-/// Then to twenty-seven: item 27 is FX-8's runner change (a point-in-time
-/// restore of a `LogAppendTime` topic is refused unless its plan selects by
-/// producer time). Its token is the refusal an operator will see on the
-/// `Restore`, and it is held, below, to the pre-upgrade inventory of the
-/// topics it applies to and to the opt-in. The notes at main's `917f0241`,
-/// with twenty-six items, fail the twenty-seven pin (FX-8 fix round,
-/// 2026-10-07; item 23 when first written, renumbered after FX-10, FX-3,
-/// FX-13 and FX-11).
-///
-/// Then to twenty-eight: item 28 is PROD-00.3f's engine pin (0.23.3). Its
-/// token is the variable a standalone CLI install must change with the
-/// engine, so an item 28 that stops telling that operator what to change
-/// fails here, and the notes at main's `2c277dc1`, with twenty-seven items,
-/// fail the twenty-eight pin (PROD-00.3f fix round, 2026-10-08; item 25 when
-/// first written, renumbered after FX-13, FX-11 and FX-8).
-///
-/// Then to twenty-nine: item 29 is PROD-16.1, no approver key by default.
-/// Its token is the fresh-install marker's annotation, so an item 29 that
-/// stops naming what decides a fresh install's confirm default fails here;
-/// the notes at main's `a00ae659`, with twenty-eight items, fail the
-/// twenty-nine pin (PROD-16.1, item 25 when first written, renumbered
-/// after FX-13, FX-11, FX-8 and PROD-00.3f, 2026-10-08).
-///
-/// And back to twenty-seven (2026-10-08): `v0.2.0-rc.1` shipped items 1–27,
-/// and this entry carries its candidate record, so items 28 and 29 moved, with
-/// their numbers and tokens, into the entry after the tag, which
-/// `the_entry_after_the_rc1_record_carries_its_own_items` checks. The notes at
-/// `2fe8d907`, with items 28 and 29 here, fail the twenty-seven pin.
+/// *Verification scope* section, so a deleted item could stay green. The notes
+/// are split on their `#### N.` headings, numbered 1 to 27 in order, and each
+/// item's token must be in that item's own body, with a scope and a rollback.
+/// Every line that lists the product-expansion items by number (the entry's
+/// opening paragraph, the paragraph under the count heading and the upgrade
+/// path in *Migration and rollback*) names each of them. `v0.2.0-rc.1`
+/// shipped items 1–27; later items live in the entry after the tag, which
+/// `the_entry_after_the_rc1_record_carries_its_own_items` checks.
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1667,19 +1541,19 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("restore completion", "recordsRestored"),
         ("pre-creation slots", "metadata.creationTimestamp"),
         ("the API trust state", "RecordedBeforeRevocation"),
-        // RECEIPT-DUP (2026-09-23): the execution claim and its store requirement.
+        // The execution claim and its store requirement.
         ("one engine run per execution", "ExecutionAlreadyClaimed"),
-        // PLAT-20.2's "later items" (poc-install, 2026-09-24): controller before runner, and the
-        // readiness principals with the old-runner refusal.
+        // Controller before runner, and the readiness principals with the
+        // old-runner refusal.
         ("controller before runner", "roll the controller out before"),
         ("readiness principals", "CheckContractMismatch"),
-        // legacy-point-restore (2026-09-24): P3, P5 and P6 of the PoC round.
+        // Restoring a point with no saved destination.
         ("a point with no saved destination", "legacySourceArchive"),
-        // P10 (2026-09-24): manual runs may queue, and "Back up now" is limited.
+        // Manual runs may queue, and "Back up now" is limited.
         ("the manual-run pool", "ConcurrencyLimited"),
-        // TRUSTPOLICY-DELETE-DROPS-REVOCATION (2026-09-24): the compromise guard.
+        // The compromise guard.
         ("the compromise guard", "logweir.dev/compromise-revocation"),
-        // The PoC rounds' later items (release-docs-final, 2026-09-25): P9, P11, P12 and P14.
+        // The PoC rounds' later items.
         (
             "an admitted Restore's Approval is a record",
             "RestoreAdmitted",
@@ -1687,39 +1561,39 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("one catalog per destination", "DuplicateCatalog"),
         ("a failed controller read is read again", "retryAfter"),
         ("a readiness replay names its expiry", "staleBasis"),
-        // FX-2 (2026-10-05): runnerResources applied or refused, and the
+        // runnerResources applied or refused, and the
         // pre-upgrade inventory of the objects whose behaviour changes.
         (
             "runnerResources applied or refused",
             "select(.spec.runnerResources // .spec.bounds.runnerResources)",
         ),
-        // FX-5 (2026-10-05): the replication factor a console restore asks
+        // The replication factor a console restore asks
         // for, and the topic subset a resumed draft lost.
         (
             "a console restore's replication factor and topic subset",
             "*Discover topics*",
         ),
-        // FX-10 (2026-10-05): two inert policy values withdrawn; the notes say so.
+        // Two inert policy values withdrawn; the notes say so.
         (
             "two inert policy values withdrawn",
             "WITHDRAWN VALUES ARE SET AND IGNORED",
         ),
-        // FX-3 (2026-10-05): a newTopic restore's scorecard names the source
+        // A newTopic restore's scorecard names the source
         // settings it did not reconstruct, never "intended".
         (
             "not-reconstructed source settings",
             "topic_parity.not_reconstructed",
         ),
-        // FX-13 (2026-10-07): the sign-in limit per client behind the
+        // The sign-in limit per client behind the
         // trusted ingress, and the audit note that says which counter.
         ("the sign-in limit per client", "loginRateKey"),
-        // FX-11 (2026-10-07): every Job-owning controller reports a refused
+        // Every Job-owning controller reports a refused
         // pod; the operator's read of which namespaces refuse one today.
         (
             "a refused Job pod is reported by every kind",
             "--field-selector reason=FailedCreate",
         ),
-        // FX-8 (2026-10-07): a point-in-time restore of a LogAppendTime topic
+        // A point-in-time restore of a LogAppendTime topic
         // is refused unless its plan selects by producer time.
         (
             "a LogAppendTime point in time refused or labelled",
@@ -1739,7 +1613,7 @@ fn the_release_notes_carry_every_owed_operator_action() {
         }
     }
 
-    // ITEM 22 OWES MORE THAN ONE THING (FX-5 review M2), each in its own
+    // ITEM 22 OWES MORE THAN ONE THING, each in its own
     // section: what an operator sees after the upgrade, what a larger factor
     // costs on the target, and the read that audits a Restore made from a
     // resumed draft.
@@ -1758,12 +1632,12 @@ fn the_release_notes_carry_every_owed_operator_action() {
         );
     }
 
-    // EVERY LINE THAT LISTS THE ITEMS AFTER `fdb48cd8` NAMES EACH OF THEM
-    // (FX-10 review L4). Items 1–20 are PLAT-20.2's; every later one landed
-    // after `fdb48cd8`, and three places say which: the entry's opening
-    // paragraph, the paragraph under the count heading, and the upgrade path.
-    // A number is matched as a whole word, outside backticks, so `fdb48cd8`
-    // names nothing.
+    // EVERY LINE THAT LISTS THE ITEMS AFTER `fdb48cd8` NAMES EACH OF THEM.
+    // Items 1–20 are the first collection; every later one landed after
+    // `fdb48cd8`, and three places say which: the entry's opening paragraph,
+    // the paragraph under the count heading, and the upgrade path. A number
+    // is matched as a whole word, outside backticks, so `fdb48cd8` names
+    // nothing.
     let squeezed = entry.split_whitespace().collect::<Vec<_>>().join(" ");
     let sentence_with = |marker: &str| -> &str {
         let at = squeezed
@@ -1821,14 +1695,13 @@ fn the_release_notes_carry_every_owed_operator_action() {
 
     // ITEM 27 OWES the inventory an operator runs before the runner rolls --
     // which source topics are LogAppendTime, by override or broker default,
-    // printed by name (review L-4) -- and the opt-in that restores them
-    // knowingly (FX-8).
+    // printed by name -- and the opt-in that restores them knowingly.
     let (_, fx8) = items
         .iter()
         .find(|(n, _)| *n == 27)
         .expect("docs/release-notes.md carries item 27");
     for owed in [
-        // Review L-4: the inventory prints topic NAMES, and `--all` covers
+        // The inventory prints topic NAMES, and `--all` covers
         // a broker default too.
         "/^ *message.timestamp.type=LogAppendTime/ {print t}",
         "restore.time_basis: producerTime",
@@ -1887,22 +1760,14 @@ fn release_entry<'a>(notes: &'a str, heading: &str) -> &'a str {
     body.split("\n## ").next().unwrap_or(body)
 }
 
-/// **The changes after `v0.2.0-rc.1` have their own entry** (PROD-08.1 review
-/// M-4). The tag froze the entry below it at twenty-seven items with its
-/// candidate record; an item that lands on `main` afterwards is not in the
-/// rc.1 binaries, so listing it there would claim it shipped. The newest entry
-/// is headed `main` after `v0.2.0-rc.1`, it is the FIRST `## ` entry, its
-/// items continue the numbering from 28 without a gap, each in its own section
-/// with its token, a scope and a rollback, and its opening paragraph and its
-/// upgrade sentence name every one of them.
-///
-/// NEGATIVE CONTROLS: the notes at `2c277dc1` (PROD-08.1 listed under the rc.1
-/// record, no entry of its own) fail the heading lookup; deleting its item's
-/// section fails the numbering; dropping `coverage: complete` from it fails
-/// the token. Item 31 is FX-17's (the scheduled points the catalog withheld);
-/// its token is `spec.syncRequest`, the re-sync an operator owes after the
-/// runner rolls, and the notes at `563ed8e2` (three items here) fail the
-/// token-count assertion.
+/// **The changes after `v0.2.0-rc.1` have their own entry.** The tag froze the
+/// entry below it at twenty-seven items with its candidate record; an item
+/// that lands on `main` afterwards is not in the rc.1 binaries, so listing it
+/// there would claim it shipped. The newest entry is headed `main` after
+/// `v0.2.0-rc.1`, it is the FIRST `## ` entry, its items continue the
+/// numbering from 28 without a gap, each in its own section with its token, a
+/// scope and a rollback, and its opening paragraph and its upgrade sentence
+/// name every one of them.
 #[test]
 fn the_entry_after_the_rc1_record_carries_its_own_items() {
     let notes = read("docs/release-notes.md");
@@ -1927,146 +1792,146 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         rc1_last + 1
     );
     let tokens = [
-        // PROD-00.3f (2026-10-08): the engine pin moved to 0.23.3; a
+        // The engine pin moved to 0.23.3; a
         // standalone install changes its engine identity with it.
         ("the engine pin is 0.23.3", "LOGWEIR_ENGINE_VERSION"),
-        // PROD-16.1 (2026-10-07): no approver key by default, and the marker
+        // No approver key by default, and the marker
         // an upgrade never reaches.
         ("no approver key by default", "logweir.dev/approval-default"),
-        // PROD-08.1 (2026-10-07): complete coverage, and what every 1.4.0
+        // Complete coverage, and what every 1.4.0
         // scorecard says its verdict covered.
         ("complete coverage", "coverage: complete"),
-        // FX-17 (2026-10-08): every scheduled point is offered once the
+        // Every scheduled point is offered once the
         // catalog is synced by the new runner; the operator re-syncs it.
         (
             "scheduled points offered after a re-sync",
             "spec.syncRequest",
         ),
-        // PROD-05.1 (2026-10-08): every receipt records each topic's
+        // Every receipt records each topic's
         // configuration model, and the console defaults from it.
         ("the topic configuration model", "topic_configuration"),
-        // PROD-01.3 (2026-10-08): three new auth modes, and the credential
+        // Three new auth modes, and the credential
         // binding every credentialed connection's Secret must carry.
         (
             "a connection presents only its own credential",
             "logweir-binding",
         ),
-        // FX-16 (2026-10-08): a point-bound restore restores its point's own
+        // A point-bound restore restores its point's own
         // set or is refused; a standalone plan naming `latestCompleted` is.
         (
             "a bound restore restores its point's set",
             "PointBindingSetMismatch",
         ),
-        // PROD-00.2 (2026-10-08): Logweir's build of the engine, both
+        // Logweir's build of the engine, both
         // platforms, signed; and the build argument that rolls the engine back.
         (
             "the engine is built from the vendored source",
             "ENGINE_SOURCE=oso",
         ),
-        // FX-23 (2026-10-08): an early-stopped restore is never signed pass,
+        // An early-stopped restore is never signed pass,
         // and a sampled scorecard names the topics its cap left unsampled.
         (
             "an early-stopped restore is never signed pass",
             "sample.unsampled_topics",
         ),
-        // PROD-04.0b (2026-10-08): one crate may hold `unsafe` code, and
+        // One crate may hold `unsafe` code, and
         // rustc forbids it everywhere else through the workspace lint table.
         ("one crate holds all unsafe code", "[workspace.lints.rust]"),
-        // FX-20 (2026-10-08): every other credential reference is bound, and
+        // Every other credential reference is bound, and
         // the one-Secret-one-object upgrade tool binds the existing ones.
         (
             "every other credential reference is bound",
             "scripts/bind-credential.py",
         ),
-        // FX-18 (2026-10-08): phase 0 uses a topic it created only once the
+        // Phase 0 uses a topic it created only once the
         // cluster serves it.
         (
             "a created topic is used only once served",
             "until every partition of each topic it created has a",
         ),
-        // FX-24 (2026-10-08): a connection that sends nothing meets the
+        // A connection that sends nothing meets the
         // console's header deadline, and the console no longer serves HTTP/2,
         // so an ingress configured for an `h2c` backend must go back to 1.1.
         (
             "a silent connection meets the console's header deadline",
             "h2c",
         ),
-        // FX-21 (2026-10-08): an unrecorded replication factor is not
+        // An unrecorded replication factor is not
         // assessed, never matching; the engine's first patch, build 2.
         (
             "a replication factor the archive does not record",
             "replication_factor (notRecorded)",
         ),
-        // PROD-11.1 (2026-10-08): a plan may select a window start (partition
+        // A plan may select a window start (partition
         // subsets were refused until OD-9; item 51), and the scorecard signs
         // it.
         ("a restore can select a window start", "source.selection"),
-        // PROD-08.1a (2026-10-08, item 43): complete coverage requested
+        // Item 43: complete coverage requested
         // through the CRDs, the API and the console, and a standing scope
         // that signs it.
         (
             "complete coverage through the CRDs, the API and the console",
             "spec.coverage: complete",
         ),
-        // FX-24b (2026-10-08): a client that stops reading an answer, or
+        // A client that stops reading an answer, or
         // stops sending a body, meets the console's stall deadline; the
         // constant names the bound an operator can find in the source.
         (
             "a stopped client meets the console's stall deadline",
             "IO_STALL_TIMEOUT",
         ),
-        // FX-29 (2026-10-09, item 45): a status is written only when its
+        // Item 45: a status is written only when its
         // content moves; the field whose leftover spun the PoC's schedules.
         (
             "a controller no longer rewrites an unchanged status",
             "status.lastSlot.backupRef",
         ),
-        // PROD-03.0 (2026-10-09, item 46): topics whose records need a schema
+        // Item 46: topics whose records need a schema
         // registry are flagged from the archived bytes, and the console says
         // the registry was not captured.
         (
             "schema-dependent topics are flagged",
             "Registry not captured: applications may not read these",
         ),
-        // FX-28 (2026-10-09, item 47): a sign-in whose identity provider
+        // Item 47: a sign-in whose identity provider
         // stalls its body is answered at the provider deadline, under the
         // audit code an operator alerts on.
         (
             "a stalled identity provider meets the provider deadline",
             "provider_timeout",
         ),
-        // FX-20c (2026-10-09, item 48): a destination's Test access compares
+        // Item 48: a destination's Test access compares
         // every grant's binding on a blocking row, and is never READY for a
         // destination a backup would refuse.
         (
             "Test access compares every grant's binding",
             "destination.credentialBound",
         ),
-        // PROD-01.4a (2026-10-09, item 49): every receipt records each
+        // Item 49: every receipt records each
         // topic's ID before and after the engine, and a recreated topic is a
         // new generation.
         ("each topic's ID before and after the engine", "generations"),
-        // PROD-04.1 (2026-10-09, item 50): a backup records the committed
+        // Item 50: a backup records the committed
         // positions of the groups it names, one outcome each, never offset 0
         // for absence.
         (
             "consumer position evidence for selected groups",
             "consumer_positions",
         ),
-        // PROD-11.1b (2026-10-09, item 51, OD-9 (a)): a partition subset,
+        // Item 51: a partition subset,
         // and the scorecard's first MAJOR it signs.
         (
             "a partition subset signs scorecard format 2.0.0",
             "logweir-drill-scorecard-2.0.0.json",
         ),
-        // FX-31 (2026-10-09, item 52): every object-store read has a size cap;
+        // Item 52: every object-store read has a size cap;
         // the controller reads evidence under the relay's cap, which sets the
         // receipt's topic limit an operator must know.
         (
             "every object-store read has a size cap",
             "about **250–300 topics**",
         ),
-        // FX-24c (2026-10-09, item 53): one peer outside the trusted proxy
+        // Item 53: one peer outside the trusted proxy
         // holds at most its share of the console's connections, and a request
         // body must keep up the window's floor; the constant names the cap an
         // operator can find in the source.
@@ -2074,41 +1939,41 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "one peer's share of the console's connections",
             "MAX_CONNECTIONS_PER_PEER",
         ),
-        // FX-19 (2026-10-09, item 54): a probe Job Kubernetes is collecting
+        // Item 54: a probe Job Kubernetes is collecting
         // is not a crash; the field that says it is being collected.
         (
             "a probe Job being collected does not clear reachable",
             "metadata.deletionTimestamp",
         ),
-        // FX-13a and FX-32 (2026-10-09, item 55): a sign-in state is
+        // Item 55: a sign-in state is
         // single-use on each replica, and a replay there is refused under the
         // audit code an operator alerts on, before any token request.
         (
             "a sign-in state is single-use on each replica",
             "login_state_replayed",
         ),
-        // PROD-15.1 (2026-10-09, item 56): a restore under the original topic
+        // Item 56: a restore under the original topic
         // names, into an absent topic, behind its own approval subject; the
         // flag an approver mints it with.
         (
             "a restore under the original topic names",
             "--approval-subject original-name",
         ),
-        // FX-14 (2026-10-09, item 57): a restore preflight of a catalog point
+        // Item 57: a restore preflight of a catalog point
         // makes the runner's own comparisons, reads only that point's own
         // receipt, and names the refusal an operator will meet.
         (
             "a catalog restore's preflight judges the archive as the runner will",
             "ManifestSuperseded",
         ),
-        // FX-22 (2026-10-09, item 58): a RetentionPolicy's status says what
+        // Item 58: a RetentionPolicy's status says what
         // the per-run ceiling held back and never counts it as kept; the
         // field an operator reads the held-back count from.
         (
             "a retention status says what the per-run ceiling held back",
             "truncatedByCap",
         ),
-        // FX-48 (2026-10-10, item 59): the shared console shows what the
+        // Item 59: the shared console shows what the
         // product API publishes; the sentence a cell carries for a value the
         // API does not publish, which an operator will read on the Restore
         // detail.
@@ -2116,139 +1981,139 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the shared console shows what the product API publishes",
             "not published by the product API",
         ),
-        // PROD-01.2 (2026-10-10, item 60): a readiness check asks the
+        // Item 60: a readiness check asks the
         // endpoint what it can do, and the runner image moves with the
         // controller because every Backup and Restore plan lists the rows.
         (
             "capability rows, and the compatibility contract",
             "capabilityChecks",
         ),
-        // FX-34 (2026-10-10, item 61): a guard-refused Restore or Backup says
+        // Item 61: a guard-refused Restore or Backup says
         // why in its status, off the one stdout line the runner adds for it.
         (
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
-        // FX-27 and FX-42 (2026-10-10, item 62): every engine document turns
+        // Item 62: every engine document turns
         // the engine's metrics server off; the key it renders.
         (
             "the engine's metrics port stays closed",
             "metrics: {enabled: false}",
         ),
-        // FX-35 (2026-10-10, item 63): a restore started from a Backup is
+        // Item 63: a restore started from a Backup is
         // bound to its point; the review row that says what the run reads.
         (
             "a restore started from a Backup is bound to its point",
             "recorded by the point",
         ),
-        // FX-39 and FX-40 (2026-10-10, item 64): the status lists are cut at
+        // Item 64: the status lists are cut at
         // the CRD's bound with their counts, and an `Enforce` run refuses a
         // partial or expired catalog view by name.
         (
             "a retention policy over 500 points keeps enforcing",
             "ViewIncomplete",
         ),
-        // FX-33 (2026-10-10, item 65): one backup names at most 1,000
+        // Item 65: one backup names at most 1,000
         // topics; the name a selection over it is refused under, at every
         // entry, before the engine runs.
         (
             "one backup names at most 1,000 topics",
             "BackupSelectionTooLarge",
         ),
-        // PROD-16.2 (2026-10-10, item 66): two-person approval in the
+        // Item 66: two-person approval in the
         // console; the policy setting the chart renders for it.
         (
             "two-person approval in the console",
             "approverSignature: Console",
         ),
-        // PROD-01.1a (2026-10-10, item 67): an archive holding transaction
+        // Item 67: an archive holding transaction
         // markers is refused unless the plan allows them; the plan field.
         (
             "an archive holding transaction markers is refused",
             "restore.allow_transaction_markers: true",
         ),
-        // PROD-02.1 (2026-10-10, item 68): a backup of a source whose
+        // Item 68: a backup of a source whose
         // records all expired is a signed empty capture; the reason an
         // operator reads on the `Backup`.
         (
             "a backup of an emptied source is a named empty capture",
             "EmptyCapture",
         ),
-        // FX-44 (2026-10-10, item 69): a failed restore removes or names the
+        // Item 69: a failed restore removes or names the
         // scratch topic it created; the line the controller reads it from.
         (
             "a failed restore removes or names the scratch topic it created",
             "teardown-failed=",
         ),
-        // FX-49 (2026-10-11, item 70): the console's original-name box takes
+        // Item 70: the console's original-name box takes
         // effect when ticked; the box's own label.
         (
             "the original-name box takes effect when ticked",
             "Restore under the original topic names",
         ),
-        // FX-50 (2026-10-11, item 71): a catalog's window holds the newest
+        // Item 71: a catalog's window holds the newest
         // points; the sentence a partial view's `Synced` message carries.
         (
             "a catalog's window holds the newest points",
             "It is a partial view",
         ),
-        // PROD-01.5a and FX-41 (2026-10-11, item 72): CI's default broker
+        // Item 72: CI's default broker
         // line is 4.3.1 and its e2e job runs in shards; the variable that
         // still starts the legacy line.
         (
             "CI tests on Kafka 4.3.1, in four shards",
             "KAFKA_VERSION=3.7.1",
         ),
-        // PROD-17.1 C1 (2026-10-11, item 73): scheduled rehearsals and
+        // Item 73: scheduled rehearsals and
         // standing authorizations are withdrawn; the reason both refusals
         // carry.
         (
             "scheduled rehearsals and standing authorizations are withdrawn",
             "StandingAuthorizationRefused",
         ),
-        // PROD-17.1 (2026-10-11, item 74): parts v1 does not use are
+        // Item 74: parts v1 does not use are
         // withdrawn; the owner decision that withdrew them.
         ("four unused parts are withdrawn for v1", "OD-12"),
-        // PROD-17.1 (2026-10-11, item 75): the v1 cut's withdrawals; the
+        // Item 75: the v1 cut's withdrawals; the
         // route an API client may still call.
         (
             "surfaces withdrawn for the v1 cut",
             "destinations:from-legacy",
         ),
-        // PROD-17.1 C5 (2026-10-11, item 76): the chart is the only install;
+        // Item 76: the chart is the only install;
         // the selector that removes a bundle install's control plane.
         (
             "the Helm chart is the only install",
             "-l app.kubernetes.io/name=logweir",
         ),
-        // PROD-17.1 B5 (2026-10-11, item 77): an unparseable plan is refused
+        // Item 77: an unparseable plan is refused
         // before its approval is read.
         ("an unparseable plan refused early", "PlanUnparseable"),
-        // PROD-17.1 B1 (2026-10-11, item 78): a schedule's `spec.retention`
+        // Item 78: a schedule's `spec.retention`
         // stops reporting; the condition a schedule that still sets it carries.
         (
             "a schedule's spec.retention stops reporting",
             "RetentionReportWithdrawn",
         ),
-        // FX-15 (2026-10-11, item 79): every refused retention run is named on
+        // Item 79: every refused retention run is named on
         // its policy's status; the line the worker prints for it.
         (
             "a refused retention run says why",
             "retention-refusal=<code>",
         ),
-        // FX-47 (2026-10-11, item 80): a setting the existing target does not
+        // Item 80: a setting the existing target does not
         // report counts as differing; the signed line it lands in.
         (
             "an unreported target setting counts as differing",
             "`differing config: [...]`",
         ),
-        // PROD-01.2a and PROD-00.3o (2026-10-11, item 81): the hand-run cells
+        // Item 81: the hand-run cells
         // get repeatable rows; the weekly workflow that re-runs them.
         (
             "the matrix's hand-run cells get rows and a weekly job",
             "compat-weekly.yml",
         ),
-        // PROD-00.3g (2026-10-11, item 82): engine build 3; the patch that
+        // Item 82: engine build 3; the patch that
         // makes it.
         (
             "the engine is build 3",
@@ -2426,18 +2291,14 @@ fn table_row<'a>(document: &'a str, file: &str, header: &str, role: &str) -> &'a
         .unwrap_or_else(|| panic!("{file}: the table headed `{header}` has no `{role}` row"))
 }
 
-/// **FX-14 item 2: the documented grants and the code's reads cannot drift.**
+/// **The documented grants and the code's reads cannot drift.**
 ///
-/// FX-7 taught three readers to read a manifest BY VERSION (`GET
-/// ?versionId=`), which AWS S3 authorises as `s3:GetObjectVersion`, a
-/// different action from `s3:GetObject`. The measured minimal-grant tables
-/// predated it and went on saying a role needed less than its code asked for,
-/// until a review noticed.
-///
-/// So: every source file that asks a store for one version of an object is
-/// named here with the ROLE whose grant it reads with, and that role's row in
-/// both tables must name the action. The check fails in each direction a
-/// drift can take:
+/// A read BY VERSION (`GET ?versionId=`) is authorised by AWS S3 as
+/// `s3:GetObjectVersion`, a different action from `s3:GetObject`. So every
+/// source file that asks a store for one version of an object is named here
+/// with the ROLE whose grant it reads with, and that role's row in both
+/// tables must name the action. The check fails in each direction a drift can
+/// take:
 ///
 /// * a NEW reader of a version (a file that USES the read, under either of
 ///   its names and however the use is spelled — [`uses_get_version`] — and is
@@ -2448,7 +2309,7 @@ fn table_row<'a>(document: &'a str, file: &str, header: &str, role: &str) -> &'a
 ///   the docs may then stop asking for);
 /// * the store no longer reading by version at all.
 ///
-/// **And the receipt a point-bound restore reads (FX-14 review L5).** The
+/// **And the receipt a point-bound restore reads.** The
 /// same two `archiveRead` readers fetch the plan's bound receipt, at a key
 /// under [`logweir::catalog::record::RECEIPTS_PREFIX`], with the archive
 /// grant, which the measured minimum (`<prefix>/*` alone) does not cover. So
@@ -2493,7 +2354,7 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
         .find(|(path, _)| path == IMPLEMENTATION[0])
         .map(|(_, code)| code.as_str())
         .expect("the store crate is scanned");
-    // FX-31 gave every read a cap and the store's read its name:
+    // Every read has a cap, and the store's read by version is
     // `Store::get_version_capped`.
     assert!(
         store.contains("pub fn get_version_capped(")
@@ -2610,7 +2471,7 @@ fn version_readers<'a>(
         .collect()
 }
 
-/// The two names the read by version has since FX-31 gave every read a cap:
+/// The two names the read by version has:
 /// the store's own method, `Store::get_version_capped`, which the runner's
 /// binding calls, and the check Jobs' seam over it,
 /// `ObjectAccess::get_version`, which takes the same cap. Neither is part of
@@ -2642,12 +2503,9 @@ fn uses_get_version(code: &str) -> bool {
 
 /// [`uses_get_version`] sees every spelling of a use and no definition, so
 /// the lint above cannot be passed by writing the same read another way
-/// (FX-14 review L5: it matched the text `.get_version(` alone, and a call
-/// spelled `Store::get_version(&store, …)` went unseen), **and it sees the
-/// read under both names it has since FX-31**: the store's
-/// `get_version_capped`, which the runner's binding calls, and the check
-/// Jobs' `ObjectAccess::get_version`. A lint that knew only the older name
-/// would not see the binding's read at all.
+/// (`Store::get_version(&store, …)`), **and it sees the read under both its
+/// names**: the store's `get_version_capped`, which the runner's binding
+/// calls, and the check Jobs' `ObjectAccess::get_version`.
 #[test]
 fn a_read_by_version_is_seen_however_the_call_is_spelled() {
     for used in [
@@ -2730,16 +2588,11 @@ fn a_read_by_version_is_seen_however_the_call_is_spelled() {
     );
 }
 
-/// **FX-34's review (H1, MED-1, MED-2): the three documents say which runner
-/// images stop under a controller that passes `--line-token`, what that looks
-/// like, the chart keys that exist, and the rollback order that is safe.**
-///
-/// The first version of these paragraphs named a chart key the chart does not
-/// have (`image`), gave the rollback order that PRODUCES the failure (the
-/// runner image first), and said "a runner older than this release" where the
-/// truth is every runner image published before the change. Each is a
-/// sentence a later merge can put back, so each is held here, against the
-/// chart's own values file.
+/// **The three documents say which runner images stop under a controller
+/// that passes `--line-token`, what that looks like, the chart keys that
+/// exist, and the rollback order that is safe.** Each is held against the
+/// chart's own values file: a key the chart does not have, or the rollback
+/// order that PRODUCES the failure (the runner image first), fails here.
 #[test]
 fn the_line_token_skew_is_documented_with_real_chart_keys_and_the_safe_rollback_order() {
     let values = read("charts/logweir/values.yaml");

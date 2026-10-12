@@ -1,7 +1,6 @@
-// console-ux.spec.js -- the rows for the console UX batch (console-ux-1): the
-// findings MCP-1 ... MCP-34 of the human-like Playwright-MCP pass over the
-// shared console (2026-09-24). Each row names its finding and fails on the
-// code before the fix where the behaviour changed.
+// console-ux.spec.js -- the console UX rows from a human-like pass over the
+// shared console. Each row fails on the code before the fix where the
+// behaviour changed.
 //
 // Like every suite here it is node's own test runner over pure functions and
 // the real transport with the one platform call stubbed; it opens no socket.
@@ -89,9 +88,7 @@ async function probeWith(answer) {
   return selectMode({ probe: async () => answer });
 }
 
-// ===========================================================================
-// MCP-1 / MCP-4: a signed-out visitor is signed out, not legacy
-// ===========================================================================
+// A SIGNED-OUT VISITOR IS SIGNED OUT, not legacy.
 
 test("mcp_1_a_product_api_401_on_session_is_signed_out_and_never_legacy", async () => {
   const record = await probeWith({ ok: false, status: 401, body: unauthenticated("unauthenticated") });
@@ -150,9 +147,7 @@ test("mcp_1_modeDecided_writes_the_console_copy_for_a_signed_out_visitor", () =>
   assert.equal(doc.getElementById("masthead-tagline").textContent.indexOf("kubeconfig"), -1);
 });
 
-// ===========================================================================
-// MCP-4: a problem document is a human message, everywhere
-// ===========================================================================
+// A PROBLEM DOCUMENT IS A HUMAN MESSAGE, everywhere.
 
 test("mcp_4_a_problem_document_on_a_kubernetes_path_is_read_as_one", () => {
   const body = JSON.stringify({
@@ -197,9 +192,7 @@ test("mcp_4_the_error_box_leads_with_words_and_keeps_the_servers_own", () => {
   assert.match(proxy, /Not authenticated/);
 });
 
-// ===========================================================================
-// MCP-5: who is signed in, in which role, and Sign out
-// ===========================================================================
+// WHO IS SIGNED IN, in which role, and Sign out.
 
 test("mcp_5_the_header_names_the_signed_in_actor_and_their_role_here", async () => {
   await probeWith({ ok: true, status: 200, body: operatorSession() });
@@ -246,9 +239,7 @@ test("mcp_5_sign_out_posts_the_logout_command_with_the_sessions_token", async ()
   }
 });
 
-// ===========================================================================
-// MCP-19 / MCP-33: the navigation
-// ===========================================================================
+// THE NAVIGATION.
 
 test("mcp_33_the_navigation_shows_the_tabs_this_session_may_use", () => {
   const titles = (has) => visibleRoutes(NAV_ROUTES, "team-a", has).map((r) => r.title);
@@ -265,9 +256,7 @@ test("mcp_33_the_navigation_shows_the_tabs_this_session_may_use", () => {
   assert.ok(NAV_ROUTES.some((r) => r.hash === "#/operations"));
 });
 
-// ===========================================================================
-// MCP-2 / MCP-3 / MCP-8 / MCP-34: the frame's proportions
-// ===========================================================================
+// THE FRAME'S PROPORTIONS.
 
 test("mcp_2_the_namespace_prompt_is_an_instruction_without_a_spinner", () => {
   const saved = globalThis.document;
@@ -297,9 +286,7 @@ test("mcp_3_mcp_8_mcp_34_the_frame_draws_no_view_ring_no_wrapped_button_no_stuck
     "MCP-34: the tab hover background only applies where a pointer hovers");
 });
 
-// ===========================================================================
-// MCP-29 / MCP-27 / MCP-25 / MCP-28 / MCP-26: the restore wizard
-// ===========================================================================
+// THE RESTORE WIZARD.
 
 import {
   STEPS,
@@ -466,8 +453,8 @@ test("mcp_27_readiness_is_done_only_when_a_check_for_this_plan_says_ready", asyn
   const html = renderPreparedWizard(state, prepared);
   assert.match(html, /<span class="stepper-status">needs attention<\/span>/);
 
-  // REVIEW L1: a check owed only its draft's approval is passable -- Create
-  // requests the approval -- and step 5 says "needs approval", not "done".
+  // A check owed only its draft's approval is passable -- Create requests the
+  // approval -- and step 5 says "needs approval", not "done".
   state.readiness.preflight = Object.assign({}, state.readiness.preflight, {
     state: "unknown",
     checks: [
@@ -571,9 +558,7 @@ test("mcp_26_a_console_list_hands_each_page_to_the_caller_before_the_last", asyn
   }
 });
 
-// ===========================================================================
-// MCP-6: a short chip never breaks mid-token
-// ===========================================================================
+// A SHORT CHIP NEVER BREAKS MID-TOKEN.
 
 import { LONG_TOKEN_CHARS, markLongTokens } from "../app.js";
 import { build } from "./fake-dom.js";
@@ -600,9 +585,7 @@ test("mcp_6_only_a_long_token_in_a_table_may_break_mid_word", () => {
   assert.match(css, /\.grid td code\.long,\n\.grid td \.badge\.long \{\n {2}overflow-wrap: anywhere;/);
 });
 
-// ===========================================================================
-// MCP-13 / MCP-17: two projections the API now publishes
-// ===========================================================================
+// TWO PROJECTIONS THE API PUBLISHES.
 
 import { renderLastSlot, renderScheduleRevision } from "../pages/schedules.js";
 import { renderBackupList } from "../pages/backups.js";
@@ -629,9 +612,8 @@ test("mcp_13_the_console_shows_what_the_last_slot_did_from_the_api", async () =>
   } finally {
     wire.restore();
   }
-  // A SCHEDULE WITH NO DECIDED SLOT YET publishes neither, and the card says
-  // nothing about a projection that no longer exists -- the fields are in the
-  // contract now, so their absence is "nothing recorded yet".
+  // A SCHEDULE WITH NO DECIDED SLOT YET publishes neither, and its absence is
+  // "nothing recorded yet".
   const fresh = con("schedule-last-slot.json");
   delete fresh.item.status.lastSlot;
   delete fresh.item.status.missedSlots;
@@ -707,9 +689,7 @@ test("mcp_17_a_console_list_row_shows_the_exit_code_and_the_restore_outcome", as
     "a row the SIGNED column calls verified does not call its outcome unverified");
 });
 
-// ===========================================================================
-// MCP-10 / MCP-20 / MCP-23 / MCP-32: forms and empty states that fit the role
-// ===========================================================================
+// FORMS AND EMPTY STATES THAT FIT THE ROLE.
 
 import { SOURCE_INPUTS, renderDestinationForm, sourceShows } from "../pages/destinations.js";
 import { NO_POLICY_SENTENCE } from "../pages/protection.js";
@@ -720,9 +700,9 @@ test("mcp_10_the_destination_form_opens_from_a_button_and_shows_only_the_chosen_
   const html = renderDestinationForm({ draft: {}, state: { phase: "idle" } });
   assert.match(html, /^<details class="create-disclosure" id="destination-create-disclosure"><summary class="button primary">Create destination<\/summary>/,
     "BEFORE: the form was always expanded under the list, a 4,300 px page");
-  // archiveWrite starts on `new` (FX-20: a create never names an existing
-  // Secret): its new-key inputs show, the Secret-name and ServiceAccount inputs
-  // do not. archiveRead starts `absent`: nothing shows.
+  // archiveWrite starts on `new` (a create never names an existing Secret):
+  // its new-key inputs show, the Secret-name and ServiceAccount inputs do not.
+  // archiveRead starts `absent`: nothing shows.
   const role = (name) => html.slice(html.indexOf("id=\"destination-" + name + "\""),
     html.indexOf("</fieldset>", html.indexOf("id=\"destination-" + name + "\"")));
   const write = role("archiveWrite");
@@ -788,9 +768,7 @@ test("mcp_32_a_403_on_keys_in_the_shared_console_says_only_administrators_may_re
     "BEFORE: a 403 was shown as 'no trust exists ... no approval can verify'");
 });
 
-// ===========================================================================
-// MCP-24: no internal roadmap reference in user-visible text
-// ===========================================================================
+// NO INTERNAL ROADMAP REFERENCE IN USER-VISIBLE TEXT.
 
 import { readdirSync } from "node:fs";
 
@@ -837,8 +815,8 @@ test("mcp_24_the_lint_refuses_a_reference_in_a_string_and_ignores_one_in_a_comme
   const flagged = quotedSegments(code, false).filter((s) => ROADMAP_REFERENCE.test(s.text))
     .map((s) => s.line);
   assert.deepEqual(flagged, [4, 6, 7], "the three strings, and no comment");
-  // Review L2: a template across lines, a quote inside a regex, a regex that
-  // happens to spell an id (not user-visible), and attributes in the shell.
+  // A template across lines, a quote inside a regex, a regex that happens to
+  // spell an id (not user-visible), and attributes in the shell.
   const harder = [
     "const quote = /[\"']/g; const after = \"frozen before PLAT-05.1\";",
     "const pattern = /PLAT-\\d/;",
@@ -854,9 +832,7 @@ test("mcp_24_the_lint_refuses_a_reference_in_a_string_and_ignores_one_in_a_comme
     .map((s) => s.line), [2, 3], "text between tags and an attribute; never a comment");
 });
 
-// ===========================================================================
-// The LOW findings: timestamps, booleans, conditions, words
-// ===========================================================================
+// THE SMALL FINDINGS: timestamps, booleans, conditions, words.
 
 import { BUCKET_FOOTER, conditionBadge, flagBadge, humanInstant, when } from "../render.js";
 import { renderClusterList } from "../pages/clusters.js";
@@ -881,10 +857,9 @@ test("mcp_7_mcp_15_one_formatter_for_every_instant_whole_seconds_utc_exact_value
   assert.equal(when("20260918-032200"), "20260918-032200", "a value that is not an instant is not guessed at");
   const css = readFileSync(UI + "style.css", "utf8");
   assert.match(css, /\.ts \{\n {2}white-space: nowrap;/, "MCP-7: an instant never wraps mid-value");
-  // And the pages use it: the clusters table's probe cell (its own OBSERVED
-  // column until MCP round 2's R2-3 folded it in, as the wizard's MCP-28 cell
-  // does) prints the age with the exact instant as the title, and the
-  // schedules table's LAST/NEXT columns print the human reading.
+  // And the pages use it: the clusters table's probe cell prints the age with
+  // the exact instant as the title, and the schedules table's LAST/NEXT
+  // columns print the human reading.
   const cluster = fixture("cluster-scram.json");
   const clusters = renderClusterList(cluster, "team-a", Date.parse("2026-09-11T20:00:00Z"));
   assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">[^<]* ago<\/time>/);
@@ -956,9 +931,7 @@ test("class_sweep_shared_console_sentences_do_not_send_an_operator_to_kubectl", 
   }
 });
 
-// ===========================================================================
-// Review M1: the LOCAL TIME column stays local, DST rows included
-// ===========================================================================
+// THE LOCAL TIME COLUMN STAYS LOCAL, DST rows included.
 
 import { humanLocal, nextRunsPanel, whenLocal } from "../render.js";
 import { renderScheduleCard } from "../pages/schedules.js";
@@ -1016,9 +989,7 @@ test("review_m1_a_saved_schedule_s_next_runs_keep_its_zone", () => {
   assert.equal(whenLocal(undefined), "-");
 });
 
-// ===========================================================================
-// Review L1: a console whose first request fails is never legacy mode
-// ===========================================================================
+// A CONSOLE WHOSE FIRST REQUEST FAILS IS NEVER LEGACY MODE.
 
 import { UNAVAILABLE, unavailableReason } from "../client.js";
 import { renderUnavailable } from "../app.js";
@@ -1078,9 +1049,7 @@ test("review_l1_unavailable_sends_nothing_and_renders_retry_not_a_namespace_prom
     "the reason is escaped");
 });
 
-// ===========================================================================
-// Review L4 / L6: the probe cell's exact instant, and the escaped header
-// ===========================================================================
+// THE PROBE CELL'S EXACT INSTANT, and the escaped header.
 
 import { probeSummary } from "../select.js";
 

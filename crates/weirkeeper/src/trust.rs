@@ -1,90 +1,60 @@
 //! Which trust a namespace resolves to, and the synthesised `legacy-roster-v1`
-//! (PLAT-19.1, decision D3 §7.1 and §7.5).
+//! (decision D3 §7.1 and §7.5).
 //!
-//! # The resolution order, and why a contested namespace resolves to NOTHING
+//! # Resolution, and why a contested namespace resolves to nothing
 //!
 //! `spec.namespaces` match → the `default: true` policy → the roster,
-//! synthesised. Three steps, in that order, and one rule that is not an
-//! ordering at all: **a namespace claimed by two policies resolves to
-//! nothing.** Every approval and every verification there is refused with
-//! [`REASON_TRUST_POLICY_CONFLICT`].
+//! synthesised. A namespace claimed by two policies resolves to nothing: every
+//! approval and verification there is refused with
+//! [`REASON_TRUST_POLICY_CONFLICT`]. Picking one by any sort order would be a
+//! trust decision made by a sort order; the safe reading of a disagreement
+//! about authority is that there is none. The conflict is also reported on
+//! both policies' `status.conflicts`. Two `default: true` policies are the same
+//! fault for every namespace that falls to the default.
 //!
-//! Picking one — the first listed, the newest, the alphabetically smallest —
-//! would be a trust decision made by a sort order. Two administrators who each
-//! believe they govern `team-a` disagree about which keys may authorise a
-//! restore there, and the safe reading of a disagreement about authority is
-//! that there is none. The conflict is reported on both policies'
-//! `status.conflicts` so it is visible in `kubectl get trustpolicy` rather
-//! than only in a refusal message.
+//! # `legacy-roster-v1` is synthesised, never applied
 //!
-//! Two `default: true` policies are the same fault one level up: a namespace
-//! no policy names explicitly falls to the default, and if there are two
-//! defaults it falls to a conflict.
+//! It exists only in memory. A written `TrustPolicy` for it would be a policy
+//! no administrator reviewed, whose CEL rules would forbid editing the roster's
+//! behaviour back out. The upgrade path is explicit (`logweir trust
+//! migrate-roster`, `kubectl apply`); until it is taken, this synthesis keeps a
+//! roster-only cluster working unchanged.
 //!
-//! # `legacy-roster-v1` is SYNTHESISED, never applied
+//! # "A partially loaded roster is not a roster", and where that rule stops
 //!
-//! It exists only in this process's memory. Nothing writes a `TrustPolicy`
-//! object for it, because a cluster that has one would then have a policy an
-//! administrator never reviewed and whose CEL rules would immediately forbid
-//! editing the roster's own behaviour back out. The upgrade path is explicit
-//! and reviewable — `logweir trust migrate-roster`, `kubectl apply` — and
-//! until it is taken, this synthesis is what keeps a roster-only cluster
-//! working unchanged.
+//! The roster's two consumers treat a bad PEM differently, and §7.5's
+//! "byte-for-byte" reproduces that: `controllers::approval::evaluate` check 2
+//! refuses every approval when any `approverKeys` entry fails to parse
+//! ([`ResolvedTrust::blocked_for`] carries that message byte for byte), while
+//! `verification::verify_evidence` skips an unparseable `signingKeys` entry. So
+//! the block is per usage. A real [`TrustPolicy`] blocks neither: an
+//! unparseable key there is one key with `effectiveState: Unparseable`. It can
+//! verify nothing, so leaving it out widens no trust, while refusing the whole
+//! policy would let one bad paste stop every restore in every bound namespace.
 //!
-//! # "A partially loaded roster is not a roster", and where that rule STOPS
+//! # A compromise revocation is a fact about the key, not about a policy
 //!
-//! Today's two consumers do not treat a bad PEM alike, and reproducing that
-//! exactly is the whole content of §7.5's "byte-for-byte":
-//!
-//! * `controllers::approval::evaluate` check 2 refuses **every** approval when
-//!   any `approverKeys` entry fails to parse, naming the first bad `keyId`.
-//!   [`ResolvedTrust::blocked_for`] carries that refusal, with the message
-//!   byte-for-byte.
-//! * `verification::verify_evidence` step 4 SKIPS an unparseable
-//!   `signingKeys` entry and keeps trying the rest.
-//!
-//! So the block is per USAGE, not per policy. A real [`TrustPolicy`] blocks
-//! neither: an unparseable key there is one key with
-//! `effectiveState: Unparseable`, the others keep working, and the reason the
-//! roster's stricter rule is not carried over is that the roster has nowhere
-//! to RECORD a per-key verdict — it has one `loaded` boolean — while the
-//! policy reports each key by id. An unparseable key can verify nothing, so
-//! leaving it out widens no trust; refusing the whole policy for it would make
-//! one bad paste in a 64-key policy stop every restore in every bound
-//! namespace.
-//!
-//! # A compromise revocation is a fact about the KEY, not about a policy
-//!
-//! Defect `TRUSTPOLICY-DELETE-DROPS-REVOCATION` (PoC round, rehearsal R2): a
-//! `TrustPolicy` revoked key K for `KeyCompromise`, every document K signed
-//! turned `Untrusted`, the policy was deleted — and the namespace fell back to
-//! `legacy-roster-v1`, synthesised from a roster that still listed K as an
-//! ordinary key, so all six backups re-verified `Valid`. The revocation had
-//! lived only on the object that was removed.
-//!
-//! A compromise says the private half may be in someone else's hands. That is
-//! true of the key material everywhere, whichever object a namespace happens
-//! to resolve through today. So [`resolve_in`] applies every `KeyCompromise`
-//! revocation ANY `TrustPolicy` in the cluster records — including one being
-//! deleted — to the resolved key with the same id, whatever the source: the
-//! namespace's own policy, another one, the default, or the synthesised roster
-//! ([`compromise_records`], [`ResolvedKey::compromise_inherited_from`]). A
-//! namespace re-bound away from the recording policy, or dropped to the roster,
-//! still reads the key as revoked for compromise. Nothing is widened: the
+//! A compromise says the private half may be in someone else's hands, whichever
+//! object a namespace resolves through. So [`resolve_in`] applies every
+//! `KeyCompromise` revocation any `TrustPolicy` in the cluster records,
+//! including one being deleted, to the resolved key with the same id, whatever
+//! the source ([`compromise_records`],
+//! [`ResolvedKey::compromise_inherited_from`]). Otherwise deleting the
+//! recording policy, or re-binding the namespace, would drop it to a source
+//! that lists the key as ordinary and re-verify everything it signed. The
 //! overlay only ever moves a key to `Revoked`, which G3 forbids undoing, and a
-//! key the resolved source does not list at all stays `UntrustedSigner`.
+//! key the source does not list stays `UntrustedSigner`.
 //!
 //! The overlay can only honour a record that still exists, which is what the
 //! `TrustPolicy` reconciler's finalizer is for (`controllers::trust_policy`,
-//! [`deletion_guard`]): a policy recording a compromise is not released for
-//! deletion until another live policy records the same revocation, or nothing
-//! in the cluster lists the key any more.
+//! [`deletion_guard`]): a policy recording a compromise is not released until
+//! another live policy records it, or nothing lists the key any more.
 //!
-//! # No clock here either
+//! # No clock here
 //!
-//! Every function in this module takes the instants it needs. The parsing is
-//! here because it needs `logweir_verify` (which `logweir-core` must not
-//! link); the arithmetic stays in [`logweir_core::trust`].
+//! Every function takes the instants it needs. The parsing is here because it
+//! needs `logweir_verify` (which `logweir-core` must not link); the arithmetic
+//! stays in [`logweir_core::trust`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,13 +78,10 @@ use crate::crds::trust_roster::{KeyEntry, TrustRosterSpec};
 /// verified against org-default" without guessing.
 pub const LEGACY_POLICY_NAME: &str = "legacy-roster-v1";
 
-/// The `notBefore` every synthesised legacy key carries.
-///
-/// The roster has no `notBefore` field, so there is no value to carry
-/// verbatim; the honest translation of "this key has always been trusted" is a
-/// window that opens at the Unix epoch. A synthesised `notBefore` of "now"
-/// would retroactively invalidate every archive the roster signed, which is
-/// the exact failure §7.5 exists to prevent.
+/// The `notBefore` every synthesised legacy key carries: the Unix epoch, the
+/// honest translation of "always trusted" for a roster with no `notBefore`. A
+/// synthesised "now" would retroactively invalidate every archive the roster
+/// signed.
 pub const LEGACY_NOT_BEFORE_RFC3339: &str = "1970-01-01T00:00:00Z";
 
 /// The `notAfter` a synthesised legacy key gets when the roster entry has
@@ -125,12 +92,9 @@ pub const LEGACY_NOT_BEFORE_RFC3339: &str = "1970-01-01T00:00:00Z";
 /// in a shape whose `notAfter` is required.
 pub const LEGACY_NOT_AFTER_RFC3339: &str = "9999-12-31T23:59:59Z";
 
-/// The refusal a contested namespace produces (D3 §7.1).
-///
-/// A CONDITION `reason` AND A REFUSAL STRING AT ONCE, deliberately: the same
-/// word appears on the `TrustPolicy`'s own `Bound` condition and on the
-/// `Approval` or run that was refused, so an operator grepping one finds the
-/// other.
+/// The refusal a contested namespace produces (D3 §7.1): a condition `reason`
+/// and a refusal string at once, so the same word appears on the
+/// `TrustPolicy`'s `Bound` condition and on the refused object.
 pub const REASON_TRUST_POLICY_CONFLICT: &str = "TrustPolicyConflict";
 
 /// One key as this cluster resolved it: the pure lifecycle facts, plus the
@@ -147,22 +111,16 @@ pub struct ResolvedKey {
     /// the parse error's `Display`. `effectiveState` is then `Unparseable`.
     pub parsed: Result<(), String>,
     /// `false` when the declared `keyId` is not the sha256 of this key's own
-    /// DER SPKI, carrying what it actually hashes to.
-    ///
-    /// SEPARATE FROM [`Self::parsed`] BECAUSE THE REFUSALS DIFFER. Today's
-    /// approval path reports a bad PEM as `SignatureInvalid` and a
-    /// disagreeing id as `KeyIdNotInRoster` (checks 2 and 3), and an entry
-    /// whose declared id is not the hash of its own material is not an entry a
-    /// signature can be looked up in.
+    /// DER SPKI, carrying what it actually hashes to. Separate from
+    /// [`Self::parsed`] because the refusals differ: the approval path reports
+    /// a bad PEM as `SignatureInvalid` and a disagreeing id as
+    /// `KeyIdNotInRoster`.
     pub declared_id_matches: Result<(), String>,
     /// The `TrustPolicy` objects whose `KeyCompromise` revocation of this key
-    /// id was applied to it although the resolved source itself does not
-    /// record one (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). Sorted; EMPTY for
-    /// every key whose state is its own source's.
-    ///
-    /// It exists so a refusal can name the object that actually records the
-    /// compromise: "the trust policy `legacy-roster-v1` records it as Revoked"
-    /// would send an operator to a roster that cannot express a revocation.
+    /// id was applied although the resolved source does not record one.
+    /// Sorted; empty when the state is the source's own. A refusal names the
+    /// object that actually records the compromise, not a roster that cannot
+    /// express a revocation.
     pub compromise_inherited_from: Vec<String>,
 }
 
@@ -217,8 +175,8 @@ impl TrustSource {
 pub struct BlockedUsage {
     /// Which usage is refused.
     pub usage: KeyUsage,
-    /// The message, byte-for-byte what `controllers::approval::evaluate`
-    /// check 2 writes today.
+    /// The message, byte for byte what `controllers::approval::evaluate` check
+    /// 2 writes.
     pub message: String,
 }
 
@@ -263,12 +221,10 @@ impl ResolvedTrust {
             .map(|b| b.message.as_str())
     }
 
-    /// **The seam W10 wires in.** [`logweir_core::trust::decide`], resolved
-    /// against this namespace's policy by the stored `matchedKeyId`.
-    ///
-    /// A key id that is not in the policy is `UntrustedSigner`, which is
-    /// exactly what a revocation-by-deletion would look like — and cannot
-    /// happen, because the CRD's G1 rule makes `spec.keys` append-only.
+    /// [`logweir_core::trust::decide`], resolved against this namespace's
+    /// policy by the stored `matchedKeyId`. A key id not in the policy is
+    /// `UntrustedSigner`; revocation by deletion cannot happen, because the
+    /// CRD's G1 rule makes `spec.keys` append-only.
     #[must_use]
     pub fn decide_for(
         &self,
@@ -287,7 +243,6 @@ impl ResolvedTrust {
         )
     }
 
-    /// **The other seam W10 wires in.**
     /// [`logweir_core::trust::may_sign_new`], resolved by key id.
     ///
     /// # Errors
@@ -316,24 +271,17 @@ pub enum Resolution {
         policies: Vec<String>,
     },
     /// No policy names it, there is no default, and there is no `TrustRoster`
-    /// either — today's `RosterNotFound`.
+    /// either (`RosterNotFound`).
     Unconfigured,
 }
 
 /// Resolve one namespace against every `TrustPolicy` in the cluster and the
-/// roster — **pure**, so the whole table is testable without a client.
+/// roster (`TrustRoster/default`'s spec, or `None`): pure, so the whole table
+/// is testable without a client.
 ///
-/// `policies` is every `TrustPolicy` object; `roster` is
-/// `TrustRoster/default`'s spec, or `None` when there is none.
-///
-/// # Every `KeyCompromise` revocation in `policies` applies, whatever answers
-///
-/// The source is chosen by the three steps below; its keys are then passed
-/// through [`apply_compromises`] with the records of EVERY policy in
-/// `policies` — the namespace's own, any other, and one carrying a
-/// `deletionTimestamp`. See the module header for why: a compromise is a fact
-/// about the key material, and a namespace that stops resolving through the
-/// policy that recorded it must not read the key as trusted again.
+/// The source is chosen by the three steps; its keys then pass through
+/// [`apply_compromises`] with the records of every policy in `policies`,
+/// including one carrying a `deletionTimestamp` (see the module header).
 #[must_use]
 pub fn resolve_in(
     namespace: &str,
@@ -355,7 +303,7 @@ fn resolve_source(
     policies: &[TrustPolicy],
     roster: Option<&TrustRosterSpec>,
 ) -> Resolution {
-    // ---- 1. an explicit `spec.namespaces` match --------------------------
+    // 1. An explicit `spec.namespaces` match.
     let explicit: Vec<&TrustPolicy> = policies
         .iter()
         .filter(|p| {
@@ -372,12 +320,8 @@ fn resolve_source(
         return Resolution::Trust(Box::new(from_policy(policy)));
     }
 
-    // ---- 2. the default policy -------------------------------------------
-    //
-    // TWO DEFAULTS ARE A CONFLICT FOR EVERY NAMESPACE THAT FALLS TO THEM, and
-    // not for the ones an explicit match already answered: an administrator
-    // who named their namespaces has already decided, and a second default
-    // elsewhere in the cluster must not take that away.
+    // 2. The default policy. Two defaults conflict for every namespace that
+    //    falls to them, but not for one an explicit match already answered.
     let defaults: Vec<&TrustPolicy> = policies.iter().filter(|p| p.spec.default).collect();
     if defaults.len() > 1 {
         return conflict(namespace, &defaults);
@@ -386,7 +330,7 @@ fn resolve_source(
         return Resolution::Trust(Box::new(from_policy(policy)));
     }
 
-    // ---- 3. the synthesised legacy roster --------------------------------
+    // 3. The synthesised legacy roster.
     match roster {
         Some(spec) => Resolution::Trust(Box::new(synthesize_legacy(spec))),
         None => Resolution::Unconfigured,
@@ -403,15 +347,12 @@ fn conflict(namespace: &str, policies: &[&TrustPolicy]) -> Resolution {
     }
 }
 
-/// Every namespace two or more policies claim, and who claims it.
-///
-/// THE STATUS HALF OF THE SAME RULE [`resolve_in`] enforces, computed once for
-/// the whole cluster so `status.conflicts` on each policy names the same set.
-/// A default policy contributes nothing here: it claims the namespaces nobody
-/// else named, which is not a claim that can collide with an explicit one.
-/// Two DEFAULTS are reported under the sentinel namespace [`DEFAULT_SENTINEL`],
-/// because the set of namespaces they contest is every namespace that does not
-/// exist yet as well as every one that does.
+/// Every namespace two or more policies claim, and who claims it: the status
+/// half of [`resolve_in`]'s rule, computed once so every policy's
+/// `status.conflicts` names the same set. A default policy claims only
+/// namespaces nobody named, so it collides with no explicit claim; two defaults
+/// are reported under [`DEFAULT_SENTINEL`], since they contest every namespace,
+/// present and future.
 #[must_use]
 pub fn conflicts(policies: &[TrustPolicy]) -> BTreeMap<String, Vec<String>> {
     let mut claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -520,17 +461,12 @@ pub fn records_compromise(key: &SpecKey) -> bool {
 pub struct CompromiseRecord {
     /// The key id.
     pub key_id: String,
-    /// The instant stored evidence is compared against: the EARLIEST
-    /// `revocationEffectiveFrom` (else `revokedAt`) any record declares —
-    /// or `None` when some record declares neither, which is "no instant
-    /// before which anything was safe" and which `decide` fails closed on.
-    ///
-    /// THE EARLIEST, because two records of one compromise that disagree about
-    /// when it began disagree about which observations still separate a
-    /// document from it, and the one that separates fewer is the one that
-    /// cannot be wrong in the dangerous direction. Both readings are
-    /// `Untrusted` either way; only the basis (`RecordedBeforeRevocation` or
-    /// `Revoked`) can differ.
+    /// The instant stored evidence is compared against: the earliest
+    /// `revocationEffectiveFrom` (else `revokedAt`) any record declares, or
+    /// `None` when some record declares neither, which `decide` fails closed
+    /// on. The earliest, because it separates fewer observations from the
+    /// compromise and so cannot be wrong in the dangerous direction; either way
+    /// the verdict is `Untrusted`, only the basis can differ.
     pub effective_from: Option<DateTime<Utc>>,
     /// The earliest `revokedAt`, for display. `None` whenever `effective_from`
     /// is, so `decide`'s `revocationEffectiveFrom.or(revokedAt)` cannot find
@@ -836,10 +772,9 @@ pub fn reason_of(reason: RevocationReason) -> logweir_core::trust::RevocationRea
     }
 }
 
-/// Parse the PEM and check the declared id against the material it describes.
-///
-/// TWO ANSWERS, NOT ONE, because today's two refusals differ — see
-/// [`ResolvedKey::declared_id_matches`].
+/// Parse the PEM and check the declared id against the material it describes:
+/// two answers, because the two refusals differ (see
+/// [`ResolvedKey::declared_id_matches`]).
 fn check_material(declared: &str, pem: &str) -> (Result<(), String>, Result<(), String>) {
     match VerifyingKey::from_pem_str(pem) {
         Ok(key) => {
@@ -857,31 +792,20 @@ fn check_material(declared: &str, pem: &str) -> (Result<(), String>, Result<(), 
     }
 }
 
-/// `TrustRoster/default` as the synthesised `legacy-roster-v1` (D3 §7.5).
-///
+/// `TrustRoster/default` as the synthesised `legacy-roster-v1` (D3 §7.5):
 /// `approverKeys` → [`KeyUsage::GovernedApproval`], `signingKeys` →
 /// [`KeyUsage::EvidenceSigning`], `allowedClusterIds` →
 /// `allowedTargetClusterIds`, `notAfter` verbatim, `state: Active`,
 /// `principal.id: legacy:<keyId>`.
 ///
-/// # A key on BOTH lists becomes ONE key with BOTH usages
+/// A key on both lists becomes one key with both usages: a key id is unique in a
+/// policy, and the usage separation the CRD enforces cannot be applied
+/// retroactively to a working roster (approval's `selfAttestedRisk` labels the
+/// overlap instead, D3 §7.3).
 ///
-/// The roster's two lists may name the same `keyId` — that overlap is what
-/// `controllers/approval.rs`'s `selfAttestedRisk` LABELS rather than refuses
-/// (`design-operator.md:169-181`), and D3 §7.3 keeps the label for
-/// legacy-roster namespaces precisely because the lists may overlap. A key id
-/// is unique in a policy, so the synthesis merges them. The usage separation
-/// the CRD enforces applies to policies an administrator writes; it cannot be
-/// applied retroactively to a roster that predates it without refusing to
-/// start against a configuration that has been working.
-///
-/// # No `ConsoleConfirmation` is ever synthesised
-///
-/// D3 §7.3, and it is a rollback rule rather than a taste: an old controller
-/// reached by rollback reads only the roster, and a confirmation key
-/// synthesised into the roster's world would let an ordinary confirmation be
-/// mistaken for a governed approval. The roster has no field it could come
-/// from anyway.
+/// No `ConsoleConfirmation` key is ever synthesised (D3 §7.3): a controller
+/// reached by rollback reads only the roster, and a synthesised confirmation
+/// key could let an ordinary confirmation pass for a governed approval.
 #[must_use]
 pub fn synthesize_legacy(roster: &TrustRosterSpec) -> ResolvedTrust {
     let mut order: Vec<String> = Vec::new();
@@ -941,10 +865,9 @@ pub fn synthesize_legacy(roster: &TrustRosterSpec) -> ResolvedTrust {
         })
         .collect();
 
-    // THE ROSTER'S RULE, REPRODUCED EXACTLY. `approval::evaluate` check 2
-    // walks `approverKeys` IN ORDER and returns on the FIRST unparseable
-    // entry; the message below is that check's, byte-for-byte, so the refusal
-    // an operator reads does not change on the day this path replaces it.
+    // The roster's rule, reproduced exactly: `approval::evaluate` check 2 walks
+    // `approverKeys` in order and returns on the first unparseable entry, with
+    // this message byte for byte.
     let mut blocked = Vec::new();
     for entry in &roster.approver_keys {
         if let Err(e) = VerifyingKey::from_pem_str(&entry.spki_pem) {
@@ -1025,29 +948,16 @@ pub fn algorithm_agrees(key: &ResolvedKey) -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The cluster-reading half
-// ---------------------------------------------------------------------------
-
-/// Every `TrustPolicy` in the cluster, plus `TrustRoster/default`, resolved
-/// for one namespace.
-///
-/// **This is the call that replaces `controllers::approval::load_roster` in
-/// W10.** It is `async` and it is the ONLY thing in this module that touches
-/// the API; everything it decides is [`resolve_in`]'s, which is pure.
-///
-/// # Why it lists policies rather than getting one by name
-///
-/// A namespace never names its own trust (D3 §7.1) — the POLICY names the
-/// namespaces it governs — so there is no name to get. The conflict rule needs
-/// the whole set for the same reason: "is this namespace claimed twice" is not
-/// answerable from one object.
+/// Every `TrustPolicy` in the cluster, plus `TrustRoster/default`, resolved for
+/// one namespace: the only API-touching function here; every decision is
+/// [`resolve_in`]'s. It lists rather than gets because the policy names its
+/// namespaces, not the reverse, and "is this namespace claimed twice" needs the
+/// whole set.
 ///
 /// # Errors
 ///
-/// A `kube::Error` from either read. A 404 on the roster is NOT an error: it
-/// is [`Resolution::Unconfigured`] when no policy covered the namespace, which
-/// is what today's `RosterNotFound` reports.
+/// A `kube::Error` from either read. A 404 on the roster is not an error: it is
+/// [`Resolution::Unconfigured`] when no policy covered the namespace.
 pub async fn resolve(client: &kube::Client, namespace: &str) -> Result<Resolution, kube::Error> {
     let policies: Api<TrustPolicy> = Api::all(client.clone());
     let list = policies.list(&kube::api::ListParams::default()).await?;
@@ -1055,48 +965,23 @@ pub async fn resolve(client: &kube::Client, namespace: &str) -> Result<Resolutio
 }
 
 /// [`resolve`], with the policy set supplied by a caller that already holds one
-/// — a `reflector::Store` kept warm by a watch this controller runs anyway.
-///
-/// # Why this exists (review finding F9)
-///
-/// [`resolve`] performs a cluster-wide `LIST trustpolicies` on every call. That
-/// is correct — "is this namespace claimed twice" is not answerable from one
-/// object — and it is one round trip per reconcile on a path a controller takes
-/// for every object it holds. A controller that already WATCHES `TrustPolicy`
-/// (which the re-trust trigger requires it to) has the whole set in memory and
-/// has no business asking the API server again: the reflector's snapshot is the
-/// same answer, is already paid for, and cannot be staler than the event that
-/// woke the reconcile.
-///
-/// The roster is still fetched, because a `TrustRoster` reflector would be a
-/// second watch for one cluster-scoped object; that halving is recorded and not
-/// taken.
+/// in a reflector store: a controller that watches `TrustPolicy` (as the
+/// re-trust trigger requires) has the set in memory, and the snapshot cannot be
+/// staler than the event that woke the reconcile.
 ///
 /// # Errors
 ///
-/// A `kube::Error` from the roster read. A 404 there is NOT an error — it is
+/// A `kube::Error` from the roster read. A 404 there is not an error: it is
 /// [`Resolution::Unconfigured`] when no policy covered the namespace.
 pub async fn resolve_with(
     policies: &[TrustPolicy],
     client: &kube::Client,
     namespace: &str,
 ) -> Result<Resolution, kube::Error> {
-    // ---- THE ROSTER IS THE FALLBACK, SO IT IS READ LAST AND OFTEN NOT AT ALL
-    //
-    // `resolve_in` reaches step 3 only after an explicit `spec.namespaces`
-    // match and the single `default: true` policy have both missed, so running
-    // it once with NO roster answers "would a roster even be consulted?" —
-    // using the same function, so the two can never disagree about the order.
-    // A namespace a policy governs, and a contested one, are decided from the
-    // reflector snapshot alone and cost nothing.
-    //
-    // This matters because the re-trust pass runs on every reconcile of every
-    // verdict-carrying object: without it, a cluster that HAS migrated still
-    // paid one `GET trustrosters/default` per object per requeue for an
-    // answer the roster has no part in. It does not remove the read for a
-    // roster-only cluster, where the roster IS the answer; that would need a
-    // second watch for one cluster-scoped object, and is recorded rather than
-    // taken.
+    // The roster is the fallback, so it is read last and often not at all:
+    // running `resolve_in` once with no roster answers "would a roster be
+    // consulted?" with the same function, so a governed or contested namespace
+    // is decided from the snapshot alone and costs no `GET trustrosters`.
     match resolve_in(namespace, policies, None) {
         Resolution::Unconfigured => {
             let roster = match crate::controllers::approval::load_roster(client).await? {
@@ -1109,22 +994,14 @@ pub async fn resolve_with(
     }
 }
 
-/// Whether a `TrustPolicy` event could change what `namespace` resolves to —
-/// the **trigger** half of the re-trust pass (D3 §7.4).
+/// Whether a `TrustPolicy` event could change what `namespace` resolves to: the
+/// trigger half of the re-trust pass (D3 §7.4).
 ///
-/// # Over-approximate, never under-approximate
-///
-/// This decides which objects a policy event ENQUEUES, not what any of them
-/// verdicts to. Enqueuing an object the policy does not govern costs one
-/// re-derivation that writes nothing (`verification::retrust` returns `None`
-/// when the rendered block is unchanged, erratum E11(d)); FAILING to enqueue one
-/// leaves a revoked key green until something else happens to reconcile it. So
-/// the two errors are not symmetric and this rounds the safe way.
-///
-/// A `default: true` policy therefore claims **every** namespace here, although
-/// resolution would hand an explicitly-named namespace to its own policy
-/// instead: deciding that properly needs the whole policy set, and getting it
-/// wrong in the other direction is the failure this function exists to prevent.
+/// Over-approximate, never under: enqueuing an object the policy does not
+/// govern costs one re-derivation that writes nothing, while failing to enqueue
+/// one leaves a revoked key green. So a `default: true` policy claims every
+/// namespace here, though resolution would give a named namespace to its own
+/// policy.
 #[must_use]
 pub fn may_govern(policy: &TrustPolicy, namespace: &str) -> bool {
     declared_scope(policy).covers(namespace)
@@ -1188,60 +1065,34 @@ pub fn declared_scope(policy: &TrustPolicy) -> PolicyScope {
     )
 }
 
-/// What each policy bound the last time it was seen — so an edit that
-/// **narrows** still wakes what it stopped governing.
+/// What each policy bound the last time it was seen, so an edit that narrows
+/// still wakes what it stopped governing.
 ///
-/// # The fail-open this closes
+/// A `watches` mapper receives only the new object: removing `team-a` from
+/// `spec.namespaces`, or clearing `spec.default`, would enqueue nothing in
+/// `team-a`, and a terminal `Restore` (`Action::await_change()`) there would
+/// keep a green badge although its new fallback may not carry the key. So the
+/// mapper enqueues the union of the scope before and after the change. The
+/// mapper is the only writer, so the remembered value cannot race the reflector
+/// feeding resolution. A policy never seen before is pure widening (a starting
+/// controller re-derives everything anyway). A `Delete` event carries the last
+/// known object; the remembered entry stays, so a delete and re-create under
+/// one name still unions correctly.
 ///
-/// A `watches` mapper receives only the NEW object. Removing `team-a` from
-/// `spec.namespaces`, or clearing `spec.default`, makes [`declared_scope`]
-/// false for `team-a` and enqueues nothing there — although that edit is
-/// exactly what changed `team-a`'s resolution. A terminal `Backup` self-heals
-/// within its requeue; a terminal `Restore` returns `Action::await_change()`
-/// and nothing wakes it at all, so if the namespace's new fallback does not
-/// carry the signing key the correct verdict is `UntrustedSigner` and the
-/// object keeps a **green** badge indefinitely. That is the same asymmetry the
-/// trigger's own note argues against, one edit away.
+/// A compromise record reaches every namespace ([`resolve_in`]), so the
+/// recording policy's declared scope is not the set its event can change. The
+/// memory also keeps each policy's records ([`compromise_signature`]), and the
+/// event widens to [`PolicyScope::Everything`] when:
 ///
-/// So the mapper enqueues the UNION of the scope before the change and the
-/// scope after it. This type is the "before" half: the mapper is the only
-/// writer, so the remembered value cannot race the reflector that feeds
-/// resolution — which is why the previous scope is kept here rather than read
-/// back out of a `Store` that a different watch updates.
+/// * the records changed (a compromise added, escalated from a supersession, or
+///   edited away by hand);
+/// * it is the policy's first sighting and it carries any;
+/// * it carries any and is being deleted: the release of a held record, a
+///   finalizer removed by hand, and the final `Delete` event all change what
+///   other namespaces resolve to.
 ///
-/// A policy this process has never seen has no "before", and its first event
-/// is treated as pure widening — correct, because a controller that has just
-/// started re-derives everything it reconciles anyway.
-///
-/// A `Delete` event carries the last-known object, so the deleted policy's own
-/// namespaces are still enqueued. The remembered entry is left behind: it is
-/// one small set per policy name, and keeping it means a delete followed by a
-/// re-create under the same name still unions correctly.
-///
-/// # A COMPROMISE RECORD REACHES EVERY NAMESPACE, SO ITS EVENT WAKES EVERY ONE
-///
-/// Review finding M1 (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). [`resolve_in`]
-/// applies a `KeyCompromise` record to every namespace that lists the key —
-/// a namespace on the roster, one another policy governs — so the declared
-/// scope of the RECORDING policy is no longer the set its event can change. A
-/// compromise newly recorded on `incident` (governing `team-a`) left a
-/// terminal `Restore` in a roster namespace `team-b` on `Action::await_change()`
-/// with a green badge, indefinitely. So the memory also keeps each policy's
-/// compromise records ([`compromise_signature`]), and the event widens to
-/// [`PolicyScope::Everything`] when:
-///
-/// * the records CHANGED — a compromise added, escalated from a supersession,
-///   or (by hand, past G1–G9) edited away;
-/// * it is the policy's FIRST sighting and it carries any — a record applied
-///   while this process was not watching, which start-up re-derives anyway;
-/// * it carries any and is being DELETED (`deletionTimestamp`): the release of
-///   a held record, the finalizer removed by hand, and the final `Delete`
-///   event (which carries the terminating object) all change what other
-///   namespaces resolve to.
-///
-/// Status-only events of a policy with records (the 300 s heartbeat) change
-/// none of these and stay at the declared scope, so the fan-out is paid once
-/// per record change, not once per heartbeat.
+/// Status-only events (the 300 s heartbeat) change none of these, so the
+/// fan-out is paid once per record change.
 #[derive(Debug, Default)]
 pub struct PolicyScopeMemory {
     seen: std::sync::Mutex<BTreeMap<String, (PolicyScope, CompromiseSignature)>>,
@@ -1281,10 +1132,8 @@ impl PolicyScopeMemory {
         let name = policy.name_any();
         let mut seen = match self.seen.lock() {
             Ok(guard) => guard,
-            // A POISONED LOCK MUST NOT NARROW THE SCOPE. The only thing this
-            // mutex guards is a widening hint; if a previous mapper panicked
-            // while holding it, the safe answer is "everything could have
-            // changed", never "only what the new object names".
+            // A poisoned lock must not narrow the scope: the safe answer is
+            // "everything could have changed".
             Err(_) => return PolicyScope::Everything,
         };
         let deleting = policy.metadata.deletion_timestamp.is_some();
@@ -1303,15 +1152,10 @@ impl PolicyScopeMemory {
     }
 }
 
-/// The ONE `TrustPolicy` reflector a reconciler's watches share, and the flag
-/// that says it has synced.
-///
-/// ONE PER RECONCILER, NOT ONE PER NAMESPACE (PLAT-17.2 review L3). A scoped
-/// controller runs a copy of each reconciler per watched namespace, and a
-/// reflector built inside that copy would open one identical cluster-wide
-/// `TrustPolicy` watch per namespace. `TrustPolicy` is cluster-scoped, so the
-/// store is the same data for every copy: it is built once in `controller()`
-/// and handed to each.
+/// The one `TrustPolicy` reflector a reconciler's watches share, and the flag
+/// that says it has synced. One per reconciler, not per watched namespace:
+/// `TrustPolicy` is cluster-scoped, so per-namespace copies would be identical
+/// cluster-wide watches.
 #[derive(Clone)]
 pub struct SharedPolicies {
     /// The reflector's store.
@@ -1331,10 +1175,8 @@ pub fn spawn_policy_reflector(client: &kube::Client) -> SharedPolicies {
         kube::runtime::reflector::store::<crate::crds::trust_policy::TrustPolicy>();
     let policies: Api<TrustPolicy> = Api::all(client.clone());
     let synced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
-    // `trustpolicies` CRD is not installed never syncs, and awaiting would
-    // mean the reconciler never reconciles anything at all — a startup
-    // regression for every install that has not migrated.
+    // Not `wait_until_ready().await` before starting: a cluster without the
+    // `trustpolicies` CRD never syncs, and the reconciler would never run.
     let probe = store.clone();
     let flag = std::sync::Arc::clone(&synced);
     tokio::spawn(async move {
@@ -1343,10 +1185,9 @@ pub fn spawn_policy_reflector(client: &kube::Client) -> SharedPolicies {
         }
     });
     tokio::spawn(
-        // BACKED OFF, like every trigger watch `Controller` runs. Without it a
-        // refused or failing LIST is retried in a tight loop — the PLAT-17.2
-        // live run measured ~175 retries a second per stream when the scoped
-        // ServiceAccount lacked the cluster-scoped trust grant.
+        // Backed off, like every trigger watch `Controller` runs; otherwise a
+        // refused LIST (a scoped ServiceAccount without the cluster-scoped trust
+        // grant) is retried in a tight loop.
         kube::runtime::reflector::reflector(
             writer,
             watcher(policies, watcher::Config::default()).default_backoff(),

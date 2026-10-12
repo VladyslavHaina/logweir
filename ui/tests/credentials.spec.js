@@ -8,8 +8,8 @@ import { renderPlanBytes } from "../plan.js";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url)));
 
-/** The route identity for a fixture's newest recovery point -- what the wizard
- *  is entered with since PLAT-11.1: it no longer picks a Backup for itself. */
+/** The route identity for a fixture's newest recovery point -- what the
+ *  wizard is entered with: it does not pick a Backup for itself. */
 function newestPoint(list) {
   const point = wizard.recoveryPoints(list)[0];
   return { uid: point.metadata.uid, backup: point.metadata.name };

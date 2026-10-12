@@ -1,4 +1,4 @@
-//! The runner's half of the credential binding (PROD-01.3 security follow-up).
+//! The runner's half of the credential binding.
 //!
 //! A controller-built Job carries, per side, two variables: the EXPECTED
 //! binding — a literal the controller computed from the `KafkaCluster` the Job
@@ -47,10 +47,6 @@ pub const fn variables(side: Side) -> (&'static str, &'static str) {
 /// A non-UTF-8 value is read as ABSENT for the projected variable (so it is
 /// refused when a binding is expected) and as present-but-unusable for the
 /// expected one, which is refused too: a controller never writes one.
-///
-/// # Errors
-///
-/// [`CredentialBindingRefusal`].
 pub fn check_side(side: Side) -> Result<(), CredentialBindingRefusal> {
     let (projected_var, expected_var) = variables(side);
     let expected = match std::env::var(expected_var) {
@@ -67,7 +63,7 @@ pub fn check_side(side: Side) -> Result<(), CredentialBindingRefusal> {
     check_credential_binding(projected_var, expected.as_deref(), projected.as_deref())
 }
 
-/// FX-20: check every OBJECT-STORE pair this process carries —
+/// Check every OBJECT-STORE pair this process carries —
 /// [`logweir_core::credential_binding::STORE_BINDING_PAIRS`]: the
 /// `AWS_*` credential's (a destination's archive grant, an inline archive's
 /// `secretRef`, a retention Job's delete-capable key) and the
@@ -96,7 +92,7 @@ pub fn check_store_bindings_with(
     Ok(())
 }
 
-/// Check BOTH Kafka sides and every object-store pair (FX-20) — what
+/// Check BOTH Kafka sides and every object-store pair — what
 /// `backup run`, `drill run`/`restore run`, `catalog sync` and a check runner
 /// call at start-up, beside `drill::check_projected_credentials`, so no client
 /// of any kind is constructed on the refusal path.

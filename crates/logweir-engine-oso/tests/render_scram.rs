@@ -1,12 +1,11 @@
-//! The SASL/SCRAM-SHA-512 half of all three rendered documents (Task 6,
-//! interface **I1**), and the four goldens that pin its bytes.
+//! The SASL/SCRAM-SHA-512 half of all three rendered documents (interface
+//! **I1**), and the four goldens that pin its bytes.
 //!
-//! # Why these goldens exist beside the eight that predate them
+//! # Why these goldens exist beside the eight plaintext ones
 //!
-//! The eight goldens at `63066d2` all carry `AuthRender::Plaintext`, whose arm
-//! emits **nothing at all** — so they are byte-identical after this task, and
-//! that identity is itself an assertion (critique A F16): it is what proves
-//! the `Plaintext` arm did not gain an explicit `security_protocol:
+//! The eight plaintext goldens carry `AuthRender::Plaintext`, whose arm emits
+//! **nothing at all**, and their unchanged bytes are themselves an assertion:
+//! they prove the `Plaintext` arm did not gain an explicit `security_protocol:
 //! PLAINTEXT`. The four here are the other half: the bytes an authenticating
 //! document actually has.
 //!
@@ -22,9 +21,8 @@
 //!    too high the engine answers with four *"Ignoring unknown config key
 //!    `source.security_protocol`"* lines — and
 //!    `OsoCliEngine::assert_no_dropped_logweir_key` then aborts the run at
-//!    exit 1 after the document was written, which is the
-//!    `strip_offset_headers` defect exactly (Task 4 review F-1). Under
-//!    `security:` the same engine emits no warning at all.
+//!    exit 1 after the document was written. Under `security:` the same
+//!    engine emits no warning at all.
 //! 2. **The mechanism has ONE hyphen.** `sasl_mechanism: "SCRAM-SHA-512"` —
 //!    librdkafka's spelling, and the one upstream's own
 //!    `config/example-backup.yaml` comments — is a serde TYPE error that
@@ -106,13 +104,13 @@ fn scram(tls: bool) -> AuthRender {
         username: PRINCIPAL.into(),
         tls,
         // No private CA: the four goldens below are the bytes of a connection
-        // that trusts the engine's bundled roots, and PLAT-07.1 leaves them
-        // byte-identical. `scram_with_ca` is the other half.
+        // that trusts the engine's bundled roots. `scram_with_ca` is the other
+        // half.
         tls_ca_file: None,
     }
 }
 
-/// The same principal over TLS, with a projected private CA — PLAT-07.1's
+/// The same principal over TLS, with a projected private CA:
 /// `ssl_ca_location` (Global Constraint 29's engine half).
 fn scram_with_ca(ca: &str) -> AuthRender {
     AuthRender::ScramSha512 {
@@ -121,10 +119,6 @@ fn scram_with_ca(ca: &str) -> AuthRender {
         tls_ca_file: Some(ca.to_string()),
     }
 }
-
-// ---------------------------------------------------------------------------
-// THE FOUR GOLDENS
-// ---------------------------------------------------------------------------
 
 #[test]
 fn restore_scram_tls_matches_the_golden() {
@@ -158,10 +152,6 @@ fn backup_scram_plaintext_matches_the_golden() {
         render_backup::render(&backup_plan(scram(false))).expect("no glob metacharacter, no `${`")
     );
 }
-
-// ---------------------------------------------------------------------------
-// THE PROPERTIES THE GOLDENS ALONE DO NOT STATE
-// ---------------------------------------------------------------------------
 
 /// **The two spellings, and neither can drift alone.**
 ///
@@ -249,8 +239,7 @@ fn a_plaintext_spec_renders_no_security_keys() {
     }
 }
 
-/// **The four keys are nested under `security:`, and the nesting is the whole
-/// finding.**
+/// **The four keys are nested under `security:`.**
 ///
 /// A source read as well as a document read: the shipped renderers must reach
 /// the SHARED block rather than each spelling the keys themselves, because
@@ -416,11 +405,11 @@ fn a_scram_document_passes_the_unnamed_placeholder_sweep_and_is_digested() {
 /// which is the claim its own doc comment makes, so it is the claim that gets
 /// a test rather than a comment.
 ///
-/// It is kept rather than deleted because the THIRD mode
-/// (`logweir_kafka::reader::AuthConfig::Token`, OAUTHBEARER / MSK IAM, SP4)
-/// has no `AuthRender` twin yet, and the task that adds one must decide in the
-/// type system whether the engine can render it. A kept variant is cheaper
-/// than the `todo!()` its absence invites (Task 2 review F1).
+/// It is kept because the THIRD mode
+/// (`logweir_kafka::reader::AuthConfig::Token`, OAUTHBEARER / MSK IAM) has no
+/// `AuthRender` twin, and adding one must decide in the type system whether the
+/// engine can render it. A kept variant is cheaper than the `todo!()` its
+/// absence invites.
 #[test]
 fn the_unsupported_auth_mode_rail_is_unreachable_from_both_arms() {
     for auth in [AuthRender::Plaintext, scram(false), scram(true)] {
@@ -434,9 +423,7 @@ fn the_unsupported_auth_mode_rail_is_unreachable_from_both_arms() {
         .contains("is not supported by this build"));
 }
 
-// ---------------------------------------------------------------------------
-// PLAT-07.1 — the private CA, in all three documents
-// ---------------------------------------------------------------------------
+// The private CA, in all three documents.
 
 /// A projected private CA becomes `ssl_ca_location` inside `security:`, in
 /// every document the engine reads, and NOTHING ELSE moves.

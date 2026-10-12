@@ -1,7 +1,6 @@
-// mutation.spec.js -- PLAT-13.2, PLAT-12.1 and PLAT-12.2 under node --test:
-// drafts that survive failures, one mutation state, idempotent creates, the
-// restore wizard's guided submit, and the approval subject that is shown
-// exactly as it is submitted.
+// mutation.spec.js -- drafts that survive failures, one mutation state,
+// idempotent creates, the restore wizard's guided submit, and the approval
+// subject that is shown exactly as it is submitted.
 //
 // HOW THESE ROWS DRIVE THE REAL PAGE CODE WITHOUT A BROWSER. The page modules
 // render strings and the mount half adopts them into a node. Here the node is
@@ -71,8 +70,6 @@ import { mountRestoreDetail } from "../pages/history.js";
 import { planHash } from "../plan.js";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url)));
-
-// ------------------------------------------------------------ the fake DOM
 
 function decodeEntities(text) {
   return text
@@ -262,8 +259,6 @@ function planBytesOf(html) {
     .replace(/&amp;/g, "&");
 }
 
-// --------------------------------------------------------- the fake cluster
-
 function statusError(code, reason, message, details) {
   return apiError(
     { status: code },
@@ -383,8 +378,6 @@ function typeCluster(view, values) {
   return form;
 }
 
-// =================================================================== rows
-
 test("a_draft_keeps_only_declared_fields_and_never_private_key_text", () => {
   const key = formKey("drafts-ns", "any-form");
   const kept = keepDraft(key, {
@@ -404,11 +397,9 @@ test("a_draft_keeps_only_declared_fields_and_never_private_key_text", () => {
   assert.equal(Object.getPrototypeOf(readDraft(key)), null, "and neither does a copy of one");
   assert.equal(readDraft(key).constructor, undefined, "a field nobody declared reads undefined");
   assert.equal(readDraft(formKey("other-ns", "any-form")), null, "a draft belongs to its namespace");
-  // THE FORBIDDEN LIST IS DATA, NOT A REGEX. `passwordKey` is connection
-  // contract v1's NAME OF A DATA KEY -- which entry of the Secret the
-  // controller projects -- and a pattern like /pass/i cannot tell that from a
-  // field a password could be typed into. So the page holds the exact names
-  // that are forbidden and this asserts against those.
+  // THE FORBIDDEN LIST IS DATA, NOT A REGEX: `passwordKey` is the NAME of a
+  // Secret data key, and a pattern like /pass/i cannot tell that from a field
+  // a password could be typed into.
   for (const forbidden of FORBIDDEN_CLUSTER_FIELDS) {
     assert.equal(
       CLUSTER_DRAFT_FIELDS.indexOf(forbidden),
@@ -692,8 +683,6 @@ test("the_schedule_form_keeps_its_draft_when_a_suspend_toggle_fails", async () =
   assert.equal(k8s.creates().length, 0);
 });
 
-// ------------------------------------------------------ the restore wizard
-
 function wizardKubernetes(ns) {
   const k8s = fakeKubernetes();
   for (const cluster of fixture("wizard-clusters.json").items) {
@@ -711,9 +700,8 @@ function wizardKubernetes(ns) {
   return k8s;
 }
 
-/** The route identity for a fixture's newest recovery point. Since PLAT-11.1
- *  the wizard does not pick a Backup for itself: it is entered ON one, by uid,
- *  and every row below enters it the way a history link does. */
+/** The route identity for a fixture's newest recovery point. The wizard is
+ *  entered ON a Backup, by uid, as a history link enters it. */
 function newestPoint(list) {
   const point = recoveryPoints(list)[0];
   return { uid: point.metadata.uid, backup: point.metadata.name };
@@ -854,13 +842,11 @@ test("the_wizard_double_click_sends_one_create_and_success_navigates_to_awaiting
 });
 
 test("the_wizard_submit_reads_the_connections_again_before_it_creates", async () => {
-  // REVIEW FINDING F3: A GUARD WITHOUT A MUTANT. `confirmClusters` was proved
-  // by a row that CALLED IT DIRECTLY, so deleting `await confirmClusters(state,
-  // api);` from the submit handler left every gate green -- and a restore could
-  // then be written into a cluster deleted and recreated under the same name
-  // between reviewing the plan and submitting it. This row drives the real
-  // mount and asserts the CALL SITE: the list read happens, and it happens
-  // BEFORE the create.
+  // A GUARD WITHOUT A MUTANT: a row that called `confirmClusters` directly
+  // would stay green with `await confirmClusters(state, api);` deleted from the
+  // submit handler, letting a restore be written into a cluster recreated
+  // under the same name after review. This row drives the real mount and
+  // asserts the CALL SITE: the list read happens, BEFORE the create.
   const ns = "wizard-reread-ns";
   const k8s = wizardKubernetes(ns);
   const view = fakeView();
@@ -938,9 +924,9 @@ test("a_saved_destination_recreated_after_review_is_refused_before_create", asyn
 });
 
 test("a_target_recreated_mid_wizard_is_refused_by_the_submit_and_creates_nothing", async () => {
-  // The other half of F3, on the same call site: the object the plan was
-  // reviewed against is deleted and recreated under its own name WHILE THE
-  // WIZARD IS OPEN, so only the re-read can see it. Nothing is created.
+  // The object the plan was reviewed against is deleted and recreated under
+  // its own name WHILE THE WIZARD IS OPEN, so only the re-read can see it.
+  // Nothing is created.
   const ns = "wizard-recreated-ns";
   const k8s = wizardKubernetes(ns);
   const view = fakeView();
@@ -1011,8 +997,6 @@ test("a_rejected_restore_keeps_every_wizard_edit_and_marks_the_field", async () 
   assert.equal(view2.find("#topic-prefix").value, "incident-4471-");
   assert.ok(view2.html().includes("Your unsubmitted edits to this plan"));
 });
-
-// ------------------------------------------------------ approvals, PLAT-12.2
 
 async function restoreAwaitingApproval(ns) {
   const k8s = wizardKubernetes(ns);
@@ -1221,8 +1205,6 @@ test("api_errors_keep_the_status_details_for_field_messages", () => {
   assert.equal(found.fields.constructor, undefined);
 });
 
-// ------------------------------------ review fixes (2026-09-16), F1-F4 and F6
-
 test("a_restore_whose_approval_is_named_constructor_is_classified_from_the_cluster", () => {
   // `constructor` is a valid DNS-1123 subdomain, so it is a name a Restore's
   // `spec.approvalRef` may legitimately hold. Read out of a plain `{}` it
@@ -1251,8 +1233,8 @@ test("a_restore_whose_approval_is_named_constructor_is_classified_from_the_clust
 
 test("an_unreadable_approvals_list_warns_beside_the_selection_instead_of_replacing_the_page", async () => {
   // An approver-only role -- `create` on approvals, no `list` -- is the role
-  // this page is for. Before the fix the 403 propagated and the whole page
-  // became an error box, so that viewer could not reach any Restore.
+  // this page is for, so its 403 must not turn the whole page into an error
+  // box that reaches no Restore.
   const ns = "rbac-index-ns";
   const { k8s, restore } = await restoreAwaitingApproval(ns);
   const forbidden = statusError(403, "Forbidden", "approvals is forbidden: User cannot list resource \"approvals\"");
@@ -1360,10 +1342,9 @@ test("a_suspend_patch_says_what_repeating_the_patch_does_and_never_the_create_se
 });
 
 test("the_key_material_guard_reads_every_pem_variant_in_any_case_and_spacing", () => {
-  // The old guard was `text.indexOf("PRIVATE KEY") !== -1`: case-sensitive and
-  // whitespace-exact, so a lower-case paste or a reflowed header walked past
-  // it while the prose promised "a value carrying private-key text is never
-  // kept at all". Each row below is a shape the guard now reads.
+  // A case-sensitive, whitespace-exact `indexOf("PRIVATE KEY")` lets a
+  // lower-case paste or a reflowed header walk past. Each row below is a shape
+  // the guard reads.
   const refusedText = [
     ["PKCS#8", "-----BEGIN PRIVATE KEY-----\nMIG\n-----END PRIVATE KEY-----\n"],
     ["PKCS#1 RSA", "-----BEGIN RSA PRIVATE KEY-----\nMII\n"],
@@ -1417,11 +1398,11 @@ test("the_key_material_guard_reads_every_pem_variant_in_any_case_and_spacing", (
 });
 
 test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", async () => {
-  // The defect: `refresh` cleared the record on every field change, including
-  // a timed-out (UNKNOWN) one. That took the attempt number with it, so the
-  // late 201 for the Restore the attempt had named found no answerable attempt
-  // and was dropped -- the warning vanished and the object was never mentioned
-  // again. The mutant is `record.clear()` back to unconditional.
+  // A field change must not clear a timed-out (UNKNOWN) record: that would
+  // take the attempt number with it, so the late 201 for the Restore the
+  // attempt named would find no answerable attempt and be dropped -- the
+  // warning gone and the object never mentioned again. The mutant is
+  // `record.clear()` back to unconditional.
   const ns = "wizard-late-ns";
   const key = formKey(ns, WIZARD_FORM);
   let fire = null;
@@ -1484,19 +1465,13 @@ test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", a
   }
 });
 
-// -------------------------- D2 §13.2 W13a / defect UI-HTTPDOWNGRADE (S5)
-
 test("restore_wizard_path_style_does_not_enable_http", async () => {
-  // THE DEFECT, EXACTLY. `wire()` used to read the ADDRESSING checkbox into
-  // the plan's insecure-transport flag --
-  //     block.pathStyle = pathStyle.checked === true;
-  //     block.allowHttp = pathStyle.checked === true;
-  // -- so an operator ticking `path_style` for a MinIO or Ceph endpoint, which
-  // is what every on-premises object store needs, also told the runner it
-  // could carry the object-store credential and every restored record over an
-  // unencrypted connection. D-SEAMS S5: transport security is never derived,
-  // from addressing style or from anything else. The check runs through the
-  // real mount half, because `wire()` is where the derivation lived.
+  // TRANSPORT SECURITY IS NEVER DERIVED, from addressing style or anything
+  // else. Ticking `path_style` (what every on-premises object store needs)
+  // must not tell the runner it may carry the object-store credential and
+  // every restored record over an unencrypted connection. The check runs
+  // through the real mount half, because `wire()` is where such a derivation
+  // would live.
   const ns = "wizard-http-ns";
   const k8s = wizardKubernetes(ns);
   const view = fakeView();
@@ -1572,10 +1547,9 @@ test("restore_wizard_path_style_does_not_enable_http", async () => {
 });
 
 test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () => {
-  // THE OTHER HALF OF THE SAME DEFECT. `applyWizardDraft` used to write
-  // `block.allowHttp = d.pathStyle`, so a draft put back after a refusal came
-  // back with plaintext transport enabled even though its box had never been
-  // ticked. The draft allowlist now carries the flag in its own right.
+  // A draft put back after a refusal must not come back with plaintext
+  // transport derived from `pathStyle`: the draft allowlist carries the flag in
+  // its own right.
   const backups = fixture("wizard-backups.json");
   const state = initialState(
     "wizard-draft-ns",
@@ -1607,9 +1581,8 @@ test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () 
   assert.equal(state.fields.source.allowHttp, true, "an explicitly kept true does come back");
   assert.equal(state.fields.evidence.allowHttp, true);
 
-  // A DRAFT THAT CARRIES NO FLAG AT ALL leaves it alone -- it does not fall
-  // back to the addressing style. This is the arm that fails against the
-  // original line, which had no `allowHttp` branch to overwrite it with.
+  // A DRAFT THAT CARRIES NO FLAG AT ALL leaves it alone; it does not fall back
+  // to the addressing style.
   const partial = Object.assign({}, kept, { pathStyle: true });
   delete partial.allowHttp;
   state.fields.source.allowHttp = false;
@@ -1624,8 +1597,6 @@ test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () 
   assert.equal(state.fields.evidence.allowHttp, false);
 });
 
-// -------------------- PLAT-08.2: the evidence store is its own store
-
 /** The two `allow_http` lines and the two `path_style` lines of a rendered
  *  plan, in document order: the source block's first, the evidence block's
  *  second. */
@@ -1636,10 +1607,9 @@ function storeFlags(bytes) {
 }
 
 test("restore_wizard_evidence_store_has_its_own_transport_and_addressing", async () => {
-  // THE SECOND HALF OF DEFECT UI-HTTPDOWNGRADE. `wire()` wrote the archive's
-  // endpoint, region, addressing and transport into BOTH plan blocks, so an
-  // evidence bucket on another store could not be described at all, and the
-  // archive's insecure box silently set the evidence store's transport too.
+  // Each plan block gets its own endpoint, region, addressing and transport:
+  // an evidence bucket on another store must be describable, and the archive's
+  // insecure box must not set the evidence store's transport.
   const ns = "wizard-evidence-store-ns";
   const k8s = wizardKubernetes(ns);
   const view = fakeView();
@@ -1744,8 +1714,6 @@ test("an_old_draft_with_one_store_keeps_meaning_one_store", () => {
   assert.equal(state.fields.evidence.pathStyle, false);
 });
 
-// ------------- PLAT-08.2: a saved point, its evidence destination, and a draft edit
-
 /** A console-shaped api over the fake cluster: the wizard's saved-destination
  *  reads, and a readiness check whose answers the row scripts. */
 function savedWizardApi(ns, destinations, preflightAnswers) {
@@ -1768,8 +1736,7 @@ function savedWizardApi(ns, destinations, preflightAnswers) {
     return { item: found === undefined ? null : clone(found) };
   };
   // THE LIST IS SUMMARIES, AS THE PRODUCT API ANSWERS IT: no bucket, prefix,
-  // region or digest. The first live run found the page treating a summary as
-  // a full destination.
+  // region or digest, so a summary is never treated as a full destination.
   k8s.destinations = async () => {
     k8s.calls.push({ verb: "destinations" });
     return { items: destinations.map((d) => ({
@@ -1888,10 +1855,9 @@ test("a_saved_point_inherits_its_destination_and_can_write_evidence_to_another",
 });
 
 test("a_replayed_restore_readiness_check_is_read_before_the_wizard_believes_it", async () => {
-  // DEFECT P8's CLASS (poc-install, 2026-09-24). A replay is terminal on
-  // arrival and its create answer is not recomputed ("this response did not
-  // recompute staleness"); step 5's follower stopped at `terminal === true`
-  // before its first read and left that answer on screen.
+  // A replay is terminal on arrival and its create answer is not recomputed
+  // ("this response did not recompute staleness"), so step 5's follower must
+  // read before it believes it.
   const ns = "wizard-replayed-readiness-ns";
   const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
   const k8s = savedWizardApi(ns, [primary], {
@@ -1921,10 +1887,9 @@ test("a_replayed_restore_readiness_check_is_read_before_the_wizard_believes_it",
 });
 
 test("a_readiness_read_landing_while_the_prefix_is_typed_does_not_wipe_it", async () => {
-  // P13's CLASS in the wizard (poc-fixes-4). A text input commits on
-  // `change`, and step 5's follower repainted the whole wizard from the state
-  // when its read landed: keystrokes typed into the prefix since the last
-  // commit -- the reader went Back to step 4 while the check ran -- were gone.
+  // A text input commits on `change`, so a follower that repainted the whole
+  // wizard when its read landed would wipe keystrokes typed into the prefix
+  // since the last commit (the reader went Back to step 4 while the check ran).
   const ns = "wizard-typing-while-a-read-lands-ns";
   const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
   const k8s = savedWizardApi(ns, [primary], {
@@ -1958,11 +1923,10 @@ test("a_readiness_read_landing_while_the_prefix_is_typed_does_not_wipe_it", asyn
   }
 });
 
-// STEP 5 FOLLOWS ITS CHECK TO THE CHECK'S OWN DEADLINE (poc-upgrade-3's P15).
-// Its 45 reads two seconds apart gave up at 90 s under a check that may run
-// for its timeoutSeconds (up to 600) plus its Job's 90 s start margin. These
-// two rows run on node:test's mock timers with NO `wait` handed in, so the
-// follow keeps the browser's own timer; `setImmediate` stays real and flushes.
+// STEP 5 FOLLOWS ITS CHECK TO THE CHECK'S OWN DEADLINE: a check may run for
+// its timeoutSeconds (up to 600) plus its Job's 90 s start margin. These two
+// rows run on node:test's mock timers with NO `wait` handed in, so the follow
+// keeps the browser's own timer; `setImmediate` stays real and flushes.
 async function onMockedClock(body) {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   try {
@@ -2048,9 +2012,9 @@ for (const never of [false, true]) {
 }
 
 test("a_step_5_follow_whose_route_left_reads_nothing_and_paints_nothing", async () => {
-  // REVIEW M2 (poc-fixes-5), for restore step 5: the fake ignores `signal`, so
-  // only the follower's own `active(lifecycle)` can stop a read after the
-  // route left -- which it does during the follow's first wait.
+  // The fake ignores `signal`, so only the follower's own `active(lifecycle)`
+  // can stop a read after the route left -- which it does during the follow's
+  // first wait.
   const ns = "wizard-p15-leave-ns";
   const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
   const k8s = savedWizardApi(ns, [primary], {
@@ -2092,10 +2056,10 @@ test("a_step_5_follow_whose_route_left_reads_nothing_and_paints_nothing", async 
 });
 
 test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
-  // D2 S21, in the console. The destination's access is rotated after the
-  // check said ready: its generation moves, the plan bytes do not, and the
-  // product API answers the SAME check `stale` with referentChanged. The page
-  // held a `ready` copy; the submit must ask again and believe the answer.
+  // The destination's access is rotated after the check said ready: its
+  // generation moves, the plan bytes do not, and the product API answers the
+  // SAME check `stale` with referentChanged. The page held a `ready` copy; the
+  // submit must ask again and believe the answer.
   const ns = "wizard-draft-edit-ns";
   const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
   let edited = false;
@@ -2142,10 +2106,9 @@ test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_r
 });
 
 test("a_readiness_re_read_that_fails_or_carries_no_check_refuses_the_submit", async () => {
-  // PLAT-08.2 review L1 and L2. The check ran and said ready; the submit's
-  // re-read then (a) throws -- a timeout, a 503 -- or (b) answers 2xx with no
-  // `item`. Either way nobody knows whether the cached `ready` still applies,
-  // and "I could not find out" must not submit.
+  // The check said ready; the submit's re-read then (a) throws -- a timeout, a
+  // 503 -- or (b) answers 2xx with no `item`. Nobody knows whether the cached
+  // `ready` still applies, and "I could not find out" must not submit.
   // NEGATIVE CONTROLS: `confirmReadiness`'s catch -> `return true` lets (a)
   // create a restore; dropping the missing-item refusal lets (b) create one.
   for (const [label, reread, says] of [
@@ -2187,8 +2150,6 @@ test("a_readiness_re_read_that_fails_or_carries_no_check_refuses_the_submit", as
     }
   }
 });
-
-// ------------------------------ PLAT-11.1 through the real mount half
 
 test("a_visit_with_no_recovery_point_gets_the_selector_and_a_gone_one_gets_a_refusal", async () => {
   const ns = "wizard-select-ns";
@@ -2233,8 +2194,8 @@ test("a_visit_with_no_recovery_point_gets_the_selector_and_a_gone_one_gets_a_ref
 
 test("discarding_a_draft_re_reads_the_namespace_without_moving_the_point", async () => {
   // THE ONE PLACE THE WIZARD RE-READS THE NAMESPACE. A re-read that dropped
-  // the route's identity would rebuild the page with no point -- or, under the
-  // behaviour PLAT-11.1 replaces, with whichever run was newest by then.
+  // the route's identity would rebuild the page with no point, or with
+  // whichever run was newest by then.
   const ns = "wizard-rearead-ns";
   const k8s = wizardKubernetes(ns);
   const chosen = k8s.point;
@@ -2304,12 +2265,9 @@ test("discarding_a_draft_re_reads_the_namespace_without_moving_the_point", async
   }
 });
 
-// ===========================================================================
-// console-ux-1 review M2: step= and step navigation leave the readiness gate,
-// the pre-submit re-read and the plan hash exactly as they were. The reviewer's
-// rows, adopted: each kills one step-conditioned mutant of the gate (U2, U2b,
-// U2c) that the MCP-29 rows alone let through.
-// ===========================================================================
+// `step=` and step navigation leave the readiness gate, the pre-submit
+// re-read and the plan hash exactly as they were: each row kills one
+// step-conditioned mutant of the gate.
 import { restoreRouteParams as rvParams } from "../pages/restore-wizard.js";
 import { fakeView as fv2, parse as parse2 } from "./fake-view.js";
 

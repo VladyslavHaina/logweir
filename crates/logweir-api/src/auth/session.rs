@@ -46,7 +46,7 @@ pub const CSRF_HEADER: &str = "x-csrf-token";
 /// and bounces back to `/auth/login`: an unbreakable sign-in loop with nothing
 /// in the log saying why, hitting exactly the large-directory installations
 /// shared mode exists for. So the size is measured and the sign-in is REFUSED
-/// with a named reason instead. Review finding F-2.
+/// with a named reason instead.
 ///
 /// The margin below 4096 is for the attributes, which are counted here too.
 pub const MAX_SET_COOKIE_BYTES: usize = 3900;
@@ -477,18 +477,13 @@ mod tests {
 
     /// Read a DECODED session payload and name any provider material in it.
     ///
-    /// THIS IS THE GUARD, AND IT IS STRUCTURAL ON PURPOSE. Its predecessor
-    /// searched the sealed cookie VALUE for the substring `u-1`; since `seal`
-    /// draws a fresh random nonce and encodes the result in base64url — an
-    /// alphabet that contains `u`, `-` and `1` — that three-character sequence
-    /// turned up by chance in roughly one run in eight hundred, and the guard
-    /// failed for a reason that had nothing to do with the property it names
-    /// (FLAKE-APICOOKIE: 2026-09-17, 2026-09-19). Worse, it could never have
-    /// caught the thing it was written for: a token sealed INTO the cookie is
-    /// indistinguishable ciphertext on the wire, so no substring search over
-    /// the wire form would find it. Opening the envelope and reading the
-    /// payload asks the real question instead — does what the browser carries
-    /// contain anything the provider issued?
+    /// THIS IS THE GUARD, AND IT IS STRUCTURAL ON PURPOSE. A substring search
+    /// over the sealed cookie VALUE cannot work: `seal` draws a fresh random
+    /// nonce and encodes the result in base64url, so any short sequence turns up
+    /// by chance now and then, and a token sealed INTO the cookie is
+    /// indistinguishable ciphertext on the wire anyway. Opening the envelope and
+    /// reading the payload asks the real question -- does what the browser
+    /// carries contain anything the provider issued?
     fn provider_material(payload: &[u8]) -> Result<(), String> {
         let value: serde_json::Value = serde_json::from_slice(payload)
             .map_err(|error| format!("the payload is not JSON: {error}"))?;

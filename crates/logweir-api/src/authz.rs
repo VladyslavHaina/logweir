@@ -55,27 +55,27 @@ pub enum Action {
     ReadConnections,
     /// Create a `KafkaCluster` that references an existing Secret by name.
     CreateConnection,
-    /// Test a saved connection (PLAT-07.2). Not implemented.
+    /// Test a saved connection. Not implemented.
     TestConnection,
-    /// Write a credential Secret from a request body (PLAT-07.1/PLAT-08.1
-    /// write-only entry). The value is created and never read back.
+    /// Write a credential Secret from a request body (write-only entry). The
+    /// value is created and never read back.
     WriteCredential,
     /// List/get `TopicDiscovery` projections and their stored topic pages.
     ReadTopicDiscoveries,
-    /// Start topic discovery (PLAT-09.1).
+    /// Start topic discovery.
     DiscoverTopics,
     /// Ask an unfinished discovery of one's own to stop.
     CancelTopicDiscovery,
     /// List/get `Preflight` projections and their detail pages.
     ReadPreflights,
-    /// Start a preflight (PLAT-03).
+    /// Start a preflight.
     RunPreflight,
     /// Ask an unfinished preflight of one's own to stop.
     CancelPreflight,
-    /// List/get `BackupDestination` projections (PLAT-08).
+    /// List/get `BackupDestination` projections.
     ReadDestinations,
     /// Create a destination, rotate its access, test it, adopt a legacy
-    /// location (PLAT-08).
+    /// location.
     ManageDestinations,
     /// List/get `BackupSchedule` projections.
     ReadSchedules,
@@ -90,7 +90,7 @@ pub enum Action {
     EditSchedulePolicy,
     /// List/get `Backup` projections.
     ReadBackups,
-    /// Create a manual `Backup` (PLAT-06.1/06.2). Not implemented.
+    /// Create a manual `Backup`.
     CreateManualBackup,
     /// List/get `Restore` projections.
     ReadRestores,
@@ -100,26 +100,26 @@ pub enum Action {
     ReadApprovals,
     /// Read raw approval and sidecar bytes through the explicit packet route.
     ReadApprovalPacket,
-    /// Submit a governed approver's countersignature (PLAT-19.2,
-    /// `POST .../restores/{name}/approval`).
+    /// Submit a governed approver's countersignature
+    /// (`POST .../restores/{name}/approval`).
     SubmitApproval,
     /// Read the normalized operation status.
     ReadOperations,
     /// Stream operation events (server-sent events).
     StreamOperationEvents,
     /// List/get `ProtectionPolicy` projections: health, the alert ledger and
-    /// the delivery state (PLAT-14.2).
+    /// the delivery state.
     ReadProtectionPolicies,
     /// List/get `RecoveryCatalog` projections, the point view and the signer
-    /// panel (PLAT-15.1).
+    /// panel.
     ReadCatalogs,
-    /// Create a `RecoveryCatalog` over an existing archive (PLAT-15.2's
-    /// "connect existing archive").
+    /// Create a `RecoveryCatalog` over an existing archive ("connect existing
+    /// archive").
     ConnectCatalog,
     /// List/get `RetentionPolicy` projections: evaluation, enforcement mode
-    /// and the approved-plan state (PLAT-16.1/16.2).
+    /// and the approved-plan state.
     ReadRetentionPolicies,
-    /// Read the cluster-scoped `TrustPolicy` rendering (PLAT-19.1). D3 §10
+    /// Read the cluster-scoped `TrustPolicy` rendering. D3 §10
     /// keeps trust WRITES off the API in v1, so there is no write action here
     /// and no route that could take one.
     ReadTrustPolicies,
@@ -219,10 +219,6 @@ pub trait Authorizer: Send + Sync + 'static {
         None
     }
 }
-
-// ======================================================================
-// Roles
-// ======================================================================
 
 /// The four product roles. They are LOGWEIR roles: they are not Kubernetes
 /// roles, they are not granted by cluster RBAC, and holding one says nothing
@@ -535,10 +531,6 @@ impl Authorizer for SharedAuthorizer {
     }
 }
 
-// ======================================================================
-// Separation of duties
-// ======================================================================
-
 /// An identity, as authorization compares them: issuer and subject, never a
 /// display name, an email or a key id.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -576,14 +568,12 @@ pub fn independent_principals(requester: &Principal, approver: &Principal) -> bo
     requester != approver
 }
 
-/// The governed-approval decision, ahead of the PLAT-19.2 route.
+/// The governed-approval decision.
 ///
-/// This is the decision the route WILL call. It exists now, tested, because
-/// the tracker's acceptance is "an operator cannot assume approver rights" and
-/// "admin is not a self-approval bypass" — properties of the decision, not of
-/// the transport. The route is absent and `approvalSubmit` is advertised
-/// `false`; when PLAT-19.2 adds it, it calls this.
-///
+/// The tracker's acceptance is "an operator cannot assume approver rights"
+/// and "admin is not a self-approval bypass" -- properties of the decision,
+/// not of the transport -- so they are decided and tested here, and the
+/// route calls this.
 /// # Errors
 ///
 /// `forbidden` when the actor holds no Approver binding in the namespace, or
@@ -936,17 +926,16 @@ mod tests {
         let c = Capabilities::for_namespace(&z, &actor(), "team-a");
         assert!(c.schedule_create && c.restore_create && c.connection_create);
         assert!(c.topic_discovery && c.preflight && c.destinations && c.credential_write);
-        // D1 W6: `POST .../backups` has a route, so the flag is no longer a
-        // permanent `false`.
+        // `POST .../backups` has a route, so the flag is not a permanent `false`.
         assert!(c.manual_backup_create);
-        // D3 W11: the read families and the event stream have routes.
+        // The read families and the event stream have routes.
         assert!(c.protection && c.catalogs && c.retention);
         assert!(c.catalog_connect && c.operation_events);
         // localAdmin holds every action, so the cluster-scoped read is on too.
         assert!(c.trust_policies_read);
-        // PLAT-19.2: governed approval submission has a route now; the local
-        // administrator holds the action — and is still refused its OWN
-        // requests by the separation-of-duties check in the route.
+        // Governed approval submission has a route; the local administrator holds
+        // the action -- and is still refused its OWN requests by the
+        // separation-of-duties check in the route.
         assert!(c.approval_submit && !c.connection_test);
         // TWO FLAGS WITH NO ACTION BEHIND THEM, AND THEY STAY `false` FOR
         // EVERYONE — including the local administrator, who holds every action

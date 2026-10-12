@@ -1,29 +1,22 @@
-//! The cadence engine — decision D1 §4 (PLAT-04.2), worker W1.
-//!
-//! # What these tests are for
+//! The cadence engine.
 //!
 //! A scheduling bug is invisible until the day it costs a recovery point. The
-//! cases below are the ones a reviewer cannot check by reading: what happens on
-//! the two nights a year the local clock is not a function of UTC, what happens
-//! when the controller was down for a week, and what happens to a name when a
-//! retry suffix is appended to it.
+//! cases below are the ones a reviewer cannot check by reading: the two nights
+//! a year the local clock is not a function of UTC, a controller that was down
+//! for a week, and a name with a retry suffix appended to it.
 //!
-//! **Every DST case carries a negative control.** A test that asserts "the
-//! Berlin 02:30 schedule fires on 2027-03-28" passes for an implementation that
-//! fires at the wrong instant; the tests here assert the exact UTC instant AND
-//! assert what a dropped rule would have produced instead, with the mutant
-//! named in the message. `the_gap_rule_has_a_mutant` and
-//! `the_deadline_boundary_has_a_mutant` are the two that exist only to fail if
-//! the rule they name is removed.
+//! **Every DST case carries a negative control**: the tests assert the exact
+//! UTC instant AND what a dropped rule would have produced instead, with the
+//! mutant named in the message. `the_gap_rule_has_a_mutant` and
+//! `the_deadline_boundary_has_a_mutant` exist only to fail if the rule they
+//! name is removed.
 //!
-//! # The table
-//!
-//! `DST_CASES` is D1 §4.3's worked-example table, transcribed. Two hemispheres
-//! (Europe/Berlin and Australia/Lord_Howe, whose transitions are in opposite
-//! months and whose DST step is 30 minutes, not 60), a zone with a historical
-//! offset change that has nothing to do with DST (Asia/Kathmandu moved from
-//! +05:30 to +05:45 on 1986-01-01), and the one zone that skipped a whole
-//! calendar day (Pacific/Apia, 2011-12-30).
+//! `DST_CASES` is the worked-example table: two hemispheres (Europe/Berlin and
+//! Australia/Lord_Howe, whose transitions are in opposite months and whose DST
+//! step is 30 minutes, not 60), a zone with a historical offset change that
+//! has nothing to do with DST (Asia/Kathmandu moved from +05:30 to +05:45 on
+//! 1986-01-01), and the one zone that skipped a whole calendar day
+//! (Pacific/Apia, 2011-12-30).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -46,9 +39,7 @@ use weirkeeper::slot::{
     MAX_RETRIES, NAME_LIMIT, SLOT_NAME_LEN,
 };
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// The workspace root: this crate's manifest directory is `crates/weirkeeper`.
 fn workspace_root() -> PathBuf {
@@ -65,13 +56,10 @@ fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         .expect("a real UTC instant")
 }
 
-/// A deterministic 64-bit generator for the property tests.
-///
-/// HAND-ROLLED RATHER THAN A `rand` DEPENDENCY, for the reason `slot.rs`'s own
-/// header gives about the cron parser: Global Constraint 38 closes the
-/// workspace graph, and a test that needs 10 000 arbitrary-but-reproducible
-/// pairs needs a sequence, not randomness. The seed is fixed, so a failure
-/// reproduces exactly.
+/// A deterministic 64-bit generator for the property tests, hand-rolled rather
+/// than a `rand` dependency: 10 000 arbitrary-but-reproducible pairs need a
+/// sequence, not randomness. The seed is fixed, so a failure reproduces
+/// exactly.
 struct Rng(u64);
 
 impl Rng {
@@ -91,39 +79,24 @@ impl Rng {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 1. The absent field is today's behaviour
-// ---------------------------------------------------------------------------
 
-/// **An absent `spec.timeZone` reproduces today's UTC slots, byte for byte.**
+/// **An absent `spec.timeZone` reproduces the legacy UTC slots, byte for
+/// byte.**
 ///
-/// THE 10 000-CASE PROPERTY D1 §4.9 REQUIRES, and it is an equality against the
-/// pre-D1 evaluator itself — `Cron::last_fire_at_or_before` and
-/// `Cron::next_fire_after`, the two functions every existing `BackupSchedule`
-/// has been scheduled by — not against a table of expected values a new
-/// implementation could have been written to satisfy.
+/// A 10 000-case equality against the legacy evaluator itself
+/// (`Cron::last_fire_at_or_before` and `Cron::next_fire_after`), not against a
+/// table of expected values a new implementation could have been written to
+/// satisfy. The expressions are drawn over the whole grammar (literals, lists,
+/// ranges, steps, the three `@` aliases) and the instants over a century,
+/// because disagreements would be at month ends, leap days and the day rule's
+/// union/intersection boundary.
 ///
-/// The expressions are drawn over the whole grammar (literals, lists, ranges,
-/// steps, the three `@` aliases) and the instants over a century, because the
-/// interesting disagreements would be at month ends, leap days and the
-/// day-rule's union/intersection boundary rather than in the middle of an
-/// ordinary Tuesday.
-///
-/// WHAT IT DOES **NOT** KILL, stated because an earlier version of this comment
-/// claimed the opposite. For the code as written the two assertions below are
-/// tautologies: `Zone::Utc` DELEGATES, so
-/// `Cadence::last_fire_at_or_before` under it *is*
-/// `Cron::last_fire_at_or_before` and 10 000 pairs assert `x == x`. Routing the
-/// absent field through the ZONED walk instead
-/// (`Zone::resolve(None) => Ok(Zone::Named(Tz::UTC))`) leaves every assertion
-/// here passing, because the zoned walk agrees — which is a real and welcome
-/// measurement, and not the delegation guard the comment promised.
-///
-/// The delegation itself is held by
-/// `the_absent_zone_delegates_to_the_legacy_walk`; this test's value is the
-/// 10 000-pair AGREEMENT, and the second half below now measures the zoned path
-/// against the legacy one over the same corpus so that agreement is asserted
-/// rather than assumed.
+/// For the code as written the first half is a tautology: `Zone::Utc`
+/// DELEGATES, so 10 000 pairs assert `x == x`. The delegation itself is held
+/// by `the_absent_zone_delegates_to_the_legacy_walk`; this test's value is the
+/// second half, which measures the zoned path against the legacy one over the
+/// same corpus so the agreement is asserted rather than assumed.
 #[test]
 fn absent_timezone_is_byte_identical_to_legacy_utc() {
     let mut rng = Rng(0x5eed_1234_abcd_0001);
@@ -174,13 +147,12 @@ fn absent_timezone_is_byte_identical_to_legacy_utc() {
     );
 
     // THE HALF THAT IS NOT A TAUTOLOGY: the same generator, against the ZONED
-    // local-date walk with `Tz::UTC`. This one really is two implementations
-    // compared — a bitset walk over UTC dates against a walk that converts
-    // every matched local minute through `from_local_datetime` — and it is the
-    // measurement that makes `explicit_utc_agrees_with_the_absent_field`'s
-    // claim hold over the whole grammar rather than over five expressions.
-    // A thousand rather than ten thousand because the zoned walk is ~14x the
-    // cost per pair and the suite is run on every change.
+    // local-date walk with `Tz::UTC`: a bitset walk over UTC dates against a
+    // walk that converts every matched local minute through
+    // `from_local_datetime`. It makes
+    // `explicit_utc_agrees_with_the_absent_field`'s claim hold over the whole
+    // grammar. A thousand rather than ten thousand because the zoned walk is
+    // ~14x the cost per pair.
     let mut rng = Rng(0x5eed_1234_abcd_0001);
     for _ in 0..1_000 {
         let expr = random_expression(&mut rng);
@@ -202,24 +174,19 @@ fn absent_timezone_is_byte_identical_to_legacy_utc() {
 
 /// **The absent `timeZone` DELEGATES to `slot.rs` rather than re-deriving it.**
 ///
-/// THE GUARD THE 10 000-PAIR PROPERTY ABOVE CANNOT BE. Two implementations that
-/// agree on every case anyone has thought to generate are still two
-/// implementations, and D1 §0.1 and §4.9 do not say "equivalent to today's UTC
-/// evaluator" — they say the absent field IS it. Agreement is measured
-/// elsewhere; this test is about which code runs.
-///
-/// Two arms, because two different mistakes reach the same wrong place:
+/// Two implementations that agree on every generated case are still two
+/// implementations, and the absent field IS the legacy evaluator. This test is
+/// about which code runs. Two arms, because two different mistakes reach the
+/// same wrong place:
 ///
 /// * **`Zone::resolve(None)` must be `Zone::Utc` and not `Zone::Named(UTC)`.**
-///   The variant is the whole distinction — `Zone::name()` returns `"UTC"` for
-///   both, so every assertion phrased in terms of the NAME passes for either.
-///   This arm is what kills the mutant the review planted (`resolve(None) =>
-///   Ok(Zone::Named(Tz::UTC))`), which previously survived all 35 tests while
-///   sending every pre-D1 schedule in the product down the zoned walk.
-/// * **The three `Zone::Utc` arms must call `self.cron`.** A source scan, in
-///   the spirit of `the_cadence_module_reads_no_clock` above it: the fall-back
-///   body of each `let Zone::Named(tz) = self.zone else { … }` has to name
-///   `self.cron.last_fire_at_or_before` or `self.cron.next_fire_after`. A
+///   `Zone::name()` returns `"UTC"` for both, so every assertion phrased in
+///   terms of the NAME passes for either; this arm kills
+///   `resolve(None) => Ok(Zone::Named(Tz::UTC))`, which would send every
+///   zoneless schedule down the zoned walk.
+/// * **The three `Zone::Utc` arms must call `self.cron`.** A source scan: the
+///   fall-back body of each `let Zone::Named(tz) = self.zone else { … }` has to
+///   name `self.cron.last_fire_at_or_before` or `self.cron.next_fire_after`. A
 ///   rewrite that kept `Zone::Utc` as a variant but re-derived the walk inside
 ///   it would pass the first arm and fail here.
 #[test]
@@ -239,8 +206,7 @@ fn the_absent_zone_delegates_to_the_legacy_walk() {
     let src = std::fs::read_to_string(workspace_root().join("crates/weirkeeper/src/cadence.rs"))
         .expect("the module is readable");
     // The else-block is taken by MATCHING BRACES, not by looking for the first
-    // `};`: the third arm builds a struct literal, and a naive split cuts the
-    // body in half and then reports a failure that is the test's own bug.
+    // `};`: the third arm builds a struct literal.
     let arms: Vec<String> = src
         .split("let Zone::Named(tz) = self.zone else {")
         .skip(1)
@@ -322,13 +288,10 @@ fn random_expression(rng: &mut Rng) -> String {
 }
 
 /// **The expectations the existing slot tests pin are unchanged under a
-/// `Cadence` with no zone.**
-///
-/// THE EXACT VALUES FROM `schedule_controller.rs::cron_last_fire_is_utc_and_stable`,
-/// re-asserted through the new entry point. The property test above compares
-/// two implementations to each other; this one compares the new one to the
-/// NUMBERS the shipped controller's tests already agree on, so both halves of
-/// "unchanged" are covered.
+/// `Cadence` with no zone**: the exact values from
+/// `schedule_controller.rs::cron_last_fire_is_utc_and_stable`, re-asserted
+/// through the new entry point, so the new walk is compared with the numbers
+/// the shipped controller's tests agree on as well as with the old code.
 #[test]
 fn the_existing_slot_expectations_hold_through_the_cadence() {
     let c = Cadence::parse("17 3 * * 1", None).expect("the brief's expression");
@@ -382,13 +345,11 @@ fn the_existing_slot_expectations_hold_through_the_cadence() {
     );
 }
 
-/// **An explicit `timeZone: UTC` agrees with the absent field.**
-///
-/// THE TWO PATHS ARE DIFFERENT CODE and this is the test that says so out loud:
-/// `Zone::Utc` delegates to `slot.rs`, `Zone::Named(Tz::UTC)` takes the
-/// local-date walk with its `from_local_datetime` calls and its edge slack. A
-/// user who writes the zone out must not get different slots from a user who
-/// leaves it off.
+/// **An explicit `timeZone: UTC` agrees with the absent field.** The two paths
+/// are different code: `Zone::Utc` delegates to `slot.rs`, `Zone::Named(Tz::UTC)`
+/// takes the local-date walk with its `from_local_datetime` calls and its edge
+/// slack. A user who writes the zone out must not get different slots from a
+/// user who leaves it off.
 #[test]
 fn explicit_utc_agrees_with_the_absent_field() {
     for expr in ["*/15 * * * *", "30 2 * * *", "17 3 * * 1", "0 3 31 * *"] {
@@ -410,14 +371,12 @@ fn explicit_utc_agrees_with_the_absent_field() {
     assert_eq!(Zone::resolve(None).unwrap().name(), "UTC");
     assert_eq!(Zone::resolve(Some("UTC")).unwrap().name(), "UTC");
 
-    // AND THE WHOLE PREVIEW AGREES, not only one firing at a time. The two
-    // branches reach a multi-entry preview by different routes — the absent
-    // field iterates `Cron::next_fire_after`, the named zone makes ONE pass
-    // over local dates — and a sparse expression is where they came apart:
-    // iterating restarts the ten-year walk at every firing, so `0 0 29 2 *`
-    // would report twenty February 29ths reaching into the 2160s while the
-    // zoned pass reported the one inside the walk bound. `horizon_date` is the
-    // shared bound that closed it, and this is the case that fails without it.
+    // AND THE WHOLE PREVIEW AGREES, not only one firing at a time. The absent
+    // field iterates `Cron::next_fire_after`, the named zone makes ONE pass over
+    // local dates, and a sparse expression is where they can part: iterating
+    // restarts the ten-year walk at every firing, so `0 0 29 2 *` would report
+    // February 29ths far beyond the walk bound. `horizon_date` is the shared
+    // bound, and this is the case that fails without it.
     for expr in [
         "*/15 * * * *",
         "30 2 * * *",
@@ -437,8 +396,8 @@ fn explicit_utc_agrees_with_the_absent_field() {
         }
     }
 
-    // The sparse case really is the short one — a test that compared two empty
-    // vectors would pass for an implementation that previewed nothing at all.
+    // The sparse case really is the short one: comparing two empty vectors
+    // would pass for an implementation that previewed nothing at all.
     assert_eq!(
         Cadence::parse("0 0 29 2 *", None)
             .unwrap()
@@ -449,11 +408,9 @@ fn explicit_utc_agrees_with_the_absent_field() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 2. Time zones and DST
-// ---------------------------------------------------------------------------
 
-/// One row of D1 §4.3's worked-example table.
+/// One row of the worked-example table.
 struct DstCase {
     /// What the row is about, quoted in every failure.
     what: &'static str,
@@ -604,7 +561,7 @@ fn dst_cases() -> Vec<DstCase> {
 }
 
 /// **A fixed local time inside a spring-forward gap fires ONCE, at the end of
-/// the gap** — D1 §4.3, in three zones whose gaps are 60, 60 and 30 minutes.
+/// the gap**, in three zones whose gaps are 60, 60 and 30 minutes.
 #[test]
 fn tz_gap_fixed_time_fires_once_at_gap_end() {
     for case in dst_cases().into_iter().filter(|c| {
@@ -632,8 +589,8 @@ fn tz_gap_fixed_time_fires_once_at_gap_end() {
     }
 }
 
-/// **A fixed local time inside a repeated hour fires at BOTH occurrences** —
-/// D1 §4.3, in two hemispheres and at two DST step sizes (60 and 30 minutes).
+/// **A fixed local time inside a repeated hour fires at BOTH occurrences**, in
+/// two hemispheres and at two DST step sizes (60 and 30 minutes).
 #[test]
 fn tz_overlap_fires_at_both_occurrences() {
     for case in dst_cases().into_iter().filter(|c| {
@@ -644,9 +601,8 @@ fn tz_overlap_fires_at_both_occurrences() {
     }
 }
 
-/// **An interval schedule keeps its UTC cadence through both transitions** —
-/// D1 §4.3's third and fourth rows. No burst at the fall back, no hole at the
-/// spring forward.
+/// **An interval schedule keeps its UTC cadence through both transitions.** No
+/// burst at the fall back, no hole at the spring forward.
 #[test]
 fn tz_interval_schedule_keeps_utc_cadence_through_both_transitions() {
     for case in dst_cases().into_iter().filter(|c| c.expr.starts_with("*/")) {
@@ -701,14 +657,12 @@ fn apia_skipped_day_maps_all_matches_to_one_instant() {
         "20111230-100000"
     );
 
-    // AND THE INSTANT CARRIES NO MARKER, which is the deduplication rule's
-    // other half. Local 2011-12-31T00:00 is a REAL local time that `*/15`
-    // matches and that maps to this same instant, so the row a user reads is
-    // one they can verify on their own clock; `Adjustment::rank` prefers it
-    // over the shift for exactly that reason. It is the same answer
-    // `Europe/Berlin, */15 through the gap` gets in the table above, and the
-    // mutant is `rank` returning the shift instead: the preview would then
-    // annotate a run whose local time exists.
+    // AND THE INSTANT CARRIES NO MARKER. Local 2011-12-31T00:00 is a REAL local
+    // time that `*/15` matches and that maps to this same instant, so the row
+    // a user reads is one they can verify on their own clock; `Adjustment::rank`
+    // prefers it over the shift for that reason, as for `Europe/Berlin, */15
+    // through the gap` in the table above. The mutant is `rank` returning the
+    // shift: the preview would annotate a run whose local time exists.
     assert_eq!(
         runs.iter().find(|r| r.at == crossing).unwrap().adjustment,
         None,
@@ -795,34 +749,23 @@ fn assert_table(case: &DstCase) {
     }
 }
 
-/// **All three walks give one instant one marker** — the property, over a
-/// corpus, not one asserted example.
-///
-/// # What went wrong, so it is not re-derived
+/// **All three walks give one instant one marker**, over a corpus.
 ///
 /// `fire_at_or_before`, `fire_after` and `next_runs` all reduce several matched
-/// local times to one firing, and they reach the same instant from three
-/// directions. Only the third applied `Adjustment::rank`; the other two took a
-/// plain max/min over the INSTANT and kept whichever marker the walk happened
-/// to see first — which depends on the direction of travel, so the two
-/// single-shot walks disagreed with `next_runs` and with each other.
+/// local times to one firing, reaching the same instant from three directions.
+/// A plain max/min over the INSTANT keeps whichever marker the walk saw first,
+/// which depends on the direction of travel. The case: `Pacific/Apia`,
+/// `0 0 * * *`. The instant 2011-12-30T10:00Z is produced twice: by local
+/// 2011-12-30T00:00, which does not exist and shifts to the date-line
+/// crossing, and by local 2011-12-31T00:00, which IS that crossing and exists.
+/// A `BackupSchedule.status` whose `lastSlot` came from one walk and whose
+/// `nextRuns` came from another would contradict itself about a single slot.
 ///
-/// The measured case: `Pacific/Apia`, `0 0 * * *`. The instant
-/// 2011-12-30T10:00Z is produced twice — once by local 2011-12-30T00:00, which
-/// does not exist and shifts to the date-line crossing, and once by local
-/// 2011-12-31T00:00, which IS that crossing and exists. `fire_after` walking
-/// forwards met the gap first and answered
-/// `NonexistentLocalTimeShifted`; `next_runs` and `fire_at_or_before` answered
-/// `None`. A `BackupSchedule.status` whose `lastSlot` came from one and whose
-/// `nextRuns` came from the other would contradict itself about a single slot.
-///
-/// # Why a corpus and not the one row
-///
-/// The Apia row is asserted too (below), but a single row passes for a fix that
-/// special-cases it. The loop walks six zones — the date-line crossing, both
-/// hemispheres, a 30-minute DST step, a 24-hour repeated day and a +14 zone —
-/// four expressions and 480 start instants each, and requires the marker for
-/// every instant produced by ANY walk to equal the marker `next_runs` gives it.
+/// A single row passes for a fix that special-cases it, so the loop walks six
+/// zones (the date-line crossing, both hemispheres, a 30-minute DST step, a
+/// 24-hour repeated day and a +14 zone), four expressions and 480 start
+/// instants each, and requires the marker for every instant produced by ANY
+/// walk to equal the marker `next_runs` gives it.
 #[test]
 fn every_walk_agrees_on_the_marker_for_an_instant() {
     let zones = [
@@ -845,23 +788,18 @@ fn every_walk_agrees_on_the_marker_for_an_instant() {
         for expr in exprs {
             let cadence = Cadence::parse(expr, Some(zone)).expect("zone and expression are legal");
             for start in starts {
-                // FOUR DAYS AT THREE-HOUR STEPS, not five days hourly. The
-                // property is about instants several matched local times
-                // collapse onto, and `fire_after(t)` lands on such an instant
-                // for EVERY `t` in the whole interval before it — so a coarser
-                // grid crosses exactly the same collisions and the suite stays
-                // a suite anyone runs. (Measured: hourly took 30 s of a 32 s
-                // run; this takes about a quarter of that, and re-planting the
-                // F1 mutant still fails here.)
+                // FOUR DAYS AT THREE-HOUR STEPS, not five days hourly. The property is
+                // about instants several matched local times collapse onto, and
+                // `fire_after(t)` lands on such an instant for EVERY `t` in the interval
+                // before it, so a coarser grid crosses the same collisions at a quarter
+                // of the cost.
                 for step in 0..32 {
                     let t = start + Duration::hours(step * 3);
 
-                    // `next_runs` is the reference: it is the one the console
-                    // and `status.nextRuns` show, so it is the answer the other
-                    // two must not contradict. `count: 1` throughout, because
-                    // the earliest firing after an instant is exactly the
-                    // firing the single-shot walks return — and a wider preview
-                    // multiplies the walk cost without widening the property.
+                    // `next_runs` is the reference: it is what the console and
+                    // `status.nextRuns` show, so it is the answer the other two must not
+                    // contradict. `count: 1` throughout, because the earliest firing after
+                    // an instant is exactly what the single-shot walks return.
                     let next = cadence.next_runs(t, 1);
                     match (cadence.fire_after(t), next.first()) {
                         (Some(f), Some(row)) => {
@@ -909,9 +847,8 @@ fn every_walk_agrees_on_the_marker_for_an_instant() {
         "a corpus that compared almost nothing is not a property test; compared {compared}"
     );
 
-    // THE MEASURED ROW, NAMED. This is the exact disagreement the review found,
-    // and it fails for any fix that leaves either walk taking a plain min/max
-    // over the instant alone.
+    // THE MEASURED ROW, NAMED: it fails for any fix that leaves either walk
+    // taking a plain min/max over the instant alone.
     let apia = Cadence::parse("0 0 * * *", Some("Pacific/Apia")).unwrap();
     let crossing = utc(2011, 12, 30, 10, 0);
     let after = apia.fire_after(utc(2011, 12, 29, 10, 0)).expect("it fires");
@@ -933,34 +870,25 @@ fn every_walk_agrees_on_the_marker_for_an_instant() {
     );
 }
 
-/// **All three selection points name the one tie-break** — the structural half
+/// **All three selection points name the one tie-break**, the structural half
 /// of `every_walk_agrees_on_the_marker_for_an_instant`.
 ///
-/// # Why a source scan and not more instants
-///
-/// Of the three places that reduce several matched local times to one firing,
-/// only ONE can be shown to need the tie-break by example, and that is measured
-/// rather than assumed: re-planting each mutant gives
+/// Only ONE of the three places can be shown to need the tie-break by example:
 ///
 /// | mutant | outcome |
 /// |---|---|
 /// | `fire_after` takes a plain `<` over the instant | **dies** in the corpus test (Apia, `0 0 * * *`) |
-/// | `fire_at_or_before` takes a plain `>` | survives every instant I can construct |
-/// | `record` becomes last-writer-wins | survives every instant I can construct |
+/// | `fire_at_or_before` takes a plain `>` | survives every constructible instant |
+/// | `record` becomes last-writer-wins | survives every constructible instant |
 ///
-/// and the reason the last two survive is structural, not a gap in the corpus.
-/// A gap shift only ever moves a firing FORWARD in time, so when two matched
-/// local times collapse onto one instant the better-ranked producer — the real
-/// local time — always belongs to the LATER local date. `fire_at_or_before`
-/// walks dates backwards and therefore meets it first, and `record` fills its
-/// map in ascending date-and-minute order and therefore overwrites with it
-/// last. Both land on the right answer for a reason that has nothing to do with
-/// the rule they are supposed to be applying.
-///
-/// That is precisely the arrangement that broke once already: three spellings
-/// of one decision, two of them right by accident, and a reader with no way to
-/// tell which. So the tie-break is asserted where it can be — one function name
-/// at all three sites — and the accident is written down rather than relied on.
+/// The last two survive for a structural reason: a gap shift only moves a
+/// firing FORWARD, so when two matched local times collapse onto one instant
+/// the better-ranked producer (the real local time) always belongs to the
+/// LATER local date. `fire_at_or_before` walks dates backwards and meets it
+/// first, and `record` fills its map in ascending order and overwrites with
+/// it last: right by accident, not by the rule. So the tie-break is asserted
+/// as one function name at all three sites, and the accident is written down
+/// rather than relied on.
 #[test]
 fn every_selection_point_names_the_one_tie_break() {
     let src = std::fs::read_to_string(workspace_root().join("crates/weirkeeper/src/cadence.rs"))
@@ -1009,28 +937,21 @@ fn every_selection_point_names_the_one_tie_break() {
     }
 }
 
-/// **A 24-hour REPEATED day needs the edge slack** — `America/Sitka`, the
+/// **A 24-hour REPEATED day needs the edge slack**: `America/Sitka`, the
 /// Alaska purchase of 1867-10-18.
-///
-/// # Why this zone
 ///
 /// Sitka moved from the Russian calendar at +14:59 to the American one at
 /// −09:01 and lived the same local day twice: a 24-hour fall back, the mirror
 /// of `Pacific/Apia`'s 24-hour gap. It is the case that makes `EDGE_DAYS`
-/// load-bearing, and it is here because the first round of this module recorded
-/// — wrongly, from a sweep that covered only the eastward direction — that the
-/// constant had "no measured effect".
-///
-/// # The mechanism
+/// load-bearing.
 ///
 /// At +14:59 a local midnight lands most of a day EARLIER in UTC, so the
 /// firing that answers `fire_at_or_before(1867-10-19T01:00Z)` comes from local
-/// date 1867-10-**19** — one local date AFTER the local date of the argument
+/// date 1867-10-**19**, one local date AFTER the local date of the argument
 /// (1867-10-18). `fire_at_or_before` starts its backwards walk at
-/// `local_date + EDGE_DAYS` for exactly this reason. With `EDGE_DAYS = 0` the
-/// walk starts at the argument's own local date, never visits 1867-10-19, and
-/// answers 1867-10-17T09:01:13Z — a whole slot too early, which for a daily
-/// backup is a day of data nobody notices is missing.
+/// `local_date + EDGE_DAYS` for this reason. With `EDGE_DAYS = 0` the walk
+/// never visits 1867-10-19 and answers 1867-10-17T09:01:13Z, a whole slot too
+/// early: for a daily backup, a day of data nobody notices is missing.
 #[test]
 fn a_twenty_four_hour_repeated_day_needs_the_edge_slack() {
     let sitka = Cadence::parse("0 0 * * *", Some("America/Sitka")).expect("Sitka is in the tzdb");
@@ -1079,13 +1000,13 @@ fn a_twenty_four_hour_repeated_day_needs_the_edge_slack() {
 /// **The gap rule has a mutant.** THIS TEST EXISTS TO FAIL if the
 /// nonexistent-local-time arm is dropped or changed.
 ///
-/// Two implementations that D1 §4.3 rejects are named here as the values they
-/// would have produced, so removing the rule cannot leave a green suite:
+/// Two rejected implementations are named here as the values they would have
+/// produced, so removing the rule cannot leave a green suite:
 ///
 /// * **Skip the gap.** The 2027-03-28 firing disappears and the next slot is
 ///   2027-03-29's. Asserted absent.
 /// * **Keep the wall time and use the OLD offset.** 02:30 local at +01:00 is
-///   01:30 UTC — a real instant, an hour and a half after the one the rule
+///   01:30 UTC: a real instant, an hour and a half after the one the rule
 ///   produces, and half an hour *past* a time that no longer existed.
 ///   Asserted absent.
 #[test]
@@ -1123,10 +1044,10 @@ fn the_gap_rule_has_a_mutant() {
 /// **The repeated-hour rule has a mutant.** THIS TEST EXISTS TO FAIL if the
 /// ambiguous arm collapses to one firing.
 ///
-/// D1 §4.3 makes both occurrences real instants whose local wall time matches,
-/// so both fire. An implementation that took `.earliest()` or `.latest()` would
-/// produce ONE slot here; an implementation that produced one slot but the
-/// other instant would be invisible to a test that only counted them.
+/// Both occurrences are real instants whose local wall time matches, so both
+/// fire. An implementation that took `.earliest()` or `.latest()` would
+/// produce ONE slot here; one that produced one slot but the other instant
+/// would be invisible to a test that only counted them.
 #[test]
 fn the_repeated_hour_rule_has_a_mutant() {
     let runs = Cadence::parse("30 2 * * *", Some("Europe/Berlin"))
@@ -1207,8 +1128,8 @@ fn unknown_timezone_is_refused_by_name() {
             "the message names the database that has no such zone: {message}"
         );
     }
-    // POSIX SIGN INVERSION IS A REAL ZONE, NOT A TYPO (D1 §4.3). `Etc/GMT+5`
-    // is UTC-05:00, and the preview's rendered offset is what tells the user.
+    // POSIX SIGN INVERSION IS A REAL ZONE, NOT A TYPO: `Etc/GMT+5` is
+    // UTC-05:00, and the preview's rendered offset is what tells the user.
     let etc = Cadence::parse("0 9 * * *", Some("Etc/GMT+5")).expect("Etc/GMT+5 exists");
     assert_eq!(
         etc.next_runs(utc(2026, 9, 14, 0, 0), 1)[0].local_time,
@@ -1253,7 +1174,7 @@ fn an_invalid_cron_is_refused_naming_the_field() {
 ///
 /// `0 3 31 * *` DOES NOT RUN IN FEBRUARY, APRIL, JUNE, SEPTEMBER OR NOVEMBER,
 /// and that is what a `dayOfMonth: 31` schedule means everywhere; the preset
-/// catalogue caps `monthly` at 28 for exactly this reason
+/// catalogue caps `monthly` at 28 for this reason
 /// (`the_monthly_preset_stops_at_28`). `0 3 29 2 *` waits eight years across
 /// 2100, which is the figure `slot.rs`'s `WALK_DAYS` is sized for.
 #[test]
@@ -1302,12 +1223,11 @@ fn leap_year_and_month_end_expressions_answer() {
     );
 }
 
-/// **Nothing in the cadence module reads a clock or the environment** — guard
-/// **G-SLOT**, extended to the module D1 W1 adds.
+/// **Nothing in the cadence module reads a clock or the environment.**
 ///
-/// A SOURCE-READING TEST, for the same reason
+/// A SOURCE-READING TEST, as
 /// `schedule_controller.rs::the_name_never_reads_a_reconcile_clock_or_a_status`
-/// is one: the property is about what the code CANNOT do. Every function here
+/// is: the property is about what the code CANNOT do. Every function here
 /// takes its instant as an argument, so a duplicate reconcile after a crash
 /// computes the same slot and the API server's 409 is the idempotence key.
 #[test]
@@ -1337,14 +1257,11 @@ fn the_cadence_module_reads_no_clock() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 3. Deadlines, catch-up and downtime
-// ---------------------------------------------------------------------------
 
-/// **The starting deadline's boundary is INCLUSIVE, to the second.**
-///
-/// D1 §4.5 step 7 is `now - S <= startingDeadlineSeconds`. Exactly at the
-/// horizon the slot is still admitted; one second later it is not.
+/// **The starting deadline's boundary is INCLUSIVE, to the second**
+/// (`now - S <= startingDeadlineSeconds`): exactly at the horizon the slot is
+/// still admitted; one second later it is not.
 #[test]
 fn the_starting_deadline_boundary_is_inclusive() {
     let slot = utc(2026, 9, 15, 3, 0);
@@ -1376,13 +1293,11 @@ fn the_starting_deadline_boundary_is_inclusive() {
 /// **The deadline boundary has a mutant.** THIS TEST EXISTS TO FAIL if the
 /// horizon is dropped, inverted or made exclusive.
 ///
-/// Three implementations that would be wrong, each asserted against:
-///
-/// * **No horizon at all** — every old slot admitted. The 25-hour-old slot
+/// * **No horizon at all**: every old slot admitted. The 25-hour-old slot
 ///   below would be `Scheduled`; it must be `Missed`.
-/// * **An exclusive boundary** — the slot exactly on the horizon would be
+/// * **An exclusive boundary**: the slot exactly on the horizon would be
 ///   `Missed`; it must be `Scheduled`.
-/// * **Catch-up as the default** — an absent `catchUpPolicy` would admit a
+/// * **Catch-up as the default**: an absent `catchUpPolicy` would admit a
 ///   `CatchUp` run for the old slot; it must admit nothing.
 #[test]
 fn the_deadline_boundary_has_a_mutant() {
@@ -1425,15 +1340,11 @@ fn the_deadline_boundary_has_a_mutant() {
     );
 }
 
-/// **The deadline fields are range-checked HERE, not in the controller** —
-/// D1 §4.1 ranges, D1 §4.5 step 0's fail-closed re-validation.
-///
-/// THE SAME ARGUMENT `RetryPolicy::validate` MAKES FOR ITSELF. The CRD's
-/// OpenAPI ranges are the first gate; an object created against an older CRD,
-/// or read after the API server pruned a field it does not declare, reaches
-/// the scheduler without having passed them. Two gates, one table — and the
-/// table has to cover all three fields or the deadlines are the pair W2
-/// hand-rolls and gets subtly different.
+/// **The deadline fields are range-checked HERE, not in the controller**, as
+/// `RetryPolicy::validate` checks itself. The CRD's OpenAPI ranges are the
+/// first gate; an object created against an older CRD, or read after the API
+/// server pruned a field it does not declare, reaches the scheduler without
+/// having passed them. Two gates, one table, covering all three fields.
 #[test]
 fn the_deadline_ranges_are_checked() {
     // The documented defaults, which are what an absent field means.
@@ -1537,12 +1448,12 @@ fn the_deadline_ranges_are_checked() {
 /// **`admit_slot`'s precondition is `slot <= now`, and the documented answer
 /// for a future slot is pinned** so it is a contract rather than an accident.
 ///
-/// D1 §4.5 step 5 produces the only correct argument — `latest_due_slot`, which
-/// is `last_fire_at_or_before(now)` and cannot return a future instant. A
-/// caller that passes one anyway has a negative age, which is inside
-/// `age <= startingDeadline`, so the answer is `Scheduled`: this function would
-/// tell it to run a backup before its slot. It is stated rather than guarded
-/// because a guard would need a fifth outcome D1 §4.7's table has no row for.
+/// The scheduler passes `latest_due_slot`, which is
+/// `last_fire_at_or_before(now)` and cannot return a future instant. A caller
+/// that passes one anyway has a negative age, which is inside
+/// `age <= startingDeadline`, so the answer is `Scheduled`. It is stated
+/// rather than guarded because a guard would need a fifth outcome the truth
+/// table has no row for.
 #[test]
 fn admit_slot_is_documented_for_a_future_slot() {
     let now = utc(2026, 9, 15, 12, 0);
@@ -1570,12 +1481,10 @@ fn admit_slot_is_documented_for_a_future_slot() {
     );
 }
 
-/// **A long downtime with `catchUpPolicy: Latest` produces exactly ONE run** —
-/// and with `None`, none at all.
-///
-/// D1 §4.7's downtime row, exercised over a week of a schedule that fires every
-/// hour: 168 slots came due while nothing was running, and the policy's whole
-/// promise is that the backlog is bounded at one.
+/// **A long downtime with `catchUpPolicy: Latest` produces exactly ONE run**,
+/// and with `None`, none at all: over a week of an hourly schedule, 168 slots
+/// came due while nothing was running, and the policy's promise is that the
+/// backlog is bounded at one.
 #[test]
 fn a_week_of_downtime_creates_at_most_one_catch_up() {
     for zone in [None, Some("Europe/Berlin")] {
@@ -1633,12 +1542,11 @@ fn a_week_of_downtime_creates_at_most_one_catch_up() {
             SlotAdmission::CatchUp,
             "zone {zone:?}: the latest due slot, past its deadline, is the one catch-up"
         );
-        // 2026-09-08T12:00Z to 2026-09-15T10:00Z is 166 hours, and BOTH ENDS
-        // ARE EXCLUSIVE — `lastEvaluatedSlot` was accounted for last time and
-        // `old_latest` is the slot being decided — so 165 lie strictly
-        // between. The off-by-one is the whole reason the number is written
-        // out here: counting either endpoint twice is a `missedSlots.count`
-        // that drifts by one every reconcile.
+        // 2026-09-08T12:00Z to 2026-09-15T10:00Z is 166 hours, and BOTH ENDS ARE
+        // EXCLUSIVE (`lastEvaluatedSlot` was accounted for last time and
+        // `old_latest` is the slot being decided), so 165 lie strictly between.
+        // Counting either endpoint twice is a `missedSlots.count` that drifts by
+        // one every reconcile.
         let skipped = cadence.skipped_slots(down_since, old_latest, MAX_SKIPPED_SLOT_ENUMERATION);
         assert_eq!(
             skipped.count, 165,
@@ -1648,8 +1556,7 @@ fn a_week_of_downtime_creates_at_most_one_catch_up() {
     }
 }
 
-/// **Catch-up never runs a slot from before the revision was observed** — D1
-/// §4.7 row 19.
+/// **Catch-up never runs a slot from before the revision was observed.**
 #[test]
 fn catch_up_never_runs_a_slot_before_the_observed_revision() {
     let effective_since = utc(2026, 9, 15, 12, 0);
@@ -1678,8 +1585,8 @@ fn catch_up_never_runs_a_slot_before_the_observed_revision() {
         SlotAdmission::CatchUp,
         "the boundary is `slot < effectiveSince`, so a slot AT the revision is caught up"
     );
-    // Still inside the horizon, the revision does not matter: D1 §4.7 keeps
-    // today's row 17 behaviour deliberately.
+    // Still inside the horizon, the revision does not matter: an ordinary
+    // due slot is admitted as before.
     assert_eq!(
         admit_slot(
             utc(2026, 9, 15, 11, 0),
@@ -1761,11 +1668,10 @@ fn missed_slot_accounting_caps_at_one_thousand() {
     }
 
     // THE HORIZON IS A SECOND REASON THE COUNT IS A FLOOR, and it says so.
-    // `0 0 1 1 *` over twelve years is twelve slots and too few to reach any
-    // cap, but `slot.rs` cannot name a slot more than WALK_DAYS out — the same
-    // ten-year blindness the legacy evaluator has had since PLAT-04.1 — so the
-    // count stops at ten. Without `horizon_reached` that floor would be
-    // published as an exact total in `status.missedSlots.count`.
+    // `0 0 1 1 *` over twelve years is twelve slots, too few to reach any cap,
+    // but `slot.rs` cannot name a slot more than WALK_DAYS out, so the count
+    // stops at ten. Without `horizon_reached` that floor would be published as
+    // an exact total in `status.missedSlots.count`.
     for zone in [None, Some("Europe/Berlin")] {
         let yearly = Cadence::parse("0 0 1 1 *", zone).unwrap();
         let walk = yearly.skipped_slots(
@@ -1790,11 +1696,9 @@ fn missed_slot_accounting_caps_at_one_thousand() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 4. Retries
-// ---------------------------------------------------------------------------
 
-/// **A retry's name and execution id carry the attempt** — D1 §3.1.
+/// **A retry's name and execution id carry the attempt.**
 #[test]
 fn retry_name_and_execution_id_carry_the_attempt() {
     let slot = "20260915-030000";
@@ -1830,19 +1734,16 @@ fn retry_name_and_execution_id_carry_the_attempt() {
     assert_eq!(ids.len(), (MAX_RETRIES + 1) as usize);
 }
 
-/// **FX-17: every set id this minter writes is an identity to the redactor.**
+/// **Every set id this minter writes is an identity to the redactor.**
 ///
-/// REGRESSION REASON. The catalog sync publishes a point's `backupId`,
-/// `receiptKey` and `manifestKey` through `logweir_core::check_contract`'s
-/// redactor, and the console builds a restore's plan binding from them. The
-/// redactor knew a UUID set id (a manual run's) but not this function's
-/// `<schedule uid>-<slot>[-r<k>]`, so every SCHEDULED point reached the
-/// console as `[redacted]` and was never offered — the PoC's whole first
-/// Catalog page. The two sides are in two crates and nothing tied them
-/// together; this row is the tie. It walks the minter's real output — every
-/// attempt up to [`MAX_RETRIES`], slots from real instants including the year,
-/// month and leap-day edges — so a retry range or a slot format the redactor
-/// does not know fails HERE, in the crate that changed.
+/// The catalog sync publishes a point's `backupId`, `receiptKey` and
+/// `manifestKey` through `logweir_core::check_contract`'s redactor, and the
+/// console builds a restore's plan binding from them; a set id the redactor
+/// does not know reaches the console as `[redacted]` and is never offered.
+/// The two sides are in two crates, and this row ties them: it walks the
+/// minter's real output (every attempt up to [`MAX_RETRIES`], slots from real
+/// instants including the year, month and leap-day edges), so a retry range
+/// or a slot format the redactor does not know fails HERE.
 #[test]
 fn every_set_id_the_minter_writes_survives_the_redactor() {
     use logweir_core::check_contract::{is_object_key_shaped, redact, REDACTED};
@@ -1901,8 +1802,8 @@ fn every_set_id_the_minter_writes_survives_the_redactor() {
     );
 }
 
-/// **A retry suffix never silently produces an unusable name** — D1 §3.1
-/// rule 6, and the 63-character pod-label limit `slot.rs` refuses past.
+/// **A retry suffix never silently produces an unusable name**: the
+/// 63-character pod-label limit `slot.rs` refuses past.
 #[test]
 fn retry_names_fit_the_29_character_budget() {
     assert_eq!(max_schedule_name_len(false), 32);
@@ -1942,8 +1843,8 @@ fn retry_names_fit_the_29_character_budget() {
         );
     }
 
-    // `retry_names_fit` is the policy-level check D1 §4.5 step 0 runs, and it
-    // answers for the DEEPEST attempt.
+    // `retry_names_fit` is the policy-level check the scheduler runs first, and
+    // it answers for the DEEPEST attempt.
     assert!(
         retry_names_fit(&thirty, 0).is_ok(),
         "no retries, no problem"
@@ -1982,18 +1883,14 @@ fn the_slot_string_is_the_length_the_budget_assumes() {
 }
 
 /// **The retryable classification is a closed match, and an unknown terminal
-/// record is NOT retryable** — D1 §4.6.
-///
-/// # What a mutant here costs
+/// record is NOT retryable.**
 ///
 /// Flipping the unrecognised arm to `true` turns every refusal this build has
 /// never heard of into `1 + maxRetries` full backups of a customer's cluster,
 /// spaced `delaySeconds` apart, for a decision that was never going to change.
-/// That is why the test walks `conditions::TERMINAL_STATES` — the WHOLE list,
-/// not a sample — and asserts that everything outside
-/// `RETRYABLE_TERMINAL_STATES` is refused, so a state added to that list by a
-/// later task lands on `false` and is noticed here rather than in a retry
-/// storm.
+/// So the test walks `conditions::TERMINAL_STATES` (the WHOLE list) and asserts
+/// that everything outside `RETRYABLE_TERMINAL_STATES` is refused: a new state
+/// lands on `false` and is noticed here rather than in a retry storm.
 #[test]
 fn retry_classification_is_a_closed_match_and_unknown_is_not_retryable() {
     let with_code = |code: i32| TerminalOutcome {
@@ -2096,9 +1993,8 @@ fn retry_classification_is_a_closed_match_and_unknown_is_not_retryable() {
         terminal_state: Some("CredentialNotRenderable"),
     }));
 
-    // AND THE CLASSIFICATION IS WHAT `admit_retry` CONSUMES, which is the
-    // seam W2 wires: the same chain retries under exit 1 and stops under
-    // exit 3.
+    // AND THE CLASSIFICATION IS WHAT `admit_retry` CONSUMES: the same chain
+    // retries under exit 1 and stops under exit 3.
     let slot = utc(2026, 9, 15, 3, 0);
     let finished = utc(2026, 9, 15, 3, 10);
     let policy = Some(RetryPolicy {
@@ -2133,11 +2029,8 @@ fn retry_classification_is_a_closed_match_and_unknown_is_not_retryable() {
 }
 
 /// **Retry admission: exhaustion, the delay, and "never past the next due
-/// slot".**
-///
-/// The table is D1 §4.7 rows 10–13 and 22, evaluated top to bottom. The
-/// supersession row is FIRST because the scheduler picks the latest due slot
-/// before it looks at any attempt chain.
+/// slot"**, evaluated top to bottom. The supersession row is FIRST because the
+/// scheduler picks the latest due slot before it looks at any attempt chain.
 #[test]
 fn retry_admission_follows_the_truth_table() {
     let slot = utc(2026, 9, 15, 3, 0);
@@ -2197,11 +2090,10 @@ fn retry_admission_follows_the_truth_table() {
         },
         "an absent `retry` block is no retries, which is today's behaviour"
     );
-    // AND THE TWO ZEROES ARE TOLD APART (D1 §4.7 row 10). `maxRetries: 0` is a
-    // schedule that considered retries and chose none — `RetryExhausted`; an
-    // absent block never had a budget to exhaust — `RunFailed`. A reader of
-    // `RetryAdmission` alone must be able to write the right reason, or the
-    // two drift apart in the controller.
+    // AND THE TWO ZEROES ARE TOLD APART. `maxRetries: 0` is a schedule that
+    // considered retries and chose none (`RetryExhausted`); an absent block
+    // never had a budget to exhaust (`RunFailed`). A reader of
+    // `RetryAdmission` alone must be able to write the right reason.
     assert_eq!(
         admit_retry(
             slot,
@@ -2282,7 +2174,7 @@ fn retry_admission_follows_the_truth_table() {
         "MUTANT `unbounded retries`: at maxRetries the chain stops, and the slot is done"
     );
     // A `maxRetries` LOWERED by an edit below the attempts already made is
-    // exhaustion, not a negative countdown (D1 §4.5 step 6d).
+    // exhaustion, not a negative countdown.
     assert_eq!(
         admit_retry(
             slot,
@@ -2351,9 +2243,7 @@ fn the_retry_policy_ranges_are_checked() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 5. Previews
-// ---------------------------------------------------------------------------
 
 /// **Previews: count, order, rendering and markers.**
 #[test]
@@ -2400,8 +2290,7 @@ fn previews_mark_shifted_and_repeated_instants() {
         Some(Adjustment::RepeatedLocalTimeSecond)
     );
 
-    // RENDERING: the UTC instant and the local wall time with its offset, which
-    // is D1 §4.4's shape.
+    // RENDERING: the UTC instant and the local wall time with its offset.
     assert_eq!(marked[0].local_time, "2026-10-25T02:30:00+02:00");
     assert_eq!(marked[1].local_time, "2026-10-25T02:30:00+01:00");
 
@@ -2423,7 +2312,7 @@ fn previews_mark_shifted_and_repeated_instants() {
     );
 }
 
-/// **The preview serialises to the shape D1 §4.4 states.**
+/// **The preview serialises to the documented shape.**
 #[test]
 fn a_preview_entry_serialises_to_the_documented_shape() {
     let runs = Cadence::parse("30 2 * * *", Some("Europe/Berlin"))
@@ -2444,9 +2333,7 @@ fn a_preview_entry_serialises_to_the_documented_shape() {
     assert_eq!(third["localTime"], "2026-10-26T02:30:00+01:00");
 }
 
-// ---------------------------------------------------------------------------
 // 6. Presets
-// ---------------------------------------------------------------------------
 
 /// **Every preset in range round-trips through its canonical cron.**
 ///
@@ -2521,7 +2408,7 @@ fn presets_compile_to_the_canonical_expressions() {
     for (preset, want) in table {
         assert_eq!(presets::compile(&preset).unwrap(), want, "{preset:?}");
     }
-    // The aliases, exactly as D1 §4.2 maps them.
+    // The aliases.
     assert_eq!(
         presets::match_preset("@hourly"),
         Some(Preset::Hourly { minute: 0 })
@@ -2653,11 +2540,11 @@ fn preset_parameters_are_range_checked() {
     }
 }
 
-/// **The preset catalogue fixture the static UI reads matches Rust.**
+/// **The preset catalogue fixture the static console reads matches Rust.**
 ///
-/// D1 §4.2 puts ONE catalogue in the product and lets the browser render string
-/// templates from it — never evaluate cron. This test is the drift gate: the
-/// checked-in fixture is this test's own output, so a preset added, renamed or
+/// ONE catalogue in the product, and the browser renders string templates
+/// from it, never evaluating cron. This test is the drift gate: the checked-in
+/// fixture is this test's own output, so a preset added, renamed or
 /// re-ranged in Rust fails here until the fixture is regenerated.
 ///
 /// Regenerate with:
@@ -2734,15 +2621,12 @@ fn example_rows() -> serde_json::Value {
     )
 }
 
-// ---------------------------------------------------------------------------
 // 7. The database this binary carries
-// ---------------------------------------------------------------------------
 
-/// **`TZDB_SOURCE` is the version `Cargo.lock` resolves** — D1 §4.3.
-///
-/// `status.policy.tzdb` carries this string so an operator can tell which rule
-/// set produced a schedule's slots. A string that says one version while the
-/// binary links another is worse than no string: it would be read as evidence.
+/// **`TZDB_SOURCE` is the version `Cargo.lock` resolves.** `status.policy.tzdb`
+/// carries this string so an operator can tell which rule set produced a
+/// schedule's slots; one that says one version while the binary links another
+/// would be read as evidence.
 #[test]
 fn the_tzdb_source_is_the_version_cargo_lock_resolves() {
     let lock = std::fs::read_to_string(workspace_root().join("Cargo.lock"))

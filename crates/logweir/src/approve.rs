@@ -1,28 +1,11 @@
 //! `logweir drill approve` — mint the DSSE-signed approval that
 //! `logweir drill run --approval` requires.
 //!
-//! WHY THIS IS A SUBCOMMAND AND NOT AN EXAMPLE. Approval is MANDATORY in v0.1
-//! (`drill run --approval` has no default and no opt-out), and until this
-//! existed the only producer in the repository was
-//! `crates/logweir-evidence/examples/sign_approval.rs` — a cargo EXAMPLE.
-//! `crates/logweir/Cargo.toml` holds the workspace's only `[[bin]]`, so that
-//! example shipped in neither the container image nor the cargo-dist tarballs.
-//! An operator deploying `examples/cronjob-drill.yaml` could not mint
-//! `approval.sig` from Logweir's own artifacts at all: they had to clone the
-//! repository and install Rust 1.89 — and repeat that on EVERY spec edit,
-//! because `plan_hash` binds the approval to the exact bytes of the spec and a
-//! drill spec carries a time-varying `sample.window_*`. Kubernetes is the
-//! primary deployment target; a product that cannot be operated from its own
-//! artifacts on that path is not shipped.
-//!
-//! WHY A SUBCOMMAND AND NOT A SECOND `[[bin]]`. A second binary has to be
-//! added to the Dockerfile's `COPY` and picked up by cargo-dist separately —
-//! two places it can silently go missing, which is the failure this fixes. One
-//! binary cannot lose a subcommand. It costs one row in
-//! `logweir drill --help`, and it is the row that makes the other three
-//! usable. Global Constraint 13 constrains `logweir schema`'s ARGUMENT to
-//! `scorecard`; it says nothing about subcommands, and nothing here emits or
-//! changes a scorecard field (Global Constraint 12 — the tag is cut).
+//! A subcommand because approval is mandatory and `plan_hash` binds it to the
+//! exact spec bytes, so an operator re-mints on every spec edit and must be
+//! able to from Logweir's own artifacts (the container image and the release
+//! tarballs). Not a second `[[bin]]`: one binary cannot lose a subcommand from
+//! the Dockerfile's `COPY` or the cargo-dist set.
 //!
 //! `openssl dgst` cannot substitute for this: a DSSE signature covers
 //! `PAE(payloadType, payload)`, never the bare payload bytes.
@@ -47,7 +30,7 @@ pub struct ApproveArgs {
     /// parser: `mint` writes the bytes, and `cli.rs` decides what a command
     /// line may spell.
     pub subject_kind: String,
-    /// `--approval-subject` (PROD-15.1), as the wire value that goes into the
+    /// `--approval-subject`, as the wire value that goes into the
     /// document — `originalName` — or `None` for an ordinary approval, whose
     /// bytes carry no such key.
     pub approval_subject: Option<String>,
@@ -107,8 +90,8 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
     }
     let spec_text =
         std::fs::read_to_string(spec_path).map_err(|e| format!("{}: {e}", spec_path.display()))?;
-    // PROD-11.1b (review L4): never sign a partition subset this release's
-    // runner would refuse, because a runner that predates it might not.
+    // Never sign a partition subset this release's runner would refuse,
+    // because a runner that predates it might not.
     if args.subject_kind == "Restore" {
         refuse_unparseable_subset_plan(&spec_text)
             .map_err(|why| format!("{}: {why}", spec_path.display()))?;
@@ -137,7 +120,7 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
         // instead would leave check 8 comparing a field anyone who can write
         // the approval bundle could rewrite without touching the signature.
         subject_kind: args.subject_kind.clone(),
-        // PROD-15.1: INSIDE THE SIGNED BYTES too, and only when the approver
+        // INSIDE THE SIGNED BYTES too, and only when the approver
         // asked for the separate subject — an ordinary approval carries no key.
         approval_subject: approval_subject.wire().map(str::to_string),
     };
@@ -181,7 +164,7 @@ pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<St
     ))
 }
 
-/// **PROD-15.1.** The approval subject this per-run approval carries, refused
+/// The approval subject this per-run approval carries, refused
 /// at MINTING time when it is not the plan's: an original-name plan needs
 /// `--approval-subject original-name`, and that subject approves nothing
 /// else — nor a plan whose original-name shape the runner refuses (a sampled
@@ -243,7 +226,7 @@ fn approval_subject_for(
 /// plan under ([`refuse_unparseable_subset_plan`]).
 pub const SUBSET_PLAN_UNPARSEABLE: &str = "SubsetPlanUnparseable";
 
-/// **PROD-11.1b (review L4).** A `Restore` plan that states
+/// A `Restore` plan that states
 /// `restore.partitions` must PARSE under this release's grammar before an
 /// approval is minted over it, or the approval is refused, named
 /// [`SUBSET_PLAN_UNPARSEABLE`], and nothing is signed.
@@ -257,7 +240,7 @@ pub const SUBSET_PLAN_UNPARSEABLE: &str = "SubsetPlanUnparseable";
 /// not.
 ///
 /// Only a plan that names the key is judged: every other plan is minted
-/// exactly as before, including bytes that are not YAML at all, which no
+/// unchanged, including bytes that are not YAML at all, which no
 /// runner parses either.
 ///
 /// # Errors
@@ -285,7 +268,7 @@ pub fn refuse_unparseable_subset_plan(spec_text: &str) -> Result<(), String> {
         })
 }
 
-/// `logweir drill countersign` — the governed approver's half of PLAT-19.2.
+/// `logweir drill countersign` — the governed approver's half.
 pub struct CountersignArgs {
     /// The authorization document v2 bytes, verbatim.
     pub document: PathBuf,

@@ -2,7 +2,7 @@ use crate::Error;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use std::path::Path;
 
-/// `VerifyingKey` and its entire inherent `impl` block moved to
+/// `VerifyingKey` and its entire inherent `impl` block live in
 /// `logweir-verify` (ADR 0008 §E) and are re-exported here, so every
 /// existing `logweir_evidence::keys::VerifyingKey` call site — including
 /// the `VerifyingKey::P256(_)` / `VerifyingKey::Ed25519(_)` patterns in

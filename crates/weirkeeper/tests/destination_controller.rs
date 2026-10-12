@@ -1,50 +1,31 @@
 //! `BackupDestination`: the reconciler's verdict, the resolver's complete
 //! `AWS_*` set, the frozen snapshot, the `ControllerIdentity` store cache and
-//! the G14 retention guard — decision D2 §3.3–§3.7, §3.10, §3.13.
+//! the retention guard.
 //!
 //! # THE PROCESS ENVIRONMENT OF THIS BINARY IS POISONED ON PURPOSE
 //!
 //! [`poison_the_environment`] sets `AWS_ALLOW_HTTP=true`, `AWS_ENDPOINT_URL`,
 //! `AWS_REGION` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=true` in this test
-//! process — the exact shape of defect **SEC-ENVHTTP**, in which a controller
-//! started with those variables forwards them into every runner Job and the
-//! engine's `AmazonS3Builder::from_env()` honours them, enabling plaintext HTTP
-//! for a plan whose `allow_http` is `false`.
+//! process: a controller started with those variables must not forward them
+//! into a runner Job, where the engine's `AmazonS3Builder::from_env()` would
+//! honour them and enable plaintext HTTP for a plan whose `allow_http` is
+//! `false`. Every rendering assertion below runs WITH that environment set, so
+//! "the controller environment never reaches a rendered set" is measured. The
+//! mutation races nothing: `weirkeeper::destination` reads no environment
+//! variable at all.
 //!
-//! Every rendering assertion below then runs WITH that environment set, so
-//! "the controller environment never reaches a rendered set" is measured rather
-//! than asserted from the absence of a `std::env::var` call. The mutation races
-//! nothing: `weirkeeper::destination` reads no environment variable at all, so
-//! no other row in this binary can observe the change.
+//! # The planted mutants
 //!
-//! # The six planted mutants (D2 §12's "a guard without a mutant is not a
-//! guard")
-//!
-//! Each was applied to the shipped source, measured, and reverted. The row that
-//! dies is named beside each.
-//!
-//! The unplanted tree was **35 passed / 0 failed** here and **48 / 0** in
-//! `tests/retention.rs` when these six were measured.
-//!
-//! | # | Mutant | Measured | Dies in |
-//! |---|---|---|---|
-//! | M1 | `job_env` appends `controllers::backup::archive_addressing_env()` | 32 / 3 | [`the_rendered_environment_never_carries_a_process_value`], [`two_destinations_render_distinct_complete_environments`], [`the_resolver_names_no_environment_read`] |
-//! | M2 | `AWS_ALLOW_HTTP` computed from `!addressing.is_path_style()` | 33 / 2 | [`allow_http_comes_from_transport_and_never_from_addressing`], [`two_destinations_render_distinct_complete_environments`] |
-//! | M3 | `secret_grant` drops its object-name check | 34 / 1 | [`a_cross_namespace_secret_reference_is_refused`] |
-//! | M4 | `StoreCache::get_or_build` builds outside `spawn_blocking` | 47 / 1 | `retention::no_store_call_is_made_outside_spawn_blocking`, naming `evidence_store.rs:339` |
-//! | M5 | `StoreCache::record` drops the eviction loop | 34 / 1 | [`the_store_cache_is_bounded`] |
-//! | M6 | `retention_scope` returns `GlobalHandleApplies` unconditionally | 33 / 2 | rows withdrawn with the per-schedule retention report (PROD-17.1 B1) |
-//!
-//! Review round (2026-09-17) added three more, for the three findings that were
-//! fixes rather than documentation:
-//!
-//! | # | Mutant | Measured | Dies in |
-//! |---|---|---|---|
-//! | M7 | `status_patch_with_preconditions` omits `metadata.resourceVersion` | 37 / 2 | [`the_status_patch_carries_its_resource_version_as_a_precondition`], [`a_valid_destination_publishes_its_url_digest_and_ca_digest`] |
-//! | M8 | `ResolvedGrant` loses `rename_all_fields = "camelCase"` | 38 / 1 | [`the_snapshot_key_spellings_are_pinned`] |
-//! | M9 | `read_ca_bundle` reads `data` only | 38 / 1 | [`a_ca_bundle_in_binary_data_is_read_and_refused_by_content`] |
-//!
-//! The unplanted tree is **39 / 0** after the review round.
+//! | # | Mutant | Dies in |
+//! |---|---|---|
+//! | M1 | `job_env` appends `controllers::backup::archive_addressing_env()` | [`the_rendered_environment_never_carries_a_process_value`], [`two_destinations_render_distinct_complete_environments`], [`the_resolver_names_no_environment_read`] |
+//! | M2 | `AWS_ALLOW_HTTP` computed from `!addressing.is_path_style()` | [`allow_http_comes_from_transport_and_never_from_addressing`], [`two_destinations_render_distinct_complete_environments`] |
+//! | M3 | `secret_grant` drops its object-name check | [`a_cross_namespace_secret_reference_is_refused`] |
+//! | M4 | `StoreCache::get_or_build` builds outside `spawn_blocking` | `retention::no_store_call_is_made_outside_spawn_blocking` |
+//! | M5 | `StoreCache::record` drops the eviction loop | [`the_store_cache_is_bounded`] |
+//! | M7 | `status_patch_with_preconditions` omits `metadata.resourceVersion` | [`the_status_patch_carries_its_resource_version_as_a_precondition`], [`a_valid_destination_publishes_its_url_digest_and_ca_digest`] |
+//! | M8 | `ResolvedGrant` loses `rename_all_fields = "camelCase"` | [`the_snapshot_key_spellings_are_pinned`] |
+//! | M9 | `read_ca_bundle` reads `data` only | [`a_ca_bundle_in_binary_data_is_read_and_refused_by_content`] |
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Once};
@@ -70,25 +51,19 @@ const OTHER_NS: &str = "team-b";
 const UID_A: &str = "11111111-0000-4000-8000-000000000001";
 const UID_B: &str = "22222222-0000-4000-8000-000000000002";
 
-/// The value no status, body, environment or snapshot may ever carry.
-///
-/// It is never PUT anywhere by these tests: it stands for the bytes inside the
-/// Secret the references name, and every scan below asserts its absence, which
-/// is the shape `no_status_or_configmap_body_contains_fixture_secret` takes on
-/// the live paths.
+/// The value no status, body, environment or snapshot may ever carry. It is
+/// never PUT anywhere by these tests: it stands for the bytes inside the
+/// Secret the references name, and every scan below asserts its absence.
 const FIXTURE_SECRET_VALUE: &str = "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY";
 
-// ===========================================================================
 // The poisoned environment
-// ===========================================================================
 
-/// Set the four variables defect SEC-ENVHTTP is about, once per process.
+/// Set the four environment variables, once per process.
 ///
 /// `set_var` is `unsafe` from the 2024 edition; this crate is 2021. The
-/// mutation is safe here for a reason stronger than the edition: NOTHING under
-/// test reads these variables. `weirkeeper::destination` calls `std::env::var`
-/// zero times — [`the_resolver_names_no_environment_read`] is the source-level
-/// half of that claim, and every rendering row below is the behavioural half.
+/// mutation is safe here because NOTHING under test reads these variables:
+/// [`the_resolver_names_no_environment_read`] is the source-level half of that
+/// claim, and every rendering row below is the behavioural half.
 fn poison_the_environment() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -99,14 +74,12 @@ fn poison_the_environment() {
     });
 }
 
-// ===========================================================================
 // Fixtures
-// ===========================================================================
 //
 // EVERY FIXTURE IS A `serde_json::Value` A TEST MUTATES BY PATH, never a string
-// a test rewrites by substring. A `.replace("\"PathStyle\"", …)` that silently
-// matches nothing is a test that asserts the DEFAULT fixture's behaviour while
-// its name claims otherwise — the shape a reviewer cannot see in a diff.
+// a test rewrites by substring: a `.replace("\"PathStyle\"", …)` that silently
+// matches nothing asserts the DEFAULT fixture's behaviour while its name
+// claims otherwise.
 
 /// A `BackupDestination` from a JSON value.
 fn build(value: Value) -> BackupDestination {
@@ -131,10 +104,8 @@ fn valid_status(generation: i64) -> Value {
 fn dest_a_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        // EVERY OBJECT FROM A WATCH OR A `get` CARRIES A `resourceVersion`, and
-        // the `/status` write uses it as its compare-and-set precondition
-        // (D-SEAMS S7), so a fixture without one is not a fixture of anything
-        // this reconciler ever sees.
+        // EVERY OBJECT FROM A WATCH OR A `get` CARRIES A `resourceVersion`, and the
+        // `/status` write uses it as its compare-and-set precondition.
         "metadata": {
             "name": "dest-a", "namespace": NS, "uid": UID_A,
             "generation": 3, "resourceVersion": "1001"
@@ -231,10 +202,10 @@ fn policy_for_bucket(bucket: &str) -> Policy {
 }
 
 /// A DER-shaped certificate: a SEQUENCE (`0x30`) with a short body, base64'd
-/// the way a PEM bundle carries it. Not a real certificate, and it does not
-/// need to be: what this file asserts is that the controller can tell a
-/// certificate-shaped block from a private key, a truncated block and a `.der`
-/// file — not that a chain validates.
+/// the way a PEM bundle carries it. Not a real certificate: what this file
+/// asserts is that the controller can tell a certificate-shaped block from a
+/// private key, a truncated block and a `.der` file, not that a chain
+/// validates.
 fn ca_pem(marker: u8) -> String {
     // 0x30 0x06 <six bytes>: a SEQUENCE of length 6. Nine bytes total, a
     // multiple of three, so the base64 has no padding to argue about.
@@ -273,11 +244,9 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// The route table for a reconcile that reads a CA `ConfigMap` and patches a
-/// status.
-///
-/// THE PATCH ANSWER IS A WHOLE OBJECT, because `Api::patch_status` deserialises
-/// the response into the kind. A `{}` body makes the client fail with a serde
-/// error that reads like a reconciler bug.
+/// status. THE PATCH ANSWER IS A WHOLE OBJECT, because `Api::patch_status`
+/// deserialises the response into the kind; a `{}` body would fail with a
+/// serde error that reads like a reconciler bug.
 fn routes(ca: Option<&str>) -> Vec<Route> {
     vec![
         Route {
@@ -314,9 +283,7 @@ fn configmap_body(key: &str, value: &str) -> String {
     .to_string()
 }
 
-// ===========================================================================
-// §3.3 — the reconciler's verdict
-// ===========================================================================
+// The reconciler's verdict
 
 /// The happy path, end to end over the double: one CA `GET`, one `/status`
 /// PATCH, and every published field.
@@ -394,10 +361,10 @@ async fn a_valid_destination_publishes_its_url_digest_and_ca_digest() {
     }
 }
 
-/// **ENGINE-PATHSTYLE.** `VirtualHosted` with a custom endpoint is a setting
-/// the pinned engine cannot honour (0.21.0 through the 0.23.3 pin), so it is
-/// REFUSED rather than served as path-style behind the operator's back. The
-/// condition's message names no engine version (PROD-00.3f, A-C16-1).
+/// `VirtualHosted` with a custom endpoint is a setting the pinned engine
+/// cannot honour (0.21.0 through the 0.23.3 pin), so it is REFUSED rather than
+/// served as path-style behind the operator's back. The condition's message
+/// names no engine version.
 #[test]
 fn virtual_hosted_with_a_custom_endpoint_is_refused() {
     let mut value = dest_a_unreconciled();
@@ -440,7 +407,7 @@ fn virtual_hosted_without_an_endpoint_is_valid() {
     assert_eq!(verdict.canonical_url, "s3://lw-b");
 }
 
-/// The four CA-bundle refusals, each with the code D2 §3.3 names.
+/// The four CA-bundle refusals, each with its code.
 #[test]
 fn the_ca_bundle_refusal_table() {
     let dest = build(dest_a_unreconciled());
@@ -536,12 +503,11 @@ async fn an_absent_ca_config_map_is_reported_as_ca_bundle_not_found() {
     );
 }
 
-/// An object the API server admitted but this controller's own rules refuse —
-/// an older CRD revision, or a hand-applied one.
-///
-/// R6 is the case: `prefix: logweir/x` is Logweir's own evidence root. A CRD
-/// installed before R6 existed would accept it, and every run under it would
-/// write engine segments into the directory the receipts live in.
+/// An object the API server admitted but this controller's own rules refuse
+/// (an older CRD revision, or a hand-applied one). `prefix: logweir/x` is
+/// Logweir's own evidence root: a CRD without that rule would accept it, and
+/// every run under it would write engine segments into the directory the
+/// receipts live in.
 #[test]
 fn an_object_admitted_by_an_older_crd_is_still_refused() {
     let mut value = dest_a_unreconciled();
@@ -585,16 +551,14 @@ async fn an_unchanged_verdict_sends_no_patch() {
     );
 }
 
-/// **FX-29's class sweep: a CA bundle that goes away is written ONCE.**
+/// **A CA bundle that goes away is written ONCE.**
 ///
 /// `dest-a` was `Valid` with a private CA, so its status carries
 /// `caBundleSha256`. The `ConfigMap` is deleted: the verdict is
-/// `CaBundleNotFound` with no digest. Before FX-29 the patch OMITTED the key
-/// (`skip_serializing_if`), a merge patch keeps an omitted key, and
-/// `observed_at_for` compared the stale stored digest with the verdict's
-/// `None` on every pass — so `observedAt` was `now` on every pass, every write
-/// woke this reconciler's own watch, and the destination spun. CONTROL: at
-/// `a8a30428` twenty passes write twenty times and the digest stays.
+/// `CaBundleNotFound` with no digest, and the patch must send `null` for it. A
+/// merge patch keeps an omitted key, so an omitted digest would be compared
+/// stale against the verdict's `None` on every pass: `observedAt` would be
+/// `now` on every pass and every write would wake this reconciler's own watch.
 ///
 /// The fake API is `testing::ObjectStore`, which applies each merge patch as
 /// the API server does and hands the next pass the stored object.
@@ -647,13 +611,13 @@ async fn a_ca_bundle_that_goes_away_is_cleared_once_and_settles() {
     assert_eq!(after["status"]["reason"], "CaBundleNotFound");
 }
 
-/// **A rotated CA bundle is read by the timed requeue** (FX-29 review M-1).
+/// **A rotated CA bundle is read by the timed requeue.**
 ///
 /// This controller does not watch `ConfigMap`s, so nothing but its requeue
-/// ever runs the pass that reads a rotated bundle. The pass returns a timed
-/// requeue of `REQUEUE_SECONDS` (never `await_change()`), and the next pass —
-/// with no event on the destination at all — publishes the new digest. A
-/// failed pass is requeued on `ERROR_REQUEUE_SECONDS`.
+/// runs the pass that reads a rotated bundle. The pass returns a timed requeue
+/// of `REQUEUE_SECONDS` (never `await_change()`), and the next pass, with no
+/// event on the destination at all, publishes the new digest. A failed pass
+/// is requeued on `ERROR_REQUEUE_SECONDS`.
 ///
 /// Mutants that fail here: `destination_action()` returning `await_change()`
 /// or a poll longer than the documented 300 s.
@@ -757,9 +721,7 @@ fn the_condition_reasons_are_closed_and_are_check_codes() {
     );
 }
 
-// ===========================================================================
-// §3.4 — the resolver
-// ===========================================================================
+// The resolver
 
 /// Role defaulting, in one table.
 #[test]
@@ -784,7 +746,7 @@ fn the_role_defaulting_table() {
         (DestinationRole::ArchiveRead, &reader),
         // NOT declared: falls back to archiveWrite, never to "anything".
         (DestinationRole::EvidenceWrite, &writer),
-        // `ArchiveReadGrant` resolves to the EXPLICIT read-only grant (R9).
+        // `ArchiveReadGrant` resolves to the EXPLICIT read-only grant.
         (DestinationRole::EvidenceRead, &reader),
     ] {
         let resolved = destination::resolve(&a, role, &policy)
@@ -809,7 +771,7 @@ fn the_role_defaulting_table() {
 }
 
 /// `evidenceRead: ArchiveReadGrant` without an explicit `archiveRead` is
-/// refused HERE as well as by CEL rule R9 — a write grant is never reused for
+/// refused HERE as well as by CEL rule R9: a write grant is never reused for
 /// verification.
 #[test]
 fn archive_read_grant_without_an_explicit_read_grant_is_refused() {
@@ -889,10 +851,10 @@ fn the_real_problem_is_reported_before_not_yet_valid() {
 /// **M3.** A `<namespace>/<name>` grant reference is refused, naming the rule.
 ///
 /// A `S3SecretKeysRef` has no `namespace` field, so a cross-namespace reference
-/// cannot be EXPRESSED — but a name-shaped attempt at one would reach the
+/// cannot be EXPRESSED, but a name-shaped attempt at one would reach the
 /// kubelet, which reports it as "Secret not found" and sends the operator
-/// looking for the wrong thing. The controller reads no Secret (D2 §3.8 option
-/// B, rejected), so this is a check on the SPELLING and it says so.
+/// looking for the wrong thing. The controller reads no Secret, so this is a
+/// check on the SPELLING and it says so.
 #[test]
 fn a_cross_namespace_secret_reference_is_refused() {
     for spelling in [
@@ -972,8 +934,7 @@ fn controller_identity_needs_the_policy_allowlist() {
 
     // A BUCKET NAME IS NOT AN IDENTITY. The same bucket at a different endpoint
     // is a different store, and an allowlist that matched on the bucket alone
-    // would let an operator point the controller's principal at any endpoint
-    // they can name.
+    // would let an operator point the controller's principal at any endpoint.
     let mut elsewhere = policy_allowing_b();
     elsewhere.evidence.controller_identity_locations[0].endpoint =
         "http://minio-c.storage.svc:9000".to_string();
@@ -1018,7 +979,7 @@ async fn an_absent_destination_is_a_namespace_local_hold() {
 }
 
 /// `resolve_ref` reads the destination in the namespace it was given AND
-/// NOWHERE ELSE — the double panics on any other route.
+/// NOWHERE ELSE: the double panics on any other route.
 #[tokio::test]
 async fn resolve_ref_reads_only_its_own_namespace() {
     let pem = ca_pem(0x7E);
@@ -1053,15 +1014,13 @@ async fn resolve_ref_reads_only_its_own_namespace() {
     assert_eq!(resolved.ca_pem.as_deref(), Some(pem.as_bytes()));
 }
 
-// ===========================================================================
-// §3.5 / §3.13 — the rendered environment
-// ===========================================================================
+// The rendered environment
 
-/// **THE TWO-DESTINATION ACCEPTANCE, at the resolver level** (D2 §3.13).
+/// **THE TWO-DESTINATION ACCEPTANCE, at the resolver level.**
 ///
 /// Two destinations in one namespace with different endpoints, transports and
 /// credentials yield COMPLETE and DISTINCT `AWS_*` sets, and neither carries a
-/// value from the process environment — which this binary has deliberately
+/// value from the process environment, which this binary has deliberately
 /// poisoned.
 #[test]
 fn two_destinations_render_distinct_complete_environments() {
@@ -1149,7 +1108,7 @@ fn two_destinations_render_distinct_complete_environments() {
                 "lw-a-writer".to_string(),
                 "secret-access-key".to_string()
             ),
-            // FX-20: the Secret's own binding, beside the credential it guards.
+            // The Secret's own binding, beside the credential it guards.
             (
                 "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING".to_string(),
                 "lw-a-writer".to_string(),
@@ -1184,8 +1143,8 @@ fn two_destinations_render_distinct_complete_environments() {
         "dest-b's grant declares a sessionTokenKey and dest-a's does not; a session token \
          nobody configured is a token that does not exist"
     );
-    // FX-20: each Job expects ITS destination's binding, so dest-a's Secret
-    // named by dest-b would be refused.
+    // Each Job expects ITS destination's binding, so dest-a's Secret named by
+    // dest-b would be refused.
     assert_eq!(
         env_a.literal(logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV),
         Some(a.credential_binding().as_str())
@@ -1259,11 +1218,11 @@ fn the_rendered_environment_never_carries_a_process_value() {
 }
 
 /// **M2.** `AWS_ALLOW_HTTP` is a function of `transport.security` and of
-/// nothing else — D-SEAMS **S5**, defect UI-HTTPDOWNGRADE's server-side twin.
+/// nothing else: path-style addressing never turns into plaintext HTTP.
 ///
 /// The table walks every legal (transport, addressing) pair. A mutant that
 /// computed `allow_http` from the addressing agrees with the shipped code on
-/// exactly zero of them.
+/// none of them.
 #[test]
 fn allow_http_comes_from_transport_and_never_from_addressing() {
     poison_the_environment();
@@ -1384,7 +1343,7 @@ fn a_workload_identity_grant_projects_no_key() {
 }
 
 /// Evidence and archive are DIFFERENT locations and may be different
-/// principals — D2 §3.9, PLAT-08.1's "evidence/archive destination differences".
+/// principals.
 #[test]
 fn evidence_and_archive_differ_in_prefix_and_credential() {
     let policy = Policy::defaults();
@@ -1407,10 +1366,9 @@ fn evidence_and_archive_differ_in_prefix_and_credential() {
     );
     assert_ne!(archive.plan_storage(), evidence.evidence_storage());
 
-    // dest-a's evidenceWrite falls back to archiveWrite, which is the WRITER —
-    // and its archiveRead is a different, read-only principal. So the two
-    // resolutions carry two different Secrets, which is the separation G6 says
-    // does not exist today.
+    // dest-a's evidenceWrite falls back to archiveWrite, which is the WRITER,
+    // and its archiveRead is a different, read-only principal, so the two
+    // resolutions carry two different Secrets.
     let env = evidence
         .evidence_env(&archive)
         .expect("one namespace, no workload identity");
@@ -1425,7 +1383,7 @@ fn evidence_and_archive_differ_in_prefix_and_credential() {
         vec![
             "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID",
             "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY",
-            // FX-20: the evidence Secret's binding, against this destination's.
+            // The evidence Secret's binding, against this destination's.
             "LOGWEIR_EVIDENCE_CREDENTIAL_BINDING"
         ],
         "SEPARATELY NAMED so neither store's credential can shadow the other's: `AWS_*` is the \
@@ -1560,11 +1518,9 @@ fn the_resolver_names_no_environment_read() {
     }
 }
 
-// ===========================================================================
-// §3.7 / seam S4 — the frozen snapshot
-// ===========================================================================
+// The frozen snapshot
 
-/// The snapshot W10 freezes: canonical, stable, and carrying no credential.
+/// The snapshot a run freezes: canonical, stable, and carrying no credential.
 #[test]
 fn the_snapshot_is_canonical_stable_and_value_free() {
     let resolved = destination::resolve(
@@ -1662,9 +1618,7 @@ fn the_snapshot_digest_moves_with_generation_and_ca() {
     );
 }
 
-// ===========================================================================
-// §3.10 — the ControllerIdentity store cache
-// ===========================================================================
+// The ControllerIdentity store cache
 
 /// A destination the policy allows, resolved for `EvidenceRead`.
 fn controller_identity_destination(
@@ -1853,21 +1807,15 @@ async fn the_store_cache_refuses_what_it_may_not_build() {
     );
 }
 
-// ===========================================================================
-// Seam S7 — the status write is a compare-and-set
-// ===========================================================================
+// The status write is a compare-and-set
 
 /// **M7.** The `/status` merge PATCH carries `metadata.resourceVersion`.
 ///
-/// D-SEAMS **S7**: a status write is a merge patch carrying
-/// `metadata.resourceVersion` as the precondition. The API server applies a
-/// `resourceVersion` in a patch BODY as an update precondition and answers
-/// `409 Conflict` on a mismatch — which is how a merge PATCH gets a
+/// The API server applies a `resourceVersion` in a patch BODY as an update
+/// precondition and answers `409 Conflict` on a mismatch: a merge PATCH gets a
 /// compare-and-set without the `update` verb this role grants on nothing.
-///
-/// Without it, two writers of this status (a second replica, or a future API
-/// path) lose one write silently: each computed its verdict from the object it
-/// read, and last-write-wins picks the stale one.
+/// Without it, two writers of this status (a second replica, or another API
+/// path) lose one write silently: last-write-wins picks the stale verdict.
 #[tokio::test]
 async fn the_status_patch_carries_its_resource_version_as_a_precondition() {
     let pem = ca_pem(0x33);
@@ -1935,24 +1883,20 @@ async fn a_conflicting_status_write_is_not_an_error() {
     );
 }
 
-// ===========================================================================
-// Seam S4 — the frozen key spellings
-// ===========================================================================
+// The frozen key spellings
 
 /// **M8.** The snapshot's key spellings, pinned as literal bytes.
 ///
-/// # Why a golden string and not a round-trip
+/// A round-trip test is satisfied by any encoder that agrees with itself:
+/// `#[serde(rename_all)]` on an ENUM renames the VARIANTS and leaves
+/// struct-variant FIELDS alone, so `ResolvedGrant` could ship
+/// `access_key_id_key` inside a document that is `locationDigest` and
+/// `archiveStorage` everywhere else, and round-trip happily.
 ///
-/// A round-trip test is satisfied by any encoder that agrees with itself, so it
-/// would have passed the defect this row exists for: `#[serde(rename_all)]` on
-/// an ENUM renames the VARIANTS and leaves struct-variant FIELDS alone, so
-/// `ResolvedGrant` shipped `access_key_id_key` inside a document that is
-/// `locationDigest` and `archiveStorage` everywhere else.
-///
-/// W10 freezes this block into `execution-inputs.json`, whose structs are
+/// The block is frozen into `execution-inputs.json`, whose structs are
 /// `deny_unknown_fields` and which is re-encoded and compared byte for byte on
-/// every later pass. After that, renaming one key turns every running `Backup`
-/// into a `PlanConfigMapConflict`. So the spellings are pinned here, now.
+/// every later pass: renaming one key would turn every running `Backup` into a
+/// `PlanConfigMapConflict`. So the spellings are pinned.
 #[test]
 fn the_snapshot_key_spellings_are_pinned() {
     let resolved = destination::resolve(
@@ -2008,9 +1952,8 @@ fn the_snapshot_key_spellings_are_pinned() {
     // NO snake_case IN THIS TYPE'S OWN KEYS. `archiveStorage` and
     // `evidenceStorage` are `logweir_core::engine::StorageUrl`, whose
     // `path_style` / `allow_http` spelling is the grammar the runner's
-    // `backup.yaml` already parses and is NOT this type's to rename — so the
-    // scan is over the block's own level and the `grant` block, which are the
-    // keys this change owns.
+    // `backup.yaml` parses and is NOT this type's to rename, so the scan is
+    // over the block's own level and the `grant` block.
     for key in top.iter().chain(grant.iter()) {
         assert!(
             !key.contains('_'),
@@ -2077,9 +2020,7 @@ fn the_snapshot_key_spellings_are_pinned() {
     );
 }
 
-// ===========================================================================
 // The CA parser
-// ===========================================================================
 
 /// What counts as a certificate, and what does not.
 #[test]
@@ -2105,9 +2046,9 @@ fn the_certificate_parser_table() {
             b"-----BEGIN CERTIFICATE-----\nMIIB".to_vec(),
             "no END marker",
         ),
-        // Padding outside the FINAL group is not base64. Counting `=` per group
-        // accepted this (review F8), which made `CaBundleInvalid` fire one layer
-        // later than it should — at `from_pem_bundle` or at the handshake.
+        // Padding outside the FINAL group is not base64: counting `=` per group
+        // would accept this, and `CaBundleInvalid` would fire one layer later, at
+        // `from_pem_bundle` or at the handshake.
         (
             b"-----BEGIN CERTIFICATE-----\nAA==AAAA\n-----END CERTIFICATE-----\n".to_vec(),
             "padding in a non-final group",
@@ -2145,9 +2086,9 @@ fn the_certificate_parser_table() {
 ///
 /// `kubectl create configmap ca --from-file=ca.crt=ca.der` lands in
 /// `binaryData`, because the value is not valid UTF-8. Reading `data` alone
-/// answered `CaBundleKeyMissing` — "that ConfigMap carries no such key" — for a
-/// key the operator can see in `kubectl get cm -o yaml`. The right answer names
-/// the real problem: a DER file is not a PEM bundle.
+/// would answer `CaBundleKeyMissing` for a key the operator can see in
+/// `kubectl get cm -o yaml`. The right answer names the real problem: a DER
+/// file is not a PEM bundle.
 #[tokio::test]
 async fn a_ca_bundle_in_binary_data_is_read_and_refused_by_content() {
     // A raw DER certificate: a SEQUENCE, not PEM, and not UTF-8 either.
@@ -2208,9 +2149,7 @@ async fn a_ca_bundle_in_binary_data_is_read_and_refused_by_content() {
     assert_eq!(verdict.reason, CheckCode::CaBundleKeyMissing.as_str());
 }
 
-// ===========================================================================
-// FX-20: a destination's Secrets are bound to it, and every Job checks
-// ===========================================================================
+// A destination's Secrets are bound to it, and every Job checks
 
 fn literal_of<'a>(env: &'a weirkeeper::destination::DestinationEnv, name: &str) -> Option<&'a str> {
     env.literal(name)

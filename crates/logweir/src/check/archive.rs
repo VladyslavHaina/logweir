@@ -16,9 +16,7 @@
 //! first by `the_pure_segment_walk_agrees_with_the_store` in
 //! `crates/logweir/tests/check_cli.rs`, which drives BOTH over the same
 //! filesystem archive fixture and asserts the same keys in the same order —
-//! including the `qualify` rule, which is the one a review already found
-//! wrong once (`segment_keys_for` used to return manifest-relative keys, so
-//! every present segment 404'd on a prefixed archive).
+//! including the `qualify` rule.
 //!
 //! # The field paths
 //!
@@ -129,8 +127,7 @@ pub fn window(v: &Value) -> Result<ManifestWindow, ManifestError> {
 ///
 /// `qualify` turns a manifest-relative key into the key space `get` operates
 /// in. It is a parameter rather than a rule because it is the handle's
-/// property (`Store::qualify` is `prefix` plus `/`), and the review that found
-/// it missing is why it is not optional here.
+/// property (`Store::qualify` is `prefix` plus `/`).
 #[must_use]
 pub fn segment_keys_for(
     v: &Value,
@@ -200,7 +197,7 @@ pub fn segment_keys_for_topics(
     out
 }
 
-/// **PROD-11.1.** The manifest's topics in the shape the SHARED replay
+/// The manifest's topics in the shape the SHARED replay
 /// selection reads (`logweir_core::replay_selection::ReplaySelection::resolve`),
 /// so the restore preflight previews a plan's selection through the same
 /// function execution restores it with.

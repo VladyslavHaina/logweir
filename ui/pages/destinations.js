@@ -1,54 +1,40 @@
-// pages/destinations.js -- saved destinations (PLAT-08.1, PLAT-08.2): the
-// list, the create form, the access rotation, the access test and what uses
-// one.
+// pages/destinations.js -- saved destinations: the list, the create form, the
+// access rotation, the access test and what uses one.
 //
-// WHY THIS PAGE EXISTS. Before it, every schedule and every restore spelled
-// its own archive URL, its own endpoint, its own region and its own Secret
-// name, in a form field beside a checkbox called "path_style". Two schedules
-// meant to write to one bucket could disagree about any of those and nothing
-// would say so until a run failed, or -- worse -- until it succeeded against
-// the wrong place. A destination is that answer written down ONCE, with an
-// identity, so everything else references it by name.
+// A destination is an archive location written down ONCE, with an identity,
+// so schedules and restores reference it by name instead of each spelling its
+// own URL, endpoint, region and Secret (and disagreeing silently).
 //
-// FOUR RULES THIS PAGE KEEPS, AND WHAT EACH ONE IS FOR.
+// FOUR RULES THIS PAGE KEEPS.
 //
 // 1. THE CREDENTIAL IS NEVER IN A DRAFT. `ui/lifecycle.js`'s `keepDraft` takes
-//    an ALLOWLIST of field names, and [`DESTINATION_DRAFT_FIELDS`] does not
-//    name `archiveWriteAccessKeyId`, `archiveWriteSecretAccessKey` or any of
-//    their siblings. So a typed credential survives exactly as long as the
-//    form element does: through nothing. Not a refusal, not a route change,
-//    not a re-render after a 409. That is deliberate and it is the whole
-//    reason the allowlist is an allowlist -- a denylist would have meant the
-//    safe default for the NEXT credential field somebody adds is "kept".
-//    The twelve credential field names are DERIVED from the four roles, so a
-//    fifth role cannot add three the disjointness assertion does not cover.
+//    an ALLOWLIST of field names, and [`DESTINATION_DRAFT_FIELDS`] names no
+//    credential field, so a typed credential survives exactly as long as the
+//    form element does: not a refusal, a route change or a re-render after a
+//    409. An allowlist, because with a denylist the default for the NEXT
+//    credential field somebody adds would be "kept". The twelve credential
+//    field names are DERIVED from the four roles, so a fifth role cannot add
+//    three the disjointness assertion does not cover.
 //    `ui/tests/credentials.spec.js` plants a password in a draft and fails.
 //
-// 2. ADDRESSING IS NOT TRANSPORT (defect G5). `addressing` says how the bucket
-//    appears in the URL; `transport.security` alone says whether the
-//    connection is encrypted. They are two independent controls, sitting in
-//    two different fieldsets, and neither derives the other. The wizard once
-//    derived `allowHttp` from a pathStyle checkbox, which meant an operator
-//    ticking "path_style addressing" silently turned TLS off; W13a deleted
-//    that derivation and this page was written so it could not come back.
+// 2. ADDRESSING IS NOT TRANSPORT. `addressing` says how the bucket appears in
+//    the URL; `transport.security` alone says whether the connection is
+//    encrypted. They are two independent controls in two fieldsets and
+//    neither derives the other: deriving `allowHttp` from a pathStyle
+//    checkbox once turned TLS off for anyone who ticked it.
 //
 // 3. ABSENT IS NOT FALSE. `status.valid` is OPTIONAL on the wire and `null`
-//    means the controller has not reached a verdict. On this laboratory
-//    cluster NO controller reconciles a `BackupDestination` at all -- the
-//    images predate the kind -- so every destination reads "not judged yet".
-//    Rendering that as "invalid" would report a missing controller as a broken
-//    destination, and rendering it as "valid" would be worse.
+//    means the controller has not reached a verdict (a controller older than
+//    the kind never writes one). Rendering that as "invalid" would report a
+//    missing controller as a broken destination, and "valid" would be worse.
 //
 // 4. A TEST'S VERDICT COMES FROM THE CHECK, NOT FROM THIS PAGE. "Test access"
-//    creates a `Preflight` and then renders that object's own recorded state.
-//    It does not dial anything, it does not infer a pass from the absence of a
-//    failure, and a `Preflight` that has not been reconciled reads `pending`
-//    -- which is what it is. AND IT READS THE OBJECT BACK (defect P8): the
-//    create answer is the check before it ran, projected without recomputing
-//    staleness, so the page follows the started check with bounded GETs until
-//    a read answers terminal. Before that it rendered the create answer for
-//    ever -- `pending / does not apply / compared: nothing` four minutes after
-//    the check had recorded `ready`.
+//    creates a `Preflight` and renders that object's own recorded state: it
+//    dials nothing, never infers a pass from the absence of a failure, and an
+//    unreconciled `Preflight` reads `pending`. The create answer is the check
+//    before it ran, projected without recomputing staleness, so the page
+//    follows the started check with bounded GETs until a read answers
+//    terminal.
 
 import { apiClient, mayOperate } from "../client.js";
 import {
@@ -105,13 +91,10 @@ import {
 const API = apiClient();
 
 // THE TWO SCHEMES, BUILT AND NEVER SPELLED (the rule `ui/api.js`'s
-// `SCHEME_SEPARATOR` follows, and `scripts/check-ui-offline.sh` enforces over
-// every line of this tree). A reviewer grepping `ui/` for `http` followed by a
-// colon must get an empty result and learn something true: this page names no
-// resource outside the directory it was served from. These are pieces of
-// PROSE and of a VALIDATOR -- the scheme an operator typed into a text field
-// -- and not identifiers this page would fetch, but the gate cannot tell those
-// apart from a line and it is right not to try.
+// `SCHEME_SEPARATOR` follows and `scripts/check-ui-offline.sh` enforces over
+// every line of this tree): grepping `ui/` for `http` and a colon must come
+// back empty. These are pieces of prose and of a validator, not addresses
+// this page fetches, but the gate reads lines and is right not to guess.
 const HTTPS = "https" + ":" + "//";
 const HTTP = "http" + ":" + "//";
 
@@ -143,18 +126,18 @@ export const GRANT_SOURCES = Object.freeze([
   "absent", "existing", "new", "workloadIdentity", "controllerIdentity", "archiveReadGrant",
 ]);
 
-/** FX-20: the sources the CREATE form offers -- every one but `existing`.
- *  A new destination never names an existing Secret: none can carry the
- *  binding of a destination that does not exist yet, and the product API
- *  refuses one (`existing_credential_refused`). The credential is entered
- *  once (`new`) and becomes a Secret owned by and bound to the destination.
- *  The ROTATION form still offers `existing`, for a Secret this destination
- *  already names. */
+/** The sources the CREATE form offers -- every one but `existing`. A new
+ *  destination never names an existing Secret: none can carry the binding of
+ *  a destination that does not exist yet, and the product API refuses one
+ *  (`existing_credential_refused`). The credential is entered once (`new`)
+ *  and becomes a Secret owned by and bound to the destination. The ROTATION
+ *  form still offers `existing`, for a Secret this destination already
+ *  names. */
 export const CREATE_GRANT_SOURCES = Object.freeze(
   GRANT_SOURCES.filter((s) => s !== "existing"),
 );
 
-/** What `existing` means on the rotation form (FX-20). */
+/** What `existing` means on the rotation form. */
 export const EXISTING_ON_ROTATION =
   "existing: only a Secret this destination already names. To change a credential, enter the " +
   "new value: it is written to a NEW Secret bound to this destination, and the old one is left " +
@@ -180,11 +163,10 @@ export const DESTINATION_DEFAULTS = Object.freeze({
   evidenceReadSource: "absent", evidenceReadSecret: "", evidenceReadServiceAccount: "",
 });
 
-/** THE DRAFT ALLOWLIST. Read rule 1 at the top of this file before adding to
- *  it. Every field here is a NAME, a FLAG or an ENUM MEMBER -- a bucket, a
- *  Secret's name, a radio's value. Not one of them is a credential, and every
- *  name in [`CREDENTIAL_INPUTS`] is deliberately absent, so `keepDraft` cannot
- *  keep one even if a future caller hands it the whole form. */
+/** THE DRAFT ALLOWLIST (rule 1 at the top of this file). Every field here is
+ *  a name, a flag or an enum member; every name in [`CREDENTIAL_INPUTS`] is
+ *  deliberately absent, so `keepDraft` cannot keep one even if a caller hands
+ *  it the whole form. */
 export const DESTINATION_DRAFT_FIELDS = Object.freeze([
   "name", "description", "bucket", "prefix", "region", "endpoint",
   "addressing", "security", "caName", "caKey", "writeProbe", "isDefault",
@@ -195,18 +177,13 @@ export const DESTINATION_DRAFT_FIELDS = Object.freeze([
 ]);
 
 /** EVERY FIELD NAME THAT CARRIES A CREDENTIAL VALUE, derived from the four
- *  roles rather than written out, so a fifth role cannot add three names this
- *  list does not have.
+ *  roles so a fifth role cannot add three names this list does not have.
  *
- *  Exported so the suite can assert -- mechanically, not by reading the
- *  allowlist above -- that NONE of them is in it. A field added to the form and
- *  forgotten here is still not kept, because the allowlist is the gate; this
- *  list is what makes the forgetting VISIBLE.
- *
- *  `<role>SessionToken` IS IN IT even though no input renders one yet (review
- *  F4). `grantBody` already reads that field and puts it in `secret.new`, so
- *  the day the input lands the disjointness assertion covers it -- rather than
- *  the day after, when somebody notices. */
+ *  Exported so the suite can assert mechanically that NONE of them is in the
+ *  allowlist. A field forgotten here is still not kept (the allowlist is the
+ *  gate); this list is what makes the forgetting VISIBLE. `<role>SessionToken`
+ *  is in it although no input renders one yet, because `grantBody` already
+ *  reads that field into `secret.new`. */
 export const CREDENTIAL_INPUTS = Object.freeze(GRANT_ROLES.reduce(
   (all, role) => all.concat([
     role + "AccessKeyId", role + "SecretAccessKey", role + "SessionToken",
@@ -242,13 +219,8 @@ export const WRITE_PROBE_SENTENCE =
   "and no opinion gets `disabled` instead: a form that discloses the choice may default to the " +
   "useful answer, and an object created without one may not.";
 
-// ---------------------------------------------------------------- the reads
-
-/** The destinations table. NAME, DEFAULT, LOCATION, TRANSPORT, ADDRESSING,
- *  VERDICT, GENERATION.
- *
- *  TRANSPORT AND ADDRESSING ARE TWO COLUMNS, not one "mode" column, for the
- *  same reason they are two controls on the form: they are two facts, and a
+/** The destinations table. TRANSPORT AND ADDRESSING ARE TWO COLUMNS, not one
+ *  "mode" column, for the same reason they are two controls on the form: a
  *  reader who sees them merged learns that one implies the other. */
 export function renderDestinationList(page, ns) {
   const items = Array.isArray((page || {}).items) ? page.items : [];
@@ -286,13 +258,13 @@ export function renderDestinationList(page, ns) {
   );
 }
 
-/** A transport cell. `insecureHttp` is a BADGE and not a word in a cell, and
- *  the badge says what it is: plaintext over the network. It is a legal,
- *  explicitly configured choice for a lab endpoint and the page does not
- *  refuse it -- it refuses to let it look like the other one. */
+/** A transport cell. `insecureHttp` is a warning BADGE saying what it is,
+ *  plaintext over the network: a legal, explicitly configured choice for a
+ *  lab endpoint, which the page does not refuse but will not let look like
+ *  TLS. */
 export function transportCell(security) {
   if (security === "insecureHttp") {
-    // THE WARNING STYLE (MCP-12): a neutral grey pill read as "fine".
+    // The warning style: a neutral grey pill read as "fine".
     return badge("warn", "insecureHttp (plaintext)");
   }
   if (security === "tls") {
@@ -360,10 +332,9 @@ export function renderDestinationDetail(item, view) {
       ["controller message", cell((d.status || {}).message)],
     ]) +
     "<section class=\"access\"><h3>Access</h3>" + renderAccessTable(d.access) + "</section>" +
-    // THE SUMMARY STANDS DOWN ONCE THIS PAGE HOLDS A TEST OF ITS OWN (the
-    // rule the connection panel keeps): the summary is what the detail read
-    // found BEFORE the test was started, and "No access test has been
-    // recorded" printed above the test this page just started contradicted it.
+    // The summary stands down once this page holds a test of its own: it is
+    // what the detail read found BEFORE the test started, and "No access test
+    // has been recorded" above the test just started would contradict it.
     "<div class=\"test-slot\" id=\"destination-test-slot\">" + renderTestSlot(d, v) + "</div>" +
     renderUsage(v.usage, v.usageError) +
     renderRotateForm(d, v)
@@ -371,10 +342,10 @@ export function renderDestinationDetail(item, view) {
 }
 
 /** The test half of the detail: the recorded summary (until this page holds a
- *  test of its own) and the Test access panel. ITS OWN SLOT (P13's class): a
- *  followed test repaints this and nothing else, so the rotation form below
- *  -- whose credential inputs no draft may keep and no re-render may carry --
- *  is never re-rendered under a reader typing into it. */
+ *  test of its own) and the Test access panel. Its own slot, so a followed
+ *  test repaints this alone and the rotation form below -- whose credential
+ *  inputs no draft may keep -- is never re-rendered under a reader typing
+ *  into it. */
 export function renderTestSlot(item, view) {
   const d = item || {};
   const v = view || {};
@@ -382,10 +353,8 @@ export function renderTestSlot(item, view) {
 }
 
 /** The recorded `lastTest`, which is a POINTER and not a verdict of its own.
- *
- *  `truncated` IS RENDERED. It means the search for the newest test hit its
- *  page bound, so this may not actually be the newest one -- and a "last test"
- *  that might not be last is worse than none, so the reader is told rather
+ *  `truncated` is rendered: the search for the newest test hit its page
+ *  bound, so this may not be the newest, and the reader is told so rather
  *  than reassured. */
 export function renderLastTest(lastTest) {
   if (lastTest === null || lastTest === undefined) {
@@ -406,22 +375,17 @@ export function renderLastTest(lastTest) {
   );
 }
 
-/** The "Test access" control and whatever the started `Preflight` says.
- *
- *  THE VERDICT IS THE OBJECT'S. `view.test` is the `Preflight` this page last
- *  read, rendered field for field: its aggregate, its applicability, its
- *  blocking rows, its advisory rows and its execution-only notes. When the
- *  check has not been reconciled -- which is every check on a cluster whose
- *  controller predates the kind -- that is `pending`, and `pending` is what
- *  appears. */
+/** The "Test access" control and whatever the started `Preflight` says. The
+ *  verdict is the object's: `view.test` is rendered field for field, and an
+ *  unreconciled check is `pending`, which is what appears. */
 export function renderTestPanel(item, view) {
   const v = view || {};
   const test = v.test || null;
   const may = v.mayOperate !== false;
-  // THE STATUS IS THE FORM'S OWN (P16's sweep), as every other check form's
-  // is: a click disables the fieldset, focus leaves the button for the status
-  // of the form it was in (`render.js`'s `restoreFocus`), and a status drawn
-  // after `</form>` was not found -- focus fell to the body at the click.
+  // The status is the form's own, as every check form's is: a click disables
+  // the fieldset and focus moves to the status of the form it was in
+  // (`render.js`'s `restoreFocus`); a status drawn after `</form>` is not found
+  // and focus would fall to the body.
   const status = "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
     mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
     "</div>";
@@ -447,9 +411,9 @@ export function renderTestPanel(item, view) {
   );
 }
 
-// THE ATTEMPT TOKEN, as the connection check mints it (review F1): this load's
-// nonce and a per-click ordinal, so a DELIBERATE second test is a new
-// `Preflight` rather than a replay of the first one's verdict.
+// The attempt token, as the connection check mints it: this load's nonce and
+// a per-click ordinal, so a DELIBERATE second test is a new `Preflight`
+// rather than a replay of the first one's verdict.
 let testAttempts = 0;
 
 /** The token one accepted Test access click carries. */
@@ -459,20 +423,18 @@ export function nextDestinationTestAttempt(ns, name) {
   return String(ns) + "." + String(name) + ".test." + mint + "-" + String(testAttempts);
 }
 
-// THE STARTED TEST, REMEMBERED PER DESTINATION FOR THE LIFE OF THE LOADED PAGE
-// -- the connection panel's `checkViews`, for the same reason: every other
-// control on this view repaints the whole detail, and without this the first
-// such repaint would wipe the result the operator had just asked for. It also
-// names the ONE test being followed, so an older follower stops painting the
-// moment a newer test replaces it.
+// The started test, remembered per destination for the life of the loaded
+// page (the connection panel's `checkViews`, for the same reason): every
+// other control repaints the whole detail, and without this the first such
+// repaint would wipe the result just asked for. It also names the ONE test
+// being followed, so an older follower stops painting once a newer test
+// replaces it.
 const testViews = new Map();
 
 /** A `Preflight`, rendered from its own recorded fields and from nothing else.
- *
- *  SHARED BY THREE CALLERS -- the destination test here, the schedules
- *  readiness panel and the restore wizard's step 5 -- because a readiness
- *  verdict must read the same in all three. A page that rendered its own
- *  version would be a page that could render a different one. */
+ *  Shared by the destination test, the schedules readiness panel and the
+ *  restore wizard's step 5, so a readiness verdict reads the same in all
+ *  three. */
 export function renderPreflight(preflight) {
   const p = preflight || {};
   const binding = p.binding || {};
@@ -506,11 +468,10 @@ export function renderPreflight(preflight) {
 
 /** What names this destination, with the BASIS on which the lists were built.
  *
- *  THE BASIS IS RENDERED BESIDE AN EMPTY LIST, not instead of it. The product
- *  API builds these from a label IT sets on the objects IT creates, so a
- *  schedule made with kubectl is invisible here -- and an empty list that did
- *  not say so would read as "nothing uses this", which is the sentence an
- *  operator would delete a destination on. */
+ *  The basis is rendered beside an empty list, not instead of it: the product
+ *  API builds these from a label it sets on objects IT creates, so a schedule
+ *  made with kubectl is invisible here, and an unexplained empty list would
+ *  read as "nothing uses this" -- the sentence an operator deletes on. */
 export function renderUsage(usage, error) {
   if (error !== null && error !== undefined) {
     return "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
@@ -533,11 +494,9 @@ export function renderUsage(usage, error) {
   );
 }
 
-// ------------------------------------------------------------- the two forms
-
-/** The page's own checks over the create form's values. A CONVENIENCE: the
+/** The page's own checks over the create form's values. A convenience: the
  *  product API's `destination_invalid` and the CRD's CEL rules are the gate,
- *  and every message here names the rule rather than restating the value. */
+ *  and every message names the rule rather than restating the value. */
 export function validateDestination(values) {
   const v = values || {};
   const problems = Object.create(null);
@@ -563,9 +522,9 @@ export function validateDestination(values) {
   if (region.length > 0 && !/^[a-z0-9-]{1,32}$/.test(region)) {
     problems.region = "a region is lowercase letters, digits and '-'";
   }
-  // THE ONE RULE THAT IS ABOUT BOTH CONTROLS AT ONCE, and it is a CONSISTENCY
-  // rule and never a derivation: the scheme the operator typed must AGREE with
-  // the transport they chose. Neither field is changed to suit the other.
+  // The one rule about both controls at once, a CONSISTENCY rule and never a
+  // derivation: the scheme typed must agree with the transport chosen, and
+  // neither field is changed to suit the other.
   const endpoint = String(v.endpoint || "").trim();
   const security = v.security === "insecureHttp" ? "insecureHttp" : "tls";
   if (endpoint.length > 0) {
@@ -593,13 +552,12 @@ export function validateDestination(values) {
     problems.endpoint = "insecureHttp requires an explicit " + HTTP + " endpoint. There is no " +
       "way to reach AWS S3 in the clear and this page will not pretend there is";
   }
-  // A CUSTOM ENDPOINT NEEDS pathStyle ADDRESSING ON THIS ENGINE (D2 G4,
-  // ENGINE-PATHSTYLE): the pinned engine addresses a custom endpoint pathStyle
-  // whatever it is told, so a virtual-hosted destination there would describe a
-  // location its runs never use. The product API refuses it as
-  // `addressing_unsupported_by_engine` and the controller as
-  // `AddressingUnsupportedByEngine`; this says so beside the control, and it
-  // changes neither control to suit the other.
+  // A CUSTOM ENDPOINT NEEDS pathStyle ADDRESSING ON THIS ENGINE: the pinned
+  // engine addresses a custom endpoint pathStyle whatever it is told, so a
+  // virtual-hosted destination would describe a location its runs never use.
+  // The product API refuses it (`addressing_unsupported_by_engine`), as does
+  // the controller (`AddressingUnsupportedByEngine`); this says so beside the
+  // control and changes neither control.
   if (endpoint.length > 0 && v.addressing === "virtualHosted" && problems.endpoint === undefined) {
     problems.addressing = "virtualHosted addressing with a custom endpoint is refused: this " +
       "engine addresses a custom endpoint as pathStyle, so the location would not be the one its " +
@@ -619,7 +577,7 @@ export function validateDestination(values) {
     }
   }
   Object.assign(problems, validateGrants(v));
-  // FX-20: a NEW destination names no existing Secret (the API refuses it as
+  // A NEW destination names no existing Secret (the API refuses it as
   // `existing_credential_refused`); this says so beside the control.
   for (const role of GRANT_ROLES) {
     if (String(v[role + "Source"] || "absent") === "existing") {
@@ -631,20 +589,14 @@ export function validateDestination(values) {
   return problems;
 }
 
-/** The four grants' own checks, for the CREATE form and the ROTATION alike.
+/** The four grants' own checks, for the create form and the rotation alike.
  *
- *  FACTORED OUT BECAUSE THE ROTATION HAD NONE (review F3). `wireRotate` called
- *  `rotationBody` straight from the form, so an operator who chose `new` and
- *  typed nothing sent `secret.new.accessKeyId: ""`. That fails closed at the
- *  API -- `check_credential` answers `required`, "the value is empty" -- but
- *  the 422 comes back on paths (`archiveWrite.secret.new.accessKeyId`) that do
- *  not match this form's input names, so it landed as an unplaced banner on the
- *  one form whose entire subject is a credential. The message here is the same
- *  one the create form has always shown, beside the field it is about.
- *
- *  IT IS THE ROTATION'S ONLY CHECK, and that is correct: the location and the
- *  transport security are immutable, so there are no bucket, endpoint or
- *  scheme rules to run -- there is nothing on that form they could be about. */
+ *  Without them a rotation that chose `new` and typed nothing would send
+ *  `secret.new.accessKeyId: ""`; the API refuses that, but on paths that do
+ *  not match this form's input names, so it would land as an unplaced banner
+ *  on the one form whose subject is a credential. This is the rotation's
+ *  only check: the location and transport security are immutable, so there
+ *  is nothing else on that form a rule could be about. */
 export function validateGrants(values) {
   const v = values || {};
   const problems = Object.create(null);
@@ -710,9 +662,9 @@ export function grantBody(values, role) {
       secret: { existing: { name: String(v[role + "Secret"] || "").trim() } },
     };
   }
-  // `new`: the write-only entry. THE ONLY PLACE IN THIS TREE WHERE A
-  // CREDENTIAL VALUE IS PUT INTO AN OBJECT, and the object goes straight to
-  // the product-API create and is never kept, logged or drafted.
+  // `new`: the write-only entry. THE ONLY PLACE IN THIS TREE WHERE A CREDENTIAL
+  // VALUE IS PUT INTO AN OBJECT, and the object goes straight to the
+  // product-API create and is never kept, logged or drafted.
   const fresh = {
     accessKeyId: String(v[role + "AccessKeyId"] || ""),
     secretAccessKey: String(v[role + "SecretAccessKey"] || ""),
@@ -759,9 +711,8 @@ export function destinationBody(values) {
   if (endpoint.length > 0) {
     storage.endpoint = endpoint;
   }
-  // TWO INDEPENDENT READS. `security` comes from the transport radio and from
-  // nothing else; `addressing` above comes from the addressing radio and from
-  // nothing else. Neither expression mentions the other field (defect G5).
+  // TWO INDEPENDENT READS (rule 2): `security` comes from the transport radio
+  // alone and `addressing` above from the addressing radio alone.
   const transport = { security: v.security === "insecureHttp" ? "insecureHttp" : "tls" };
   const caName = String(v.caName || "").trim();
   if (caName.length > 0 && transport.security === "tls") {
@@ -811,12 +762,10 @@ export function rotationBody(values, generation) {
   return body;
 }
 
-/** WHICH INPUTS EACH CREDENTIAL SOURCE USES (MCP-10). The form used to show
- *  the Secret name, the ServiceAccount and both new-key inputs under every
- *  role whatever its source, `absent` included; now a source shows its own
- *  inputs and the others are `hidden` -- still in the form, so a draft and a
+/** Which inputs each credential source uses. A source shows its own inputs
+ *  and the others are `hidden` -- still in the form, so a draft and a
  *  re-render keep what was typed, and `grantBody` reads only the ones its
- *  source names, as it always did. */
+ *  source names. */
 export const SOURCE_INPUTS = Object.freeze({
   absent: Object.freeze([]),
   existing: Object.freeze(["secret"]),
@@ -865,9 +814,8 @@ function grantFieldset(role, d, field, line, prefixId, sources) {
     field(id("sa"), role + "ServiceAccount") + ">" +
     line(id("sa"), role + "ServiceAccount") + "</div>" +
     // THE WRITE-ONLY INPUTS. `autocomplete="off"` and `type="password"` for the
-    // secret half; no `value` attribute on either, ever, because a value
-    // attribute is what a re-render would have to carry -- and a re-render
-    // that carried a credential is exactly the failure rule 1 forbids.
+    // secret half, and never a `value` attribute: a re-render would have to carry
+    // it, which is exactly what rule 1 forbids.
     "<div class=\"field-row\" data-grant-inputs=\"keys\"" + hide("keys") + ">" +
     "<div class=\"field\"><label for=\"" + esc(id("akid")) + "\">new access key id</label>" +
     "<input id=\"" + esc(id("akid")) + "\" name=\"" + esc(role + "AccessKeyId") +
@@ -892,9 +840,9 @@ export function renderDestinationForm(view) {
   const pending = state.phase === "pending";
   const field = (id, name) => invalidAttributes(id, errors[name]);
   const line = (id, name) => fieldErrorLine(id, errors[name]);
-  // ONE BUTTON, NOT A 4,300 PX PAGE (MCP-10). The form opens from "Create
-  // destination"; it is open already when the reader has something in flight
-  // there -- a draft, a refusal, a pending create -- so no outcome is hidden.
+  // One button, not a 4,300 px page: the form opens from "Create destination",
+  // and is open already when something is in flight there (a draft, a refusal,
+  // a pending create), so no outcome is hidden.
   const busy = pending || state.phase === "failed" || Object.keys(errors).length > 0 ||
     Object.keys(v.draft || {}).some((k) => String((v.draft || {})[k] || "") !== "" &&
       String((v.draft || {})[k]) !== String(DESTINATION_DEFAULTS[k]));
@@ -985,8 +933,7 @@ export function renderDestinationForm(view) {
     "<label class=\"inline\" for=\"destination-default\">" +
     "<input type=\"checkbox\" id=\"destination-default\" name=\"isDefault\"" +
     (d.isDefault === true ? " checked" : "") + "> make this the namespace default</label>" +
-    // MCP-11: the default-destination paragraph is said once, beside the
-    // checkbox it is about, and no longer a second time under the list.
+    // The default-destination paragraph is said once, beside its checkbox.
     "<p class=\"help\">" + esc(DEFAULT_DESTINATION_SENTENCE) + "</p>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</fieldset>" +
@@ -1057,12 +1004,9 @@ export function renderRotateForm(item, view) {
   );
 }
 
-// ---------------------------------------------------------------- the DOM half
-
 /** Reads the create form's values. The credential inputs ARE read here --
- *  they have to be, they are what the request carries -- and the returned
- *  object goes to `destinationBody` and to `keepDraft`, whose allowlist drops
- *  them. Two callers, one of which forgets. */
+ *  the request carries them -- and the object goes to `destinationBody` and
+ *  to `keepDraft`, whose allowlist drops them. */
 export function readDestinationValues(form) {
   return readFormValues(form);
 }
@@ -1096,7 +1040,7 @@ export const DESTINATION_FIELD_PATHS = Object.freeze({
   "access.archiveWrite": "archiveWriteSource",
   "access.archiveWrite.mode": "archiveWriteSource",
   "access.archiveWrite.secret.existing.name": "archiveWriteSecret",
-  // FX-20: `existing_credential_refused` names the `existing` object itself.
+  // `existing_credential_refused` names the `existing` object itself.
   "access.archiveWrite.secret.existing": "archiveWriteSecret",
   "access.archiveRead.mode": "archiveReadSource",
   "access.archiveRead.secret.existing.name": "archiveReadSecret",
@@ -1129,8 +1073,6 @@ export async function submitRotation(ns, name, values, generation, deps) {
   }
   return (deps || API).updateDestinationAccess(ns, name, rotationBody(values, generation));
 }
-
-// --------------------------------------------------------------- mount half
 
 export async function mountDestinations(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
@@ -1169,9 +1111,9 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
     if (!active(lifecycle)) {
       return;
     }
-    // THE USAGE READ IS SEPARATE AND ITS FAILURE IS NOT THE PAGE'S. A
-    // destination whose `/usage` route answers 403 still renders; what the
-    // reader loses is one section, and that section says so.
+    // The usage read is separate and its failure is not the page's: a
+    // destination whose `/usage` answers 403 still renders, and the lost section
+    // says so.
     let usage = null;
     let usageError = null;
     try {
@@ -1229,8 +1171,8 @@ function detailView(ns, name, extra) {
 
 function paintDetail(node, ns, name, parse, lifecycle, api, item, extra, first) {
   const view = detailView(ns, name, extra);
-  // THE MOUNT'S FIRST PAINT IS NEW CONTENT; a later one repaints the detail
-  // the reader is on and keeps their place there (P16).
+  // The mount's first paint is new content; a later one repaints the detail
+  // the reader is on and keeps their place there.
   (first === true ? replace : replaceInPlace)(node, parse(renderDestinationDetail(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
   wireRotate(node, ns, name, parse, lifecycle, api, item, view);
@@ -1261,9 +1203,8 @@ function paintTest(node, ns, name, parse, lifecycle, api, item, extra) {
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
 }
 
-/** A source selector shows its own inputs and hides the rest, as the reader
- *  changes it (MCP-10). Every grant fieldset on the page, create and rotate
- *  alike: each `<fieldset class="grant">` holds one selector and its groups. */
+/** A source selector shows its own inputs and hides the rest as the reader
+ *  changes it, in every grant fieldset on the page, create and rotate alike. */
 function wireGrantSources(node, lifecycle) {
   for (const set of node.querySelectorAll("fieldset.grant")) {
     const select = set.querySelector("select");
@@ -1290,9 +1231,8 @@ function wireCreate(node, ns, parse, lifecycle, api) {
     if (!active(lifecycle)) {
       return;
     }
-    // THE ALLOWLIST IS WHAT DROPS THE CREDENTIAL, and it is applied HERE, on
-    // the values the form just produced -- which do carry one. Nothing between
-    // `readDestinationValues` and this call holds them.
+    // THE ALLOWLIST IS WHAT DROPS THE CREDENTIAL, applied here on the values the
+    // form just produced, which do carry one.
     keepDraft(key, readDestinationValues(form), DESTINATION_DRAFT_FIELDS);
     if (mutation.state.phase === "succeeded") {
       mutation.clear();
@@ -1356,9 +1296,9 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     }
     const values = readDestinationValues(form);
     const roles = Array.isArray(values.roles) ? values.roles : [];
-    // THE TOKEN IS MINTED INSIDE THE EXECUTOR, as the connection check's is,
-    // so a platform with no random source is a refusal in this form's status
-    // region rather than an exception out of an event handler.
+    // The token is minted inside the executor, as the connection check's is, so
+    // a platform with no random source is a refusal in this form's status region
+    // rather than an exception out of an event handler.
     mutation.run(() => api.testDestination(ns, name, roles.length > 0 ? { roles: roles } : {}, {
       attempt: nextDestinationTestAttempt(ns, name),
     }));
@@ -1367,22 +1307,17 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     event.preventDefault();
     start();
   }, lifecycle);
-  // "RUN THE CHECK AGAIN" IS TEST ACCESS AGAIN, with the roles on the form: a
+  // "Run the check again" is Test access again, with the roles on the form: a
   // per-click token, so a new test.
   wireCheckRetry(node, view.test, start, lifecycle);
 }
 
 /** Re-reads the test this page started until a READ answers terminal, or the
- *  longest time a check may take has passed -- defect P8, and poc-upgrade-3's
- *  P15 (a 60 s budget under a check that may take twelve minutes).
- *
- *  THE CREATE ANSWER IS NOT A READ (`owesRead`): even a terminal one, which
- *  is a replay, was projected without recomputing staleness. Every read is
- *  guarded by the route (PLAT-13.1), a failed read is not a verdict (the rows
- *  on screen stay what the check last recorded), an older follower stops as
- *  soon as a newer test is the one on screen, and a follow that ends without
- *  a result says so with "Run the check again" (`lifecycle.js`'s
- *  `followCheck`). */
+ *  longest time a check may take has passed (`lifecycle.js`'s `followCheck`).
+ *  The create answer is not a read (`owesRead`); a failed read is not a
+ *  verdict (the rows stay what the check last recorded); an older follower
+ *  stops once a newer test is on screen; and a follow that ends without a
+ *  result says so with "Run the check again". */
 function followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, first) {
   const key = formKey(ns, TEST_FORM, name);
   const mine = () => ((testViews.get(key) || {}).test || {}).id === (first || {}).id;

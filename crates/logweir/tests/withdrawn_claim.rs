@@ -1,5 +1,4 @@
 //! G-SIGN, SECOND HALF — the corpus grep, and the tests that keep it a gate.
-//! Task 14.
 //!
 //! `scripts/check-withdrawn-claim.sh` walks every shipped surface for a fixed
 //! list of phrases: the stronger claim about signing that was made once, was
@@ -29,7 +28,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const GATE: &str = "scripts/check-withdrawn-claim.sh";
-/// The wrap-insensitive corpus scan the gate runs — review `d3w9` R2.
+/// The wrap-insensitive corpus scan the gate runs.
 const SCAN: &str = "scripts/withdrawn-claim-scan.py";
 
 fn gate_source() -> String {
@@ -263,15 +262,9 @@ fn the_gate_enforces_every_phrase_on_its_own_list() {
     }
 }
 
-/// **A line break is not an exemption** — review `d3w9` R2.
-///
-/// The gate was `grep -rniF`, which is line-based, and this corpus hard-wraps
-/// prose at a median of 76 columns. A phrase that happened to break across two
-/// lines was invisible to it, and that was not a gap in one phrase: EVERY
-/// phrase on the list was escapable the same way, including the original
-/// withdrawn signing claim the gate was built for. One instance survived a
-/// whole review round in the D3 decision document; the wrap-insensitive scan
-/// found it, and two more, on its first run.
+/// **A line break is not an exemption.** This corpus hard-wraps prose at a
+/// median of 76 columns, so a line-based grep misses EVERY phrase on the list
+/// whenever it breaks across two lines.
 ///
 /// Each phrase is planted THREE ways — on one line, wrapped as prose, and
 /// wrapped inside a Rust doc comment (the shape that also needs the leading

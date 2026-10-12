@@ -1,50 +1,44 @@
-//! The bounded Kubernetes view of a durable recovery catalog — D3 §5.3, §5.4.
+//! The bounded Kubernetes view of a durable recovery catalog.
 //!
-//! # What lives here and why it is pure
+//! # Pure
 //!
-//! Everything in this module is a function of bytes and values: the grammar of
-//! the `catalogSync` result body, the two classification axes, the trust
+//! Everything here is a function of bytes and values: the grammar of the
+//! `catalogSync` result body, the two classification axes, the trust
 //! re-evaluation, the page and fence-pointer materialisation, the ten status
-//! counters and the names of every object the controller creates. Nothing here
-//! reads a clock, a socket or an API server —
-//! [`crate::controllers::recovery_catalog`] does that and hands the bytes over.
+//! counters and the names of every object the controller creates. Nothing reads
+//! a clock, a socket or an API server; [`crate::controllers::recovery_catalog`]
+//! does that and hands the bytes over, so a whole view is asserted over a table
+//! ("5 001 points page as 2 ConfigMaps, the newest 5 000 are materialised and
+//! `truncated` is true") rather than a fake Job.
 //!
-//! That split is the reason a whole view can be asserted over a table instead
-//! of over a route table: "5 001 points page as 2 ConfigMaps, the newest 5 000
-//! are materialised and `truncated` is true" is a property of arithmetic, and a
-//! test that had to stand up a fake Job to state it would be testing the fake.
+//! # The durable truth is in object storage; this is a window onto it
 //!
-//! # The durable truth is in object storage, and this is a window onto it
-//!
-//! D3 §5.3: the catalog itself is `logweir/catalog/v1/` in the destination.
-//! Kubernetes carries the **newest ≤ 5 000 points**, the counts, the histogram
-//! and the signer summary, in immutable `ConfigMap` pages **owned by the sync
-//! Job**. When the Job's TTL fires, Kubernetes garbage collection takes the
-//! pages with it and the catalog reports `ViewExpired` — which is honest, and
-//! is why **this decision adds no `delete` verb anywhere**.
+//! The catalog itself is `logweir/catalog/v1/` in the destination. Kubernetes
+//! carries the newest ≤ 5 000 points, the counts, the histogram and the signer
+//! summary, in immutable `ConfigMap` pages owned by the sync Job. When the
+//! Job's TTL fires, garbage collection takes the pages and the catalog reports
+//! `ViewExpired`, which is honest, and is why there is no `delete` verb
+//! anywhere.
 //!
 //! # Two axes, and nothing merges them
 //!
-//! [`Availability`] answers *can these bytes be read*, [`Verification`] answers
-//! *does the evidence verify under trusted key material*. A point is selectable
-//! for an ordinary restore only when it is `Available` **and**
-//! (`Verified` | `VerifiedHistorical`); everything else is listed with its exact
-//! state. A single "healthy" boolean over the two is precisely how a console
-//! comes to offer recovery from an archive whose manifest does not parse.
+//! [`Availability`] answers *can these bytes be read*, [`Verification`] *does
+//! the evidence verify under trusted key material*. A point is selectable for
+//! an ordinary restore only when it is `Available` and (`Verified` |
+//! `VerifiedHistorical`); everything else is listed with its exact state. One
+//! "healthy" boolean would offer recovery from an archive whose manifest does
+//! not parse.
 //!
 //! # Who decides what
 //!
 //! The sync Job reads the archive, so it decides [`Availability`] and the
-//! **signature** verdict ([`SignatureVerdict`]) — did these bytes verify under
-//! the key material this controller mounted for it. It does NOT decide trust:
-//! whether a key is one this installation accepts, whether it is retired or
-//! revoked, is a question about the trust source and the controller is what
-//! holds that. [`classify_verification`] is the one place the two meet, and
-//! [`TrustView`] is the trust bound to the catalog's namespace, projected by
-//! [`TrustView::from_resolution`] from [`crate::trust::resolve`] — the same
-//! resolution the `Approval` controller, the restore preflight and the runner's
-//! keyring are built from, with the synthesised `legacy-roster-v1` as the
-//! fallback when no `TrustPolicy` governs the namespace.
+//! signature verdict ([`SignatureVerdict`]) under the key material this
+//! controller mounted. It does not decide trust (whether a key is accepted,
+//! retired or revoked): the controller holds the trust source.
+//! [`classify_verification`] is where the two meet, and [`TrustView`] is the
+//! namespace's trust from [`crate::trust::resolve`], the resolution the
+//! `Approval` controller, the restore preflight and the runner's keyring use,
+//! with the synthesised `legacy-roster-v1` as the fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,40 +58,23 @@ use crate::crds::{trust_roster::TrustRosterSpec, Time};
 use crate::job::{ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner};
 use crate::verification::ValidBasis;
 
-// ===========================================================================
-// The plan kind, and the one thing this module could not take from D2 yet
-// ===========================================================================
-
-/// The plan kind a `RecoveryCatalog` sync runs — D-SEAMS **S1**.
-///
-/// **THE SEAM IS CLOSED.** This was a hand-written `"catalogSync"` for as long
-/// as D2's [`CheckPlanKind`] was a closed FIVE-member vocabulary that did not
-/// name it, guarded by a test that failed the day the kind landed. It has
-/// landed: the constant is now DERIVED from the enum, so the two cannot drift,
-/// and it is kept as a constant only because a `&'static str` in a JSON key
-/// position reads better than a method call. Everything else about the Job —
-/// the argv, the mount path, the three pinned environment variables, the
-/// deadline margin, the labels, `automountServiceAccountToken: false`, the plan
-/// `ConfigMap` and its 409 rule — is taken from [`crate::check`] and is not
-/// re-decided here.
+/// The plan kind a `RecoveryCatalog` sync runs (seam **S1**), derived from the
+/// enum so the two cannot drift. Everything else about the Job (argv, mount
+/// path, pinned environment, deadline margin, labels,
+/// `automountServiceAccountToken: false`, the plan `ConfigMap` and its 409
+/// rule) is taken from [`crate::check`].
 ///
 /// [`CheckPlanKind`]: logweir_core::check_contract::CheckPlanKind
 pub const PLAN_KIND: &str = CheckPlanKind::CatalogSync.as_str();
 
-/// The two-letter Job-name discriminator for [`PLAN_KIND`], in the shape
-/// [`logweir_core::check_contract::CheckPlanKind::job_discriminator`] gives the
-/// other five (`td`, `rd`, `rp`, `da`, `ev`).
-///
-/// `cs`, and DERIVED, for the reason [`PLAN_KIND`] gives.
+/// The two-letter Job-name discriminator for [`PLAN_KIND`]
+/// ([`logweir_core::check_contract::CheckPlanKind::job_discriminator`]),
+/// derived likewise.
 pub const JOB_DISCRIMINATOR: &str = CheckPlanKind::CatalogSync.job_discriminator();
 
 /// The contract string a check plan carries, re-exported so this module names
 /// D2's spelling and never a second one.
 pub use logweir_core::check_contract::CHECK_PLAN_CONTRACT;
-
-// ===========================================================================
-// The two axes
-// ===========================================================================
 
 macro_rules! view_vocabulary {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
@@ -121,11 +98,10 @@ macro_rules! view_vocabulary {
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
             /// The wire spelling back to a member.
-            ///
-            /// `None` for anything not in the table, and never a fallback
-            /// member: "this build does not know that state" and "this specific
-            /// state happened" are different facts, and collapsing them is how
-            /// a newer runner's `Partial` would be read as `Available`.
+            /// `None` for anything not in the table, never a fallback member:
+            /// "this build does not know that state" is not "this state
+            /// happened", and collapsing them would read a newer runner's
+            /// `Partial` as `Available`.
             #[must_use]
             pub fn parse(s: &str) -> Option<Self> {
                 match s {
@@ -162,12 +138,11 @@ macro_rules! view_vocabulary {
 }
 
 view_vocabulary! {
-    /// Can these bytes be read — D3 §5.4's first table.
+    /// Can these bytes be read.
     ///
-    /// `Missing` and `Unreadable` are DIFFERENT ANSWERS and the difference is
-    /// the whole reason there are seven of these: a `NotFound` is "the archive
-    /// does not hold this", a 403 or a timeout is "this credential could not
-    /// tell", and reporting the second as the first is how an operator comes to
+    /// `Missing` and `Unreadable` are different answers: a `NotFound` is "the
+    /// archive does not hold this", a 403 or a timeout "this credential could
+    /// not tell", and reporting the second as the first makes an operator
     /// believe an outage deleted their backups.
     Availability {
         Available => "Available",
@@ -181,8 +156,8 @@ view_vocabulary! {
 }
 
 impl Availability {
-    /// Whether a point in this state may be offered for an ordinary restore —
-    /// the first half of D3 §5.4's selection rule.
+    /// Whether a point in this state may be offered for an ordinary restore:
+    /// the first half of the selection rule.
     #[must_use]
     pub fn selectable(self) -> bool {
         self == Self::Available
@@ -193,10 +168,9 @@ view_vocabulary! {
     /// What the sync Job could say about a signature, and nothing about trust.
     ///
     /// The Job holds the key material this controller mounted and the bytes it
-    /// read; it can say "this DSSE verifies under key K" or "it does not". It
-    /// cannot say whether K is a key this installation accepts, is retired, or
-    /// was revoked for compromise — those are facts about the trust source,
-    /// which lives in the cluster and not in the archive.
+    /// read; it can say whether a DSSE verifies under key K, not whether K is
+    /// accepted, retired or revoked, which are facts about the trust source in
+    /// the cluster.
     SignatureVerdict {
         Verified => "verified",
         Invalid => "invalid",
@@ -206,8 +180,8 @@ view_vocabulary! {
 }
 
 view_vocabulary! {
-    /// Does the evidence verify under trusted key material — D3 §5.4's second
-    /// table. Produced by [`classify_verification`] and by nothing else.
+    /// Does the evidence verify under trusted key material. Produced by
+    /// [`classify_verification`] and nothing else.
     Verification {
         Verified => "Verified",
         VerifiedHistorical => "VerifiedHistorical",
@@ -220,45 +194,35 @@ view_vocabulary! {
 }
 
 impl Verification {
-    /// Whether a point in this state may be offered for an ordinary restore —
-    /// the second half of D3 §5.4's selection rule.
+    /// Whether a point in this state may be offered for an ordinary restore:
+    /// the second half of the selection rule.
     #[must_use]
     pub fn selectable(self) -> bool {
         matches!(self, Self::Verified | Self::VerifiedHistorical)
     }
 }
 
-/// D3 §5.4's selection rule, in one function so no surface writes its own.
+/// The selection rule, in one function so no surface writes its own.
 #[must_use]
 pub fn selectable(availability: Availability, verification: Verification) -> bool {
     availability.selectable() && verification.selectable()
 }
 
-// ===========================================================================
-// The controller's own verdict outranks a view row
-// ===========================================================================
-
 /// Whether a `Backup.status.evidence.verification.result` is a verdict the
-/// controller REACHED that is not a pass.
+/// controller reached that is not a pass.
 ///
-/// **The catalog decides only where the controller could not look.** `None`
-/// (no verdict written), `NotAttempted` and `Pending` (the evidence-fetch Job is
-/// still reading the document — `claude/evidence-fetch`; not a verdict at all)
-/// are "I have not looked" and defer to the catalog; `Valid` is a pass the
-/// catalog may still narrow. Everything else
-/// — `Invalid`, `Untrusted`, or a spelling this build does not know (reachable
-/// after a rollback past a build that wrote a fifth verdict) — is a refusal no
-/// catalog row may overrule. The same rule as
+/// The catalog decides only where the controller could not look. `None`,
+/// `NotAttempted` and `Pending` (an evidence-fetch Job still reading) are "I
+/// have not looked" and defer to the catalog; `Valid` is a pass the catalog
+/// may still narrow. Everything else (`Invalid`, `Untrusted`, or a spelling
+/// this build does not know, reachable after a rollback) is a refusal no
+/// catalog row may overrule; the same rule as
 /// `protection::evidence_objective_met`.
 ///
-/// # `Valid` is a pass only on a basis [`ValidBasis`] admits (TRUST-VALID-BASIS-CLASS)
-///
-/// `basis` is the verdict's `trust` block, read by the one rule the
-/// controller's badge uses. A `Valid` on `Unverified` has compared nothing yet
-/// and defers like `NotAttempted`, which is what the badge calls it; a `Valid`
-/// on `RecordedBeforeRevocation`, `None`, a missing basis or an unknown word is
-/// a verdict this installation does not accept — a refusal. `basis` is not
-/// read for any other result.
+/// `Valid` is a pass only on a basis [`ValidBasis`] admits: on `Unverified` it
+/// defers like `NotAttempted`; on `RecordedBeforeRevocation`, `None`, a
+/// missing basis or an unknown word it is a refusal. `basis` is read for no
+/// other result.
 #[must_use]
 pub fn is_reached_refusal(result: Option<&str>, basis: ValidBasis) -> bool {
     match result {
@@ -277,23 +241,17 @@ pub const REFUSED_VALID_VERDICT: &str = "Untrusted";
 /// The points whose own `Backup` the controller REFUSED, keyed for a join
 /// against view rows.
 ///
-/// # Why a view row is not enough
-///
 /// A view is served until `viewExpiresAt`, so a row harvested before a receipt
-/// was replaced or its signer revoked still says `Available`/`Verified`/
-/// `selectable` after the controller fetched the receipt and recorded the
+/// was replaced or its signer revoked can still say
+/// `Available`/`Verified`/`selectable` after the controller recorded the
 /// `Backup` `Invalid` or `Untrusted`. Every surface that reads a view row as
-/// "usable" — retention's keep set, the console's point list — asks this set
-/// first.
+/// usable (retention's keep set, the console's point list) asks this set first.
 ///
-/// # The join
-///
-/// The FULL receipt digest decides wherever the `Backup` carries one
-/// (`status.evidence.receiptSha256`, the digest the view row's `receiptSha256`
-/// names). A `Backup` with no digest joins on the archive set id
-/// (`status.backupId` = the row's `backupId`), the compatibility key
-/// `protection::entries_for` uses for the same case. Both directions are
-/// conservative: a match can only take a point OUT of the usable set.
+/// The full receipt digest decides wherever the `Backup` carries one
+/// (`status.evidence.receiptSha256`, which the row's `receiptSha256` names); a
+/// `Backup` with no digest joins on the archive set id (`status.backupId`), as
+/// `protection::entries_for` does. Both are conservative: a match can only
+/// take a point out of the usable set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControllerRefusals {
     by_receipt: BTreeMap<String, String>,
@@ -306,14 +264,13 @@ pub struct ControllerRefusals {
 /// enum word; anything longer is truncated rather than copied into a response.
 const MAX_REFUSAL_LEN: usize = 32;
 
-/// The word a refusal carries when the `Backup`'s verdict field is PRESENT but
-/// is not a verdict this build can read (not a string, or under a non-object
-/// parent). "Could not read the verdict" is not "no verdict": an unknown
+/// The word a refusal carries when the `Backup`'s verdict field is present but
+/// not readable (not a string, or under a non-object parent): an unknown
 /// verdict is a refusal, and so is an unreadable one.
 pub const UNREADABLE_VERDICT: &str = "Unreadable";
 
 /// What a `Backup`'s `status.evidence.verification.result` field holds, read
-/// LENIENTLY.
+/// leniently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerdictField {
     /// No verdict written: the field, or a parent of it, is absent or null.
@@ -324,16 +281,12 @@ pub enum VerdictField {
     Unreadable,
 }
 
-/// The three facts the refusal rule reads from ONE `Backup` — and nothing else.
+/// The three facts the refusal rule reads from one `Backup`, and nothing else.
 ///
-/// # Why a projection and not the typed CRD
-///
-/// A typed `Backup` list fails WHOLE when one object does not deserialize: a
-/// trigger kind a newer build wrote (`TriggerKind` is closed), a stored object
-/// from an older schema, a missing required field. The refusal rule needs three
-/// fields, and a bounded projection must not depend on the writer's field set
-/// (the reasoning `protection::CatalogEntry` gives for its own lenient type).
-/// So one malformed `Backup` refuses at most its OWN point — never the list.
+/// A projection, not the typed CRD: a typed `Backup` list fails whole when one
+/// object does not deserialize (a newer trigger kind, an older schema, a
+/// missing field), so one malformed `Backup` refuses at most its own point,
+/// never the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupVerdictFacts {
     /// `status.backupId`, when it is a non-empty string.
@@ -342,13 +295,13 @@ pub struct BackupVerdictFacts {
     pub receipt_sha256: Option<String>,
     /// `status.evidence.verification.result`.
     pub result: VerdictField,
-    /// `status.evidence.verification.trust`, read by [`ValidBasis`] — the
-    /// half of the refusal rule a `Valid` needs.
+    /// `status.evidence.verification.trust`, read by [`ValidBasis`]: the half
+    /// of the refusal rule a `Valid` needs.
     pub basis: ValidBasis,
 }
 
 impl BackupVerdictFacts {
-    /// Read the three facts from an UNTYPED `Backup` object (its JSON, or the
+    /// Read the three facts from an untyped `Backup` object (its JSON, or the
     /// `data` of a `DynamicObject`, which carries `status` at the top level).
     #[must_use]
     pub fn from_json(object: &serde_json::Value) -> Self {
@@ -396,9 +349,9 @@ impl BackupVerdictFacts {
     }
 }
 
-/// Walk `path`; a null or missing step is [`VerdictField::Absent`], a step that
-/// is not an object where one is needed — or a leaf that is not a string — is
-/// [`VerdictField::Unreadable`].
+/// Walk `path`; a null or missing step is [`VerdictField::Absent`], a step
+/// that is not an object where one is needed, or a leaf that is not a string,
+/// is [`VerdictField::Unreadable`].
 fn verdict_at(object: &serde_json::Value, path: &[&str]) -> VerdictField {
     let mut here = object;
     for key in path {
@@ -430,12 +383,10 @@ impl ControllerRefusals {
 
     /// The same, over lenient projections.
     ///
-    /// A verdict word that [`is_reached_refusal`] refuses, and an
-    /// [`VerdictField::Unreadable`] verdict (published as
-    /// [`UNREADABLE_VERDICT`]), refuse the point their digest — or, with no
-    /// digest, their set id — names. A refusal that names NEITHER cannot be
-    /// tied to any row; it is counted in [`Self::unattributed`], so a caller
-    /// can say the join is incomplete rather than pretend it was not there.
+    /// A refused verdict word, and an [`VerdictField::Unreadable`] verdict
+    /// (published as [`UNREADABLE_VERDICT`]), refuse the point their digest (or,
+    /// without one, their set id) names. A refusal naming neither is counted
+    /// in [`Self::unattributed`], so a caller can say the join is incomplete.
     #[must_use]
     pub fn from_facts<I>(facts: I) -> Self
     where
@@ -493,7 +444,7 @@ impl ControllerRefusals {
     }
 
     /// Whether the listing this set was built from was complete, so "not in
-    /// the set" means "no listed `Backup` refused it" for EVERY `Backup`.
+    /// the set" means "no listed `Backup` refused it" for every `Backup`.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         !self.incomplete
@@ -506,14 +457,9 @@ impl ControllerRefusals {
     }
 }
 
-// ===========================================================================
-// The trust seam
-// ===========================================================================
-
 /// What a trust source says about one key.
 ///
-/// `Retired` and `Revoked` are the two D3 §7.4 states a `TrustRoster` cannot
-/// express, which is exactly why `TrustPolicy` exists.
+/// `Retired` and `Revoked` are states a `TrustRoster` cannot express;
 /// [`TrustView::from_resolved`] produces them from a bound policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustKeyState {
@@ -529,23 +475,19 @@ pub enum TrustKeyState {
 /// One key the trust source lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustKey {
-    /// `sha256(DER SPKI)` in lowercase hex — the same number `openssl` prints.
+    /// `sha256(DER SPKI)` in lowercase hex, the number `openssl` prints.
     pub key_id: String,
-    /// The PUBLIC key, SubjectPublicKeyInfo in PEM. It is carried here so the
-    /// bundle the sync Job mounts and the ids this controller classifies
-    /// against come from ONE read of the trust source: two reads could observe
-    /// two different rosters and mount a bundle the classification does not
-    /// describe.
+    /// The public key, SubjectPublicKeyInfo in PEM, carried so the bundle the
+    /// sync Job mounts and the ids this controller classifies against come
+    /// from one read of the trust source.
     pub spki_pem: String,
     /// Who the source says it belongs to. Display only, never authority.
     pub subject: Option<String>,
-    /// The key's full lifecycle, for a `TrustPolicy` key — and then
+    /// The key's full lifecycle, for a `TrustPolicy` key, so
     /// [`classify_verification`] judges it with [`logweir_core::trust::decide`]
-    /// ITSELF, the judge the restore preflight and the runner apply to the
-    /// same key, so the view cannot be the permissive one (a staged key, a
-    /// claim in the future, a retirement boundary). `None` for a roster key:
-    /// the roster has no lifecycle, and its classification is the one it
-    /// always had.
+    /// itself, the judge the restore preflight and the runner apply, and the
+    /// view cannot be the permissive one. `None` for a roster key, which has no
+    /// lifecycle.
     pub lifecycle: Option<logweir_core::trust::TrustedKey>,
     /// When it stops being accepted for NEW evidence.
     pub not_after: Option<Time>,
@@ -555,48 +497,35 @@ pub struct TrustKey {
 
 /// The trust source, projected into the one shape this view needs.
 ///
-/// # Built from the namespace's RESOLVED trust (CATALOG-TRUST-ROSTER-ONLY)
-///
-/// [`TrustView::from_resolution`] projects what [`crate::trust::resolve`]
-/// answers for the catalog's namespace: the `TrustPolicy` that governs it, or
-/// the synthesised `legacy-roster-v1` when none does. That is the resolution
-/// the `Approval` controller verifies against, the restore preflight re-judges
-/// a catalog point's signer against, and the runner's evidence keyring is
-/// rendered from — so a point signed under a `TrustPolicy` key is `Verified`
-/// here too, and a retired or revoked key is reflected. Builds before this
-/// read only the `TrustRoster` ([`TrustView::from_roster`], kept for its
-/// tests), so a `TrustPolicy`-signed point was `UntrustedSigner` or
-/// `NotAttempted` in the view and never offered.
+/// Built from the namespace's resolved trust: [`TrustView::from_resolution`]
+/// projects what [`crate::trust::resolve`] answers (the governing
+/// `TrustPolicy`, or the synthesised `legacy-roster-v1`), the resolution the
+/// `Approval` controller, the restore preflight and the runner's keyring use.
+/// So a point signed under a `TrustPolicy` key is `Verified` here too, and a
+/// retired or revoked key is reflected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrustView {
     /// The keys, in the source's own order.
     pub keys: Vec<TrustKey>,
     /// Which source produced this — for a status message, never for a decision.
     pub source: String,
-    /// Why the namespace resolved to NO trust although trust is configured —
-    /// two `TrustPolicy` objects claim it ([`crate::trust::Resolution::Conflict`]).
-    /// `keys` is then empty, every point is `NotAttempted`, and
-    /// `TrustAvailable=False` names the conflict rather than "no key material".
+    /// Why the namespace resolved to no trust although trust is configured:
+    /// two `TrustPolicy` objects claim it. `keys` is then empty, every point is
+    /// `NotAttempted`, and `TrustAvailable=False` names the conflict.
     pub unresolved: Option<String>,
 }
 
 impl TrustView {
-    /// The `TrustRoster`'s signing keys, every one of them `Active` — the
-    /// projection a roster-only namespace had before [`Self::from_resolution`]
-    /// was wired in, and the reference `from_resolved` reproduces for the
-    /// synthesised `legacy-roster-v1` (`tests/catalog_controller.rs`,
-    /// `a_roster_only_namespace_projects_exactly_as_the_roster_did`).
+    /// The `TrustRoster`'s signing keys, every one `Active`: what
+    /// `from_resolved` reproduces for the synthesised `legacy-roster-v1`
+    /// (`a_roster_only_namespace_projects_exactly_as_the_roster_did`).
     ///
-    /// `signingKeys` AND NOT `approverKeys`: D3 §7.3's usage split says a key
-    /// that may AUTHORISE a restore is not thereby a key that may ATTEST to
-    /// one. The roster's `approverKeys` are the authorisation half and are not
-    /// consulted here.
+    /// `signingKeys`, not `approverKeys`: a key that may authorise a restore is
+    /// not thereby one that may attest to one.
     ///
-    /// Every entry is `Active` because the roster has no lifecycle field to
-    /// read — that absence is the defect `TrustPolicy` was designed to fix, and
-    /// inventing a state from `notAfter` alone would make a key that simply
-    /// expired indistinguishable from one that was retired on purpose.
-    /// `notAfter` IS carried, and [`classify_verification`] uses it.
+    /// Every entry is `Active` because the roster has no lifecycle field, and
+    /// inventing one from `notAfter` would make an expired key look retired on
+    /// purpose. `notAfter` is carried, and [`classify_verification`] uses it.
     #[must_use]
     pub fn from_roster(spec: &TrustRosterSpec) -> Self {
         Self {
@@ -622,14 +551,12 @@ impl TrustView {
     ///
     /// * [`Resolution::Trust`](crate::trust::Resolution::Trust) →
     ///   [`Self::from_resolved`].
-    /// * [`Resolution::Conflict`](crate::trust::Resolution::Conflict) → NO
+    /// * [`Resolution::Conflict`](crate::trust::Resolution::Conflict) → no
     ///   keys and [`Self::unresolved`] naming the contesting policies: a
-    ///   namespace claimed twice resolves to nothing (the module header of
-    ///   [`crate::trust`] says why), and the catalog verifies nothing there
-    ///   rather than picking a policy by sort order.
+    ///   namespace claimed twice resolves to nothing, and the catalog verifies
+    ///   nothing there rather than pick a policy by sort order.
     /// * [`Resolution::Unconfigured`](crate::trust::Resolution::Unconfigured)
-    ///   → no keys, under the roster's name — exactly what an absent
-    ///   `TrustRoster` produced before `TrustPolicy` resolution was wired in.
+    ///   → no keys, under the roster's name.
     #[must_use]
     pub fn from_resolution(resolution: &crate::trust::Resolution) -> Self {
         match resolution {
@@ -659,31 +586,24 @@ impl TrustView {
     /// only, each with the state and acceptance bound [`classify_verification`]
     /// reads.
     ///
-    /// # The projection, key by key — [`logweir_core::trust::decide`]'s rules
+    /// The projection, by [`logweir_core::trust::decide`]'s rules:
     ///
     /// * `Active` → `Active`, bounded by `notAfter` (a key past it verifies
     ///   what it signed inside it, as `VerifiedHistorical`).
-    /// * `Retired` → `Retired`, bounded by `accepted_through()` — the earlier
-    ///   of `notAfter` and `retiredAt` — so evidence signed after the
-    ///   retirement is not historical.
+    /// * `Retired` → `Retired`, bounded by `accepted_through()` (the earlier of
+    ///   `notAfter` and `retiredAt`), so evidence signed after the retirement
+    ///   is not historical.
     /// * `Revoked` for `KeyCompromise` → `Revoked`: nothing it signed is
     ///   accepted, whenever it claims to have signed it.
     /// * `Revoked` for `Superseded`/`Unspecified` → `Retired` at the
-    ///   revocation's effective instant (D3 §7.4: "treated as retirement"),
-    ///   which is what `decide` answers for the same key.
+    ///   revocation's effective instant, as `decide` answers for the same key.
     ///
-    /// # Which keys
-    ///
-    /// `EvidenceSigning` and nothing else — a key that may AUTHORISE a restore
-    /// is not thereby a key that may ATTEST to one (D3 §7.3). From a real
-    /// policy, only USABLE keys (the PEM parses and hashes to its declared id):
-    /// the runner is handed exactly those (`restore::evidence_keyring_bytes`),
-    /// and a key it cannot verify with verifies nothing here either.
-    ///
-    /// From the synthesised `legacy-roster-v1`, every `signingKeys` entry,
-    /// `Active`, with `notAfter` as the roster wrote it — [`Self::from_roster`]'s
-    /// projection, so a roster-only installation mounts the same bundle and
-    /// classifies every point exactly as before.
+    /// `EvidenceSigning` keys only: a key that may authorise a restore is not
+    /// thereby one that may attest to one. From a real policy, only usable keys
+    /// (the PEM parses and hashes to its declared id), exactly those the runner
+    /// is handed (`restore::evidence_keyring_bytes`). From the synthesised
+    /// `legacy-roster-v1`, every `signingKeys` entry, `Active`, with `notAfter`
+    /// as the roster wrote it: [`Self::from_roster`]'s projection.
     #[must_use]
     pub fn from_resolved(trust: &crate::trust::ResolvedTrust) -> Self {
         use logweir_core::trust::KeyUsage;
@@ -720,10 +640,9 @@ impl TrustView {
 
     /// Whether the source holds any key material at all.
     ///
-    /// `false` is what makes every verdict [`Verification::NotAttempted`] and
-    /// `TrustAvailable=False`, and it is a DIFFERENT fact from "the signature
-    /// did not verify" — an installation with no trust material has not
-    /// disproved anything.
+    /// `false` makes every verdict [`Verification::NotAttempted`] and
+    /// `TrustAvailable=False`: an installation with no trust material has not
+    /// disproved anything, which differs from "the signature did not verify".
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
@@ -736,18 +655,13 @@ pub const TRUST_SOURCE_ROSTER: &str = "TrustRoster/default";
 /// One synthesised `legacy-roster-v1` key, as [`TrustView::from_roster`]
 /// projects the same roster entry: `Active`, and `notAfter` absent when the
 /// roster wrote none (the synthesis fills [`crate::trust::legacy_not_after`]).
-/// The roster's display-only `subject` is not carried by the synthesis and is
-/// read by nothing here.
+/// The roster's display-only `subject` is not carried.
 ///
-/// # …UNLESS A `TrustPolicy` REVOKED IT FOR COMPROMISE
-///
-/// `TRUSTPOLICY-DELETE-DROPS-REVOCATION`. The roster has no lifecycle, so a
-/// synthesised key is `Active` — except that [`crate::trust::resolve_in`]
-/// applies every `KeyCompromise` revocation any policy records to the key
-/// with the same id, whatever the source. This projection used to read the
-/// state as `Active` unconditionally, so a namespace re-bound (or dropped) to
-/// the roster listed a compromised key's points `Verified` here while every
-/// other surface refused them. `Revoked` wins, as it does in
+/// Unless a `TrustPolicy` revoked it for compromise:
+/// [`crate::trust::resolve_in`] applies every `KeyCompromise` revocation any
+/// policy records to the key with the same id, whatever the source, so a
+/// namespace on the roster does not list a compromised key's points
+/// `Verified` while every other surface refuses them. `Revoked` wins, as in
 /// [`classify_verification`]'s step 5.
 fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
     let compromised = key.trust.state == logweir_core::trust::KeyState::Revoked
@@ -767,7 +681,7 @@ fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
     }
 }
 
-/// One `TrustPolicy` key — see [`TrustView::from_resolved`] for the rules.
+/// One `TrustPolicy` key; see [`TrustView::from_resolved`] for the rules.
 fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
     use logweir_core::trust::{KeyState, RevocationReason};
     let lifecycle = &key.trust;
@@ -793,34 +707,29 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
 
 /// Turn a signature verdict into a verification state, under a trust source.
 ///
-/// # The order, and why each step is where it is
+/// In order:
 ///
-/// 1. **A signature that did not verify is [`Verification::Invalid`] whatever
-///    the trust source says.** Trust cannot rescue bytes that do not match
-///    their signature, and asking the roster first would let an unlisted key
+/// 1. **A signature that did not verify is [`Verification::Invalid`]**
+///    whatever the trust source says: trust cannot rescue bytes that do not
+///    match their signature, and asking trust first would let an unlisted key
 ///    turn a forgery into a mere `UntrustedSigner`.
-/// 2. **No evidence and not-attempted pass through.** "There is no receipt" and
-///    "nothing could be fetched" are facts about the archive and the run, not
-///    about trust.
-/// 3. **No trust material at all is `NotAttempted`.** An installation that
-///    holds no key has not disproved a signature; reporting `UntrustedSigner`
-///    would name the archive as the problem when the cluster is.
+/// 2. **No evidence and not-attempted pass through**: facts about the archive
+///    and the run, not trust.
+/// 3. **No trust material at all is `NotAttempted`**: an installation with no
+///    key has not disproved a signature, and `UntrustedSigner` would blame the
+///    archive for the cluster.
 /// 4. **A verified signature under a key the source does not list is
-///    [`Verification::UntrustedSigner`]** — D3 §5.5's "fresh installation"
-///    case. It is never upgraded by proximity: a public key found beside an
-///    archive is a claim (`docs/keys.md`).
-/// 5. **Revoked wins over everything else the key could be**, because a
-///    revocation is a statement that the private half is in someone else's
-///    hands.
-/// 6. **A `TrustPolicy` key is judged by [`logweir_core::trust::decide`]
-///    itself** ([`TrustKey::lifecycle`]): every window row — a claim before
-///    `notBefore`, after the accepted bound, in the future, against a key whose
-///    window has not opened — is `decide`'s, so the view agrees with the
-///    preflight and the runner by construction. Steps 5 and 7 are the roster's.
-/// 7. **An expired or retired key still verifies what it signed while it was
-///    valid** — [`Verification::VerifiedHistorical`], D3 §7.4. Evidence signed
-///    AFTER `notAfter` is [`Verification::Invalid`]: the key was not accepted
-///    then either.
+///    [`Verification::UntrustedSigner`]**, never upgraded by proximity: a
+///    public key found beside an archive is a claim (`docs/keys.md`).
+/// 5. **Revoked wins over everything else**: a revocation says the private
+///    half is in someone else's hands.
+/// 6. **A `TrustPolicy` key is judged by [`logweir_core::trust::decide`]**
+///    ([`TrustKey::lifecycle`]): every window row is `decide`'s, so the view
+///    agrees with the preflight and the runner by construction. Steps 5 and 7
+///    are the roster's.
+/// 7. **An expired or retired key still verifies what it signed while valid**:
+///    [`Verification::VerifiedHistorical`]. Evidence signed after `notAfter`
+///    is [`Verification::Invalid`]: the key was not accepted then either.
 ///
 /// `signed_at` is the point's own recorded instant, and `now` is this pass's.
 #[must_use]
@@ -863,9 +772,8 @@ pub fn classify_verification(
         },
         Some(not_after) => match signed_at {
             Some(signed) if signed <= not_after => Verification::VerifiedHistorical,
-            // Signed after the key stopped being accepted, or with no instant to
-            // place it by: not historical, because there is nothing to say it
-            // was inside the validity window.
+            // Signed after the key stopped being accepted, or with no instant:
+            // nothing says it was inside the validity window.
             _ => Verification::Invalid,
         },
         None => match key.state {
@@ -886,7 +794,7 @@ pub fn classify_verification(
 /// | `Valid`, basis `Unverified` | `NotAttempted` |
 /// | `Valid`, any other basis | as `Untrusted` below — never selectable |
 /// | `Untrusted`, `Revoked` or `RecordedBeforeRevocation` | `Revoked` |
-/// | `Untrusted`, `SignedOutsideValidity` — before `notBefore`, after the accepted bound, in the future, against a key whose window has not opened, or no instant at all | `Invalid` |
+/// | `Untrusted`, `SignedOutsideValidity` (before `notBefore`, after the accepted bound, in the future, before the window opened, or no instant) | `Invalid` |
 /// | `Untrusted`, `UntrustedSigner`/`KeyUsageMismatch` | `UntrustedSigner` |
 fn decided(
     lifecycle: &logweir_core::trust::TrustedKey,
@@ -909,17 +817,12 @@ fn decided(
 }
 
 /// [`decided`]'s mapping of one [`logweir_core::trust::Verdict`] onto the
-/// view's vocabulary — the table above.
+/// view's vocabulary: the table above.
 ///
-/// # AN ALLOW-LIST (TRUST-VALID-BASIS-CLASS)
-///
-/// This used to read `(Valid, Current) => Verified, (Valid, _) =>
-/// VerifiedHistorical`: a catch-all that made any `Valid` selectable whatever
-/// its basis. `decide` pairs `Valid` with `Current`/`Historical` only, so the
-/// wildcard was unreachable — and one edit away from a selectable point on
-/// `RecordedBeforeRevocation`. A `Valid` is now read by [`ValidBasis`], the
-/// rule the controller's badge uses, and a basis that is not a pass falls to
-/// the `Untrusted` rows.
+/// An allow-list: a `Valid` is read by [`ValidBasis`], the rule the
+/// controller's badge uses, and a basis that is not a pass falls to the
+/// `Untrusted` rows. A catch-all `(Valid, _)` arm would be one edit away from a
+/// selectable point on `RecordedBeforeRevocation`.
 #[must_use]
 pub fn verification_of_verdict(verdict: &logweir_core::trust::Verdict) -> Verification {
     use logweir_core::trust::{TrustBasis, TrustResult, UntrustReason};
@@ -941,10 +844,6 @@ pub fn verification_of_verdict(verdict: &logweir_core::trust::Verdict) -> Verifi
     }
 }
 
-// ===========================================================================
-// The `catalogSync` result body — the grammar
-// ===========================================================================
-
 /// `catalog-page=<i>/<n> count=<c> sha256=<hex>`.
 pub const PAGE_LINE_PREFIX: &str = "catalog-page=";
 /// `catalog-entry=<compact json>`.
@@ -956,47 +855,35 @@ pub const CURSOR_LINE_PREFIX: &str = "catalog-cursor=";
 /// `catalog-signers=<json>`.
 pub const SIGNERS_LINE_PREFIX: &str = "catalog-signers=";
 
-/// `catalog-format=<n>` — the grammar's own version line, which the parser
-/// REQUIRES.
-///
-/// The record layout is versioned in its key path and in `format_version`; the
-/// relay grammar was not, which meant a newer runner could only extend it by
-/// hoping this parser ignored what it did not know (review finding F7). A body
-/// with no version line, or with a version this build does not know, is refused
-/// by name instead.
+/// `catalog-format=<n>`: the grammar's own version line, which the parser
+/// requires. A body with no version line, or a version this build does not
+/// know, is refused by name, so a newer runner cannot extend the grammar by
+/// hoping this parser ignores what it does not know.
 pub const FORMAT_LINE_PREFIX: &str = "catalog-format=";
 
 /// The only [`FORMAT_LINE_PREFIX`] value this build reads.
 pub const BODY_FORMAT_VERSION: u32 = 1;
 
-/// The most bytes of `details` one body may carry — review finding F7.
+/// The most bytes of `details` one body may carry.
 ///
-/// FIVE MEGABYTES, AND IT IS A BYTE BUDGET BECAUSE THE TRANSPORT IS. The
-/// relay bounds the body twice by bytes and never by lines:
-/// [`crate::check::relay::RELAY_LIMIT_BYTES`] is 8 MiB on the `pods/log` read
-/// and [`crate::check::relay::DECODER_BUDGET_BYTES`] is 8 MiB counted over
-/// BASE64 part-frame lines, i.e. roughly 5.9 MB of raw `details` after the
-/// ~1.35x expansion. A line cap says nothing about either: 25 000 entries at a
-/// realistic 600 B each is ~15 MB, which blows both budgets and surfaces as
-/// `ResultUnreadable` — a transport message for what is really "you sent too
-/// much". Five megabytes sits inside the narrower of the two with headroom and
-/// is what D2's runner is told to honour.
+/// A byte budget, because the transport's bounds are bytes:
+/// [`crate::check::relay::RELAY_LIMIT_BYTES`] (8 MiB on the `pods/log` read)
+/// and [`crate::check::relay::DECODER_BUDGET_BYTES`] (8 MiB over base64 part
+/// frames, about 5.9 MB of raw `details`). Too much would otherwise surface as
+/// a transport `ResultUnreadable`. Five megabytes sits inside the narrower with
+/// headroom, and the runner is told to honour it.
 pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
-/// The most `catalog-signers` rows one body may declare — review finding F7.
-///
-/// SIXTY-FOUR, four times the sixteen [`MAX_SIGNERS`] the status can carry, so
-/// an archive written by many installations still reports an exact
-/// `untrustedSigner` total (finding F10) without an unbounded list reaching
-/// this process.
+/// The most `catalog-signers` rows one body may declare: four times the
+/// [`MAX_SIGNERS`] the status can carry, so an archive written by many
+/// installations still reports an exact `untrustedSigner` total without an
+/// unbounded list reaching this process.
 pub const MAX_BODY_SIGNERS: usize = 64;
 
-/// The most locations one point may be reported at — review finding F12.
-///
-/// SIXTEEN. `locations[]` is the only unbounded field in an entry, and an
-/// entry whose rendered line does not fit a page is an entry that cannot be
-/// published; bounding it in the GRAMMAR turns that into a named refusal rather
-/// than a `ConfigMap` the API server rejects at CREATE.
+/// The most locations one point may be reported at. `locations[]` is the only
+/// unbounded field in an entry, and bounding it in the grammar makes an entry
+/// too large for a page a named refusal rather than a `ConfigMap` the API
+/// server rejects at create.
 pub const MAX_ENTRY_LOCATIONS: usize = 16;
 
 /// The most pages a body may declare. Eight is the CRD's `status.pages`
@@ -1004,31 +891,31 @@ pub const MAX_ENTRY_LOCATIONS: usize = 16;
 /// because a truncated page set would silently drop points.
 pub const MAX_BODY_PAGES: usize = 8;
 
-/// **PROD-05.1.** The most topics one entry may list — the runner's own cap
+/// The most topics one entry may list: the runner's own cap
 /// (`logweir::check::kinds::catalog_sync::MAX_ENTRY_TOPICS`, held equal by
 /// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`). An
-/// entry listing more is MALFORMED, for the reason [`MAX_ENTRY_LOCATIONS`]
-/// gives: an unbounded list is one a page may not be able to hold.
+/// entry listing more is malformed, for the reason [`MAX_ENTRY_LOCATIONS`]
+/// gives.
 pub const MAX_ENTRY_TOPICS: usize = 64;
 
-/// **PROD-05.1 (fix round, M2).** The most words an entry's `ownerDetection`
-/// may carry: the sources the receipt format defines
+/// The most words an entry's `ownerDetection` may carry: the sources the
+/// receipt format defines
 /// (`logweir_core::topic_configuration::OWNER_DETECTION_SOURCES`), each at
 /// most once.
 pub const MAX_OWNER_DETECTION: usize =
     logweir_core::topic_configuration::OWNER_DETECTION_SOURCES.len();
 
-/// **PROD-04.1.** The most consumer groups one entry may list — the runner's
-/// own cap (`logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS`, held
-/// equal by `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`).
-/// An entry listing more is MALFORMED, for [`MAX_ENTRY_TOPICS`]' reason.
+/// The most consumer groups one entry may list: the runner's own cap
+/// (`logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS`, held equal by
+/// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`). An
+/// entry listing more is malformed, for [`MAX_ENTRY_TOPICS`]' reason.
 pub const MAX_ENTRY_GROUPS: usize = 32;
 
-/// **PROD-04.1.** A point's consumer position evidence, as the runner lists
-/// it: when the positions were observed, the listing word, and per selected
-/// group its outcome and how many positions relate to archived data — never a
-/// position. Informational: the runner's rule-3 cross-check tied it to the
-/// verified receipt.
+/// A point's consumer position evidence, as the runner lists it: when the
+/// positions were observed, the listing word, and per selected group its
+/// outcome and how many positions relate to archived data, never a position.
+/// Informational: the runner's rule-3 cross-check tied it to the verified
+/// receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryConsumerPositions {
@@ -1046,7 +933,7 @@ pub struct EntryConsumerPositions {
     pub groups_omitted: Option<u32>,
 }
 
-/// **PROD-04.1.** One selected group of a point.
+/// One selected group of a point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryGroup {
@@ -1068,8 +955,7 @@ pub struct EntryGroup {
     pub positions: Option<EntryPositionCounts>,
 }
 
-/// **PROD-04.1.** A captured group's positions, counted by what they say about
-/// archived data.
+/// A captured group's positions, counted by what they say about archived data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryPositionCounts {
@@ -1088,10 +974,10 @@ pub struct EntryPositionCounts {
     pub not_observed: u32,
 }
 
-/// **PROD-05.1.** One topic of a point, as the runner lists it: the record's
-/// layout and how its configuration is held — never a configuration value.
-/// Informational: two observations of one point are not compared on it (the
-/// runner's rule-3 cross-check already tied it to the verified receipt).
+/// One topic of a point, as the runner lists it: the record's layout and how
+/// its configuration is held, never a configuration value. Informational: two
+/// observations of one point are not compared on it (the runner's rule-3
+/// cross-check already tied it to the verified receipt).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryTopic {
@@ -1103,29 +989,28 @@ pub struct EntryTopic {
     /// The source's replication factor, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication_factor: Option<u32>,
-    /// FX-4's capture coverage word, when recorded.
+    /// The capture coverage word, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_coverage: Option<String>,
     /// The declarative owner's kind, when one manages the topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// **PROD-03.0.** The topic's schema dependency, when the point's record
-    /// carries one (record format 1.5.0). ABSENT is NOT ASSESSED, never "not
+    /// The topic's schema dependency, when the point's record carries one
+    /// (record format 1.5.0). Absent is not assessed, never "not
     /// schema-dependent".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_dependency: Option<EntrySchemaDependency>,
 }
 
-/// **PROD-03.0.** The most schema ids one topic's entry may list — the
-/// receipt format's own cap (`logweir_core::schema_dependency::
-/// SCHEMA_IDS_LISTED`, held equal below and by the runner's
+/// The most schema ids one topic's entry may list: the receipt format's own
+/// cap (`logweir_core::schema_dependency::SCHEMA_IDS_LISTED`, held equal below
+/// and by the runner's
 /// `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`). An
-/// entry listing more is MALFORMED and skipped, for the reason
-/// [`MAX_ENTRY_TOPICS`] gives.
+/// entry listing more is malformed and skipped.
 pub const MAX_ENTRY_SCHEMA_IDS: usize = 16;
 const _: () = assert!(MAX_ENTRY_SCHEMA_IDS == logweir_core::schema_dependency::SCHEMA_IDS_LISTED);
 
-/// **PROD-03.0.** One topic's schema dependency as the runner lists it: the
+/// One topic's schema dependency as the runner lists it: the
 /// receipt's verdict and how it was reached, the DEPENDENT sides, and the
 /// schema ids they name — what a restore review needs to say "registry not
 /// captured" and which ids the applications will ask a registry for. The ids
@@ -1160,44 +1045,41 @@ pub struct EntrySchemaDependency {
 
 /// One point, as the sync Job reports it.
 ///
-/// **The receipt-derived facts are the binding** (D3 §5.2 rule 3): the point
-/// id, the receipt digest and the manifest digest are what a later restore
-/// re-checks. Everything else here is for display and for selection.
+/// The receipt-derived facts are the binding: the point id, the receipt digest
+/// and the manifest digest are what a later restore re-checks. Everything else
+/// is for display and selection.
 ///
-/// `topics` is BOUNDED, not absent (PROD-05.1): a view entry stays small so
-/// that 5 000 of them fit in two `ConfigMap`s, so an entry lists at most
-/// [`MAX_ENTRY_TOPICS`] topics — an entry listing more is malformed and
-/// skipped — and the runner drops the list (counting it in `topicsOmitted`)
-/// before it would push a point out of the body. The full topic set and its
-/// configuration model live in the point's signed record in object storage.
+/// `topics` is bounded, not absent: an entry stays small so 5 000 fit in two
+/// `ConfigMap`s, so it lists at most [`MAX_ENTRY_TOPICS`] topics (more is
+/// malformed and skipped), and the runner drops the list (counting it in
+/// `topicsOmitted`) before it would push a point out of the body. The full
+/// topic set lives in the point's signed record in object storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerEntry {
-    /// `lwp1-<32 hex>` — content-derived from the receipt bytes (D3 §5.1).
+    /// `lwp1-<32 hex>`, content-derived from the receipt bytes.
     pub point_id: String,
-    /// The archive SET identifier. Two receipts under one `backupId` are two
-    /// points, which is defect **RECEIPT-DUP**'s answer.
+    /// The archive set identifier. Two receipts under one `backupId` are two
+    /// points.
     pub backup_id: String,
     /// The run that wrote the receipt.
     pub run_id: String,
-    /// The recovery point, in epoch milliseconds — the record's
+    /// The recovery point, in epoch milliseconds: the record's
     /// `capture.started_at`.
     pub recovery_point_at_ms: i64,
     /// The covered window's start, in epoch milliseconds.
     pub covered_from_ms: i64,
     /// The covered window's end, EXCLUSIVE (invariant I22).
     pub covered_to_ms: i64,
-    /// Where the bytes could be read from, and **how each place fared** — one
-    /// entry per location holding the same receipt. An archive copied to a
-    /// second bucket is ONE point in TWO places (D3 §5.1).
-    ///
-    /// A location whose own `availability` is absent inherits the entry's.
-    /// Bounded by [`MAX_ENTRY_LOCATIONS`].
+    /// Where the bytes could be read from, and how each place fared: one entry
+    /// per location holding the same receipt (an archive copied to a second
+    /// bucket is one point in two places). A location with no `availability`
+    /// of its own inherits the entry's. Bounded by [`MAX_ENTRY_LOCATIONS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locations: Vec<EntryLocation>,
     /// The receipt's key under `logweir/`.
     pub receipt_key: String,
-    /// `sha256:<hex>` of the receipt bytes — the binding the short id displays.
+    /// `sha256:<hex>` of the receipt bytes: the binding the short id displays.
     pub receipt_sha256: String,
     /// The manifest's key, when the record names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1213,7 +1095,7 @@ pub struct RunnerEntry {
     pub format_version: Option<String>,
     /// What the Job could read.
     pub availability: Availability,
-    /// What the Job could say about the signature — NOT about trust.
+    /// What the Job could say about the signature, not about trust.
     pub signature: SignatureVerdict,
     /// The key the signature verified under, or the key the record claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1222,39 +1104,35 @@ pub struct RunnerEntry {
     /// credential, a principal or log content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
-    /// **PROD-05.1.** The point's topics with their recorded layout, bounded
-    /// by [`MAX_ENTRY_TOPICS`]. Empty is NOT PUBLISHED — an older runner, a
-    /// record before 1.3.0, a point that is not `Available` — never "no
-    /// topics".
+    /// The point's topics with their recorded layout, bounded by
+    /// [`MAX_ENTRY_TOPICS`]. Empty is not published (an older runner, a record
+    /// before 1.3.0, a point that is not `Available`), never "no topics".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<EntryTopic>,
     /// How many topics the runner left out of `topics`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topics_omitted: Option<u32>,
-    /// **PROD-05.1 (fix round, M2).** Where the run looked for declarative
-    /// owners (`declared`, `kafkaTopicResources`), beside `topics` and only
-    /// there. An EMPTY list says no owner was looked for, so a topic without
-    /// an `owner` is "not checked", never "applied through the admin API";
-    /// ABSENT is NOT PUBLISHED. At most [`MAX_OWNER_DETECTION`] words — an
-    /// entry carrying more is malformed.
+    /// Where the run looked for declarative owners (`declared`,
+    /// `kafkaTopicResources`), beside `topics` and only there. An empty list
+    /// says no owner was looked for, so a topic without an `owner` is "not
+    /// checked", never "applied through the admin API"; absent is not
+    /// published. At most [`MAX_OWNER_DETECTION`] words; more is malformed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_detection: Option<Vec<String>>,
-    /// **PROD-04.1.** The point's consumer position evidence. ABSENT is NOT
-    /// PUBLISHED — no group selected, an older runner or record, a point that
-    /// is not `Available`. Its groups are bounded by [`MAX_ENTRY_GROUPS`]; an
-    /// entry listing more is malformed.
+    /// The point's consumer position evidence. Absent is not published (no
+    /// group selected, an older runner or record, a point that is not
+    /// `Available`). Its groups are bounded by [`MAX_ENTRY_GROUPS`]; an entry
+    /// listing more is malformed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
 }
 
 impl RunnerEntry {
-    /// The receipt-derived facts two records of one identity must agree on —
-    /// D3 §5.2 rule 3's set, minus the fields that are informational.
+    /// The receipt-derived facts two records of one identity must agree on.
     ///
     /// `locations`, `recordedAt`, `signature`, `signerKeyId` and `remedy` are
-    /// deliberately OUT: two records differing only in where they were found
-    /// are one point in two places, which is the whole point of a
-    /// content-derived identity.
+    /// out: two records differing only in where they were found are one point
+    /// in two places, which is the point of a content-derived identity.
     fn facts(&self) -> (i64, i64, i64, &str, &str, &str, Option<&str>, Option<&str>) {
         (
             self.recovery_point_at_ms,
@@ -1271,26 +1149,21 @@ impl RunnerEntry {
 
 /// One place a point's bytes were looked for, and what was found there.
 ///
-/// PER-LOCATION AVAILABILITY IS WHY A COPY IS AN ASSET AND NOT A LIABILITY
-/// (review finding F9, decision recorded at integration as an amendment to D3
-/// §5.4). D3 §5.1's whole point is that an archive copied to a second bucket is
-/// ONE point in TWO places; a merge that took the WORST availability across
-/// those places would hide a fully recoverable point because a second copy went
-/// missing — the opposite of what a second copy is for. So availability merges
-/// **best-of**, each location keeps its own verdict here, and the degraded ones
-/// are named in `remedy` so nobody has to guess which copy to repair.
+/// Availability merges best-of across locations: an archive copied to a second
+/// bucket is one point in two places, and taking the worst would hide a fully
+/// recoverable point because a second copy went missing. Each location keeps
+/// its own verdict, and the degraded ones are named in `remedy`.
 ///
-/// The SIGNATURE half keeps worst-of, and that asymmetry is deliberate: bytes
-/// that fail verification in one place are evidence about the point, not about
-/// the place.
+/// The signature half keeps worst-of, deliberately: bytes that fail
+/// verification in one place are evidence about the point, not the place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryLocation {
-    /// `s3://<bucket>/<prefix>` — bucket and prefix only. No endpoint, no
-    /// region, no credential, and deliberately NOT part of the identity.
+    /// `s3://<bucket>/<prefix>`: bucket and prefix only. No endpoint, region
+    /// or credential, and not part of the identity.
     pub location_id: String,
-    /// What was found HERE. Absent inherits the entry's own availability, which
-    /// is what a runner reporting one observation at one place writes.
+    /// What was found here. Absent inherits the entry's own availability, as a
+    /// runner reporting one observation at one place writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability: Option<Availability>,
 }
@@ -1303,11 +1176,8 @@ impl EntryLocation {
     }
 }
 
-/// One location in a published view entry, with its verdict RESOLVED.
-///
-/// `availability` is required here and optional on [`EntryLocation`]: a reader
-/// of the view must never have to re-apply an inheritance rule to find out
-/// whether a copy is readable.
+/// One location in a published view entry, with its verdict resolved, so a
+/// reader never has to re-apply the inheritance rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLocation {
@@ -1317,12 +1187,11 @@ pub struct ResolvedLocation {
     pub availability: Availability,
 }
 
-/// One point as it is written into a page — the runner's entry with the
+/// One point as it is written into a page: the runner's entry with the
 /// controller's [`Verification`] in place of the Job's [`SignatureVerdict`].
 ///
-/// **`selectable` is materialised and not derived by the reader.** D3 §5.4's
-/// rule is one conjunction, and a UI that recomputed it from two enums it had
-/// to parse would be a second implementation of the rule that matters most.
+/// `selectable` is materialised, not derived by the reader: a UI recomputing
+/// it would be a second implementation of the rule that matters most.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewEntry {
@@ -1354,9 +1223,9 @@ pub struct ViewEntry {
     /// See [`RunnerEntry::format_version`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_version: Option<String>,
-    /// D3 §5.4's first axis.
+    /// The first axis.
     pub availability: Availability,
-    /// D3 §5.4's second axis, after the controller's trust re-evaluation.
+    /// The second axis, after the controller's trust re-evaluation.
     pub verification: Verification,
     /// See [`RunnerEntry::signer_key_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1380,10 +1249,8 @@ pub struct ViewEntry {
     pub consumer_positions: Option<EntryConsumerPositions>,
 }
 
-/// What the sync counted over the WHOLE walk, not only over the window.
-///
-/// The window is the newest `viewLimit` points; these numbers cover everything
-/// the walk saw, which is what makes `truncated` meaningful and what lets the
+/// What the sync counted over the whole walk, not only over the window (the
+/// newest `viewLimit` points), which makes `truncated` meaningful and lets the
 /// histogram describe the archive rather than the page set.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1417,13 +1284,12 @@ pub struct RunnerCounts {
     /// Points per day, newest day first. Bounded by [`MAX_HISTOGRAM_DAYS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_day: Vec<DayCount>,
-    /// **FX-33.** How many of `unreadable` are a document over its read
-    /// bound: a SIZE, never a permission or transport failure. Absent (zero)
-    /// from an older runner, which then says nothing about why.
+    /// How many of `unreadable` are a document over its read bound: a size,
+    /// never a permission or transport failure. Absent (zero) from an older
+    /// runner, which then says nothing about why.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unreadable_over_read_cap: i64,
-    /// **FX-33.** How many of `unreadable` are a document that is not what
-    /// its key names.
+    /// How many of `unreadable` are a document that is not what its key names.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unreadable_malformed: i64,
 }
@@ -1433,16 +1299,13 @@ fn is_zero(n: &i64) -> bool {
     *n == 0
 }
 
-/// **FX-33 — why points could not be read, in words that fit the cause.**
-/// The `Synced` condition's message for a walk whose `unreadable` is not
-/// zero.
+/// Why points could not be read, in words that fit the cause: the `Synced`
+/// condition's message for a walk whose `unreadable` is not zero.
 ///
-/// It used to be one sentence, "a permission or transport failure", for
-/// every unreadable point — including a backup of 110 topics whose record
-/// was over the walk's read cap, which no grant and no network change would
-/// ever list. A document's SIZE and a document's CONTENT are named as what
-/// they are; only what is left is called a permission or transport failure,
-/// and an older runner's body, which carries no sub-counts, reads as before.
+/// A document's size and content are named as such (no grant or network change
+/// would list an over-cap record); only the rest is called a permission or
+/// transport failure. An older runner's body, with no sub-counts, reads as
+/// before.
 #[must_use]
 pub fn unreadable_message(counts: &RunnerCounts) -> String {
     let over = counts.unreadable_over_read_cap.clamp(0, counts.unreadable);
@@ -1506,15 +1369,15 @@ pub struct DayCount {
 
 /// Who signed the points in this archive, over the whole walk.
 ///
-/// `trusted` is deliberately ABSENT: the Job does not decide trust. The
-/// controller adds it in [`signer_summaries`].
+/// `trusted` is absent: the Job does not decide trust. The controller adds it
+/// in [`signer_summaries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerSigner {
     /// `sha256(DER SPKI)` in lowercase hex.
     pub key_id: String,
-    /// What the record said the principal was. A HINT: it is unsigned metadata
-    /// and is never authority.
+    /// What the record said the principal was. A hint: unsigned metadata,
+    /// never authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_hint: Option<String>,
     /// How many points it signed.
@@ -1580,9 +1443,8 @@ impl SyncBody {
 
 /// Why a `catalogSync` result body could not be read.
 ///
-/// Every variant is a fact about the BODY and carries no log content: a body
-/// that does not decode is exactly the input nobody should paste into a status
-/// field.
+/// Every variant is a fact about the body and carries no log content: a body
+/// that does not decode is exactly the input that must not reach a status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyError {
     /// A `catalog-page=` header did not parse.
@@ -1705,12 +1567,9 @@ impl std::fmt::Display for BodyError {
 impl std::error::Error for BodyError {}
 
 impl BodyError {
-    /// The closed D2 code this is reported as.
-    ///
-    /// ALWAYS [`logweir_core::check_contract::CheckCode::ResultUnreadable`] —
-    /// D-SEAMS **S1**: failures use D2's closed error-code vocabulary rather
-    /// than new strings, and from a consumer's side "the sync's output did not
-    /// read" is one fact whatever the sub-cause. The sub-cause is the
+    /// The closed code this is reported as: always
+    /// [`logweir_core::check_contract::CheckCode::ResultUnreadable`] (seam
+    /// **S1**: the closed vocabulary, no new strings). The sub-cause is the
     /// [`Display`] above.
     #[must_use]
     pub fn code(&self) -> logweir_core::check_contract::CheckCode {
@@ -1720,12 +1579,11 @@ impl BodyError {
 
 /// The digest a page header declares, over the page's own entry lines.
 ///
-/// **Over the RAW line bodies, each followed by `\n`** — the JSON after
-/// `catalog-entry=`, byte for byte as it arrived, and never a re-serialisation.
-/// A digest over reparsed values would verify nothing: the point of the check is
-/// that the bytes this controller read are the bytes the Job wrote, which is
-/// transport integrity and explicitly NOT authorization (D3 §5.3). The
-/// receipt's own signature is the verification root.
+/// Over the raw line bodies, each followed by `\n`: the JSON after
+/// `catalog-entry=`, byte for byte, never a re-serialisation. The check is
+/// that the bytes this controller read are the bytes the Job wrote: transport
+/// integrity, not authorization. The receipt's own signature is the
+/// verification root.
 #[must_use]
 pub fn page_digest(entry_lines: &[&str]) -> String {
     let mut buf = String::new();
@@ -1742,10 +1600,8 @@ pub fn page_digest(entry_lines: &[&str]) -> String {
 ///
 /// [`BodyError`], naming which rule failed and carrying no body content.
 pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError> {
-    // THE BYTE BUDGET FIRST, before a single line is scanned. The transport
-    // bounds this body by bytes twice over (see [`MAX_BODY_BYTES`]), so a body
-    // that is too large is refused as too large rather than as whatever its
-    // first malformed line happens to be.
+    // The byte budget first, before a line is scanned: a body that is too
+    // large is refused as too large, not as its first malformed line.
     if text.len() > MAX_BODY_BYTES {
         return Err(BodyError::TooLarge { got: text.len() });
     }
@@ -1779,10 +1635,9 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
             }
             page.push(rest);
         } else if let Some(rest) = line.strip_prefix(COUNTS_LINE_PREFIX) {
-            // A REPEAT IS AN ERROR AND NOT LAST-WINS (review finding F7). Two
-            // `catalog-counts=` lines mean the runner disagreed with itself
-            // about the whole walk, and silently keeping one of them publishes
-            // a number nobody can attribute to an observation.
+            // A repeat is an error, not last-wins: two `catalog-counts=` lines
+            // mean the runner disagreed with itself, and keeping one would
+            // publish a number nobody can attribute to an observation.
             if out.counts.is_some() {
                 return Err(BodyError::RepeatedSummary(COUNTS_LINE_PREFIX));
             }
@@ -1810,11 +1665,11 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
             out.signers = signers;
         }
         // Anything else is ignored: a result body shares the stream with
-        // whatever else the runner wrote, exactly as D2's frame decoder does.
+        // whatever else the runner wrote, as the frame decoder does.
     }
 
-    // THE VERSION LINE IS REQUIRED. A body with no declared grammar is a body
-    // this build cannot promise it read the way the writer meant.
+    // The version line is required: a body with no declared grammar is one
+    // this build cannot promise it read as the writer meant.
     match format.as_deref() {
         None => return Err(BodyError::MissingFormat),
         Some(v) if v.parse::<u32>().ok() == Some(BODY_FORMAT_VERSION) => {}
@@ -1830,7 +1685,7 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
             declared: u32::try_from(headers.len()).unwrap_or(u32::MAX),
         });
     }
-    // 1..=n, in order, each exactly once — and every header agreeing on `n`.
+    // 1..=n, in order, each exactly once, and every header agreeing on `n`.
     let total = u32::try_from(headers.len()).unwrap_or(u32::MAX);
     for (i, (index, of, _, _)) in headers.iter().enumerate() {
         let want = u32::try_from(i + 1).unwrap_or(u32::MAX);
@@ -1848,14 +1703,11 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                 got,
             });
         }
-        // THE DIGEST BEFORE THE PARSE. A page whose bytes did not survive the
-        // log read is refused as a page; deciding that after parsing would let
-        // a truncated read contribute the entries that happened to be whole.
-        //
-        // IT COVERS THE ENTRY LINES AND NOTHING ELSE. The three summary lines
-        // are covered by the frame stream's own digest, which D2's decoder
-        // verifies before this function is ever called; a second digest over
-        // them would be a second answer to a question already answered.
+        // The digest before the parse: a page whose bytes did not survive the
+        // log read is refused as a page, so a truncated read contributes no
+        // entries. It covers the entry lines only; the summary lines are
+        // covered by the frame stream's own digest, verified before this
+        // function is called.
         if page_digest(&raw) != declared_sha256 {
             return Err(BodyError::PageDigestMismatch { index });
         }
@@ -1863,18 +1715,16 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
         let mut skipped = 0u32;
         for body in &raw {
             match serde_json::from_str::<RunnerEntry>(body) {
-                // AN UNBOUNDED `locations[]` IS A MALFORMED ENTRY (review
-                // finding F12). It is the only unbounded field an entry has,
-                // and an entry whose rendered line cannot fit a page is an
-                // entry that cannot be published.
+                // An unbounded `locations[]` is a malformed entry: an entry
+                // whose rendered line cannot fit a page cannot be published.
                 Ok(entry) if entry.locations.len() > MAX_ENTRY_LOCATIONS => {
                     skipped = skipped.saturating_add(1);
                 }
-                // PROD-05.1: the same rule for `topics[]`.
+                // The same rule for `topics[]`.
                 Ok(entry) if entry.topics.len() > MAX_ENTRY_TOPICS => {
                     skipped = skipped.saturating_add(1);
                 }
-                // And for `ownerDetection` (fix round, M2).
+                // And for `ownerDetection`.
                 Ok(entry)
                     if entry
                         .owner_detection
@@ -1883,7 +1733,7 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                 {
                     skipped = skipped.saturating_add(1);
                 }
-                // PROD-03.0: and for a topic's schema ids and sides.
+                // And for a topic's schema ids and sides.
                 Ok(entry)
                     if entry.topics.iter().any(|t| {
                         t.schema_dependency.as_ref().is_some_and(|d| {
@@ -1893,7 +1743,7 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                 {
                     skipped = skipped.saturating_add(1);
                 }
-                // PROD-04.1: and for the consumer groups.
+                // And for the consumer groups.
                 Ok(entry)
                     if entry
                         .consumer_positions
@@ -1903,9 +1753,9 @@ pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError>
                     skipped = skipped.saturating_add(1);
                 }
                 Ok(entry) => entries.push(entry),
-                // SKIPPED AND COUNTED, NEVER FATAL — D3 §5.2's reading rules:
-                // a malformed entry is one point this build cannot show, not a
-                // sync that failed. The count reaches the status message.
+                // Skipped and counted, never fatal: a malformed entry is one
+                // point this build cannot show, not a failed sync. The count
+                // reaches the status message.
                 Err(_) => skipped = skipped.saturating_add(1),
             }
         }
@@ -1942,48 +1792,39 @@ fn parse_page_header(rest: &str) -> Option<(u32, u32, u32, String)> {
     Some((index, of, count, sha))
 }
 
-// ===========================================================================
-// Duplicate identity, ordering, and the window
-// ===========================================================================
-
-/// Collapse entries that share one point id — D3 §5.1 and §5.2 rule 4.
+/// Collapse entries that share one point id.
 ///
-/// * **The same receipt found in two locations is ONE point with TWO
+/// * **The same receipt found in two locations is one point with two
 ///   locations.** Identity is `sha256(receipt bytes)`, so a copied archive
-///   yields the same id by construction; producing two rows would tell an
-///   operator they have two recovery points when they have one, in two places.
+///   yields the same id; two rows would claim two recovery points.
 /// * **Two records of one identity that disagree about a receipt-derived fact
 ///   are a [`Availability::Conflict`]**, on the merged row, with the union of
 ///   their locations. Neither is preferred: `logweir/` objects are never
-///   rewritten, so a disagreement means something wrote a second record, and
-///   picking one would be picking a side.
-/// * Two receipts under one `backupId` have DIFFERENT point ids and are two
-///   rows — defect **RECEIPT-DUP**.
+///   rewritten, so a disagreement means something wrote a second record.
+/// * Two receipts under one `backupId` have different point ids and are two
+///   rows.
 ///
-/// # The two axes merge in OPPOSITE directions, and that asymmetry is the rule
+/// The two axes merge in opposite directions:
 ///
-/// * **Availability merges BEST-of** (review finding F9; recorded as an
-///   amendment to D3 §5.4 at integration). A point present in bucket A and
-///   absent from bucket B is still fully recoverable from A, and hiding it from
-///   the restore wizard because a second copy went missing is the opposite of
-///   what a second copy is for. Each location keeps its own verdict in
-///   [`EntryLocation`], and the degraded ones are NAMED in `remedy` so nobody
-///   has to guess which copy to repair.
-/// * **The signature merges WORST-of**, with the key id following the worst
-///   verdict. Bytes that fail verification in one place are evidence about the
-///   POINT, not about the place, and `selectable` must never survive it.
-/// * **`Conflict` overrides both.** A receipt-derived disagreement is a fact
-///   about the records and not about any location, so it is applied last.
+/// * **Availability merges best-of.** A point present in bucket A and absent
+///   from bucket B is still recoverable from A. Each location keeps its own
+///   verdict in [`EntryLocation`], and the degraded ones are named in
+///   `remedy`.
+/// * **The signature merges worst-of**, with the key id following the worst
+///   verdict: bytes that fail verification in one place are evidence about the
+///   point, and `selectable` must never survive it.
+/// * **`Conflict` overrides both**, applied last: it is a fact about the
+///   records, not any location.
 ///
 /// The output is sorted newest recovery point first, with the point id as the
-/// tie-break so the order is total and the page set is reproducible.
+/// tie-break, so the order is total and the page set reproducible.
 #[must_use]
 pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     let mut by_id: BTreeMap<String, RunnerEntry> = BTreeMap::new();
     let mut conflicted: BTreeSet<String> = BTreeSet::new();
     for mut entry in entries {
-        // Resolve every location's verdict against the observation ONCE, here,
-        // so the merge below never has to know which side an entry came from.
+        // Resolve every location's verdict against the observation once, here,
+        // so the merge never needs to know which side an entry came from.
         for location in &mut entry.locations {
             location.availability = Some(location.availability_or(entry.availability));
         }
@@ -2001,10 +1842,9 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                         .iter_mut()
                         .find(|l| l.location_id == location.location_id)
                     {
-                        // ONE PLACE REPORTED TWICE KEEPS THE WORSE VERDICT. Two
-                        // observations of the SAME bucket are two attempts at
-                        // one thing, and "it worked once" is not a property of
-                        // the bucket.
+                        // One place reported twice keeps the worse verdict: two
+                        // observations of the same bucket are two attempts at
+                        // one thing.
                         Some(existing) => {
                             let a = existing.availability_or(kept.availability);
                             let b = location.availability_or(entry.availability);
@@ -2017,33 +1857,28 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                 }
                 kept.locations
                     .sort_by(|a, b| a.location_id.cmp(&b.location_id));
-                // THE ENTRY-LEVEL VERDICT IS NOT DECIDED HERE. Every location's
-                // own availability was resolved on the way in, so the best-of
-                // answer is a `max` over `kept.locations` and is computed once,
-                // below, when every observation has been folded in. Doing it
-                // pairwise here as well would be a second implementation of the
-                // same rule — and a dead one, since the value it wrote would be
-                // overwritten by that `max`.
+                // The entry-level verdict is not decided here: it is the `max`
+                // over `kept.locations`, computed once below after every
+                // observation is folded in.
                 if worse_signature(entry.signature, kept.signature) {
                     kept.signature = entry.signature;
                     kept.signer_key_id = entry.signer_key_id;
                 }
-                // PROD-05.1: a copy that lists the topics fills a kept entry
-                // that does not. Both lists come from records the runner
-                // cross-checked against the one verified receipt, so two
-                // non-empty lists are the same list.
+                // A copy that lists the topics fills a kept entry that does
+                // not. Both lists come from records cross-checked against the
+                // one verified receipt, so two non-empty lists are the same.
                 if kept.topics.is_empty() && !entry.topics.is_empty() {
                     kept.topics = entry.topics;
                     kept.topics_omitted = entry.topics_omitted;
-                    // Where the run looked for owners travels WITH the list
-                    // it qualifies (fix round, M2).
+                    // Where the run looked for owners travels with the list it
+                    // qualifies.
                     kept.owner_detection = entry.owner_detection;
                 } else if kept.topics.is_empty() && kept.topics_omitted.is_none() {
                     kept.topics_omitted = entry.topics_omitted;
                 }
-                // PROD-04.1: the same rule for the consumer position summary:
-                // a copy that lists the groups fills one that does not, and a
-                // copy that carries any summary fills one that carries none.
+                // The same rule for the consumer position summary: a copy that
+                // lists the groups fills one that does not, and any summary
+                // fills none.
                 match (&kept.consumer_positions, &entry.consumer_positions) {
                     (None, Some(_)) => kept.consumer_positions = entry.consumer_positions,
                     (Some(k), Some(e)) if k.groups.is_empty() && !e.groups.is_empty() => {
@@ -2056,8 +1891,8 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     }
     let mut out: Vec<RunnerEntry> = by_id.into_values().collect();
     for entry in &mut out {
-        // The entry-level verdict is the BEST any location reached; with no
-        // locations at all it is the observation's own.
+        // The entry-level verdict is the best any location reached; with no
+        // locations it is the observation's own.
         if let Some(best) = entry
             .locations
             .iter()
@@ -2079,13 +1914,10 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     out
 }
 
-/// The entry's remedy, with every location that is not [`Availability::Available`]
-/// named — review finding F9.
-///
-/// A best-of merge would otherwise DROP the information that a copy is broken:
-/// the entry says `Available` and nothing says which bucket to repair. Names
-/// only: a location id is a bucket and a prefix, never an endpoint, a region or
-/// a credential.
+/// The entry's remedy, naming every location that is not
+/// [`Availability::Available`]: a best-of merge would otherwise drop which copy
+/// is broken. Names only: a location id is a bucket and a prefix, never an
+/// endpoint, a region or a credential.
 fn name_degraded_locations(entry: &RunnerEntry) -> Option<String> {
     let degraded: Vec<String> = entry
         .locations
@@ -2144,28 +1976,23 @@ fn worse_signature(candidate: SignatureVerdict, kept: SignatureVerdict) -> bool 
     signature_rank(candidate) < signature_rank(kept)
 }
 
-// ===========================================================================
-// Pages and the fence pointer
-// ===========================================================================
-
-/// The hard ceiling on `sync.viewLimit`, whatever the spec says — D3 §5.3.
+/// The hard ceiling on `sync.viewLimit`, whatever the spec says.
 pub const MAX_VIEW_ENTRIES: usize = 5000;
 
 /// Entry bytes one page `ConfigMap` may carry.
 ///
-/// 768 KiB against the API server's 1 MiB object limit: the remainder carries
-/// the object's own metadata, its annotations and the second data key. A page
-/// that overflowed would be rejected at CREATE with a message about etcd, which
-/// is not a message about a catalog.
+/// 768 KiB against the API server's 1 MiB object limit; the rest carries the
+/// object's metadata, annotations and second data key. An overflowing page
+/// would be rejected at create with a message about etcd, not the catalog.
 pub const PAGE_MAX_BYTES: usize = 768 * 1024;
 
-/// The most pages a view may have — the CRD's `status.pages` `maxItems`.
+/// The most pages a view may have: the CRD's `status.pages` `maxItems`.
 pub const MAX_PAGES: usize = 8;
 
-/// The most days `status.histogram` may carry — the CRD's `maxItems`.
+/// The most days `status.histogram` may carry: the CRD's `maxItems`.
 pub const MAX_HISTOGRAM_DAYS: usize = 400;
 
-/// The most signers `status.signers` may carry — the CRD's `maxItems`.
+/// The most signers `status.signers` may carry: the CRD's `maxItems`.
 pub const MAX_SIGNERS: usize = 16;
 
 /// The `ConfigMap` key holding one page's entries, one compact JSON per line.
@@ -2177,19 +2004,14 @@ pub const INDEX_DATA_KEY: &str = "index.json";
 /// `sha256:<hex>` over a page's `entries.jsonl`, on the page object itself.
 pub const PAGE_DIGEST_ANNOTATION: &str = "logweir.dev/catalog-page-sha256";
 
-/// The point-id range and time range of one page — the fence pointer.
+/// The point-id range and time range of one page: the fence pointer.
 ///
-/// # A fence pointer EXCLUDES pages; it never proves one holds anything
-///
-/// `minPointId`/`maxPointId` bound the ids in a page, so a lookup for an id
-/// outside `[min, max]` may skip that page. Inside the range the page may still
-/// not hold it: entries are ordered by recovery point and not by id, so the
-/// range is not dense. That is the classic LSM fence-pointer contract — no
-/// false negatives, false positives allowed — and stating it is what stops a
-/// later reader treating a hit as an existence proof.
-///
-/// `newestMs`/`oldestMs` are the same idea on the axis the view is actually
-/// ordered by, and there the bound IS tight.
+/// A fence pointer excludes pages and never proves one holds anything:
+/// `minPointId`/`maxPointId` bound the ids, so an id outside `[min, max]` may
+/// skip the page, but entries are ordered by recovery point, not id, so the
+/// range is not dense (no false negatives, false positives allowed).
+/// `newestMs`/`oldestMs` are the same idea on the axis the view is ordered by,
+/// where the bound is tight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageFence {
@@ -2297,28 +2119,25 @@ pub struct View {
     /// Whether the archive holds more points than the view carries.
     pub truncated: bool,
     /// How many entries were dropped because the page budget ran out, as
-    /// opposed to because of `viewLimit`. Reported so "the view is a window"
-    /// and "this build could not fit the window" stay distinguishable.
+    /// opposed to `viewLimit`, so "the view is a window" and "this build could
+    /// not fit the window" stay distinguishable.
     pub dropped_for_space: usize,
-    /// How many entries were refused because ONE rendered line does not fit a
-    /// page at all — review finding F12. An entry that cannot be published is
-    /// counted here rather than producing a `ConfigMap` the API server rejects
-    /// at CREATE, which would surface as a requeue loop and not as a verdict.
+    /// How many entries were refused because one rendered line does not fit a
+    /// page at all; counted, rather than a `ConfigMap` the API server rejects
+    /// at create, which would be a requeue loop and not a verdict.
     pub dropped_oversized: usize,
-    /// How many of the materialised entries are `Revoked`, and how many are
-    /// `VerifiedHistorical` — the two verification states `status.counts` has
-    /// no field for (review finding F4).
+    /// How many of the materialised entries are `Revoked`, and how many
+    /// `VerifiedHistorical`: the two states `status.counts` has no field for.
     pub window: WindowStates,
 }
 
 /// The states of the materialised window that the ten status counters cannot
-/// carry — review finding F4.
+/// carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WindowStates {
-    /// Points whose signing key this installation has REVOKED. Latent until a
-    /// trust source can express revocation, and the reason this is counted at
-    /// all: a revoked point is `selectable: false` inside the page and would
-    /// otherwise appear in no adverse number on the status.
+    /// Points whose signing key this installation has revoked: `selectable:
+    /// false` inside the page, and otherwise in no adverse number on the
+    /// status.
     pub revoked: i64,
     /// Points that verify under a retired or expired key, for evidence signed
     /// while it was valid.
@@ -2330,10 +2149,10 @@ pub struct WindowStates {
 pub struct ViewLimits {
     /// `spec.sync.viewLimit`, clamped to [`MAX_VIEW_ENTRIES`].
     pub view_limit: usize,
-    /// Entry bytes per page — [`PAGE_MAX_BYTES`] in production, smaller in a
-    /// test that wants to reach the second page without 700 KiB of fixture.
+    /// Entry bytes per page: [`PAGE_MAX_BYTES`] in production, smaller in a
+    /// test that wants a second page without 700 KiB of fixture.
     pub page_max_bytes: usize,
-    /// The most pages — [`MAX_PAGES`].
+    /// The most pages: [`MAX_PAGES`].
     pub max_pages: usize,
 }
 
@@ -2351,13 +2170,13 @@ impl ViewLimits {
     }
 }
 
-/// Turn the walk's entries into pages — **pure**, and the function every
-/// "large catalog" property is stated over.
+/// Turn the walk's entries into pages. Pure, and the function every "large
+/// catalog" property is stated over.
 ///
-/// The entries are merged ([`merge_entries`]), the newest `viewLimit` are
-/// kept, each is re-classified against the trust source and rendered, and the
-/// renderings are packed into pages by byte budget. `total` is the whole walk's
-/// count, which is what decides `truncated`.
+/// The entries are merged ([`merge_entries`]), the newest `viewLimit` kept,
+/// each re-classified against the trust source and rendered, and the
+/// renderings packed into pages by byte budget. `total` is the whole walk's
+/// count, which decides `truncated`.
 #[must_use]
 pub fn materialise(
     entries: Vec<RunnerEntry>,
@@ -2385,10 +2204,8 @@ pub fn materialise(
     for entry in window {
         let line = serde_json::to_string(&entry).unwrap_or_default();
         let cost = line.len() + 1;
-        // ONE LINE THAT CANNOT FIT A PAGE IS REFUSED, NOT PLACED ANYWAY
-        // (review finding F12). The old guard only sealed a page when the
-        // current one was non-empty, so a single oversized entry went into an
-        // over-budget ConfigMap the API server rejects at CREATE.
+        // One line that cannot fit a page is refused, not placed in an
+        // over-budget ConfigMap the API server rejects at create.
         if cost > limits.page_max_bytes {
             dropped_oversized += 1;
             continue;
@@ -2417,9 +2234,9 @@ pub fn materialise(
     View {
         pages,
         entries: placed,
-        // TRUNCATED IS ABOUT THE ARCHIVE AND NOT ABOUT THE PAGES. `total` is
-        // what the walk saw; `merged_len` is what survived de-duplication. The
-        // view is a window whenever either exceeds what was placed.
+        // `truncated` is about the archive, not the pages: the view is a
+        // window whenever the walk's `total` or the de-duplicated count
+        // exceeds what was placed.
         truncated: total > i64::try_from(placed).unwrap_or(i64::MAX)
             || merged_len > placed
             || dropped_for_space > 0
@@ -2517,58 +2334,44 @@ pub fn index_document(
     }
 }
 
-// ===========================================================================
-// The ten status counters
-// ===========================================================================
-
 /// The counters, plus the states the v1alpha1 status has no field for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tally {
     /// What goes on `status.counts`.
     pub counts: CatalogCounts,
     /// `(state, count, scope)` for every state the ten fields cannot carry, in
-    /// a stable order. Named in the `Synced` condition message rather than
-    /// dropped.
-    ///
-    /// `scope` is [`SCOPE_WALK`] or [`SCOPE_VIEW`] — some of these numbers can
-    /// only be known for the materialised window, and saying which is the
-    /// difference between a bounded fact and a wrong one.
+    /// a stable order, named in the `Synced` condition message rather than
+    /// dropped. `scope` is [`SCOPE_WALK`] or [`SCOPE_VIEW`]: some numbers are
+    /// only known for the materialised window, and saying which keeps a bounded
+    /// fact from becoming a wrong one.
     pub unrepresented: Vec<(&'static str, i64, &'static str)>,
 }
 
 /// A residue count that covers everything the sync walked.
 pub const SCOPE_WALK: &str = "the archive";
-/// A residue count that covers only the materialised window — the verification
-/// axis is re-decided HERE, so it is only known for the entries this controller
-/// re-classified.
+/// A residue count that covers only the materialised window: the verification
+/// axis is re-decided here, so it is only known for the entries this
+/// controller re-classified.
 pub const SCOPE_VIEW: &str = "the materialised view";
 
 /// Project the walk's counts and signer summary onto the CRD's ten counters.
 ///
-/// # The ten fields are a PROJECTION and not a partition
+/// The ten fields are a projection, not a partition: seven availability and
+/// seven verification states share ten fields across both axes.
 ///
-/// D3 §5.4 has seven availability states and seven verification states;
-/// `status.counts` has ten fields across both axes. Three consequences, all of
-/// them stated rather than smoothed over:
-///
-/// * **`untrustedSigner` is computed here and not by the Job.** The Job holds
-///   the key material this controller mounted; whether a key is one this
-///   installation ACCEPTS is a fact about the trust source. Summing
-///   `signers[].points` over untrusted keys is what makes the number cover the
-///   whole walk rather than only the window.
-/// * **`unverified` is `notAttempted` plus `noEvidence`.** Both mean "no
-///   signature verdict was reached"; the CRD has one field for them.
-/// * **`Partial`, `Revoked` and `VerifiedHistorical` have no field.** They are
-///   returned in [`Tally::unrepresented`] so the condition message can name
-///   them, and they are the reason the availability fields do not sum to
-///   `total`. **NOTE FOR W13:** `status.counts.partial` and
-///   `status.counts.verifiedHistorical` are the two fields this would want.
+/// * **`untrustedSigner` is computed here, not by the Job**: whether a key is
+///   accepted is a fact about the trust source. Summing `signers[].points`
+///   over untrusted keys covers the whole walk, not only the window.
+/// * **`unverified` is `notAttempted` plus `noEvidence`**: both mean "no
+///   signature verdict was reached".
+/// * **`Partial`, `Revoked` and `VerifiedHistorical` have no field**: they are
+///   returned in [`Tally::unrepresented`] for the condition message, and are
+///   why the availability fields do not sum to `total`.
 #[must_use]
 pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary], window: WindowStates) -> Tally {
-    // THE FULL SIGNER LIST, BEFORE [`bounded`] TRUNCATES IT (review finding
-    // F10). `untrustedSigner` is documented as covering the whole walk, and
-    // summing it over the sixteen rows the status can DISPLAY would silently
-    // under-report an archive written by seventeen installations.
+    // The full signer list, before [`bounded`] truncates it: `untrustedSigner`
+    // covers the whole walk, and summing over the sixteen displayable rows
+    // would under-report an archive written by seventeen installations.
     let untrusted: i64 = signers
         .iter()
         .filter(|s| s.trusted == Some(false))
@@ -2578,11 +2381,9 @@ pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary], window: WindowSta
     if counts.partial > 0 {
         unrepresented.push((Availability::Partial.as_str(), counts.partial, SCOPE_WALK));
     }
-    // `Revoked` AND `VerifiedHistorical` HAVE NO COUNTER EITHER (review
-    // finding F4). A revoked point is `selectable: false` inside the page and
-    // would otherwise land in NO adverse number on the status — `invalid` comes
-    // from the runner's signature verdict, `unverified` from
-    // notAttempted + noEvidence, and `untrustedSigner` from unlisted keys.
+    // A revoked point is `selectable: false` inside the page and would land in
+    // no adverse number otherwise: `invalid` is the runner's signature verdict,
+    // `unverified` notAttempted + noEvidence, `untrustedSigner` unlisted keys.
     if window.revoked > 0 {
         unrepresented.push((Verification::Revoked.as_str(), window.revoked, SCOPE_VIEW));
     }
@@ -2617,10 +2418,9 @@ pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary], window: WindowSta
 
 /// `status.signers[]`, with the trust decision this controller made.
 ///
-/// Bounded to [`MAX_SIGNERS`], **untrusted keys first**: a summary that dropped
-/// the unknown signer to stay inside the bound would hide the one row PLAT-15.2
-/// asks an administrator to act on. Within each group the order is by point
-/// count, descending, then by key id, so the list is stable across passes.
+/// Bounded to [`MAX_SIGNERS`], untrusted keys first, so the bound never drops
+/// the unknown signer an administrator must act on. Within each group, by
+/// point count descending, then key id, so the list is stable across passes.
 #[must_use]
 pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<SignerSummary> {
     let mut rows: Vec<SignerSummary> = signers
@@ -2629,10 +2429,9 @@ pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<Sign
             key_id: s.key_id.clone(),
             principal_hint: s.principal_hint.clone(),
             points: Some(s.points),
-            // NEVER `None`. An absent `trusted` would read as "not known yet"
-            // on a surface whose whole job is to say whether an unknown key
-            // signed these points; with no trust material every key is
-            // untrusted, and the `TrustAvailable` condition is what says why.
+            // Never `None`, which would read as "not known yet": with no trust
+            // material every key is untrusted, and the `TrustAvailable`
+            // condition says why.
             trusted: Some(accepts(trust, &s.key_id)),
         })
         .collect();
@@ -2645,14 +2444,12 @@ pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<Sign
     rows
 }
 
-/// Whether this installation ACCEPTS evidence from a key — review finding F4.
+/// Whether this installation accepts evidence from a key.
 ///
-/// **Listed is not accepted.** A key the trust source lists with
-/// `state: Revoked` is a key whose private half is in someone else's hands, and
-/// reporting `trusted: true` for it would tell an operator reading `status`
-/// alone that a compromised signer is fine. `Retired` IS accepted, because a
-/// retirement is what makes `VerifiedHistorical` meaningful: the evidence it
-/// signed while valid still verifies.
+/// Listed is not accepted: a `Revoked` key's private half is in someone else's
+/// hands, and `trusted: true` would tell an operator a compromised signer is
+/// fine. `Retired` is accepted: the evidence it signed while valid still
+/// verifies (`VerifiedHistorical`).
 #[must_use]
 pub fn accepts(trust: &TrustView, key_id: &str) -> bool {
     matches!(
@@ -2663,9 +2460,9 @@ pub fn accepts(trust: &TrustView, key_id: &str) -> bool {
 
 /// [`signer_summaries`]'s output, cut to what `status.signers` can carry.
 ///
-/// A SEPARATE STEP so the counters can be summed over the FULL list first
-/// (review finding F10). Untrusted keys are already first, so the rows that
-/// survive are the ones an administrator has to act on.
+/// A separate step, so the counters are summed over the full list first.
+/// Untrusted keys are already first, so the surviving rows are the ones an
+/// administrator must act on.
 #[must_use]
 pub fn bounded(mut rows: Vec<SignerSummary>) -> Vec<SignerSummary> {
     rows.truncate(MAX_SIGNERS);
@@ -2685,12 +2482,10 @@ pub fn histogram(counts: &RunnerCounts) -> Vec<HistogramBucket> {
         })
         .collect();
     days.sort_by(|a, b| b.day.cmp(&a.day));
-    // FOLDED WITH `+=`, NEVER DROPPED (review finding F11). A runner that
-    // reports one day in two shards must not lose those points from the
-    // histogram while `counts.total` still includes them — silently losing
-    // points is the one option this module's own philosophy argues against.
-    // `dedup_by` sees `(later, earlier)` and keeps the EARLIER element, so the
-    // sum is accumulated onto that one.
+    // Folded with `+=`, never dropped: one day reported in two shards must not
+    // lose points from the histogram while `counts.total` includes them.
+    // `dedup_by` sees `(later, earlier)` and keeps the earlier element, so the
+    // sum accumulates onto that one.
     days.dedup_by(|later, earlier| {
         if later.day == earlier.day {
             earlier.points = earlier.points.saturating_add(later.points);
@@ -2713,19 +2508,14 @@ fn is_iso_day(day: &str) -> bool {
             .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
 }
 
-// ===========================================================================
-// Names, tokens and the TTL
-// ===========================================================================
-
 /// How many hex characters of `sha256(catalog uid)` every name below carries.
 ///
-/// Twenty, exactly as [`crate::check::job::OWNER_UID_HEX_CHARS`], and for the
-/// same reason: a name derived from the OBJECT's name can be made
-/// unschedulable by naming the object badly, and D3 §5.3's illustrative
-/// `<catalog>-g<generation>-p<index>` would overflow the 63-character
-/// `batch.kubernetes.io/job-name` label at a catalog name of 40 characters.
-/// The real names are published in `status.pages[].configMapName` and
-/// `status.indexConfigMap`, so no consumer ever computes one.
+/// Twenty, as [`crate::check::job::OWNER_UID_HEX_CHARS`], for the same reason:
+/// a name derived from the object's name can be made unschedulable by naming
+/// the object badly (a `<catalog>-g<generation>-p<index>` name overflows the
+/// 63-character `batch.kubernetes.io/job-name` label at a 40-character catalog
+/// name). The real names are published in `status.pages[].configMapName` and
+/// `status.indexConfigMap`, so no consumer computes one.
 pub const OWNER_UID_HEX_CHARS: usize = 20;
 
 /// The prefix of every object this view creates.
@@ -2741,14 +2531,11 @@ pub enum SyncTrigger {
 }
 
 impl SyncTrigger {
-    /// The generation token this trigger produces — short, deterministic and
-    /// DNS-label safe.
-    ///
-    /// Deterministic is the whole property: two reconciles of one trigger
-    /// compute one name, so the second gets **409 `AlreadyExists`** from the
-    /// API server rather than creating a second sync Job. That is the same
-    /// mechanism [`crate::slot`] uses for scheduled backups, and it is what
-    /// makes `syncRequest` idempotent without a lock.
+    /// The generation token this trigger produces: short, deterministic and
+    /// DNS-label safe. Deterministic is the property: two reconciles of one
+    /// trigger compute one name, so the second gets **409 `AlreadyExists`**
+    /// rather than creating a second sync Job, as [`crate::slot`] does for
+    /// scheduled backups. That makes `syncRequest` idempotent without a lock.
     #[must_use]
     pub fn token(&self) -> String {
         match self {
@@ -2763,8 +2550,8 @@ impl SyncTrigger {
 
 /// Which slot `now` falls in, for an interval in seconds.
 ///
-/// `None` when the interval is zero — `sync.intervalSeconds: 0` is "manual
-/// only", and a manual-only catalog has no slots at all.
+/// `None` when the interval is zero: `sync.intervalSeconds: 0` is "manual
+/// only", which has no slots.
 #[must_use]
 pub fn periodic_slot(now: DateTime<Utc>, interval_seconds: i32) -> Option<i64> {
     let interval = i64::from(interval_seconds);
@@ -2781,7 +2568,7 @@ pub fn sync_stem(catalog_uid: &str, token: &str) -> String {
     format!("{NAME_PREFIX}{}-{token}", &digest[..OWNER_UID_HEX_CHARS])
 }
 
-/// The sync Job's name — [`sync_stem`].
+/// The sync Job's name: [`sync_stem`].
 #[must_use]
 pub fn sync_job_name(catalog_uid: &str, token: &str) -> String {
     sync_stem(catalog_uid, token)
@@ -2801,12 +2588,11 @@ pub fn index_config_map_name(stem: &str) -> String {
 
 /// The trust-material `ConfigMap`'s name: `lwc-cs-<20 hex>-trust-g<gen>`.
 ///
-/// Owned by the **`RecoveryCatalog`** and not by the sync Job, deliberately: it
-/// is reused by every sync while the trust source's generation is unchanged, so
-/// tying it to a Job's TTL would make each sync render it again under a new
-/// owner and get a 409 it could not adopt. It carries only PUBLIC key material
-/// — a `ConfigMap` is the right object for that and a Secret would be the wrong
-/// one — and it is collected with the catalog, so nothing deletes it.
+/// Owned by the `RecoveryCatalog`, not the sync Job: it is reused by every
+/// sync while the trust source's generation is unchanged, so a Job's TTL
+/// would make each sync re-render it under a new owner and get a 409 it could
+/// not adopt. It carries only public key material, and is collected with the
+/// catalog.
 #[must_use]
 pub fn trust_config_map_name(catalog_uid: &str, policy_generation: i64) -> String {
     let digest = logweir_core::ids::sha256_hex(catalog_uid.as_bytes());
@@ -2825,30 +2611,24 @@ pub const TRUST_BUNDLE_KEY: &str = "trust-bundle.pem";
 /// The `ConfigMap` key holding the key ids, one per line, in bundle order.
 pub const TRUST_KEY_IDS_KEY: &str = "key-ids.txt";
 
-/// The floor on a sync Job's `ttlSecondsAfterFinished` — **one hour**.
+/// The floor on a sync Job's `ttlSecondsAfterFinished`: one hour.
 ///
-/// IT WAS A DAY, AND A DAY WAS A LEAK (review finding F3). One sync Job lives
-/// per slot, so the number of GENERATIONS alive at once is
-/// `ttl / intervalSeconds`, not three: at `intervalSeconds: 3600` a day's floor
-/// kept 24 of them — about 216 page `ConfigMap`s and, at a realistic 600 B an
-/// entry over 5 000 points, some 72 MB of etcd per catalog. At D3 §5.3's own
-/// 300 s floor it was 288 generations and near a gigabyte, past etcd's default
-/// quota with two or three catalogs.
-///
-/// An hour bounds it: with the CEL floor of 300 s
-/// ([`crate::crds::recovery_catalog::J3_INTERVAL_FLOOR_RULE`]) at most **12**
-/// generations coexist, and at an hourly cadence exactly **3** — which is what
-/// "three intervals" was always meant to mean. A manual-only catalog keeps its
-/// view for an hour after its last sync and republishes on the next request.
+/// One sync Job lives per slot, so `ttl / intervalSeconds` generations are
+/// alive at once; a day's floor kept 24 at an hourly cadence (some 72 MB of
+/// etcd per catalog at 5 000 points) and 288 at the 300 s floor. An hour
+/// bounds it: with the CEL floor of 300 s
+/// ([`crate::crds::recovery_catalog::J3_INTERVAL_FLOOR_RULE`]) at most 12
+/// generations coexist, and at an hourly cadence exactly 3. A manual-only
+/// catalog keeps its view for an hour after its last sync and republishes on
+/// the next request.
 pub const TTL_FLOOR_SECONDS: i32 = 3_600;
 
 /// `ttlSecondsAfterFinished` for a sync Job: `max(3 × interval, 3600)`.
 ///
-/// THREE INTERVALS, so a view outlives two missed syncs and the page set does
-/// not blink out between them, with an hour's floor so a manual-only catalog
-/// (`intervalSeconds: 0`) still has one. The TTL is the ONLY thing that removes
-/// a page, a fence pointer or a plan — `delete` is granted on nothing — so it
-/// is also the only bound on how many of them exist at once.
+/// Three intervals, so a view outlives two missed syncs, with an hour's floor
+/// so a manual-only catalog (`intervalSeconds: 0`) still has one. The TTL is
+/// the only thing that removes a page, a fence pointer or a plan (`delete` is
+/// granted on nothing), so it is also the only bound on how many exist.
 #[must_use]
 pub fn ttl_seconds(interval_seconds: i32) -> i32 {
     interval_seconds.saturating_mul(3).max(TTL_FLOOR_SECONDS)
@@ -2856,9 +2636,8 @@ pub fn ttl_seconds(interval_seconds: i32) -> i32 {
 
 /// How many view generations can be alive at once at this cadence.
 ///
-/// `ttl / interval`, which is the number D3 §5.3's "the previous one ages out"
-/// glosses over. Stated as a function so the documentation and the test read
-/// one arithmetic.
+/// `ttl / interval`, stated as a function so the documentation and the test
+/// read one arithmetic.
 #[must_use]
 pub fn live_generations(interval_seconds: i32) -> i32 {
     if interval_seconds <= 0 {
@@ -2873,11 +2652,11 @@ pub fn view_expires_at(finished_at: DateTime<Utc>, interval_seconds: i32) -> Dat
     finished_at + chrono::Duration::seconds(i64::from(ttl_seconds(interval_seconds)))
 }
 
-/// Whether the view is stale — D3's test matrix: `2 × interval`.
+/// Whether the view is stale: older than `2 × interval`.
 ///
-/// A manual-only catalog is NEVER stale by the clock: nothing was promised
-/// about when it would sync, and reporting `Stale` for a catalog whose owner
-/// asked for manual syncs would be reporting the configuration as a fault.
+/// A manual-only catalog is never stale by the clock: nothing was promised
+/// about when it would sync, and `Stale` would report the configuration as a
+/// fault.
 #[must_use]
 pub fn is_stale(
     now: DateTime<Utc>,
@@ -2893,18 +2672,13 @@ pub fn is_stale(
     now > synced_at + chrono::Duration::seconds(i64::from(interval_seconds) * 2)
 }
 
-// ===========================================================================
-// The objects the controller creates
-// ===========================================================================
-
-/// An owner reference that does NOT block deletion — D3 §5.3.
+/// An owner reference that does not block deletion.
 ///
-/// `blockOwnerDeletion: false` on every page, on the fence pointer and on the
-/// trust bundle. `true` asks the API server for `update` on the owner's
-/// `finalizers` subresource under the `OwnerReferencesPermissionEnforcement`
-/// admission plugin, which this `ClusterRole` grants on nothing; and blocking
-/// the deletion of a Job whose TTL has fired is the opposite of what the
-/// garbage-collection design wants.
+/// `blockOwnerDeletion: false` on every page, the fence pointer and the trust
+/// bundle: `true` asks for `update` on the owner's `finalizers` under the
+/// `OwnerReferencesPermissionEnforcement` admission plugin, which this
+/// `ClusterRole` grants on nothing, and blocking the deletion of a Job whose
+/// TTL has fired is the opposite of what the garbage-collection design wants.
 fn owner_reference(owner: &RunnerOwner) -> OwnerReference {
     OwnerReference {
         api_version: owner.api_version.clone(),
@@ -2939,10 +2713,8 @@ pub fn page_config_map(
                     LABEL_COMPONENT.to_string(),
                     COMPONENT_CATALOG_PAGE.to_string(),
                 ),
-                // THE CATALOG'S UID, NOT THE JOB'S (review finding F8). The label
-                // exists so an operator can find every object of ONE catalog with
-                // `kubectl get cm -l`; keyed on the Job it changed every slot and
-                // matched nothing but that slot.
+                // The catalog's UID, not the Job's: the label lets an operator
+                // find every object of one catalog with `kubectl get cm -l`.
                 (LABEL_CATALOG_UID.to_string(), catalog_uid.to_string()),
                 (LABEL_PAGE_INDEX.to_string(), index.to_string()),
             ])),
@@ -2953,9 +2725,8 @@ pub fn page_config_map(
             owner_references: Some(vec![owner_reference(job_owner)]),
             ..ObjectMeta::default()
         },
-        // A VIEW A SECOND PASS COULD REWRITE IS NOT A VIEW. Immutability is
-        // what makes `status.pages[].sha256` mean something to a reader that
-        // fetched the page a minute later.
+        // Immutable, so `status.pages[].sha256` still means something to a
+        // reader that fetched the page a minute later.
         immutable: Some(true),
         data: Some(BTreeMap::from([(
             PAGE_DATA_KEY.to_string(),
@@ -2992,7 +2763,7 @@ pub fn index_config_map(
                     LABEL_COMPONENT.to_string(),
                     COMPONENT_CATALOG_INDEX.to_string(),
                 ),
-                // See `page_config_map` — the CATALOG's UID (finding F8).
+                // See `page_config_map`: the catalog's UID.
                 (LABEL_CATALOG_UID.to_string(), catalog_uid.to_string()),
             ])),
             annotations: Some(BTreeMap::from([(
@@ -3047,10 +2818,9 @@ pub fn trust_config_map(
             ..ObjectMeta::default()
         },
         immutable: Some(true),
-        // PUBLIC MATERIAL ONLY. `spkiPem` is a SubjectPublicKeyInfo; nothing
-        // private is ever placed in a ConfigMap, and the one-signer gate
-        // (`scripts/check-one-signer.sh`) is why this crate cannot even reach a
-        // private key type.
+        // Public material only: `spkiPem` is a SubjectPublicKeyInfo, and the
+        // one-signer gate (`scripts/check-one-signer.sh`) keeps this crate from
+        // reaching a private key type.
         data: Some(BTreeMap::from([
             (TRUST_BUNDLE_KEY.to_string(), bundle),
             (TRUST_KEY_IDS_KEY.to_string(), key_ids),
@@ -3067,20 +2837,19 @@ pub const COMPONENT_CATALOG_PAGE: &str = "catalog-page";
 pub const COMPONENT_CATALOG_INDEX: &str = "catalog-index";
 /// The component value on the trust `ConfigMap`.
 pub const COMPONENT_CATALOG_TRUST: &str = "catalog-trust";
-/// The `RecoveryCatalog` UID, as a label. **A label and never an identity** —
-/// ownership is decided by `ownerReferences`, exactly as D-SEAMS **S6** requires
-/// for pods.
+/// The `RecoveryCatalog` UID, as a label. A label, never an identity:
+/// ownership is decided by `ownerReferences` (seam **S6**).
 pub const LABEL_CATALOG_UID: &str = "logweir.dev/catalog-uid";
 /// A page's index, as a label, so an operator can `kubectl get cm -l`.
 pub const LABEL_PAGE_INDEX: &str = "logweir.dev/catalog-page-index";
 
 /// Whether an object already at a page's name IS this sync's page.
 ///
-/// The same three questions [`crate::check::plan::accepts_existing`] asks, for
-/// the same reasons, and a fourth: the digest annotation must match, so a page
-/// left by a sync that computed a different view is refused rather than
-/// adopted. **A foreign-owned object is never adopted**, whatever it contains:
-/// adopting it would publish somebody else's bytes as this catalog's view.
+/// The three questions [`crate::check::plan::accepts_existing`] asks, and a
+/// fourth: the digest annotation must match, so a page from a sync that
+/// computed a different view is refused. A foreign-owned object is never
+/// adopted, whatever it contains: that would publish someone else's bytes as
+/// this catalog's view.
 ///
 /// # Errors
 ///
@@ -3140,19 +2909,12 @@ impl std::fmt::Display for PageConflict {
 
 impl std::error::Error for PageConflict {}
 
-// ===========================================================================
-// The sync Job and its plan
-// ===========================================================================
-
 /// The `catalogSync` request, as the plan carries it.
 ///
-/// **IT MOVED, EXACTLY AS THIS COMMENT SAID IT WOULD.** The shape was declared
-/// here while `CheckRequest` had no variant for it; now that D2 carries both,
-/// the declaration is D2's and this is a re-export, so a field added on one
-/// side cannot be missing on the other. The controller still owns the two CRD
-/// enums (`spec.sync.mode`, `spec.sync.deepCheck`) because they carry
-/// `JsonSchema` and the published CRD is generated from them; the two `From`
-/// impls below are the whole of the translation, and
+/// The declaration is `logweir-core`'s, re-exported, so a field added on one
+/// side cannot be missing on the other. The controller owns the two CRD enums
+/// (`spec.sync.mode`, `spec.sync.deepCheck`) because they carry `JsonSchema`;
+/// the two `From` impls below are the whole translation, and
 /// `the_crd_and_the_plan_spell_the_two_enums_identically` asserts they spell
 /// the same strings.
 pub use logweir_core::check_contract::CatalogSyncRequest;
@@ -3176,15 +2938,11 @@ impl From<DeepCheck> for logweir_core::check_contract::CatalogDeepCheck {
     }
 }
 
-/// The plan document — D2's own [`CheckPlan`], serialised.
+/// The plan document: the core [`CheckPlan`], serialised.
 ///
-/// **IT IS A TYPED `CheckPlan` NOW.** It was a hand-built `serde_json::Value`
-/// because `CheckRequest` was a closed enum with no `catalogSync` variant, so a
-/// typed value could not be constructed and the field spellings had to be
-/// copied. They are no longer copied: this builds the very type the runner
-/// deserialises with `deny_unknown_fields`, so a field this controller writes
-/// and that runner does not know is a compile error here rather than a
-/// `CheckContractMismatch` in a pod.
+/// The very type the runner deserialises with `deny_unknown_fields`, so a
+/// field this controller writes that the runner does not know is a compile
+/// error here, not a `CheckContractMismatch` in a pod.
 ///
 /// [`CheckPlan`]: logweir_core::check_contract::CheckPlan
 ///
@@ -3211,7 +2969,7 @@ pub fn plan_document(
 /// Everything one sync Job needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncJobSpec {
-    /// The Job's name — [`sync_job_name`].
+    /// The Job's name: [`sync_job_name`].
     pub name: String,
     /// The namespace: the catalog's, which is the destination's.
     pub namespace: String,
@@ -3226,7 +2984,7 @@ pub struct SyncJobSpec {
     /// The plan's own budget; the Job's deadline is this plus
     /// [`crate::check::job::DEADLINE_MARGIN_SECONDS`].
     pub timeout_seconds: i64,
-    /// `ttlSecondsAfterFinished` — [`ttl_seconds`].
+    /// `ttlSecondsAfterFinished`: [`ttl_seconds`].
     pub ttl_seconds: i32,
     /// The ServiceAccount: `logweir-runner`.
     pub service_account_name: String,
@@ -3244,31 +3002,24 @@ pub struct SyncJobSpec {
 
 /// The sync Job.
 ///
-/// # What is taken from the check framework and what is decided here
-///
 /// The argv, the `/check` mount, the plan key, the three pinned environment
 /// variables, `RUST_LOG=warn`, the deadline margin and every property
-/// [`crate::job::build`] holds — container name, `restartPolicy: Never`,
+/// [`crate::job::build`] holds (container name, `restartPolicy: Never`,
 /// `backoffLimit: 0`, `automountServiceAccountToken: false`, the security
-/// context — are the framework's and are not re-decided.
-///
-/// Two things are this function's, and only two:
+/// context) are the check framework's. Two things are decided here:
 ///
 /// 1. The Job name and the `logweir.dev/check-kind` label carry [`PLAN_KIND`],
-///    which is now [`CheckPlanKind::CatalogSync`]'s own string rather than a
-///    second spelling of it.
+///    [`CheckPlanKind::CatalogSync`]'s own string.
 ///
 ///    [`CheckPlanKind::CatalogSync`]: logweir_core::check_contract::CheckPlanKind::CatalogSync
-/// 2. **`ttlSecondsAfterFinished` IS SET AT CREATION**, unlike every other
-///    check Job in this tree. The framework patches a TTL on only after the
-///    status commit because a check's relay lives on the pod and the TTL
-///    controller removes Jobs and pods together. A sync Job's TTL is at least a
-///    DAY ([`TTL_FLOOR_SECONDS`]), so it cannot race a read in the same
-///    reconcile — and it is load-bearing in a way the ten-minute one is not:
-///    the TTL is the ONLY thing that ever removes a page, so a Job that
-///    finished without one would pin its pages forever if the controller died
-///    before it could patch. Setting it at creation is what makes the "no
-///    `delete` verb" design safe against a crash.
+/// 2. **`ttlSecondsAfterFinished` is set at creation**, unlike every other
+///    check Job, whose TTL is patched after the status commit because its
+///    relay lives on the pod. A sync Job's TTL is at least an hour
+///    ([`TTL_FLOOR_SECONDS`]), so it cannot race a read in the same reconcile,
+///    and it is the only thing that ever removes a page: a Job that finished
+///    without one would pin its pages for ever if the controller died before
+///    patching. Setting it at creation makes the "no `delete` verb" design safe
+///    against a crash.
 #[must_use]
 pub fn build_sync_job(spec: &SyncJobSpec) -> Job {
     let mut config_map_mounts = vec![ConfigMapMount {
@@ -3317,7 +3068,7 @@ pub fn build_sync_job(spec: &SyncJobSpec) -> Job {
         plan_config_map: None,
         image: spec.image.clone(),
         image_pull_policy: spec.image_pull_policy.clone(),
-        // No `RecoveryCatalog` field states resources for its sync Job (FX-2).
+        // No `RecoveryCatalog` field states resources for its sync Job.
         resources: None,
     });
 

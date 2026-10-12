@@ -1,12 +1,10 @@
 // workflow.spec.js -- the transitions are named, and an illegal one is an
 // error with a name rather than a silent no-op.
 //
-// WHAT THIS FILE IS FOR. PLAT-18.1's acceptance asks for "state transition
-// errors". Before it, the mutation record's states existed and its moves did
-// not: settling an attempt that was not in flight was an `if` beside a call
-// site, and a page that got it wrong published a state nobody could have
-// refused. Every assertion below is about a MOVE -- that it happened, that it
-// was the move the contract names, or that it was refused by name.
+// Every assertion below is about a MOVE: that it happened, that it was the
+// move the contract names, or that it was refused by name. Settling an
+// attempt that is not in flight must be a transition error, not an `if`
+// beside a call site that lets a page publish a state nobody could refuse.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,7 +30,7 @@ import { initialState, stepStates } from "../pages/restore-wizard.js";
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
 
-// ============================================================== the kit
+// THE KIT.
 
 test("a_machine_whose_transition_names_a_state_it_does_not_declare_is_refused_at_load", () => {
   assert.throws(
@@ -82,7 +80,7 @@ test("a_final_state_says_it_is_final_rather_than_listing_nothing", () => {
   assert.match(built.message, /this state is final/);
 });
 
-// ======================================================= the mutation record
+// THE MUTATION RECORD.
 
 test("the_mutation_record_takes_the_named_moves_the_contract_declares", async () => {
   const record = createMutation();
@@ -168,7 +166,7 @@ test("every_machine_state_publishes_a_phase_the_pages_already_render", () => {
   assert.equal(MUTATION_PHASES.unanswered.timedOut, true);
 });
 
-// ========================================================== the restore wizard
+// THE RESTORE WIZARD.
 
 test("the_wizard_s_six_steps_are_the_machine_s_six_states_in_one_order", () => {
   assert.equal(WIZARD_STEPS.length, 6);

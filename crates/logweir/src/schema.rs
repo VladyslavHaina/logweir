@@ -2,13 +2,7 @@ use crate::exit::ExitCode;
 
 /// The one sentence every non-shipping arm below ends with, so `logweir
 /// schema <anything>` tells an operator what tag 1 DOES ship rather than only
-/// what it does not.
-///
-/// It replaced three copies of "v0.1 ships exactly one schema: `logweir
-/// schema scorecard`." / "v0.1 accepts: scorecard", which were three places
-/// one fact had to be edited — and the fact changed the moment Global
-/// Constraint 13 was revised to accept `backup-receipt`. Capitalised because
-/// every use of it is sentence-initial, after a full stop.
+/// what it does not. Capitalised because every use is sentence-initial.
 const ACCEPTED: &str = "Tag 1 ships two schemas: `scorecard` and `backup-receipt`.";
 
 /// Global Constraint 13, as REVISED: `logweir schema` accepts `scorecard` and
@@ -16,34 +10,24 @@ const ACCEPTED: &str = "Tag 1 ships two schemas: `scorecard` and `backup-receipt
 /// exit `1` naming the sub-project that introduces them; `switchover-record`
 /// exits `1` naming **tag 2**.
 ///
-/// # Why `switchover-record` has its own arm (critique A F31)
-///
-/// It used to fall through the catch-all, whose message named no tag: an
-/// operator who had read tag 2's design and typed the obvious command was
-/// told `unknown schema \`switchover-record\``, which reads as "there is no
-/// such thing" rather than "not yet". Every other deferred schema in this
-/// function names the thing that introduces it, and this one is the only
-/// deferred schema an adopter has any reason to try, because it is the only
-/// one the ROADMAP names by document type.
+/// `switchover-record` has its own arm because it is the one deferred schema
+/// the ROADMAP names by document type, so an adopter types it, and the
+/// catch-all's "unknown schema" reads as "no such thing", not "not yet".
 pub fn run(which: &str) -> ExitCode {
     match which {
         "scorecard" => {
             print!("{}", logweir_core::schema::scorecard_schema());
             ExitCode::Ok
         }
-        // Task 5. The SECOND schema tag 1 ships, and the reason GC13 was
-        // revised: the backup's evidence is a new document, not new scorecard
-        // fields (spec §7, GC12 as amended). Byte-identical to the CURRENT
-        // receipt schema file, `schemas/logweir-backup-receipt-<v>.json` with
-        // `v` = `FORMAT_VERSION_WITH_GENERATIONS` (1.6.0, PROD-01.4a;
-        // PROD-03.0's 1.5.0, PROD-01.3's 1.4.0, PROD-05.1's 1.3.0, FX-7's
-        // 1.2.0, FX-4's 1.1.0 and the 1.0.0 file are frozen beside it)
-        // — the CI drift arm regenerates
-        // that file and `diff -u`s it, and
+        // The SECOND schema tag 1 ships: the backup's evidence is a new
+        // document, not new scorecard fields (spec §7, GC12 as amended).
+        // Byte-identical to the CURRENT receipt schema file,
+        // `schemas/logweir-backup-receipt-<v>.json` with
+        // `v` = `FORMAT_VERSION_WITH_GENERATIONS` (1.6.0; 1.5.0 back to 1.0.0
+        // are frozen beside it). The CI drift arm regenerates that file, and
         // `crates/logweir/tests/cli_verify_gc12.rs::
         // schema_backup_receipt_is_byte_identical_to_the_checked_in_file`
-        // compares THIS stdout against it, so the printed schema and the
-        // published file cannot come apart.
+        // compares THIS stdout against it.
         "backup-receipt" => {
             print!("{}", logweir_core::schema::backup_receipt_schema());
             ExitCode::Ok

@@ -2,24 +2,10 @@
 //! and by `logweir drill run`, so a green `doctor` and the drill it green-lit
 //! cannot disagree about which binary they mean.
 //!
-//! THE DEFECT THIS EXISTS FOR. `doctor` resolved
-//! `$LOGWEIR_ENGINE_BIN` -> `/usr/local/bin/kafka-backup` -> a `$PATH` scan.
-//! `drill run` resolved `$LOGWEIR_ENGINE_BIN` -> the literal
-//! `.engine/kafka-backup`, and `Command::new` performs NO `$PATH` search for a
-//! path containing `/`. `README.md` and `docs/quickstart.md` both tell an
-//! adopter that the engine on `$PATH` is enough. So the documented install
-//! produced a `doctor` run printing `ok engine present` and `ok engine
-//! version`, followed by a `drill run` that read the target cluster and the
-//! archive manifest through phases 0-4 and then died at phase 5 the first time
-//! it tried to execute an engine that, as far as it was concerned, was not
-//! there. Two resolutions, one of them documented, neither of them shared.
-//!
-//! The `.engine/kafka-backup` entry is kept — it is where `just engine` and
-//! `scripts/extract-engine.sh` put the extracted binary, and dropping it would
-//! break every contributor's local drill — but it is now in the SAME chain
-//! `doctor` walks, so `doctor` finds it too. Before this, a contributor with a
-//! working `.engine/kafka-backup` was told by `doctor` that they had no engine
-//! at all: the disagreement ran in both directions.
+//! The chain includes a `$PATH` scan because `Command::new` performs none for
+//! a path containing `/`, and `README.md` and `docs/quickstart.md` say an
+//! engine on `$PATH` is enough. `.engine/kafka-backup` is where `just engine`
+//! and `scripts/extract-engine.sh` put the extracted binary.
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
@@ -31,8 +17,7 @@ pub const ENGINE_NAME: &str = "kafka-backup";
 const WELL_KNOWN: &str = "/usr/local/bin/kafka-backup";
 
 /// Where `just engine` / `scripts/extract-engine.sh` put the extracted,
-/// digest-pinned binary in a checkout. Relative to the current directory, as
-/// it always was.
+/// digest-pinned binary in a checkout. Relative to the current directory.
 const REPO_LOCAL: &str = ".engine/kafka-backup";
 
 /// Resolve the engine, reading the real process environment.
@@ -115,8 +100,7 @@ mod tests {
         exe
     }
 
-    /// Moved here from `doctor::tests` when the resolution was unified: a bare
-    /// name on `$PATH`, not in the current directory and not in
+    /// A bare name on `$PATH`, not in the current directory and not in
     /// `/usr/local/bin`, must resolve. Uses a synthetic `PATH`-like value (two
     /// tempdirs) rather than the real process environment.
     #[test]
@@ -144,11 +128,9 @@ mod tests {
         assert_eq!(find_on_path(&path_var, ENGINE_NAME), None);
     }
 
-    /// THE FINDING, as a unit: an engine installed only on `$PATH` — the
-    /// install `README.md` documents — must resolve to the file on `$PATH`.
-    /// The drill's old default, the literal `.engine/kafka-backup`, is not a
-    /// `$PATH` lookup at all: `Command::new` on a path containing `/` never
-    /// searches.
+    /// An engine installed only on `$PATH`, the install `README.md` documents,
+    /// must resolve to the file on `$PATH`: `Command::new` on a path containing
+    /// `/` never searches.
     #[test]
     fn an_engine_installed_only_on_path_resolves_to_the_file_on_path() {
         let bin_dir = tempfile::tempdir().unwrap();

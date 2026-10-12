@@ -133,7 +133,7 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
-    // FX-24c: the per-peer cap exists only where a trusted-proxy set does, so
+    // The per-peer cap exists only where a trusted-proxy set does, so
     // the ingress is never capped as one peer (see `PeerLimit`). localAdmin
     // mode has no such set, and every peer it serves is this machine anyway.
     let peer_limit = state
@@ -150,7 +150,7 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
         issuer = config.shared().map_or("", |s| s.oidc.issuer.as_str()),
         oidc_extra_roots,
         oidc_system_roots,
-        // PLAT-19.2 readiness (D0: "API and controller consume the same content
+        // Readiness (D0: "API and controller consume the same content
         // hash and expose it"): the controller logs the same digest at start.
         approval_policy_digest = %state.approval().policies.digest(),
         confirmation_key_id = state
@@ -158,7 +158,7 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             .confirmation
             .as_ref()
             .map_or("", |k| k.key_id()),
-        // PROD-16.1: a managed key the identity hook has not written yet is
+        // A managed key the identity hook has not written yet is
         // read on first use; and the fresh-install marker is read per request.
         confirmation_key_pending = state.approval().pending_confirmation_file.is_some(),
         installation_marker_source = state
@@ -166,7 +166,7 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             .installation
             .as_ref()
             .map_or(String::new(), |i| format!("{}/{}", i.namespace, i.config_map)),
-        // FX-24c (review L1): whether one peer outside the trusted proxy is
+        // Whether one peer outside the trusted proxy is
         // capped, and at what; 0 is off. A capped install that refuses nobody
         // and an uncapped one look the same in the log otherwise.
         per_peer_cap = peer_limit.as_ref().map_or(0, |_| MAX_CONNECTIONS_PER_PEER),
@@ -192,17 +192,17 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
 /// minute holds a task, a file descriptor and a connection permit
 /// indefinitely. Ten seconds is generous for a browser on loopback, for an
 /// ingress controller's pooled connection and for a kubelet probe, and it
-/// bounds the classic slow-loris shape (review finding R4) and the silent
-/// socket (FX-24). See [`serve`] on why the deadline starts at the accept.
+/// bounds the classic slow-loris shape and the silent socket. See [`serve`]
+/// on why the deadline starts at the accept.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a connection may wait on its client with no progress: a pending
 /// write of an answer the client has stopped reading, or a pending read of a
-/// request body the client has stopped sending (FX-24b). Past it the operation
-/// fails `TimedOut`, the connection ends and its permit comes back. See
+/// request body the client has stopped sending. Past it the operation fails
+/// `TimedOut`, the connection ends and its permit comes back. See
 /// `logweir_api::transport` for the two guards and why the connection's other
 /// reads are not timed. A body's window also has a floor,
-/// [`BODY_MIN_PROGRESS`] (FX-24c).
+/// [`BODY_MIN_PROGRESS`].
 ///
 /// A STALL, NOT A TOTAL, AND NOT THE HEADER DEADLINE. The clock starts only
 /// while a write or a body read is pending and, on the output, resets on every
@@ -218,21 +218,18 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// every connection slot, which is the outage this bounds. Each test row that
 /// measures it reads it back out of this file.
 ///
-/// IT ALSO ENDS A CLIENT THAT READS A BYTE AT A TIME (FX-24c, measured). The
-/// kernel stops waking a writer whose client takes almost nothing, so a client
+/// IT ALSO ENDS A CLIENT THAT READS A BYTE AT A TIME (measured). The kernel
+/// stops waking a writer whose client takes almost nothing, so a client
 /// reading one byte every twenty seconds, or 16 KiB every twenty, is ended at
-/// 35.1 s on macOS, the same as one that reads nothing (2026-10-09, the
-/// binary's own "connection ended" line). The FX-24b review's "still open at
-/// 100 s" read a byte at a time out of half a megabyte the kernel had
-/// buffered, and never reached the end-of-stream behind it.
+/// 35.1 s on macOS, the same as one that reads nothing.
 const IO_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The least a request body that is still arriving must bring in each
-/// [`IO_STALL_TIMEOUT`] window: 32 KiB, about 1.1 KiB/s or 9 kbit/s (FX-24c).
+/// [`IO_STALL_TIMEOUT`] window: 32 KiB, about 1.1 KiB/s or 9 kbit/s.
 ///
-/// WHY A FLOOR. A body's window was closed by any byte, so a signed-in client
-/// that sent one byte every twenty seconds held its connection until
-/// `http::read_json`'s sixty-second total. With the floor it is answered
+/// WHY A FLOOR. A body's window closed by any byte would let a signed-in
+/// client sending one byte every twenty seconds hold its connection until
+/// `http::read_json`'s sixty-second total; with the floor it is answered
 /// `400 malformed_request` at thirty. A body that ends inside its window is
 /// never cut, however small: the console's own bodies are a few KiB, sent at
 /// once.
@@ -247,7 +244,7 @@ const IO_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const BODY_MIN_PROGRESS: usize = 32 * 1024;
 
 /// The most connections one peer outside the trusted-proxy set may hold at
-/// once (FX-24c; `logweir_api::transport::PeerLimit`). A connection over it is
+/// once (`logweir_api::transport::PeerLimit`). A connection over it is
 /// closed as soon as it is accepted, before anything is read.
 ///
 /// WHY A COUNT. A client that reads fast enough to keep the kernel waking the
@@ -297,20 +294,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// The loop below is the same shape — accept, wrap, spawn, watch for shutdown —
 /// with those two configured and with a permit and a shutdown deadline added.
 ///
-/// HTTP/1.1 ONLY, AND THAT IS WHAT BOUNDS THE FIRST BYTE (FX-24). This loop
-/// used hyper-util's `auto` builder, which reads a connection's first bytes to
-/// choose HTTP/1 or HTTP/2 — with no timer — and only then builds the HTTP/1
-/// connection that owns [`HEADER_READ_TIMEOUT`]. A socket that sent nothing
-/// therefore never reached a deadline: measured on the built binary
-/// (2026-10-08), a partial head closed at 10.0 s and a silent socket was still
-/// open at 16 s, and 256 silent sockets held every permit until the client let
-/// go. A timeout around that version read alone would not have been enough,
-/// because hyper's HTTP/2 server has no header deadline of its own: a client
-/// that sent the 24-byte HTTP/2 preface and stopped was still open at 16 s
-/// too, on the same binary. hyper's HTTP/1 connection arms the deadline in its
-/// first read of the head, which runs when the spawned task first polls it,
-/// so serving HTTP/1 directly bounds zero bytes, a partial head and an idle
-/// keep-alive alike, with one mechanism.
+/// HTTP/1.1 ONLY, AND THAT IS WHAT BOUNDS THE FIRST BYTE. hyper-util's `auto`
+/// builder reads a connection's first bytes to choose HTTP/1 or HTTP/2 --
+/// with no timer -- before it builds the HTTP/1 connection that owns
+/// [`HEADER_READ_TIMEOUT`], so a socket that sent nothing would never reach a
+/// deadline (256 silent sockets held every permit), and hyper's HTTP/2 server
+/// has no header deadline of its own (a client that sent the 24-byte preface
+/// and stopped stayed open). hyper's HTTP/1 connection arms the deadline in
+/// its first read of the head, which runs when the spawned task first polls
+/// it, so serving HTTP/1 directly bounds zero bytes, a partial head and an
+/// idle keep-alive alike, with one mechanism.
 ///
 /// Nothing that talks to this listener speaks HTTP/2: browsers use it only
 /// over TLS, and this listener is plain HTTP (TLS terminates at the ingress in
@@ -369,7 +362,7 @@ async fn serve(
         // anywhere.
         let peer_ip = peer.ip();
 
-        // THE PER-PEER CAP (FX-24c), before anything is read: a peer outside
+        // THE PER-PEER CAP, before anything is read: a peer outside
         // the trusted-proxy set that already holds its share has this
         // connection closed now, and the permit above comes back with it.
         let peer_slot = match peer_limit.as_ref().map(|limit| limit.admit(peer_ip)) {
@@ -387,7 +380,7 @@ async fn serve(
                 request
                     .extensions_mut()
                     .insert(logweir_api::http::PeerAddr(peer_ip));
-                // THE BODY'S PROGRESS WINDOW (FX-24b; its floor, FX-24c), for
+                // THE BODY'S PROGRESS WINDOW (and its floor), for
                 // every route and whoever reads the body: a handler waiting on
                 // a body the client stopped sending, or trickles, gets
                 // `TimedOut` instead of waiting for ever. `http::read_json`
@@ -408,7 +401,7 @@ async fn serve(
         // stream is server-sent events, an ordinary HTTP/1.1 response), so a
         // request asking to upgrade is answered like any other.
         //
-        // THE OUTPUT'S STALL DEADLINE (FX-24b): an answer the client has
+        // THE OUTPUT'S STALL DEADLINE: an answer the client has
         // stopped reading fails its pending write at `IO_STALL_TIMEOUT`, and
         // the connection ends with it — the permit below comes back then.
         let io = StallGuard::new(TokioIo::new(stream), IO_STALL_TIMEOUT);

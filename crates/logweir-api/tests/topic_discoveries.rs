@@ -196,9 +196,7 @@ async fn the_create_rate_is_bounded_per_actor_and_namespace() {
     logweir_api::routes::reset_check_rate_limits();
 }
 
-// ======================================================================
-// The topics page
-// ======================================================================
+// THE TOPICS PAGE.
 
 #[tokio::test]
 async fn the_topics_page_is_bounded_ordered_and_searchable() {
@@ -442,9 +440,7 @@ async fn the_read_never_lists_config_maps() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// Freshness, the two slots, and cancellation
-// ======================================================================
+// FRESHNESS, THE TWO SLOTS, AND CANCELLATION.
 
 #[tokio::test]
 async fn a_result_goes_stale_when_its_connection_binding_changes() {
@@ -531,7 +527,7 @@ async fn a_failed_attempt_never_hides_the_last_successful_inventory() {
     app.fake.assert_strict();
 }
 
-/// FX-5: a discovery publishes the broker count its result recorded, under the
+/// A discovery publishes the broker count its result recorded, under the
 /// name and with the value the console's shared fixture carries -- and a result
 /// that recorded none publishes NO count, never a zero.
 ///

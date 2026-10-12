@@ -1,15 +1,10 @@
 // render.js -- DOM helpers. This module issues no network request of any kind;
 // `api.js` is the only module in this tree that does.
 //
-// WHAT IS DELIBERATELY NOT HERE. There is no function in this file that
-// decides whether an object verified, and there must not be. The verdict a
-// page shows is read from the object's own status -- weirkeeper writes
-// `status.evidence.verification` and a `Verified` condition, and the badge
-// rules are a conjunction over those recorded fields and the run's own outcome.
-// A helper here that took a guess at that conjunction, or that defaulted a
-// missing field to a favourable answer, would be this page inventing a claim
-// about signed evidence it never read. The shell renders no verdict at all;
-// the pages that render one arrive with their own tests.
+// NO VERDICT IS DECIDED HERE. A page shows the verdict the object's own status
+// records (`status.evidence.verification`, the `Verified` condition); a helper
+// that guessed at the badge conjunction, or defaulted a missing field to a
+// favourable answer, would invent a claim about evidence it never read.
 //
 // Everything below is structural: it builds elements and sets TEXT. Nothing
 // here writes `innerHTML`, so a name, a reason or an API server message drawn
@@ -61,27 +56,18 @@ export function clear(node) {
 
 /** Replaces a node's children in one step -- AND KEEPS THE READER'S FOCUS.
  *
- *  FOCUS SURVIVES A RE-RENDER (PLAT-18.2; the PLAT-10 review's LOW). Every
- *  page here re-renders by replacing its whole subtree: the restore wizard on
- *  every change, a schedule detail after every action. Replacing the node a
- *  keyboard reader is on moves their focus to the document body, so the next
- *  Tab starts again at the skip link -- the page worked for a mouse and was
- *  lost to a keyboard. So when the focused element is inside `node` and has
- *  an `id`, the element with the same `id` in the new subtree takes focus
- *  again, with its caret and selection when it is a text field, and without
- *  scrolling. An element that is gone is not replaced by a guess: focus then
- *  goes to `node` itself when it can take it (the view slot is
- *  `tabindex="-1"`), which is where a screen reader expects a re-read page to
- *  start.
+ *  Replacing the node a keyboard reader is on moves focus to the body, and
+ *  every page here re-renders by replacing its subtree. So when the focused
+ *  element is inside `node` and has an `id`, the element with the same `id`
+ *  in the new subtree takes focus again, with its caret and selection, without
+ *  scrolling. An element that is gone is not replaced by a guess: focus goes
+ *  to `node` itself when it can take it (the view slot is `tabindex="-1"`).
  *
  *  THE SCROLL IS NOT TOUCHED HERE: this is the swap for NEW content -- a route
  *  mount, a wizard step, a list -- which opens where its page puts it. A
- *  repaint of the SAME view, an answer landing under a reader who is reading
- *  it, is [`replaceInPlace`].
+ *  repaint of the SAME view is [`replaceInPlace`].
  *
- *  Nothing here runs without a document: the node suites drive `replace`
- *  through fake nodes that have no `ownerDocument`, and for them this is the
- *  plain replace it always was. */
+ *  Without a document (the node suites' fake nodes) this is a plain replace. */
 export function replace(node, children) {
   const kept = focusWithin(node);
   append(clear(node), children);
@@ -92,21 +78,14 @@ export function replace(node, children) {
 }
 
 /** [`replace`] for a repaint of the SAME view -- AND THE PAGE STAYS WHERE IT
- *  WAS (poc-upgrade-4's P16). Emptying `node` and filling it again moved the
- *  page under the reader: the browser lays the emptied view out, or loses the
- *  scroll anchor it had chosen inside it, and the window's offset came back
- *  smaller -- restore step 5's first follow read took 282 px to 0 and left the
- *  focused status below the fold, where no later read brought it back. So the
- *  offset is read before the swap and put back after it when the swap moved
- *  it, and when focus was inside `node` on an element that is there again,
- *  that element is kept where it sat in the viewport ([`readingPlace`],
- *  [`keepReadingPlace`]).
+ *  WAS. Emptying and refilling `node` can move the page under the reader (the
+ *  browser loses its scroll anchor), so the offset is read before the swap and
+ *  put back after it, and an element that held focus and is there again is
+ *  kept where it sat in the viewport ([`readingPlace`], [`keepReadingPlace`]).
  *
- *  ONLY FOR THE SAME VIEW (the P16 review's HIGH): a follow's repaint, a
- *  click's pending and settled repaints, an edit re-rendering the step it was
- *  made in. New content keeps [`replace`] -- the first cut kept the place in
- *  every swap, and the wizard's Next opened step 2 1935 px below its heading,
- *  at the offset step 1 had been read to. */
+ *  ONLY FOR THE SAME VIEW: a follow's repaint, a click's pending and settled
+ *  repaints, an edit re-rendering its own step. New content keeps [`replace`],
+ *  or Next would open a step at the offset the previous one was read to. */
 export function replaceInPlace(node, children) {
   const kept = focusWithin(node);
   const place = readingPlace(node, kept);
@@ -243,11 +222,10 @@ export function restoreFocus(node, kept) {
   if (!doc || kept === null || kept === undefined) {
     return false;
   }
-  // A TARGET THE BROWSER REFUSES IS NOT A LANDING (P16's sweep): an empty
-  // status region is `display: none` (`.form-status:empty`), and `focus()` on
-  // it does nothing and says nothing -- Test access and the schedule form's
-  // Check readiness left focus on the body that way. So a target counts only
-  // when focus is on it afterwards, and otherwise the next one is tried.
+  // A TARGET THE BROWSER REFUSES IS NOT A LANDING: an empty status region is
+  // `display: none` (`.form-status:empty`), and `focus()` on it does nothing
+  // and says nothing. So a target counts only when focus is on it afterwards,
+  // and otherwise the next one is tried.
   const take = (target) => {
     target.focus({ preventScroll: true });
     if (doc.activeElement !== target) {
@@ -295,9 +273,7 @@ export function restoreFocus(node, kept) {
  *  body. So when `disabled` is true and focus is on `control` or inside it,
  *  focus first moves to `fallback` (a status region the outcome will be
  *  written into), else to the status region of the form the control is in,
- *  else to the view slot -- then the control is disabled. The class of defect
- *  `replace()`'s bookkeeping closes for a re-render, closed for the pages that
- *  disable a control without one (PLAT-18.2 class sweep). */
+ *  else to the view slot -- then the control is disabled. */
 export function disableKeepingFocus(control, disabled, fallback) {
   if (control === null || control === undefined) {
     return;
@@ -326,7 +302,7 @@ export function disableKeepingFocus(control, disabled, fallback) {
   control.disabled = disabled === true;
 }
 
-/** THE TWO PROBLEM CODES THAT MEAN "SIGN IN" (MCP-1, MCP-4): the product API's
+/** THE TWO PROBLEM CODES THAT MEAN "SIGN IN": the product API's
  *  `401` for a request with no session, and for one whose session expired
  *  (`docs/api.md`, *The session and the CSRF token*). `ui/client.js` reads
  *  the boot probe's answer against this list, and the error box offers a
@@ -349,8 +325,8 @@ function hereHash() {
   return typeof window !== "undefined" && window.location ? String(window.location.hash || "") : "";
 }
 
-// The headline an error box leads with, in words (MCP-4). The server's own
-// status, code and message are still shown, verbatim, underneath: this adds a
+// The headline an error box leads with, in words. The server's own status,
+// code and message are still shown, verbatim, underneath: this adds a
 // sentence a person reads first and changes nothing they could search for.
 function errorTitle(status, reason) {
   if (SIGN_IN_CODES.indexOf(reason) !== -1) {
@@ -407,17 +383,9 @@ export function errorParts(error) {
   };
 }
 
-/** Renders an error from `api.js`: a headline in words, then the API server's
- *  own message, then its status, code and request id, verbatim (MCP-4).
- *
- *  A 403 here is still the API server's 403 about the viewer's own authority.
- *  This function neither softens it nor explains it away; it says in words
- *  what the number means before it shows the number. A sign-in refusal from
- *  the product API carries a Sign in link that returns to this address. */
 /** [`messageText`]'s rule for the DOM half, which writes no markup: the
  *  PAIRED backticked spans of `value` as `<code>` elements and the rest as
- *  text (O2, R2-10's class) -- this page's own refusals say "the console
- *  (`logweir-api`)", and the error box printed the backticks. */
+ *  text. */
 export function messageNodes(value) {
   const text = typeof value === "string" ? value : "";
   const parts = text.split("`");
@@ -436,6 +404,13 @@ export function messageNodes(value) {
   return out;
 }
 
+/** Renders an error from `api.js`: a headline in words, then the API server's
+ *  own message, then its status, code and request id, verbatim.
+ *
+ *  A 403 here is still the API server's 403 about the viewer's own authority.
+ *  This function neither softens it nor explains it away; it says in words
+ *  what the number means before it shows the number. A sign-in refusal from
+ *  the product API carries a Sign in link that returns to this address. */
 export function errorBox(error) {
   const parts = errorParts(error);
   return el("div", { class: "error", role: "alert" }, [
@@ -449,32 +424,19 @@ export function errorBox(error) {
   ]);
 }
 
-// ===========================================================================
-// THE STRING HALF -- the primitives the four page modules are built from.
-// ===========================================================================
+// THE STRING HALF: pure functions from data to an HTML string -- no
+// `document`, no `window`, no network, no clock -- so `node --test`, which
+// has no DOM, can assert what a page renders
+// (`scripts/check-ui-behaviour.sh`).
 //
-// WHY A STRING AND NOT A NODE. Everything below is a pure function from data
-// to an HTML string: no `document`, no `window`, no network, no clock. That is
-// what makes the page rules testable. `node --test` has no DOM, and this tree
-// has no bundler, no npm and no DOM shim (Global Constraints 17 and 21), so a
-// rule expressed as "the detail view renders this exact line" can only be
-// asserted if the thing a page produces is a value a test can read. It is a
-// string, and `scripts/check-ui-behaviour.sh` runs the assertions on every
-// `just lint`.
+// NOTHING BELOW WRITES `innerHTML`. `app.js` parses a string with
+// `DOMParser`, which does not execute script, and adopts the nodes; every
+// value from the cluster passes through `esc` first, so it is text and never
+// markup.
 //
-// AND NOTHING BELOW WRITES `innerHTML`. The mount half in `app.js` parses a
-// string with `DOMParser`, which does not execute script content, and adopts
-// the nodes. Every value that comes from the cluster passes through `esc`
-// before it reaches a string, so a topic name, a Secret name or an API server
-// message is text in the output and can never become markup. The two claims
-// `ui/README.md` and this file's own header make -- "sets text, never
-// `innerHTML`" -- stay true of this module and of the whole tree.
-//
-// STILL NO VERDICT HERE. `badge(kind, text)` is structural: it puts a class
-// and a caption on a span. It decides nothing. The two badge RULES -- one per
-// kind, because a `Backup` carries no `outcome` -- live in the page modules
-// with their fixtures and their tests, and `evidenceBlock` renders what the
-// controller RECORDED without re-deriving any part of it.
+// STILL NO VERDICT HERE. `badge(kind, text)` puts a class and a caption on a
+// span and decides nothing; the badge RULES live in the page modules with
+// their fixtures, and `evidenceBlock` renders what the controller RECORDED.
 
 /** The rightwards arrow, written as an escape because every file under `ui/`
  *  outside `tests/` is plain ASCII (`the_ui_sources_are_ascii_only`). The
@@ -482,10 +444,10 @@ export function errorBox(error) {
 export const ARROW = "\u2192";
 
 /** `evidence.immutable` is `false` in every document this product writes, and
- *  the field carries no information at all (C38, spec section 12). It is rendered as
- *  this exact line, and NEVER as a tick: a tick beside the word `immutable`
- *  tells a viewer that a document is WORM-protected, and nothing in this
- *  product established that. */
+ *  the field carries no information at all. It is rendered as this exact
+ *  line, and NEVER as a tick: a tick beside the word `immutable` tells a
+ *  viewer that a document is WORM-protected, and nothing in this product
+ *  established that. */
 export const IMMUTABLE_LINE =
   "immutable: false (this field carries no information in format_version 1.0.0)";
 
@@ -497,10 +459,8 @@ export const ENGINE_SUBREPORT_LINE =
   "engine sub-report: not produced by this engine version";
 
 /** Every list view carries this, verbatim. A custom resource is a cluster's
- *  view of a run; the authoritative index is the evidence bucket, because
- *  deleting the object does not delete the signed document it names. Said in
- *  an operator's words since MCP-21: "the authoritative index is the evidence
- *  bucket" was jargon, repeated on every list. */
+ *  view of a run; deleting the object does not delete the signed document it
+ *  names. */
 export const BUCKET_FOOTER =
   "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
   "archive even if the object listed here is deleted.";
@@ -513,19 +473,14 @@ export const RETENTION_SENTENCE =
  *  "verified in your browser": this page verified nothing. */
 export const UNVERIFIED = "unverified";
 
-// ---------------------------------------------------------------------------
-// THE RESTORE-SIDE FIXED SENTENCES (Task 27). Same rule as the five above:
-// each is a sentence of OURS, rendered verbatim and never through `esc`, and
-// each is asserted by name in `ui/tests/pages.spec.js`. They live here rather
-// than in the three pages that print them for one reason -- a sentence that
-// exists in two files is a sentence two editors can make disagree.
-// ---------------------------------------------------------------------------
+// THE RESTORE-SIDE FIXED SENTENCES: each is a sentence of OURS, rendered
+// verbatim and never through `esc`, asserted by name in
+// `ui/tests/pages.spec.js`, and kept here so two pages cannot disagree.
 
-/** `Restore.spec` is CEL-immutable (`self == oldSelf`, spec section 3.2), so
- *  there is no such thing as editing a plan in place: "edit" prefills a NEW
- *  draft whose bytes hash differently, and the approval that covered the old
- *  one does not cover it. The page says so IN THE PAGE, above the form, rather
- *  than discovering it at the 422 (C48). */
+/** `Restore.spec` is immutable, so there is no editing a plan in place:
+ *  "edit" prefills a NEW draft whose bytes hash differently, and the approval
+ *  that covered the old one does not cover it. The page says so above the
+ *  form rather than at the 422. */
 export const RESTORE_IMMUTABLE_SENTENCE =
   "Restore.spec is immutable. This creates a NEW Restore with a new plan hash; " +
   "the existing approval does not cover it.";
@@ -533,14 +488,11 @@ export const RESTORE_IMMUTABLE_SENTENCE =
 /** Why a download button exists beside the copy button.
  *
  *  The plan bytes are the thing an approval binds, so "nearly the same bytes"
- *  is not a degraded copy -- it is a different document with a different
- *  sha256, and `logweir drill approve` would sign the wrong one. Several
- *  browsers strip trailing whitespace from a clipboard copy of a `<pre>`, and
- *  a plan whose last line ends in spaces is not exotic. So the page offers the
- *  download, and names the `kubectl` route to the same bytes for anyone who
- *  would rather take them from the cluster -- under THEIR OWN context: the
- *  caveat used to hard-code `--context docker-desktop`, this repository's lab
- *  context, on every installation (MCP-30). */
+ *  is a different document with a different sha256. Several browsers strip
+ *  trailing whitespace from a clipboard copy of a `<pre>`, and a plan whose
+ *  last line ends in spaces is not exotic. So the page offers the download,
+ *  and names the `kubectl` route to the same bytes under the reader's own
+ *  context. */
 export const COPY_CAVEAT =
   "copy loses trailing whitespace in some browsers; download, or read the same bytes from " +
   "the cluster with your own kubectl context -- kubectl get restore <name> --namespace " +
@@ -556,9 +508,8 @@ export const CONVENIENCE_SENTENCE =
   "are the gate, and they read the bytes you submit.";
 
 /** The approvals page's refusal, verbatim. It is the whole of the message: a
- *  page that took a private key would be the most consequential missing
- *  subsystem in this product reimplemented inside a browser (Global
- *  Constraint 28). */
+ *  page that took a private key would reimplement the approval signer inside
+ *  a browser. */
 export const PRIVATE_KEY_REFUSAL = "this page never accepts a private key";
 
 /** `Approval.status.selfAttestedRisk` rendered as a SENTENCE and never as a
@@ -566,7 +517,7 @@ export const PRIVATE_KEY_REFUSAL = "this page never accepts a private key";
  *
  *  A tick or a `false` beside the words "self attested" reads as "two people
  *  signed off". It means only that the two matched key ids differ, and one
- *  operator may hold both keys (spec section 9). */
+ *  operator may hold both keys. */
 export const SELF_ATTESTED_TRUE =
   "self-attested: the approver key and the signing key are the same; " +
   "\"not self-attested\" means only two different keys, and one operator may hold both";
@@ -578,9 +529,7 @@ export const SELF_ATTESTED_FALSE =
   "\"not self-attested\" means only two different keys, and one operator may hold both";
 
 /** The window the archive covers, both bounds as RFC 3339, and the refusal a
- *  point outside it gets. Interface I22: `Backup.status.windowCovered` is two
- *  INTEGERS, so a page that read `covered.from`/`covered.to` would render
- *  `Invalid Date` on both bounds and default step 3 to nothing. */
+ *  point outside it gets. `Backup.status.windowCovered` is two INTEGERS. */
 export function windowMessage(fromMs, toMs) {
   return (
     "the archive covers [" +
@@ -593,23 +542,16 @@ export function windowMessage(fromMs, toMs) {
 
 /** What the RUN will do to the target before the engine starts, named in the
  *  page so an operator reads it before the plan is signed rather than out of a
- *  refusal afterwards (spec section 6.1, guard G-TS).
+ *  refusal afterwards (guard G-TS).
  *
- *  IT IS NOT A READINESS VERDICT, AND SINCE D2 IT SAYS SO. The wizard's step 5
- *  now carries a real `Preflight`, whose aggregate comes from a check Job's own
- *  recorded result; this sentence describes what EXECUTION will attempt, which
- *  is a different fact and one no check can confirm in advance -- the broker's
- *  answer to a topic create is only knowable when the create is made, which is
- *  why `target.logAppendTime` is an execution-only check (D2 section 6.3, G12).
- *
- *  The old copy called this "preflight". That word now names the object above
- *  it, and one word for two things is how an operator comes to read a
- *  description of an intention as a statement that it was checked. */
+ *  IT IS NOT A READINESS VERDICT: it describes what EXECUTION will attempt.
+ *  The broker's answer to a topic create is only knowable when the create is
+ *  made, which is why `target.logAppendTime` is an execution-only check. */
 export function preflightSentence(topicCount) {
   return (
     "At execution time Logweir will create " +
     String(topicCount) +
-    // ONE TOPIC IS ONE TOPIC (MCP round 2, R2-10: "1 topics").
+    // One topic is one topic.
     (topicCount === 1 ? " topic" : " topics") +
     " with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
     "engine runs, and will refuse if the broker is LogAppendTime and rejects the override. " +
@@ -658,7 +600,7 @@ export const BIDI_REPLACEMENT = "\uFFFD";
  *  (U+202A-U+202E) and the isolates (U+2066-U+2069). */
 const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
 
-/** TEXT FROM THE CLUSTER IS SHOWN, NEVER OBEYED (FX-34). `esc` stops a
+/** TEXT FROM THE CLUSTER IS SHOWN, NEVER OBEYED. `esc` stops a
  *  message becoming MARKUP; it does nothing about a bidi override, which is
  *  not markup: U+202E in a text node reverses everything after it on screen,
  *  so a condition message could read as the opposite of what it says. A
@@ -735,7 +677,7 @@ export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
  *  (a caller renders it from `esc`'d values) and is never a value read out of
  *  the cluster unescaped.
  *
- *  `grid`, when given, DECLARES THE TABLE A DATAGRID (PLAT-18.2): `{id,
+ *  `grid`, when given, DECLARES THE TABLE A DATAGRID: `{id,
  *  label}`, where `id` names it for the page's lifetime and `label` is the
  *  plural noun its filter and pagination speak of ("backups"). The table is
  *  then wrapped in `div.datagrid[data-datagrid]`, and `enhanceDatagrids` --
@@ -772,34 +714,24 @@ export function table(columns, rows, empty, rowAttributes, grid) {
   return grid === undefined || grid === null ? html : datagrid(grid, html);
 }
 
-// ===========================================================================
-// PLAT-18.2: THE DATAGRID -- Clarity's filter, sort and pagination over a
-// table the page already rendered.
-// ===========================================================================
+// THE DATAGRID: Clarity's filter, sort and pagination over a table the page
+// already rendered.
 //
-// WHY AN ENHANCEMENT AND NOT A NEW RENDERER. Every list here is a pure string
-// from a JSON object, asserted as such under `node --test`. A datagrid that
-// re-rendered the rows itself would be a second renderer the suites never see.
-// So the page declares a table a datagrid (the `grid` argument of `table`),
-// the string gains one wrapper, and `enhanceDatagrids` works on the parsed
-// rows: it FILTERS them, SORTS them and SHOWS ONE PAGE of them, and never
-// changes what a row says. Its arithmetic is [`datagridView`], a pure
-// function the suites drive directly.
+// AN ENHANCEMENT, NOT A NEW RENDERER: every list is a pure string the suites
+// assert, so a page declares a table a datagrid (`table`'s `grid` argument),
+// the string gains one wrapper, and `enhanceDatagrids` FILTERS, SORTS and
+// PAGES the parsed rows without changing what a row says. Its arithmetic is
+// [`datagridView`], which the suites drive directly.
 //
-// WHY NOT VIRTUALISATION. Measured before this was written
-// (`scripts/plat18-2-measure.mjs`, and a one-off Chromium run): the strings
-// for 1,000 history rows render in under 5 ms; what a large list costs is
-// the browser laying out every row. Pagination keeps one page of rows in the
-// layout -- the others are detached (a read-only table) or hidden (a table
-// whose rows hold controls a page wires after it parses) -- which is the
-// benefit virtualisation would buy, without a scroll model a keyboard and a
-// screen reader then have to fight. The figures are in the PLAT-18.2 report.
+// PAGINATION, NOT VIRTUALISATION: the strings render fast and the cost is
+// layout, which one page of rows in the layout bounds without a scroll model
+// a keyboard and a screen reader have to fight
+// (`scripts/plat18-2-measure.mjs`).
 //
-// THE STATE IS MEMORY, NOT STORAGE. A grid's filter, sort and page live in
+// THE STATE IS MEMORY, NOT STORAGE: a grid's filter, sort and page live in
 // the map below for the life of the loaded page, keyed by the grid's id, so a
-// re-render (the detail after an action, the wizard after an edit) keeps the
-// reader where they were. Nothing is written to browser storage; the offline
-// gate's rule 2 forbids it and a reload starts clean.
+// re-render keeps the reader's place. Nothing is written to browser storage
+// (the offline gate forbids it) and a reload starts clean.
 
 /** Clarity's datagrid page sizes, and the one a grid starts at. */
 export const DATAGRID_PAGE_SIZES = Object.freeze([10, 20, 50, 100]);
@@ -922,17 +854,15 @@ export function datagridSummary(view, label) {
 const DATAGRID_STATE = new Map();
 
 /** THE KEY A GRID'S STATE IS KEPT UNDER: its id, the route it is on, and the
- *  list instance it shows (review HIGH-1). A grid id is a constant --
- *  `history`, `subset-topics` -- shared by every namespace and every recovery
- *  point, so keyed on the id alone a filter typed over one namespace's 15 runs
- *  silently emptied the next namespace's 5, whose grid rendered no box to
- *  clear it. The route is the whole hash (namespace, name, uid); `scope` is the
- *  instance a page names itself (a schedule's uid, a point's uid). */
+ *  list instance it shows. A grid id (`history`, `subset-topics`) is shared by
+ *  every namespace and point, so a filter keyed on it alone would carry over
+ *  to another list with no box to clear it. The route is the whole hash;
+ *  `scope` is the instance a page names (a schedule's uid, a point's uid). */
 export function datagridScopeKey(id, route, scope) {
   return [String(id || ""), String(route || ""), String(scope || "")].join("\n");
 }
 
-/** WHAT A GRID OF `rowCount` ROWS SHOWS, given its kept state (review HIGH-1).
+/** WHAT A GRID OF `rowCount` ROWS SHOWS, given its kept state.
  *
  *  The filter box is rendered when the list is long enough to need one OR a
  *  filter is in force -- so a query can never apply without the box that shows
@@ -966,7 +896,7 @@ export function datagridHiddenSentence(view, label) {
   return String(hidden) + " " + (label || "rows") + " hidden by the filter.";
 }
 
-/** ROWS THAT NEED ATTENTION AND ARE NOT ON THIS PAGE (review LOW-2): an
+/** ROWS THAT NEED ATTENTION AND ARE NOT ON THIS PAGE: an
  *  unavailable archive or a failed run on page 3 must not be invisible on page
  *  1. `attention[i]` says whether row `i` carries such a state. Returns the
  *  count and the pages they are on, over the rows the filter keeps. */
@@ -1018,8 +948,8 @@ export function datagridState(id) {
   return DATAGRID_STATE.get(key);
 }
 
-/** ONE POLITE LIVE REGION FOR THE WHOLE PAGE (PLAT-18.2: accessible progress
- *  announcements). A view that re-renders by replacing its subtree replaces
+/** ONE POLITE LIVE REGION FOR THE WHOLE PAGE. A view that re-renders by
+ *  replacing its subtree replaces
  *  any live region inside it, and a region that is removed and re-added is
  *  not reliably announced. `index.html` carries `#announcer`, which no view
  *  replaces; a page hands it a sentence when something a reader is waiting
@@ -1040,7 +970,7 @@ export function announce(message) {
   return true;
 }
 
-/** THE SCROLLING REGIONS, MADE REACHABLE (PLAT-18.2; axe-core's
+/** THE SCROLLING REGIONS, MADE REACHABLE (axe-core's
  *  `scrollable-region-focusable`). A wide table or a long plan block scrolls
  *  sideways inside its own box; a region that scrolls and holds nothing
  *  focusable cannot be scrolled from a keyboard at all. So every `.table-wrap`
@@ -1401,16 +1331,15 @@ export function detailLink(route, ns, name) {
   return "<a href=\"" + esc(target) + "\">" + esc(name) + "</a>";
 }
 
-/** A covered window as ONE cell, both bounds, one per line (MCP round 2,
- *  R2-3): two instant columns side by side were the widest pair on every
- *  run table, each `nowrap` by MCP-7's rule. `from` and `to` are RFC 3339
- *  strings (or anything `when` takes). */
+/** A covered window as ONE cell, both bounds, one per line: two instant
+ *  columns side by side were the widest pair on every run table. `from` and
+ *  `to` are RFC 3339 strings (or anything `when` takes). */
 export function coveredCell(from, to) {
   return "<span class=\"cell-sub-first\">from " + when(from) + "</span>" +
     "<span class=\"cell-sub\">to " + when(to) + "</span>";
 }
 
-/** A schedule's last and next firing as ONE cell (R2-3), the same shape. */
+/** A schedule's last and next firing as ONE cell, the same shape. */
 export function firingsCell(last, next) {
   return "<span class=\"cell-sub-first\">last " + when(last) + "</span>" +
     "<span class=\"cell-sub\">next " + when(next) + "</span>";
@@ -1426,7 +1355,7 @@ export function badge(kind, text) {
 }
 
 /** A badge with a hover title: the exact recorded value one hover away from
- *  the words (MCP-14, MCP-22). `title` is plain text and is escaped here. */
+ *  the words. `title` is plain text and is escaped here. */
 export function titledBadge(kind, text, title) {
   return (
     "<span class=\"badge badge-" + esc(kind) + "\" title=\"" + esc(title) + "\">" + esc(text) +
@@ -1434,7 +1363,7 @@ export function titledBadge(kind, text, title) {
   );
 }
 
-/** A CONDITION AS A BADGE, NOT AS ITS SYNTAX (MCP-22): `Ready=True ViewReady`
+/** A CONDITION AS A BADGE, NOT AS ITS SYNTAX: `Ready=True ViewReady`
  *  in a table cell becomes the word, in the status colour, with the recorded
  *  type, status and reason as its title. A `False` carries its reason in the
  *  words too, because that is what the reader acts on; `Unknown` -- or any
@@ -1459,7 +1388,7 @@ export function conditionBadge(condition, trueWord, falseWord) {
   return titledBadge("flat", "unknown" + (reason.length > 0 ? " (" + reason + ")" : ""), exact);
 }
 
-/** A BOOLEAN AS WORDS (MCP-14): `true`/`false` in a cell become the words the
+/** A BOOLEAN AS WORDS: `true`/`false` in a cell become the words the
  *  field means, as a neutral badge -- neither word is a verdict. [`ABSENT`]
  *  for a value that is not a boolean, never a guess. */
 export function flagBadge(value, trueWords, falseWords) {
@@ -1488,8 +1417,8 @@ export function phaseBadge(phase) {
 }
 
 /** A RUN's recorded phase as a badge: [`phaseBadge`], except that a manual run
- *  waiting for a slot in its namespace's manual-run pool (P10) also says how
- *  many runs of its kind may be active there at once -- "Queued (limit 4
+ *  waiting for a slot in its namespace's manual-run pool also says how many
+ *  runs of its kind may be active there at once -- "Queued (limit 4
  *  active)". The number is the controller's own `status.queue.limit`, COPIED
  *  and never computed here; a `Queued` phase with no such block (nothing an
  *  older controller writes has one) is the plain `Queued` badge, and every
@@ -1498,9 +1427,9 @@ export function runPhaseBadge(status) {
   const s = status || {};
   const queue = s.queue || {};
   if (s.phase === "Queued" && Number.isInteger(queue.limit) && queue.limit > 0) {
-    // A QUEUED RESTORE'S APPROVAL KEEPS ITS CLOCK (P10 review M2): the queue
-    // does not extend an approval's maximum age, so the deadline the
-    // controller copied onto the object is part of what "queued" means here.
+    // A QUEUED RESTORE'S APPROVAL KEEPS ITS CLOCK: the queue does not extend
+    // an approval's maximum age, so the deadline the controller copied onto
+    // the object is part of what "queued" means here.
     const deadline = typeof queue.authorizationExpiresAt === "string" &&
       queue.authorizationExpiresAt.length > 0
       ? "; approval expires " + queue.authorizationExpiresAt
@@ -1511,17 +1440,17 @@ export function runPhaseBadge(status) {
 }
 
 /** What to do with a topic a restore created and left when its creation step
- *  stopped (PROD-15.1) -- the runner's, the Restore status's and the product
- *  API's one sentence (`leftInstruction`), word for word. */
+ *  stopped -- the runner's, the Restore status's and the product API's one
+ *  sentence (`leftInstruction`), word for word. */
 export const LEFT_TOPIC_SENTENCE =
   "created by this restore and left empty; remove it yourself once you have checked nothing " +
   "writes to it";
 
-/** What to do with a topic a stopped creation step CANNOT ACCOUNT FOR
- *  (PROD-15.1 review 2, M2): the restore asked the cluster to create it, got
- *  no definite answer, and the cluster listed it afterwards. It may be this
- *  restore's or someone else's, so the sentence never claims it. The product
- *  API's `unconfirmedInstruction`, word for word. */
+/** What to do with a topic a stopped creation step CANNOT ACCOUNT FOR: the
+ *  restore asked the cluster to create it, got no definite answer, and the
+ *  cluster listed it afterwards. It may be this restore's or someone else's,
+ *  so the sentence never claims it. The product API's
+ *  `unconfirmedInstruction`, word for word. */
 export const UNCONFIRMED_TOPIC_SENTENCE =
   "exists now; this restore asked the cluster to create it and got no definite answer, so it " +
   "may be this restore's or someone else's: check what it holds and who writes to it before " +
@@ -1534,7 +1463,7 @@ export const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE =
   "could not list the cluster afterwards: look for it, and check what it holds and who writes " +
   "to it before you remove it";
 
-/** What a queued manual run is, in the page's own fixed words (P10). */
+/** What a queued manual run is, in the page's own fixed words. */
 export const QUEUED_RUN_SENTENCE =
   "Queued: this manual run is waiting for a slot. Its namespace lets a fixed number of manual " +
   "runs of this kind be active at once, and this one starts, in creation order, when one of " +
@@ -1543,31 +1472,19 @@ export const QUEUED_RUN_SENTENCE =
   "queue does not extend it, so a restore still waiting when its approval expires is refused " +
   "and must be confirmed again.";
 
-// ===========================================================================
-// D2 (PLAT-08, PLAT-09.1, PLAT-03): the words for destinations, topic
-// visibility and operation readiness
-// ===========================================================================
-//
-// THREE SENTENCES THIS PRODUCT MUST NEVER RENDER, and the reason each one is
-// forbidden. They are kept together because they are one rule seen three
-// times: a page states what was OBSERVED and by WHOM, and never a conclusion
-// nobody drew.
+// THREE SENTENCES THIS PRODUCT MUST NEVER RENDER: a page states what was
+// OBSERVED and by WHOM, and never a conclusion nobody drew.
 //
 //   1. "complete", for a topic inventory. An all-topics Kafka Metadata request
-//      SILENTLY OMITS topics the principal cannot DESCRIBE -- no error, no
-//      count, nothing to notice. A successful listing therefore proves nothing
-//      about completeness, which is why `visibility.state` is `unknown` for
-//      one and why `unknown` is that field's HEALTHY default rather than a
-//      fault. [`visibilityLine`] carries the words.
+//      SILENTLY OMITS topics the principal cannot DESCRIBE, so a successful
+//      listing proves nothing about completeness: `visibility.state` is
+//      `unknown` for one, and that is its HEALTHY default ([`visibilityLine`]).
 //   2. "verified by Logweir", for an attestation. `attestedComplete` is an
-//      ADMINISTRATOR'S CLAIM recorded in a policy ConfigMap. Logweir checked
-//      that the claim matches this cluster, this principal and this moment; it
-//      did not check that the claim is TRUE, and it cannot. So the attestation
-//      is always rendered with its author, its instant and the disclaimer.
-//   3. "ready", for anything this page decided. A readiness verdict comes from
-//      a `Preflight`'s own recorded aggregate and from nowhere else -- not
-//      from "no checks failed", not from "the list came back", not from an
-//      empty `checks` array. [`preflightVerdict`] reads `state` and renders
+//      ADMINISTRATOR'S CLAIM; Logweir checked that it matches this cluster,
+//      principal and moment, not that it is TRUE. It is always rendered with
+//      its author, its instant and the disclaimer.
+//   3. "ready", for anything this page decided. A readiness verdict comes only
+//      from a `Preflight`'s recorded aggregate; [`preflightVerdict`] renders
 //      `unknown` for every shape it does not recognise.
 
 /** The disclaimer every rendered attestation carries. Not a suffix a caller
@@ -1603,16 +1520,15 @@ export const DESTINATION_TEST_SENTENCE =
   "this destination's own endpoint. The verdict below is that check's recorded result, read " +
   "back from its status -- this page performs no I/O of its own and decides nothing.";
 
-/** The one sentence that says what a readiness result is ABOUT. */
 /** What a check still running says instead of an applicability verdict. */
 export const CHECKING_SENTENCE =
   "The check has not finished. Whether its result applies to your current inputs is decided " +
   "when it has one; this page reads it again until then.";
 
-/** THE WORDS A ROLE THAT CANNOT RESTORE READS WHERE A RESTORE LINK WOULD BE
- *  (MCP round 3, R3-2): the route refuses such a role by name (R2-14), so a
- *  link to it is an offer the page already knows it will refuse. The same
- *  words the catalog's Connect panel uses for its own role. */
+/** THE WORDS A ROLE THAT CANNOT RESTORE READS WHERE A RESTORE LINK WOULD BE:
+ *  the route refuses such a role by name, so a link to it is an offer the
+ *  page already knows it will refuse. The same words the catalog's Connect
+ *  panel uses for its own role. */
 export const RESTORE_NEEDS_ROLE_SENTENCE =
   "an operator or administrator can restore this point";
 
@@ -1749,8 +1665,8 @@ export function visibilityLine(visibility) {
  *  destination. */
 export function destinationVerdict(status) {
   const s = status || {};
-  // THE REASON IS SHOWN WHEN IT SAYS SOMETHING THE WORD DOES NOT (MCP-11):
-  // "valid (Valid)" repeated itself; "not valid (EndpointUnreachable)" does not.
+  // The reason is shown when it says something the word does not: "valid
+  // (Valid)" repeated itself; "not valid (EndpointUnreachable)" does not.
   const beside = (echo) => (typeof s.reason === "string" && s.reason.length > 0 &&
     s.reason !== echo ? " (" + s.reason + ")" : "");
   if (s.valid === true) {
@@ -1792,8 +1708,8 @@ export function preflightVerdict(state) {
 /** The approval row of a readiness check run against a DRAFT plan: `approval.state`,
  *  `skipped`, `SubjectNotCreated` together and nothing wider -- the one blocking
  *  row a draft cannot make ready, because no Restore exists yet for an approver
- *  to sign (DRAFT-PREFLIGHT-NEVER-READY; the wizard's `readinessRefusal` says
- *  why the console, not the API, applies it). */
+ *  to sign (the wizard's `readinessRefusal` says why the console, not the API,
+ *  applies it). */
 export function isDraftApprovalRow(check) {
   const c = check || {};
   return (
@@ -1803,7 +1719,7 @@ export function isDraftApprovalRow(check) {
   );
 }
 
-/** Whether a check row gates the verdict. FAIL-CLOSED (review L2): only the two
+/** Whether a check row gates the verdict. FAIL-CLOSED: only the two
  *  gatings the contract names as not gating -- `advisory` and `executionOnly`
  *  -- are left out; `blocking`, an absent gating and one this build does not
  *  recognise (the API maps an unknown value to `null`) all count as blocking. */
@@ -1815,7 +1731,7 @@ export function isBlockingRow(check) {
 /** Whether a row is one only the run itself can answer, and has not: an
  *  `executionOnly` row that is `unknown` or `skipped`. An execution-only row
  *  that says `notReady` is an answer, and is never summarised as "confirmed
- *  later" (review L2). */
+ *  later". */
 export function answeredAtRun(check) {
   const c = check || {};
   return c.gating === "executionOnly" && (c.state === "unknown" || c.state === "skipped");
@@ -1840,7 +1756,7 @@ export function readyButForDraftApproval(preflight) {
     others.every((c) => c.state === "ready") && !refusedAtRun;
 }
 
-/** A readiness result's headline (MCP round 2, R2-12; review L1).
+/** A readiness result's headline.
  *
  *  NEVER `ready` OVER AN UNRESOLVED BLOCKING ROW. The aggregate's own badge,
  *  with two refinements that add words and never a green one:
@@ -1902,11 +1818,8 @@ export function applicabilityLine(preflight) {
   const p = preflight || {};
   const reasons = Array.isArray(p.staleReasons) ? p.staleReasons : [];
   const basis = Array.isArray(p.staleBasis) ? p.staleBasis : [];
-  // A CHECK STILL RUNNING HAS NO RESULT TO APPLY OR NOT (MCP round 2, R2-11).
-  // It read "does not apply to your current inputs / compared: nothing" until
-  // it settled, which says the check is out of date when it has not answered
-  // yet. Applicability is a property of a result; until there is one the
-  // line says the check is running.
+  // A check still running has no result to apply or not: until there is one,
+  // the line says the check is running.
   if (p.terminal !== true && ["pending", "queued", "running"].indexOf(p.state) !== -1) {
     // AND ONE THIS PAGE STOPPED FOLLOWING says so instead: "this page reads it
     // again until then" would be a promise nothing keeps. The words and the
@@ -1960,17 +1873,9 @@ export function checkVerdict(state) {
   return badge("pending", "unknown");
 }
 
-/** The check table: one row per recorded entry, with the gating, the code, the
- *  message, the remedy, and when the fact stops counting.
- *
- *  EVERY COLUMN IS A RECORDED FIELD. Nothing here is computed from the others,
- *  and an absent field prints [`ABSENT`] rather than a guess: a check with no
- *  `expiresAt` is one whose expiry the producer did not record, which is a
- *  different thing from one that never expires. */
 /** A controller-authored message, escaped, with its backticked spans shown as
- *  code (MCP round 2, R2-10): the controller writes "`primary`" and
- *  "`sha256:...`" and the page printed the backticks. Only a PAIRED span
- *  becomes code; an unpaired backtick stays the character it is. */
+ *  code. Only a PAIRED span becomes code; an unpaired backtick stays the
+ *  character it is. */
 export function messageText(value) {
   if (typeof value !== "string" || value.length === 0) {
     return cell(value);
@@ -1993,20 +1898,24 @@ export function messageText(value) {
 
 /** A message this page or a server wrote, escaped, with its paired
  *  backticked spans as code -- and the empty string for no message, where
- *  [`messageText`] would print the absent marker (O2, R2-10's class: the
- *  error box and the field-error line printed the backticks). */
+ *  [`messageText`] would print the absent marker. */
 export function codeSpans(value) {
   return typeof value === "string" && value.length > 0 ? messageText(value) : esc(value);
 }
 
+/** The check table: one row per recorded entry, with the gating, the code, the
+ *  message, the remedy, and when the fact stops counting.
+ *
+ *  EVERY COLUMN IS A RECORDED FIELD. Nothing here is computed from the others,
+ *  and an absent field prints [`ABSENT`] rather than a guess: a check with no
+ *  `expiresAt` is one whose expiry the producer did not record, which is a
+ *  different thing from one that never expires. */
 export function checkTable(checks, empty) {
-  // NINE FIELDS IN FOUR CELLS (MCP round 2, R2-3): nine columns were more
-  // than a thousand pixels wider than step 5's card at 1440 px, because the
-  // messages carry unbroken tokens -- an image digest, a signer key id -- and
-  // two instants sat side by side. Every field is still printed, an absent
-  // one as absent: the code under its check, the gating under the verdict,
-  // the remedy and the scope under the message, and the two instants one per
-  // line. The message and the remedy are prose and may break anywhere.
+  // Nine fields in four cells, so the table fits step 5's card: the code
+  // under its check, the gating under the verdict, the remedy and the scope
+  // under the message, and the two instants one per line. Every field is
+  // still printed; the message and the remedy are prose and may break
+  // anywhere.
   const rows = (Array.isArray(checks) ? checks : []).map((c) => [
     "<code>" + cell(c.id) + "</code>" +
       "<span class=\"cell-sub prose\" data-field=\"code\">" + cell(c.code) + "</span>",
@@ -2028,18 +1937,12 @@ export function checkTable(checks, empty) {
   );
 }
 
-/** What a row is ABOUT, as `Kind/name`.
- *
- *  PLAT-03.1's acceptance sentence is "names each failed prerequisite and its
- *  remedy, with check time **and scope**", and until review F5 this table
- *  rendered the first two and dropped the third: the controller fills every
- *  row's `scope`, the typed client declares it, and no console surface printed
- *  it. A `notReady` row whose subject is invisible makes an operator guess
- *  which of two connections or two destinations a refusal is about.
+/** What a row is ABOUT, as `Kind/name`: a `notReady` row whose subject is
+ *  invisible makes an operator guess which of two connections or
+ *  destinations a refusal is about.
  *
  *  A scope with no `kind` and no `name` prints [`ABSENT`] like every other
- *  unrecorded field -- a verdict stored by an older controller carries none,
- *  and inventing one would be a guess about which object was checked. */
+ *  unrecorded field: a verdict stored by an older controller carries none. */
 export function checkScope(scope) {
   const s = scope || {};
   const kind = typeof s.kind === "string" ? s.kind : "";
@@ -2095,7 +1998,7 @@ export function copyBlock(lines) {
 
 /** An epoch-millisecond instant as RFC 3339, UTC, second precision.
  *
- *  `Backup.status.windowCovered` is two INTEGERS (interface I22), because the
+ *  `Backup.status.windowCovered` is two INTEGERS, because the
  *  receipt it mirrors carries integers and a controller that converted between
  *  the two representations is a controller that can round a window boundary.
  *  A page is the other end of that: a viewer reading `1757253900000` learns
@@ -2111,19 +2014,13 @@ export function rfc3339(ms) {
     : iso;
 }
 
-// ---------------------------------------------------------------------------
-// THE ONE TIMESTAMP FORMATTER (MCP-7, MCP-15). Every instant a page SHOWS goes
-// through [`when`]: a human-readable UTC reading with whole seconds --
-// `2026-09-24 16:39:04 UTC` -- that never wraps mid-value, inside a `<time>`
-// whose `datetime` and `title` carry the EXACT value the object recorded,
-// nanoseconds and offset included, so nothing is lost and a hover or a copy
-// gets the original. Tables used to print `2026-09-24T15:21:21.720607463Z`,
-// broken across two lines at the `-`.
+// THE ONE TIMESTAMP FORMATTER. Every instant a page SHOWS goes through
+// [`when`]: a UTC reading with whole seconds (`2026-09-24 16:39:04 UTC`) that
+// never wraps, inside a `<time>` whose `datetime` and `title` carry the EXACT
+// recorded value, nanoseconds and offset included.
 //
-// UTC ON PURPOSE. The page reads no clock and no locale for a verdict; a
-// reading in the viewer's own zone would make two people on one incident call
-// read different times off one screen. The suffix says which zone it is.
-// ---------------------------------------------------------------------------
+// UTC ON PURPOSE: a reading in the viewer's own zone would make two people on
+// one incident call read different times off one screen.
 
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 
@@ -2170,7 +2067,7 @@ export function when(value) {
     esc(human) + "</time>";
 }
 
-/** A LOCAL WALL-CLOCK READING, KEPT IN ITS OWN ZONE (console-ux-1 review M1).
+/** A LOCAL WALL-CLOCK READING, KEPT IN ITS OWN ZONE.
  *  The controller renders a firing in the schedule's zone with its offset --
  *  `2026-10-25T02:30:00+02:00` -- and that reading IS the fact: on the
  *  fall-back day two firings share one wall time and differ only in offset.
@@ -2232,34 +2129,29 @@ export function bucketOf(url) {
  *  plan bytes, the runner's own `StorageUrl` block. `""` when the bytes carry no
  *  such block, or none this reader can see.
  *
- *  WHY THE PLAN AND NOT THE ARCHIVE. A restore's signed scorecard is written
- *  where its approved plan's `evidence:` block says -- for a point with no
- *  saved destination that is whatever bucket the plan named, and for a
- *  destination-backed one it is the evidence destination's bucket, while
- *  `spec.sourceArchive.url` is the `logweir-destination://` sentinel whose
- *  "bucket" is a destination NAME. A fetch command built from the source
- *  archive therefore pointed at the wrong bucket in both cases (PoC defect P5's
- *  class sweep). Used only to render a copyable command; nothing here
- *  addresses a store.
+ *  WHY THE PLAN AND NOT THE ARCHIVE: a restore's signed scorecard is written
+ *  where its approved plan's `evidence:` block says, while
+ *  `spec.sourceArchive.url` may be the `logweir-destination://` sentinel whose
+ *  "bucket" is a destination NAME. Used only to render a copyable command;
+ *  nothing here addresses a store.
  *
  *  Read by [`planBlockValue`], a tolerant line reader and not a YAML parser:
  *  any indentation, a flow mapping, quoted or bare values, comments dropped. A
  *  plan in a shape it cannot read gives `""`, which renders the placeholder. */
 export function planEvidenceBucket(planBytes) {
-  // THE SAME TOLERANT BLOCK READER AS `planTimeBasis` (FX-8 review L-3's
-  // class sweep): any indentation, a flow mapping, quotes and comments. A
-  // bucket it cannot find still renders the placeholder.
+  // The same tolerant block reader as `planTimeBasis`. A bucket it cannot
+  // find still renders the placeholder.
   const bucket = planBlockValue(planBytes, "evidence", "bucket");
-  // A BUCKET NAME OR NOTHING (review L5). This value is plan text an
-  // approver signed, not an API-validated URL, and it is pasted into a
-  // shell: anything outside the S3 bucket grammar renders the placeholder.
+  // A BUCKET NAME OR NOTHING: this value is plan text an approver signed,
+  // not an API-validated URL, and it is pasted into a shell, so anything
+  // outside the S3 bucket grammar renders the placeholder.
   return bucket !== null && isBucketName(bucket) ? bucket : "";
 }
 
-/** The plan's `restore.time_basis` (FX-8): `"producerTime"` when the approved
+/** The plan's `restore.time_basis`: `"producerTime"` when the approved
  *  plan bytes state it, `""` when this reader finds no such value.
  *
- *  A TOLERANT LINE READER, NOT A YAML PARSER (review L-3). It reads a
+ *  A TOLERANT LINE READER, NOT A YAML PARSER. It reads a
  *  `restore:` block at any indentation, a flow mapping (`restore: {...}`, on
  *  one line or several) and values with or without quotes, and drops
  *  comments; a plan written by hand or by the CLI and approved with the opt-in
@@ -2358,9 +2250,8 @@ export function isBucketName(value) {
 
 /** One POSIX shell word: unchanged when it is made only of characters no shell
  *  reads specially, otherwise single-quoted with every `'` closed, escaped and
- *  reopened (review L5). The fetch commands below are copied into a terminal,
- *  and their bucket and keys come from a status and a plan, not from this
- *  page. */
+ *  reopened. The fetch commands below are copied into a terminal, and their
+ *  bucket and keys come from a status and a plan, not from this page. */
 export function shellWord(value) {
   const text = String(value);
   if (/^[A-Za-z0-9._/:=@+%,-]+$/.test(text)) {
@@ -2422,11 +2313,9 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// THE FORM HALF (PLAT-13.2): field-level errors and one mutation status that
-// every form renders the same way. Strings, like everything in this half, so
-// the behaviour suite reads exactly what a browser adopts.
-// ---------------------------------------------------------------------------
+// THE FORM HALF: field-level errors and one mutation status every form
+// renders the same way, as strings, so the behaviour suite reads what a
+// browser adopts.
 
 /** An error from `api.js` as a string: the twin of [`errorBox`] -- the same
  *  headline, the server's own message and its status, code and request id,
@@ -2495,12 +2384,9 @@ export function mutationStatus(state, subject, unmatched) {
   const who = subject || {};
   const kind = esc(who.kind);
   const name = esc(who.name);
-  // A SUBJECT WITH NO NAME IS A KIND, NOT A KIND AND A GAP (review F4). Every
-  // create in this tree until D1 W7 named its object BEFORE sending it -- that
-  // name is what made the create idempotent -- so `kind + " " + name` was
-  // always two words. A manual `Backup` has no name until the server derives
-  // one from the authenticated subject, so its subject carries `name: ""` and
-  // every sentence below would have read "Backup : sent" with a hole in it.
+  // A subject with no name is a kind, not a kind and a gap: a manual `Backup`
+  // has no name until the server derives one, so its subject carries
+  // `name: ""`.
   const subject_ = name.length > 0 ? kind + " " + name : kind;
   const patch = who.verb === "patch";
   if (s.phase === "pending") {
@@ -2525,11 +2411,9 @@ export function mutationStatus(state, subject, unmatched) {
     }
     return statusRegion(
       "succeeded",
-      // A NAME OR A UID THE ANSWER DID NOT CARRY IS LEFT OUT, NOT PRINTED
-      // EMPTY (found by the PLAT-18.2 live pass): a manual Backup's answer is
-      // projected without `metadata`, and the line read "Created Backup  (uid
-      // )." -- a hole where an identity should be. The run's own name and uid
-      // are in the panel's result block beside this line.
+      // A name or a uid the answer did not carry is left out, not printed
+      // empty: a manual Backup's answer is projected without `metadata`. The
+      // run's own name and uid are in the panel's result block beside this line.
       result.outcome === "existing"
         ? "<p>" + kind + (shown ? " " + shown : "") + " already existed with exactly this " +
           "content" + (uid ? " (uid " + uid + ")" : "") + "; nothing new was created.</p>"
@@ -2591,12 +2475,9 @@ export function mutationStatus(state, subject, unmatched) {
 /** What an unknown outcome leaves undecided, and what repeating the request
  *  would actually do. One sentence per verb, each true of its own request. */
 function unknownOutcome(who, patch, kind, name, subject_) {
-  // AND FOR A ROUTE WHOSE IDEMPOTENCE IS A KEY, THE SENTENCE IS ABOUT THE KEY
-  // (review F4). "It reuses the name" is true of every create this page made
-  // until D1 W7 and is false of a manual `Backup`: the product API derives
-  // that name itself, and what makes the resend safe is the `Idempotency-Key`
-  // the click is holding. Rendering the name sentence there printed an empty
-  // name AND told an operator the wrong reason it was safe to click again.
+  // AND FOR A ROUTE WHOSE IDEMPOTENCE IS A KEY, THE SENTENCE IS ABOUT THE KEY:
+  // the product API derives a manual `Backup`'s name itself, and what makes
+  // the resend safe is the `Idempotency-Key` the click is holding.
   if (who.idempotencyKey === true) {
     return (
       "whether " + subject_ + " was created is unknown." + keptClause(who) + " Submitting again " +
@@ -2629,18 +2510,12 @@ function unknownOutcome(who, patch, kind, name, subject_) {
 
 /** WHAT A CREDENTIAL FORM'S FAILURE MAY SAY ABOUT WHAT IT KEPT.
  *
- *  "Your input is kept" is true of every form in this tree except the two that
- *  take a credential, and on those it is the exact opposite of what happened:
- *  the draft allowlist drops every credential value, so the re-render an
- *  operator is reading has just emptied the boxes the sentence is about. The
- *  observed failure (review F3) is an operator reading "nothing was changed.
- *  Your input is kept", pressing the button again, and sending an empty
- *  credential -- which fails closed at the API, but only because the API is
- *  careful, not because the page was honest.
- *
- *  A form declares `clearsCredentials: true` on its subject and gets the true
- *  sentence instead. It is a property of the FORM and not of the error, so it
- *  is on the subject beside `kind` and `name`. */
+ *  "Your input is kept" is false on the two forms that take a credential: the
+ *  draft allowlist drops every credential value, so the re-render has just
+ *  emptied the boxes, and a reader who believed the sentence would resend an
+ *  empty credential. A form declares `clearsCredentials: true` on its subject
+ *  (a property of the FORM, beside `kind` and `name`) and gets this sentence
+ *  instead. */
 export const CREDENTIALS_CLEARED_CLAUSE =
   " What you typed is kept, except the credential fields: those are cleared on every render and " +
   "are never kept anywhere, so type them again.";
@@ -2702,31 +2577,22 @@ export function evidenceBlock(evidence) {
   );
 }
 
-// ===========================================================================
-// D1 W7 (PLAT-04.2, PLAT-05.1, PLAT-06.2, PLAT-09.2): cadence, revision and
-// trigger, in the words the controller wrote
-// ===========================================================================
+// CADENCE, REVISION AND TRIGGER, in the words the controller wrote. Four
+// sentences this page refuses to write:
 //
-// FOUR RULES LIVE IN THIS SECTION, AND EACH ONE IS A SENTENCE THIS PAGE
-// REFUSES TO WRITE.
-//
-//   1. NOTHING HERE EVALUATES CRON. The instants below came from the
-//      controller (`status.nextRuns`) or from `GET /api/v1/cadence-previews`,
-//      which is the same engine over a draft. A second implementation in a
-//      browser is a second opinion about when a backup runs, and D1 section 4.4
-//      forbids one in as many words.
+//   1. NOTHING HERE EVALUATES CRON. The instants come from the controller
+//      (`status.nextRuns`) or `GET /api/v1/cadence-previews`, the same engine
+//      over a draft; a browser implementation would be a second opinion about
+//      when a backup runs.
 //   2. AN ADJUSTMENT IS NAMED, NEVER SMOOTHED. A fixed local time inside a
-//      repeated hour FIRES TWICE, and both rows are shown with their offsets:
-//      hiding the second would make the page disagree with the cluster about
-//      how many backups happen that night.
-//   3. A REVISION THAT WAS NOT RECORDED IS NOT REVISION ZERO. Every run frozen
-//      before PLAT-05.1 carries no `scheduleRef.generation`, and so does every
-//      run in a console whose API does not publish one.
+//      repeated hour FIRES TWICE, and both rows are shown with their offsets.
+//   3. A REVISION THAT WAS NOT RECORDED IS NOT REVISION ZERO: an older run, or
+//      a console whose API does not publish it, carries no
+//      `scheduleRef.generation`.
 //   4. STALENESS IS `nextRuns[0].at` IN THE PAST, AND NOTHING ELSE.
-//      `status.policy.evaluatedAt` is when the status last MOVED -- the
-//      controller writes nothing when nothing changed -- so comparing it with
-//      the requeue interval would label every healthy schedule stale. D1
-//      section 4.9's amendment says this in the CRD's own description.
+//      `status.policy.evaluatedAt` is when the status last MOVED (the
+//      controller writes nothing when nothing changed), so comparing it with
+//      the requeue interval would label every healthy schedule stale.
 
 /** The three DST markers, keyed by the controller's own PascalCase, with what
  *  each one means for the instant it is on.
@@ -2748,8 +2614,7 @@ export const ADJUSTMENT_WORDS = Object.freeze({
 });
 
 /** The note a preview or a saved policy carries when its zone is UTC because
- *  no zone was named -- which is what every schedule written before PLAT-04.2
- *  carries, and what an empty time-zone field means. */
+ *  no zone was named, which is what an empty time-zone field means. */
 export const UTC_FALLBACK_NOTE =
   "No time zone is set, so the cron fields are read in UTC. That is what an absent timeZone " +
   "has always meant and it is not a default this page chose: the local times below are UTC " +
@@ -2776,10 +2641,9 @@ export function nextRunRow(run) {
   const marker = typeof r.adjustment === "string" && ADJUSTMENT_WORDS[r.adjustment] !== undefined
     ? badge("pending", r.adjustment)
     : "";
-  // THE LOCAL TIME STAYS LOCAL (review M1): `when` would read it as an
-  // instant and print it in UTC -- the AT (UTC) cell a second time -- and the
-  // wall time the schedule fires at, and the repeated 02:30 of a fall-back
-  // day, would be gone from the page.
+  // THE LOCAL TIME STAYS LOCAL: `when` would print it in UTC, the AT (UTC)
+  // cell a second time, and the wall time the schedule fires at, and the
+  // repeated 02:30 of a fall-back day, would be gone from the page.
   return [when(r.at), "<code>" + whenLocal(r.localTime) + "</code>", marker];
 }
 
@@ -2875,13 +2739,7 @@ export function triggerBadge(trigger, maxRetries) {
   return badge("trigger-" + kind.replace(/[^a-z0-9]+/g, "-"), words);
 }
 
-/** WHICH REVISION A RUN FROZE: `revision g7 - policy sha256:ab12...`.
- *
- *  A SUSPEND FLIP MOVES THE GENERATION AND NOT THE DIGEST, and printing both
- *  is what makes that visible: `generation` counts every spec change including
- *  `suspend`, while `runPolicySha256` is over what a RUN does, so two runs of
- *  different generations with the same digest did the same thing. */
-/** FACTS FOR WHOEVER DEBUGS, NOT FOR WHOEVER OPERATES (MCP-13): a digest, the
+/** FACTS FOR WHOEVER DEBUGS, NOT FOR WHOEVER OPERATES: a digest, the
  *  time-zone library's version. They stay on the page, one disclosure away,
  *  rather than in the sentence an operator reads. `html` is OURS (a caller
  *  escapes every value in it). */
@@ -2890,6 +2748,12 @@ export function technicalDetails(html) {
     html + "</p></details>";
 }
 
+/** WHICH REVISION A RUN FROZE: `revision g7 - policy sha256:ab12...`.
+ *
+ *  A SUSPEND FLIP MOVES THE GENERATION AND NOT THE DIGEST, and printing both
+ *  is what makes that visible: `generation` counts every spec change including
+ *  `suspend`, while `runPolicySha256` is over what a RUN does, so two runs of
+ *  different generations with the same digest did the same thing. */
 export function revisionLine(ref) {
   const r = ref || {};
   const parts = [];
@@ -2905,54 +2769,39 @@ export function revisionLine(ref) {
   return "<code>" + esc(parts.join(" \u00b7 ")) + "</code>";
 }
 
-// ===========================================================================
-// D3 (PLAT-12, PLAT-14, PLAT-15, PLAT-16, PLAT-19): the words for a durable
-// operation, protection health, a recovery catalog, retention enforcement and
-// key trust
-// ===========================================================================
-//
-// THE SAME RULE AS EVERY SECTION ABOVE IT, AND IT IS THE ONLY RULE HERE: a
-// fixed sentence of OURS is written down once, in this file, and rendered
-// verbatim. NO VERDICT IS COMPUTED HERE. Every function below is a lookup from
-// a value the cluster wrote to a sentence about that value; none of them reads
-// a clock, compares two instants, or decides whether something is fresh, valid
-// or safe. The one place that looks like an exception -- `evaluationWord` --
-// is handed the decision as an argument and only picks the word for it.
+// A DURABLE OPERATION, PROTECTION HEALTH, A RECOVERY CATALOG, RETENTION
+// ENFORCEMENT AND KEY TRUST. Each fixed sentence of OURS is written down once,
+// here, and rendered verbatim. NO VERDICT IS COMPUTED HERE: every function
+// below maps a value the cluster wrote to a sentence about it; none reads a
+// clock, compares two instants, or decides whether something is fresh, valid
+// or safe (`evaluationWord` is handed that decision as an argument).
 //
 // FOUR CLAIMS THIS SECTION EXISTS TO STOP THE PAGE MAKING.
 //
-//   1. "unknown is valid". `ui/pages/keys.js` used to print `valid` for any
-//      key not in `status.expiredKeyIds`, INCLUDING when the object carried no
-//      status at all. D3 section 7.7: an unevaluated or stale evaluation reads
-//      `unknown`, and `valid`/`expired` are only ever rendered for a fresh one.
+//   1. "unknown is valid". An unevaluated or stale key evaluation reads
+//      `unknown`; `valid`/`expired` are only rendered for a fresh one.
 //   2. "verified", for evidence signed by a key this installation does not
-//      accept. D3 section 7.4 adds `Untrusted` beside `Invalid` and
-//      `NotAttempted`, and the three are three different claims -- about the
-//      SIGNER, about the DOCUMENT and about the CONTROLLER. A single word for
-//      all three destroys the distinction that says what to go and fix.
+//      accept. `Untrusted`, `Invalid` and `NotAttempted` are claims about the
+//      SIGNER, the DOCUMENT and the CONTROLLER, and one word for all three
+//      hides what to go and fix.
 //   3. "exhaustive", over a sample. A restore's record check is a SAMPLE
-//      unless its signed scorecard says otherwise. `verificationScope` carries
-//      the sampled counts and [`verificationScopeSentence`] renders them with
-//      the words "this is a sampled check, not an exhaustive comparison". The
-//      word `complete` is rendered ONLY where the signed scorecard recorded
-//      `coverage: complete` (PROD-08.1a), and then always beside `covered`:
-//      a complete verification that did not cover the restore says so, and is
-//      never shown as a pass. An absent coverage is "not recorded", never
-//      complete, and `complete` is still not a value of the LEVEL (D3 section
-//      2.5), which says how records were compared, not how many.
+//      unless its signed scorecard says otherwise, and
+//      [`verificationScopeSentence`] says "this is a sampled check, not an
+//      exhaustive comparison". `complete` is rendered ONLY where the
+//      scorecard recorded `coverage: complete`, always beside `covered`; an
+//      absent coverage is "not recorded", and `complete` is never a LEVEL.
 //   4. "protected", for a policy Logweir could not evaluate. `health: Unknown`
 //      is rendered as unknown, and the `Protected` condition's `Unknown` is
-//      never rounded to `False`: "Logweir checked and you are not protected"
-//      is a claim nothing made.
+//      never rounded to `False`.
 
 /** The suffix a green badge carries when the evidence verified under a key
  *  that has since been retired (`trust.basis: Historical`).
  *
- *  IT IS A PASS AND NOT A WARNING. D3 section 7.6's rotation procedure is
- *  supposed to produce exactly this state: the key was valid when it signed,
- *  the archive still verifies, and the public material can never be edited out
- *  of the policy. The qualifier says which key and when, so a reader is not
- *  left wondering why a retired id appears on a green row. */
+ *  IT IS A PASS AND NOT A WARNING. Key rotation produces exactly this state:
+ *  the key was valid when it signed, the archive still verifies, and the
+ *  public material can never be edited out of the policy. The qualifier says
+ *  which key and when, so a reader is not left wondering why a retired id
+ *  appears on a green row. */
 export const HISTORICAL_SUFFIX = " (signed before that key was retired)";
 
 /** The evidence cases that are NOT green, each named by what it is a claim
@@ -2977,8 +2826,8 @@ export const VERIFICATION_CASES = Object.freeze({
   RunNotSucceeded: "the document verified and the run itself did not succeed",
 });
 
-/** A FACT COPIED FROM A RUN'S SCORECARD, SHOWN FOR WHAT IT IS
- *  (SCORECARD-FACTS-UNVERIFIED-SHOWN). A Restore's `outcome`, `integrity` and
+/** A FACT COPIED FROM A RUN'S SCORECARD, SHOWN FOR WHAT IT IS. A Restore's
+ *  `outcome`, `integrity` and
  *  `measured` are copied from its scorecard whatever the scorecard's verdict:
  *  until that document has verified they are the scorecard's CLAIM, and a page
  *  that printed them plainly beside an unverified badge would be vouching for
@@ -2999,7 +2848,7 @@ export function scorecardClaim(valueHtml, verified) {
     SCORECARD_CLAIM_CAPTION + "</span>";
 }
 
-/** A CONSOLE LIST ROW'S VERDICT (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED).
+/** A CONSOLE LIST ROW'S VERDICT.
  *
  *  A product-API list item carries `OperationSummary`: `verificationState` and
  *  `verifiedSuccess` -- the latter computed by the API with the controller's
@@ -3012,9 +2861,8 @@ export function scorecardClaim(valueHtml, verified) {
  *  custom resource) still shows the full block. */
 export const LIST_VERIFIED_CAPTION = "verified by weirkeeper";
 
-/** WHAT A GREEN LIST BADGE DOES NOT CARRY, said ONCE under the table (MCP-16)
- *  rather than inside every row's badge, where it tripled the row height at
- *  1440 px and made a row eight lines tall at 1024 px. */
+/** WHAT A GREEN LIST BADGE DOES NOT CARRY, said ONCE under the table rather
+ *  than inside every row's badge. */
 export const LIST_VERIFIED_NOTE =
   "SIGNED: a list row carries weirkeeper's verdict and not the key id or the instant it " +
   "verified at; the run's own page shows both.";
@@ -3053,7 +2901,7 @@ export function summaryBadge(summary) {
 
 /** THE TWO TRUST STATES A GREEN BADGE MAY CARRY, in the CONSOLE's vocabulary.
  *
- *  `OperationTrust.state` is D3 section 2.5's own word and it arrives ALREADY
+ *  `OperationTrust.state` is the API's own word and it arrives ALREADY
  *  COMBINED: `logweir-api` computed it from the controller's `result` and its
  *  `trust.basis`, which is exactly the normalization a console asks an API
  *  for. So in console mode the page reads the word instead of re-deriving it,
@@ -3099,27 +2947,20 @@ export function unverifiedTrustCaption(state, runSucceeded) {
 /** THE BASIS THAT MEANS "NO TRUST EVALUATION WAS RECORDED", AND WHY IT IS NOT
  *  A DOWNGRADE.
  *
- *  D3 section 12 spells the absent-field rule for this exact block: "`trust`
- *  absent -> `basis: None` and the badge uses the pre-existing rule". So the
- *  STRING `"None"` and an ABSENT `trust` block are the same fact said two
- *  ways -- one by a custom resource an older controller wrote, one by a DTO
- *  that fills the block in for it -- and both mean the trust layer has nothing
- *  to say about this verdict, NOT that the verdict is worse.
+ *  An absent `trust` block means `basis: None` and the pre-existing badge
+ *  rule. So the STRING `"None"` from a DTO and an ABSENT block on an older
+ *  custom resource are the same fact: the trust layer has nothing to say
+ *  about this verdict, NOT that the verdict is worse. Reading it as a
+ *  downgrade would put `unverified` beside `result: Valid`, `verifiedAt` and
+ *  `matchedKeyId`.
  *
- *  Reading it as a downgrade puts `unverified: no verification was recorded` on
- *  every archive an upgraded cluster carries, while `result: Valid`,
- *  `verifiedAt` and `matchedKeyId` all sit beside it saying otherwise. That is
- *  a caption this page would be inventing, about a controller that recorded a
- *  verdict, and it is the review's own finding F1.
- *
- *  It is a CONSTANT and not a literal in three files because the name `None`
- *  collides with the "no verdict at all" case one line above, and that
- *  collision is how the defect got written in the first place. */
+ *  A CONSTANT, not a literal in three files, because `None` also names the
+ *  "no verdict at all" case above. */
 export const TRUST_BASIS_NOT_OBSERVED = "None";
 
 /** The `trust.basis` values a green badge is allowed to carry. An object
  *  written by an older controller carries no `trust` block at all, and its
- *  absence is NOT a downgrade: the block is additive (D3 section 12). */
+ *  absence is NOT a downgrade: the block is additive. */
 export const GREEN_BASES = Object.freeze(["Current", "Historical"]);
 
 /** Which non-green case a recorded verification is, as a word.
@@ -3132,9 +2973,8 @@ export function verificationCase(verification, runSucceeded) {
   const v = verification || {};
   const trust = v.trust || {};
   // `RecordedBeforeRevocation` NAMES ITS OWN CASE on either result that can
-  // carry it. The controller writes it beside `result: Untrusted` (D3 section
-  // 7.4's row), and "rendered with the recorded instant" is owed to that
-  // object, not only to a `Valid` one no controller writes.
+  // carry it: the controller writes it beside `result: Untrusted`, and its
+  // recorded instant is owed to that object, not only to a `Valid` one.
   if (trust.basis === "RecordedBeforeRevocation" &&
     (v.result === "Valid" || v.result === "Untrusted")) {
     return VERIFICATION_CASES.RecordedBeforeRevocation;
@@ -3168,21 +3008,16 @@ export function basisAllowsGreen(basis) {
 }
 
 /** Whether a RAW `status.evidence.verification.trust` leaves a `Valid`
- *  verdict green -- legacy mode's rule, and the rule for every object shaped
- *  like a custom resource (TRUST-VALID-BASIS-CLASS).
+ *  verdict green: legacy mode's rule, for every object shaped like a custom
+ *  resource.
  *
  *  THE CONTROLLER'S RULE, `weirkeeper::verification::ValidBasis`: NO `trust`
- *  key at all -- or `trust: null`, the same absence (the CRD field is
- *  nullable, and every typed reader and the API read `null` as no block) --
- *  is D3 section 12's absent field and keeps the pre-existing rule (green); a
- *  PRESENT block is green only on `Current` or `Historical`. So
- *  `{basis: "None"}`, `{}`, `{basis: null}`, `Unverified`,
- *  `RecordedBeforeRevocation` and a word this build does not know are all not
- *  green -- the controller badge says `VerificationUntrusted` or
- *  `VerificationNotAttempted` for each, and `logweir-api` says `untrusted` or
- *  `notAttempted`. Reading a present `None` as absence here (review finding
- *  F1's rule, which belongs to the DTO) made legacy mode the one surface that
- *  painted those objects green (review LOW-1 of `claude/api-trust-state`). */
+ *  key at all, or `trust: null` (the CRD field is nullable), keeps the
+ *  pre-existing rule (green); a PRESENT block is green only on `Current` or
+ *  `Historical`. So `{basis: "None"}`, `{}`, `{basis: null}`, `Unverified`,
+ *  `RecordedBeforeRevocation` and an unknown word are not green, as the
+ *  controller's badge and `logweir-api` also say. A present `None` is not an
+ *  absence here; that reading belongs to the DTO ([`basisAllowsGreen`]). */
 export function trustBlockAllowsGreen(trust) {
   if (trust === undefined || trust === null) {
     return true;
@@ -3198,9 +3033,9 @@ export function unverifiedCaption(verification, runSucceeded) {
   return said.length === 0 ? UNVERIFIED : UNVERIFIED + ": " + said;
 }
 
-/** PROD-08.1a: what complete coverage costs, said wherever an operator can
- *  choose it. The figures are the PROD-08.1 decision record's (section 7),
- *  measured on one laptop; the sentence says so rather than promising a rate. */
+/** What complete coverage costs, said wherever an operator can choose it. The
+ *  figures were measured on one laptop, and the sentence says so rather than
+ *  promising a rate. */
 export const COMPLETE_COVERAGE_COST =
   "Complete coverage reads every archived record of the restored topics and every restored " +
   "record back, and compares each one with the archive -- key, value, timestamp and headers in " +
@@ -3209,7 +3044,7 @@ export const COMPLETE_COVERAGE_COST =
   "the sampled check, and more for a larger archive or a slower object store. A record bound " +
   "that stops it, or an archive it cannot compare, signs `covered: false`, which is never a pass.";
 
-/** PROD-11.1b: a recorded replay selection -- `verificationScope.selection` or
+/** A recorded replay selection -- `verificationScope.selection` or
  *  the custom resource's `status.integrity.selection` -- as an object, or
  *  `null` when none is recorded (every partition of every restored topic,
  *  from the archive's floor). */
@@ -3225,7 +3060,7 @@ function epochText(ms) {
   return typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : ABSENT;
 }
 
-/** PROD-11.1b: what a NARROWED restore restored, in the words every surface
+/** What a NARROWED restore restored, in the words every surface
  *  uses -- "partial: partitions 0, 2 of topic orders; ..." for a partition
  *  subset (format 2.0.0), "partial: every partition, from <start> ..." for a
  *  window start, and a sentence that says so when the selection's rows are
@@ -3257,14 +3092,14 @@ export function selectionWords(selection) {
   return "partial: a selection this page cannot read; the signed scorecard names it";
 }
 
-/** PROD-08.1a: whether a recorded coverage block says the restore was NOT
+/** Whether a recorded coverage block says the restore was NOT
  *  covered. The one predicate every badge and list verdict in this tree uses,
  *  so no surface can read `covered: false` as a pass. */
 export function notCovered(complete) {
   return complete !== null && typeof complete === "object" && complete.covered === false;
 }
 
-/** PROD-08.1a: the sentence for a recorded complete verification. `complete`
+/** The sentence for a recorded complete verification. `complete`
  *  is the block (`verificationScope.complete` or the custom resource's
  *  `status.integrity.complete`), or `null` when the coverage was recorded and
  *  the block could not be read. */
@@ -3290,8 +3125,8 @@ export function completeCoverageSentence(complete, selection) {
         : "") +
       "A verification that did not cover the restore is never a pass.";
   }
-  // PROD-11.1b: over a narrowed restore, the SELECTED partitions -- never
-  // "every restored partition", which reads as every partition of the topic.
+  // Over a narrowed restore, the SELECTED partitions -- never "every restored
+  // partition", which reads as every partition of the topic.
   return (narrowed === ""
     ? "Complete coverage: every record of every restored partition was compared with the " +
       "archive. "
@@ -3303,7 +3138,7 @@ export function completeCoverageSentence(complete, selection) {
     ", out of order " + n(r.outOfOrder) + ", different " + n(r.mismatched) + ".";
 }
 
-/** PROD-08.1a: one restore's coverage in a word or three, for a list row or a
+/** One restore's coverage in a word or three, for a list row or a
  *  fact line. `recorded` is what the signed scorecard says (absent: not
  *  recorded, never complete), `requested` what the Restore asked for, and
  *  `complete` the recorded block when there is one. */
@@ -3324,7 +3159,7 @@ export function coverageWords(recorded, requested, complete) {
     : "sampled (not recorded)";
 }
 
-/** PROD-08.1a: a recorded complete verification, in full -- the sentence, the
+/** A recorded complete verification, in full -- the sentence, the
  *  archive counts and one row per partition with its exact counts and whether
  *  it was compared. `claim` captions each value the way the page captions every
  *  scorecard fact (a claim until the evidence verifies); it defaults to the
@@ -3377,14 +3212,13 @@ export function renderCompleteCoverage(complete, claim, selection) {
   );
 }
 
-/** The sentence beside every restore result, from `verificationScope`
- *  (D3 section 2.5 and section 3.5).
+/** The sentence beside every restore result, from `verificationScope`.
  *
  *  THE COUNTS ARE LABELLED EXACTLY, and the last clause is not optional: a
  *  sampled comparison presented without it reads as a full one. `complete` is
- *  rendered only for a scope whose signed `coverage` is `complete`
- *  (PROD-08.1a), by [`completeCoverageSentence`], which says whether it
- *  covered; it is never a value of `level`. */
+ *  rendered only for a scope whose signed `coverage` is `complete`, by
+ *  [`completeCoverageSentence`], which says whether it covered; it is never a
+ *  value of `level`. */
 export function verificationScopeSentence(scope) {
   const s = scope || null;
   if (s === null || typeof s !== "object") {
@@ -3398,7 +3232,7 @@ export function verificationScopeSentence(scope) {
     ? " The partition cap left " + s.unsampledTopics.join(", ") + " without a sampled " +
       "partition: counted against the bound, not compared record by record."
     : "";
-  // PROD-11.1b: a sampled check over a narrowed restore says what it was over.
+  // A sampled check over a narrowed restore says what it was over.
   const narrowed = selectionWords(selectionIn(s));
   return sampledScopeSentence(s) + unsampled +
     (narrowed === "" ? "" : " This was a " + narrowed + ".");
@@ -3428,7 +3262,7 @@ function sampledScopeSentence(s) {
     "comparison." + degraded;
 }
 
-/** D3 section 2.5's TABLE from the custom resource's own integrity vocabulary to the
+/** THE TABLE from the custom resource's own integrity vocabulary to the
  *  scope level the API publishes. A LOOKUP AND NOT A JUDGEMENT: the three
  *  values on the left are `Restore.status.integrity.level`'s whole vocabulary
  *  and the three on the right are `verificationScope.level`'s.
@@ -3445,8 +3279,8 @@ export const SCOPE_LEVEL_OF_INTEGRITY = Object.freeze({
 });
 
 /** The completion guidance for a terminal Restore, keyed by
- *  `spec.target.mode`. D3 section 3.5: fixed sentences owned by this file,
- *  never server-authored prose. */
+ *  `spec.target.mode`: fixed sentences owned by this file, never
+ *  server-authored prose. */
 export const COMPLETION_GUIDANCE = Object.freeze({
   newTopic:
     "Consumers are not moved. Logweir wrote nothing to the original topics. Consumer group " +
@@ -3480,8 +3314,8 @@ export const TARGET_MODE_MEANING = Object.freeze({
  *  printed whenever the freshness question has no answer. */
 export const EVALUATION_UNKNOWN = "unknown";
 
-/** Why an evaluation reads `unknown`, by the reason the caller established.
- *  D3 section 7.7's three causes, each said in its own words. */
+/** Why an evaluation reads `unknown`, by the reason the caller established:
+ *  three causes, each said in its own words. */
 export const EVALUATION_UNKNOWN_REASONS = Object.freeze({
   NoStatus:
     "this object carries no status at all, so nothing has evaluated these keys yet",
@@ -3520,7 +3354,7 @@ export const UNKNOWN_IS_NOT_VALID_SENTENCE =
 
 /** The fingerprint command an operator runs OUT OF BAND against a public key,
  *  and the whole of what this product offers for establishing trust in one.
- *  There is NO one-click trust anywhere in this tree (D3 section 5.5 step 3). */
+ *  There is NO one-click trust anywhere in this tree. */
 export const NO_ONE_CLICK_TRUST_SENTENCE =
   "This page offers no control that adds a key to a TrustPolicy. A key found beside an archive " +
   "is a claim, never trusted by proximity: compare the fingerprint below with its holder out of " +
@@ -3567,56 +3401,46 @@ export const ENFORCEMENT_DEGRADED_SENTENCE =
   "their own records name.";
 
 /** The two words the product API publishes in `lastEvaluation.accounting`
- *  (`RetentionAccountingState`, FX-22 review M1). */
+ *  (`RetentionAccountingState`). */
 export const ACCOUNTING_RECORDED = "Recorded";
 export const ACCOUNTING_NOT_RECORDED_WORD = "NotRecorded";
 
-/** The CRD's `maxItems` on each `status.lastEvaluation` list (FX-39). */
+/** The CRD's `maxItems` on each `status.lastEvaluation` list. */
 const EVALUATION_LIST_BOUND = 500;
 
 /** THE FOUR COUNTS OF A RETENTION EVALUATION, OR `null` WHEN THEY ARE NOT
- *  RECORDED (FX-22).
+ *  RECORDED.
  *
  *  `pointsEvaluated` = `keptCount` + `candidateCount` + `truncatedByCap` +
- *  the skipped points. `truncatedByCap` is what the policy's rules would
- *  remove and its per-run ceiling left out of this plan: DUE, NOT KEPT. A
- *  controller that did not record it filed those points under `kept` -- 371
- *  points read "321 kept, 50 candidate(s)" for `keepLast: 300` and for
- *  `keepLast: 10` alike -- so where the counts are absent this page says
+ *  the skipped points. `truncatedByCap` is what the rules would remove and the
+ *  per-run ceiling left out of this plan: DUE, NOT KEPT. An older controller
+ *  filed those under `kept`, so where the counts are absent this page says
  *  "not recorded" and NEVER counts the `kept` list.
  *
  *  THE PRODUCT API SAYS WHETHER THE ACCOUNTING IS RECORDED, AND THIS PAGE
- *  READS IT (review M1). `lastEvaluation.accounting` is `Recorded` or
- *  `NotRecorded` on every answer, so console mode does not infer the state
- *  from a count that happens to be absent: `NotRecorded` -- and any word this
- *  build does not know -- is `null` whatever else the block carries, and
- *  `Recorded` still needs the counts themselves to be whole numbers, because
- *  a word is not a number. AN ANSWER WITHOUT THE WORD, from a build of the
- *  API that predates it, decodes with `accounting: null` and reads as
- *  `NotRecorded`, the schema's declared default: nothing is inferred from
- *  whatever counts such an answer carries.
+ *  READS IT: `lastEvaluation.accounting` is `Recorded` or `NotRecorded`.
+ *  `NotRecorded`, an unknown word, or no word at all (an older API, decoded
+ *  as `null`) is `null` whatever counts the block carries; `Recorded` still
+ *  needs whole-number counts.
  *
  *  THE RULE IS THE CONTROLLER'S (`RetentionEvaluation::accounting`). Legacy
- *  mode hands this page the custom resource itself, with no API in between
- *  and so no `accounting` key at all (`undefined`, which is how this function
- *  tells the two modes apart), and the rule is applied here wherever the
- *  lists in hand are whole -- which is every legacy read, and every console
- *  read whose `truncated` is not `true`:
+ *  mode reads the custom resource, with no `accounting` key (`undefined`,
+ *  which is how this function tells the modes apart), and the rule is
+ *  applied wherever the lists in hand are whole (every legacy read, and every
+ *  console read whose `truncated` is not `true`):
  *
  *  - the four counts add up, with `skippedCount` where the status has it;
  *    and
  *  - the `kept` and `skipped` lists are as long as their counts, up to the
- *    status's bound of 500 (review M2, FX-39, FX-39 review S1).
+ *    status's bound of 500.
  *
- *  A block that fails either is two writers' numbers: after a rollback of the
- *  controller image alone the older controller rewrites the lists and cannot
- *  remove the counts. While the archive stands still the counts even add up,
- *  beside a `kept` list of 321 ids for `keptCount: 10`. A stale count is not
- *  a count.
+ *  A block that fails either holds two writers' numbers (a rollback of the
+ *  controller image leaves newer counts beside older lists). A stale count
+ *  is not a count.
  *
- *  A NEGATIVE NUMBER IS NOT A COUNT (review L3), wherever it stands: the sum
- *  can close over one (10 + 50 - 5 = 55), and a list cut at the API's row
- *  bound is not checked against anything. */
+ *  A NEGATIVE NUMBER IS NOT A COUNT, wherever it stands: the sum can close
+ *  over one, and a list cut at the API's row bound is not checked against
+ *  anything. */
 export function evaluationAccounting(evaluation) {
   const e = evaluation || {};
   const whole = (value) => typeof value === "number" && Number.isInteger(value) && value >= 0;
@@ -3628,7 +3452,7 @@ export function evaluationAccounting(evaluation) {
     return null;
   }
   if (e.truncated !== true) {
-    // FX-39: the controller cuts each status list at 500 and writes its count.
+    // The controller cuts each status list at 500 and writes its count.
     const skipped = e.skippedCount == null
       ? (Array.isArray(e.skipped) ? e.skipped.length : 0)
       : e.skippedCount;
@@ -3640,7 +3464,7 @@ export function evaluationAccounting(evaluation) {
     if (listed !== Math.min(e.keptCount, EVALUATION_LIST_BOUND)) {
       return null;
     }
-    // And `skipped` beside a `skippedCount` (review S1).
+    // And `skipped` beside a `skippedCount`.
     const skippedListed = Array.isArray(e.skipped) ? e.skipped.length : 0;
     if (skippedListed !== Math.min(skipped, EVALUATION_LIST_BOUND)) {
       return null;
@@ -3670,7 +3494,7 @@ export const ACCOUNTING_NOT_RECORDED_SENTENCE =
  *  the plan. `ceiling` is `null` when the evaluation does not record it.
  *
  *  `planned` IS HOW MANY POINTS THIS PLAN NAMES, AND ZERO CHANGES THE
- *  SENTENCE (FX-22 review L1). A plan that names nothing while points are due
+ *  SENTENCE. A plan that names nothing while points are due
  *  means not one of them fits: each is in a backup set that more due points
  *  name than the ceiling, and a set is planned whole or not at all. The next
  *  plan finds the same sets over the same ceiling, so "the rest stay due
@@ -3696,9 +3520,8 @@ export function heldBackSentence(heldBack, ceiling, planned) {
 }
 
 /** WHAT THE CATALOG SAID ABOUT THE VIEW AN EVALUATION READ -- ONE RULE, THE
- *  PRODUCT API'S TOO (`published_view_incomplete`, FX-22 review L3 and L5):
- *  never hide a warning, and never assert a completeness that is not
- *  recorded.
+ *  PRODUCT API'S TOO (`published_view_incomplete`): never hide a warning, and
+ *  never assert a completeness that is not recorded.
  *
  *  - `"incomplete"`: `viewIncomplete` is `true`. Shown WHETHER OR NOT the
  *    accounting is recorded.
@@ -3706,11 +3529,7 @@ export function heldBackSentence(heldBack, ceiling, planned) {
  *    the catalog said its view is the whole archive, about the evaluation the
  *    counts describe.
  *  - `"not-recorded"`: the member is absent, is not a boolean, or is `false`
- *    beside an accounting that is not recorded.
- *
- *  Before this the panel printed a sentence for `true` and NOTHING for `false`
- *  and for absent alike, so "the catalog said the view is whole" and "nobody
- *  said" were the same page. */
+ *    beside an accounting that is not recorded. */
 export function evaluationView(evaluation, recorded) {
   const e = evaluation || {};
   if (e.viewIncomplete === true) {
@@ -3732,7 +3551,7 @@ export const EVALUATION_VIEW_WORDS = Object.freeze({
 /** The sentence a retention evaluation carries when the catalog said its view
  *  does not hold every point of the archive.
  *
- *  IT DOES NOT OFFER `viewLimit` AS THE REMEDY (review L4). A catalog reports
+ *  IT DOES NOT OFFER `viewLimit` AS THE REMEDY. A catalog reports
  *  `truncated` when the archive holds more points than `sync.viewLimit`, and
  *  also when entries do not fit its pages or duplicate rows were merged,
  *  where raising the limit changes nothing. */
@@ -3765,13 +3584,13 @@ export function healthBadge(health) {
 }
 
 /** The sentence beside protection health that keeps the two health questions
- *  apart. D3 section 3.2 is explicit that they are never collapsed. */
+ *  apart. */
 export const TWO_HEALTHS_SENTENCE =
   "Schedule health and protection health are two different questions and this page never " +
   "collapses them: an enabled, healthy schedule can still have no recent recoverable backup.";
 
-/** What `recoveryPointAt` and `newestRecordAt` each are. They are different
- *  instants and D3 section 3.2 requires them labelled separately. */
+/** What `recoveryPointAt` and `newestRecordAt` each are: different instants,
+ *  labelled separately. */
 export const TWO_INSTANTS_SENTENCE =
   "The recovery point instant is when the capture STARTED, which is what the objective is " +
   "measured against. The newest archived record is the last record instant the archive covers. " +
@@ -3824,9 +3643,9 @@ export const STATE_UNKNOWN_SENTENCE =
   "observation is old, a phase this build does not know, or no status at all yet. It is not a " +
   "statement that the run failed.";
 
-/** The sentence an operation view carries about what aborting a watch does.
- *  D3 section 2.6: a watch is a read, and leaving a page never cancels work
- *  the cluster has already accepted. */
+/** The sentence an operation view carries about what aborting a watch does:
+ *  a watch is a read, and leaving a page never cancels work the cluster has
+ *  already accepted. */
 export const WATCH_SENTENCE =
   "This view follows the operation while it is open and stops when it reaches a terminal state " +
   "or when you navigate away. Closing it cancels the READ and never the run.";

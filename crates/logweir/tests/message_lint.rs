@@ -14,7 +14,7 @@
 //! summaries are the published schema's developer documentation, which cites
 //! the task each route belongs to; no operator reads them at runtime.
 //!
-//! THE CRD DESCRIPTIONS ARE IN SCOPE (review L7): they are doc comments, but
+//! THE CRD DESCRIPTIONS ARE IN SCOPE: they are doc comments, but
 //! `kubectl explain` prints them, so the emitted CRDs are read as text below.
 //! Other doc comments, and the chart templates' YAML comments, are not.
 
@@ -203,7 +203,7 @@ fn crd_task_ids(rel: &str, text: &str) -> Vec<String> {
         .collect()
 }
 
-/// THE CRD DESCRIPTIONS TOO (review L7). `kubectl explain` prints every field's
+/// THE CRD DESCRIPTIONS TOO. `kubectl explain` prints every field's
 /// description, and they are generated from the CRD types' doc comments -- the
 /// one place a doc comment IS a message a person reads. The one checked-in
 /// copy, `charts/logweir/crds/`, is read.

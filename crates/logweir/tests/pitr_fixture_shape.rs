@@ -1,6 +1,5 @@
-//! **Task 11's default-set half: the two claims about G-PITR that can be
-//! checked without Docker, checked as tests rather than by eye** (critique A
-//! F26).
+//! **The default-set half of G-PITR: the two claims that can be checked
+//! without Docker, checked as tests rather than by eye.**
 //!
 //! `e2e/tests/pitr_boundary.rs` is `#![cfg(feature = "e2e")]`, so it is not
 //! compiled into the default set at all and a `#[test]` asserting on its `T`
@@ -12,21 +11,15 @@
 //! of `x-original-offset`.
 //!
 //! Neither test dials anything and neither reads a clock; each opens one file.
-//! Global Constraint 22's 15 s per-test bound is not in danger, and the two
-//! rows below are the ONLY additions Task 11 makes to
-//! `cargo test --workspace` (everything else it lands is `e2e`-gated).
 //!
 //! # Why a document claim is a test here
 //!
-//! `docs/stability.md` is where this project records what it has measured, and
-//! a recorded measurement nobody checks is how a ledger comes to say "closed"
-//! about something that regressed (STANDING RULE 21's own reasoning, and spec
-//! §17 round two). `stability_md_records_the_pitr_result_and_residual_3` is
-//! therefore an assertion with a needle, not an eyeball check — and it covers
-//! **two** obligations, because `docs/stability.md` admits exactly one editor
-//! per dispatch slot (STANDING RULE 17, chain S) and Task 11 is slot 12's
-//! owner: G-PITR's own recorded result, and the one-sentence residual-3 answer
-//! Task 8 filed here.
+//! `docs/stability.md` is where this project records what it has measured,
+//! and a recorded measurement nobody checks is how a ledger comes to say
+//! "closed" about something that regressed.
+//! `stability_md_records_the_pitr_result_and_residual_3` therefore holds two
+//! claims with needles: G-PITR's recorded result and the one-sentence
+//! residual-3 answer.
 
 use std::path::{Path, PathBuf};
 
@@ -50,9 +43,7 @@ fn read(rel: &str) -> String {
 /// clock asserts a different thing on every run: the boundary record, the
 /// window floor and the restored set would all move, the expected target topic
 /// name (`restore-<YYYYmmddTHHMMSSZ>-…`) would change run to run, and a
-/// failure could never be reproduced from the report of it. This is the mutant
-/// the brief names — replace the fixed `T` with a clock read — and this test is
-/// what kills it.
+/// failure could never be reproduced from the report of it.
 ///
 /// # Why the DECLARATION and not the literal
 ///
@@ -60,8 +51,7 @@ fn read(rel: &str) -> String {
 /// oracle: the literal survives in a doc comment, so `T` can be derived from a
 /// clock — `SystemTime::now()`, say, which this file cannot forbid because
 /// `pitr_boundary.rs` needs it for the `backup_id` nonce — while both needles
-/// still pass. That mutant was run and it SURVIVED (Task 11 review, mutant
-/// M6b, 2 passed, rc 0). The needle is therefore the declaration line itself,
+/// still pass. The needle is therefore the declaration line itself,
 /// copied byte-for-byte out of `pitr_boundary.rs`: no clock read can be
 /// spelled on the right-hand side of `const T: i64 = 1_760_000_000_000;`,
 /// because a `const` is evaluated at compile time and `SystemTime::now()` is
@@ -103,8 +93,8 @@ fn pitr_fixture_uses_a_fixed_epoch() {
 }
 
 /// `docs/stability.md` records the G-PITR result — with the engine version and
-/// digest it was measured against — and carries Task 8's one-sentence
-/// residual-3 answer.
+/// digest it was measured against — and carries the one-sentence residual-3
+/// answer.
 ///
 /// Each needle is its own assertion so a reviewer can see which claim went
 /// missing, and the digest needle is read from
@@ -156,8 +146,7 @@ fn stability_md_records_the_pitr_result_and_residual_3() {
         "{DOC} must record the engine version the G-PITR result was measured against"
     );
 
-    // 4 — Task 8's residual 3, in one sentence, filed here because chain S
-    //     admits one editor per slot and Task 11 owns slot 12.
+    // 4 — residual 3, in one sentence.
     assert!(
         doc.contains("honours a per-topic `message.timestamp.type=CreateTime` override"),
         "{DOC} must carry Task 8's one-sentence residual-3 answer: a broker on \

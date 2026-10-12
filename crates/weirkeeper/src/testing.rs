@@ -1,39 +1,28 @@
 //! A `kube::Client` over a recorded route table.
 //!
-//! WHAT THIS IS FOR. Every reconciler this crate will hold is a function of
-//! what the API server answers. A test that cannot say "the API server answers
-//! exactly these calls and nothing else" cannot distinguish a reconciler that
-//! read the right objects from one that happened to reach the same conclusion
-//! after reading the wrong ones. So the double does two things a stub usually
-//! does not: it RECORDS every request in order, and it PANICS on a request it
-//! was not given a route for.
+//! Every reconciler is a function of what the API server answers, and a test
+//! that cannot say "the API server answers exactly these calls and nothing
+//! else" cannot tell a reconciler that read the right objects from one that
+//! reached the same conclusion from the wrong ones. So the double records every
+//! request in order, and panics on a request it was not given a route for.
 //!
-//! THE PANIC IS THE POINT, AND A 404 IS NOT AN ACCEPTABLE SUBSTITUTE. A 404
-//! is a legitimate API-server answer: `Api::get` on an absent object returns
-//! one, and reconcilers are written to handle it. A double that answers 404
-//! for "no route recorded" is therefore indistinguishable, from inside the
-//! reconciler, from "the object does not exist" — and every later test in
-//! chain O silently loses its "called nothing it did not expect" property.
-//! Refusing loudly, naming the method and the path, is what keeps that
-//! property.
+//! The panic is the point, and a 404 is not a substitute: a 404 is a
+//! legitimate answer (`Api::get` on an absent object), so a double answering
+//! 404 for "no route" is indistinguishable, from inside the reconciler, from
+//! "the object does not exist", and every test silently loses its "called
+//! nothing it did not expect" property. Refusing loudly, naming the method and
+//! the path, keeps it.
 //!
-//! WHERE THE PANIC IS OBSERVABLE, AND WHY THERE. `kube::Client::new` wraps the
-//! service it is handed in `tower::buffer::Buffer`
-//! (`kube-client-0.99.0/src/client/mod.rs:157`), which drives the inner
-//! service on a `tokio::spawn`ed worker task. A panic on that task is caught
-//! by tokio's task harness: the message reaches stderr through the panic hook
-//! and the request fails, but the unwind cannot reach the test's own thread, so
-//! `#[should_panic]` around a `kube::Api` call would never fire. The route
-//! resolution is therefore a plain function, [`answer`], which the service
-//! calls and which a test can call directly — one implementation, two entry
-//! points, and the refusal is asserted where it can be seen. The end-to-end
-//! path is asserted separately, over a MATCHED route, in `tests/linkage.rs`.
+//! `kube::Client::new` wraps the service in `tower::buffer::Buffer`, which
+//! drives it on a spawned worker task; a panic there is caught by tokio's task
+//! harness and never reaches the test's thread, so `#[should_panic]` around a
+//! `kube::Api` call would never fire. The route resolution is therefore a plain
+//! function, [`answer`], which the service calls and a test can call directly;
+//! the end-to-end path is asserted over a matched route in `tests/linkage.rs`.
 //!
-//! NOTHING HERE DIALS ANYTHING. There is no socket, no `Config`, no
-//! kubeconfig read and no `Client::try_default`; the transport is a closure.
-//! That is what lets every reconciler test live in the default
-//! `cargo test --workspace` suite under Global Constraint 22's 15 s bound
-//! instead of behind an `e2e` feature gate.
+//! Nothing here dials anything: no socket, no `Config`, no kubeconfig and no
+//! `Client::try_default`; the transport is a closure, so every reconciler test
+//! runs in the default suite within Global Constraint 22's 15 s bound.
 
 use std::sync::{Arc, Mutex};
 
@@ -110,10 +99,8 @@ fn answer_parts(routes: &[Route], recorder: &Recorder, method: &str, uri: &str) 
     // test should not have to spell to match a route.
     let path = uri.split('?').next().unwrap_or(uri);
 
-    // Recorded BEFORE the match, so an unmatched request is in the log the
-    // panic message is about. A recorder that only sees matched requests
-    // cannot answer "what did the reconciler actually ask for?", which is the
-    // first question anyone asks when this panic fires.
+    // Recorded before the match, so an unmatched request is in the log the
+    // panic is about.
     recorder
         .lock()
         .expect("the recorder mutex is never held across a panic in this module")
@@ -148,31 +135,23 @@ fn answer_parts(routes: &[Route], recorder: &Recorder, method: &str, uri: &str) 
 
 /// Where every object this double has accepted a write for now stands.
 ///
-/// # THE DOUBLE ENFORCES SEAM S7, BECAUSE THE API SERVER DOES
+/// The double enforces seam S7, because the API server does: a double that
+/// answered every `PATCH` identically once hid a reconciler whose second write
+/// in a pass was preconditioned on a version its first write had already
+/// moved, answered `200` here and `409` by every real API server. So the
+/// double keeps one piece of state per object path (`…/<kind>/<name>`,
+/// `/status` folded in, since the subresource shares its parent's version):
 ///
-/// Defect REHEARSAL-FIRE-PASS-STATUS-LOST lived for a whole release behind a
-/// double that answered every `PATCH` identically: a reconciler that reserved
-/// a slot with one resourceVersion-preconditioned write and then committed the
-/// pass with a SECOND write preconditioned on the SAME, now stale, version was
-/// answered `200` twice here and `409` on the second write by every real API
-/// server. So the double keeps the one piece of state that makes the
-/// difference, per object path (`…/<kind>/<name>`, `/status` folded in, since
-/// the subresource shares its parent's version):
+/// * an accepted `PATCH`/`PUT` bumps the object's version, and the response
+///   body is rewritten to carry it;
+/// * a write whose body carries a different `metadata.resourceVersion` is
+///   answered `409 Conflict` (the API server's own Status) and recorded;
+/// * a `GET` of an object the ledger holds is rewritten to carry its current
+///   version.
 ///
-/// * An accepted `PATCH`/`PUT` BUMPS the object's version, and the response
-///   body is rewritten to carry the new one, exactly as the API server answers
-///   with the object it stored.
-/// * A write whose body carries `metadata.resourceVersion` different from the
-///   version the ledger holds is answered `409 Conflict` — the API server's
-///   own Status — and is recorded like any other request.
-/// * A `GET` of an object the ledger holds is rewritten to carry its current
-///   version, so a reconciler that re-reads after a conflict sees what a real
-///   re-read would.
-///
-/// Until the first accepted write the ledger knows nothing about an object,
-/// so the first write of a test is never refused on a version: the fixture's
-/// own `resourceVersion` is the starting point. Every mock constructor in this
-/// module applies it — a test cannot opt out of the API server's semantics.
+/// Until the first accepted write the ledger knows nothing, so a test's first
+/// write is never refused on a version. Every mock constructor here applies
+/// it: a test cannot opt out of the API server's semantics.
 pub type RvLedger = Arc<Mutex<std::collections::HashMap<String, String>>>;
 
 /// The ledger key: the object path, with the `/status` subresource folded
@@ -267,9 +246,9 @@ fn answer_enforcing(
         let (status, response) = answer_parts(routes, recorder, method, uri);
         if (200..300).contains(&status) {
             let base = current.or(precondition);
-            // A ROUTE THAT ANSWERS WITH ITS OWN, DIFFERENT VERSION IS BELIEVED:
-            // it is the test author saying where the write left the object.
-            // Only a static body that did not move (or carries none) is bumped.
+            // A route answering with its own, different version is believed
+            // (the test author saying where the write left the object); only a
+            // static body that did not move, or carries none, is bumped.
             let answered = version_of(&response).filter(|v| Some(v) != base.as_ref());
             if let Some(next) = answered.or_else(|| base.as_deref().map(bumped)) {
                 ledger
@@ -305,29 +284,19 @@ async fn collect_body(req: Request<Body>) -> String {
 
 /// One request the double was asked for, **with its body**.
 ///
-/// WHY A SECOND TYPE AND NOT A FOURTH FIELD ON [`SeenRequest`] (Task 18). A
-/// request body is only reachable asynchronously — `http_body::Body` is a
-/// stream — so the plain [`answer`] route resolver, which is a synchronous
-/// function two existing tests call directly, cannot produce one. Adding a
-/// `body` field to `SeenRequest` would either force that function async or
-/// leave the field empty in the one place a test can observe it; a separate
-/// log, filled by the service closure that already owns the whole `Request`,
-/// keeps both truthful.
-///
-/// WHY ANY TEST NEEDS IT. A `POST` to a collection carries the object's
-/// `metadata.name` in its **body**, never in its path — `Api::create` targets
-/// `…/namespaces/<ns>/backups` with no name in the URI at all. Guard
-/// **G-SLOT**'s property is "both `POST`s carried the identical
-/// `metadata.name`", so it is unassertable from method and URI alone.
+/// A second type rather than a field on [`SeenRequest`], because a request body
+/// is only reachable asynchronously and the synchronous [`answer`] that tests
+/// call directly cannot produce one. A `POST` to a collection carries
+/// `metadata.name` in its body, never its path, so guard **G-SLOT**'s "both
+/// `POST`s carried the identical `metadata.name`" needs the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeenBody {
     /// The method as the client sent it.
     pub method: String,
     /// The request target, query string included.
     pub uri: String,
-    /// The request body as UTF-8. Empty for a request with no body, and for a
-    /// body that did not collect — neither of which any test in this tree
-    /// asserts over.
+    /// The request body as UTF-8; empty for a request with no body or one that
+    /// did not collect.
     pub body: String,
 }
 
@@ -367,9 +336,8 @@ pub fn mock_client_recording(routes: Vec<Route>) -> (kube::Client, Recorder) {
             }
         })
     };
-    // `"default"` is the client's DEFAULT namespace only — the namespace an
-    // `Api::default_namespaced` would use when a test does not say. Every
-    // route in this plan's tests names its namespace in the path.
+    // `"default"` is only the client's default namespace; every route names
+    // its namespace in the path.
     (kube::Client::new(svc, "default"), recorder)
 }
 
@@ -401,10 +369,8 @@ pub fn mock_client_recording_bodies(routes: Vec<Route>) -> (kube::Client, Record
             async move {
                 let method = req.method().to_string();
                 let uri = req.uri().to_string();
-                // The body is COLLECTED BEFORE the route is resolved, so an
-                // unmatched request's body is in the log the panic is about —
-                // the same ordering `answer` uses for the request log, and for
-                // the same reason.
+                // Collected before the route is resolved, so an unmatched
+                // request's body is in the log the panic is about.
                 let body = collect_body(req).await;
                 bodies
                     .lock()
@@ -426,21 +392,13 @@ pub fn mock_client_recording_bodies(routes: Vec<Route>) -> (kube::Client, Record
 /// [`mock_client_recording_bodies`], with ONE route that changes its answer
 /// after it has been asked `after` times.
 ///
-/// # Why the double needs this at all
-///
-/// A [`Route`] answers every matching request identically, which is right for
-/// almost everything and wrong for exactly one shape of property: *the Nth
-/// write of a pass is refused*. A reconciler that writes `/status` more than
-/// once in a pass writes to ONE path, so a table cannot say "the first two
-/// land and the third conflicts" — and that is the only sequence in which
-/// defect RET-STARTRUN-PATCH-OUTCOME's failure occurs. Answering 409 to all of
-/// them refuses the first write instead, which is a different branch and
-/// proves a different thing.
-///
-/// `after` is a count of MATCHING requests already answered: `after: 2` leaves
-/// the first two alone and gives the third and every later one `status` and
-/// `body`. The switch is counted inside the service, so it holds across the
-/// `tower::buffer::Buffer` worker the client spawns.
+/// A [`Route`] answers every matching request identically, so a table cannot
+/// say "the first two writes to this path land and the third conflicts";
+/// answering 409 to all of them refuses the first write instead, a different
+/// branch. `after` counts matching requests already answered: `after: 2`
+/// leaves the first two alone and gives the third and later `status` and
+/// `body`. The count lives inside the service, so it holds across the
+/// `tower::buffer::Buffer` worker.
 ///
 /// # Panics
 ///
@@ -538,14 +496,11 @@ pub struct StoreWrite {
 
 /// A stateful stand-in for the objects a test needs to SURVIVE a pass.
 ///
-/// # Why the route table is not enough for a reservation protocol
-///
-/// A [`Route`] answers every request identically, so a table cannot express
-/// "the first write of the pass moved the object, and the second write — the
-/// one carrying the pass's result — was answered 409 and nothing of it was
-/// stored". [`RvLedger`] makes the double REFUSE the stale write; this makes
-/// the refusal OBSERVABLE: the object as it stands after the pass is here, and
-/// the next pass can be handed exactly that object, as a watch would hand it.
+/// A route table answers every request identically, so it cannot express "the
+/// first write moved the object and the second, carrying the pass's result,
+/// was refused 409 and nothing of it stored". [`RvLedger`] makes the double
+/// refuse the stale write; this makes the refusal observable, and the next
+/// pass can be handed exactly the object a watch would hand it.
 ///
 /// Objects are keyed by a path suffix (`/backupschedules/nightly`),
 /// matched with `ends_with` like a [`Route`]. For a tracked object the store
@@ -889,22 +844,14 @@ pub fn mock_client(routes: Vec<Route>) -> kube::Client {
     mock_client_recording(routes).0
 }
 
-// ---------------------------------------------------------------------------
-// FX-19 — what a pass LOGGED, by level
-// ---------------------------------------------------------------------------
-
-/// Every `tracing` event emitted on THIS thread while it lives, as the JSON
-/// lines the controller binary's own subscriber writes (`main.rs` formats
-/// with `.json()`), so a row can assert "and logged no WARN" — FX-19's
-/// property — over the reconciler's real log calls rather than over a
-/// promise in a comment.
+/// Every `tracing` event emitted on this thread while it lives, as the JSON
+/// lines the controller binary writes (`main.rs` formats with `.json()`), so a
+/// row can assert "and logged no WARN" over the reconciler's real log calls.
 ///
-/// THREAD-SCOPED, AND THAT IS WHAT MAKES IT SAFE IN A PARALLEL SUITE. It is
-/// installed with `tracing::subscriber::set_default`, which binds the
-/// subscriber to the calling thread until the guard drops. A `#[tokio::test]`
-/// runs a current-thread runtime, so the reconcile under test — and the
-/// double's `tower::buffer` worker task, spawned onto the same runtime — log
-/// here, and no other test's events can.
+/// Thread-scoped, which makes it safe in a parallel suite: it is installed with
+/// `tracing::subscriber::set_default`, and a `#[tokio::test]` runs a
+/// current-thread runtime, so the reconcile under test and the double's
+/// `tower::buffer` worker log here and no other test's events can.
 ///
 /// Debug and above are kept: a debug line is how a row proves that a race
 /// was NOTICED rather than merely not shouted about.

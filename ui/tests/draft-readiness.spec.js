@@ -1,12 +1,12 @@
-// draft-readiness.spec.js -- DRAFT-PREFLIGHT-NEVER-READY (PLAT-19.2).
+// draft-readiness.spec.js -- a draft restore plan's readiness can be ready
+// for Create.
 //
 // A readiness check run against a DRAFT restore plan answers `approval.state`
 // with `skipped` + `SubjectNotCreated`: no Restore exists yet, so no approver
 // has been asked. The controller's aggregate (`logweir_core::check_contract::
 // aggregate`) deliberately makes a skipped blocking row `unknown` overall, and
-// that stays. The wizard used to refuse every verdict that was not `ready`, so
-// after ANY readiness check the Create button was refused.
-//
+// that stays; refusing every verdict that is not `ready` would refuse Create
+// after ANY readiness check.
 // The rule these rows pin: a draft may be submitted when every blocking check
 // is `ready` except `approval.state` in PRECISELY that shape; any other
 // non-ready, unknown or skipped blocking row still refuses, by id and code.

@@ -1,31 +1,25 @@
 // validate.js -- ONE set of checks, ONE vocabulary of field paths, for both
 // modes.
 //
-// THE PROBLEM THIS SOLVES. A form's own checks speak the form's field names
-// (`servers`, `secret`). A Kubernetes 422 speaks JSON paths into the custom
-// resource (`spec.bootstrapServers[0]`). The product API's problem+json speaks
-// JSON paths into ITS request body (`bootstrapServers[0]`, `auth.credentialRef`).
-// Three vocabularies for one disagreement, and a client that does not translate
-// between them has to choose which server it renders beside the field -- so
-// before PLAT-18.1 there was only one server it could.
+// A form's own checks speak its field names (`servers`, `secret`), a
+// Kubernetes 422 speaks JSON paths into the custom resource
+// (`spec.bootstrapServers[0]`), and the product API's problem+json speaks
+// paths into ITS request body (`bootstrapServers[0]`, `auth.credentialRef`).
 //
-// THE CANONICAL VOCABULARY IS THE CUSTOM RESOURCE'S. Not because it is nicer,
-// but because it is the one the pages already speak: every page exports a
-// `*_FIELD_PATHS` table mapping `spec.auth.username` onto its own input, and
-// `lifecycle.js`'s `fieldErrors` already resolves the longest matching prefix.
-// So the console path is translated INTO that vocabulary here, and every page
-// renders a product-API field error beside the right input with no change of
-// its own. [`CONSOLE_FIELD_PATHS`] is the whole translation, stated once.
+// THE CANONICAL VOCABULARY IS THE CUSTOM RESOURCE'S, because the pages
+// already speak it: every page exports a `*_FIELD_PATHS` table mapping
+// `spec.auth.username` onto its own input, and `lifecycle.js`'s
+// `fieldErrors` resolves the longest matching prefix. So console paths are
+// translated INTO it here ([`CONSOLE_FIELD_PATHS`]), and every page renders a
+// product-API field error beside the right input with no change of its own.
 //
-// AND THE CHECKS THEMSELVES RUN IN BOTH MODES. [`validateRequest`] is applied
-// by `client.js` to the body about to be sent, whichever mode is selected, and
-// it produces the SAME `FieldError[]` shape the product API produces -- so a
-// refusal this client makes and a refusal the server makes reach a form
-// through one path and render the same way. It checks structure, required
-// fields, closed enumerations and the two formats the product has always
-// enforced (an object name, a host and port); it does not re-implement the
-// CRD's schema or the controller's probe, because the client-side check is a
-// convenience and the server is the gate.
+// THE CHECKS RUN IN BOTH MODES. `client.js` applies [`validateRequest`] to
+// the body about to be sent, and it produces the product API's own
+// `FieldError[]` shape, so a refusal this client makes and one the server
+// makes reach a form the same way. It checks structure, required fields,
+// closed enumerations, object names and host:port; it does not
+// re-implement the CRD's schema or the controller's probe, because the
+// client-side check is a convenience and the server is the gate.
 //
 // THIS MODULE ISSUES NO REQUEST, READS NO CLOCK AND TOUCHES NO DOM.
 
@@ -66,20 +60,15 @@ export function isPlanHash(value) {
   return typeof value === "string" && PLAN_HASH.test(value);
 }
 
-// ===========================================================================
-// the translation
-// ===========================================================================
-
 /** The product API's field paths, by plural, mapped onto the custom
  *  resource's. The longest matching prefix wins, and an index or a deeper
  *  segment is carried across unchanged: `bootstrapServers[0]` becomes
  *  `spec.bootstrapServers[0]`.
  *
- *  A path with no entry here is left ALONE rather than guessed at. It then
- *  matches no page's table and `fieldErrors` returns it in `unmatched`, which
- *  a form renders beside itself -- visible, attributed, and not silently
- *  dropped. That is the right answer for `Idempotency-Key` and for a query
- *  parameter, neither of which is a field on any form. */
+ *  A path with no entry here is left ALONE rather than guessed at: it matches
+ *  no page's table, and `fieldErrors` returns it in `unmatched`, which a form
+ *  renders beside itself. That is the right answer for `Idempotency-Key` and
+ *  a query parameter, neither of which is a field on any form. */
 export const CONSOLE_FIELD_PATHS = Object.freeze({
   connections: Object.freeze([
     ["role", "spec.role"],
@@ -88,7 +77,7 @@ export const CONSOLE_FIELD_PATHS = Object.freeze({
     ["auth.tls", "spec.auth.tls"],
     ["auth.username", "spec.auth.username"],
     ["auth.credentialRef", "spec.auth.secretRef"],
-    // PROD-01.3: the write-only credential and the ConfigMap CA.
+    // The write-only credential and the ConfigMap CA.
     ["auth.credential.password", "spec.auth.credential.password"],
     ["auth.credential", "spec.auth.credential"],
     ["auth.tlsCa.configMapKeyRef.name", "spec.auth.tlsCa.configMapKeyRef.name"],
@@ -163,10 +152,6 @@ export function causesFrom(plural, errors) {
   return out;
 }
 
-// ===========================================================================
-// the checks
-// ===========================================================================
-
 function fail(errors, field, code, message) {
   errors.push({ field: field, code: code, message: message });
 }
@@ -192,10 +177,9 @@ function text(errors, value, path, what) {
   }
 }
 
-// THE TWO CLOSED SETS THIS MODULE ENFORCES, imported rather than copied.
-// `ui/contract.js` holds them against the published schema, so a set that
-// moved on the server fails a test here instead of refusing an operator's
-// input for a reason nobody wrote down.
+// THE TWO CLOSED SETS THIS MODULE ENFORCES, imported from `ui/contract.js`,
+// which holds them against the published schema, so a set that moved on the
+// server fails a test rather than refusing an operator's input.
 const AUTH_MODES = CONNECTION_AUTH_MODES;
 const TARGET_MODES = RESTORE_MODES;
 
@@ -245,7 +229,7 @@ export function validateRequest(plural, body) {
       nameRef(errors, auth.secretRef, "spec.auth.secretRef",
         "a Secret name is lowercase letters, digits, '-' and '.'");
     }
-    // PROD-01.3: the CRD's own rules, as messages beside the field.
+    // The CRD's own rules, as messages beside the field.
     if (auth.mode === "plain" && auth.tls !== true) {
       fail(errors, "spec.auth.tls", "plain_requires_tls",
         "PlainWithoutTls: SASL/PLAIN sends the password itself, so it is accepted only with TLS on");
@@ -263,14 +247,11 @@ export function validateRequest(plural, body) {
   } else if (plural === "backupschedules") {
     text(errors, spec.schedule, "spec.schedule", "a schedule expression is required");
     nameRef(errors, spec.sourceRef, "spec.sourceRef", "name the KafkaCluster this schedule reads");
-    // TWO XOR PAIRS, AND NEITHER HALF IS REQUIRED ON ITS OWN (PLAT-10.1). A
-    // schedule covers a NAMED allowlist or every user topic, and writes to an
-    // INLINE archive or a saved destination; requiring `topics` and
-    // `archive.url` outright -- which this did until the create route grew the
-    // other two fields -- refused, in the browser, exactly the two shapes the
-    // guided form exists to produce. What is still refused is a selection with
-    // neither half and a location with neither half: a run with nothing to do
-    // is not a run, and a run with nowhere to write is not a run.
+    // TWO XOR PAIRS, AND NEITHER HALF IS REQUIRED ON ITS OWN. A schedule covers
+    // a NAMED allowlist or every user topic, and writes to an INLINE archive or
+    // a saved destination. What is refused is a selection with neither half and
+    // a location with neither half: a run with nothing to do, or nowhere to
+    // write, is not a run.
     if (!Array.isArray(spec.topics) || spec.topics.length === 0) {
       if (spec.allUserTopics === undefined || spec.allUserTopics === null) {
         fail(errors, "spec.topics", "selection_invalid",
@@ -301,16 +282,12 @@ export function validateRequest(plural, body) {
       fail(errors, "spec.target.mode", "invalid_enum",
         "target mode is one of " + TARGET_MODES.join(", "));
     }
-    // PROD-15.1, AS THE PRODUCT API JUDGES IT (found by FX-48's sweep). A
-    // restore under the ORIGINAL topic names declares
-    // `topicNaming.originalName: true` and its prefix is EMPTY -- every topic
-    // maps onto its own name -- and that is the one request whose prefix may
-    // be empty. This check required a non-empty prefix of every Restore, so
-    // the wizard's own original-name body was refused here, before the
-    // network, in both modes, and no row noticed because every row that
-    // submitted one used an API double. The two rules below are the route's
-    // own (`prefix_with_original_name`, `invalid_prefix`); the mode and the
-    // complete coverage the choice also needs are the server's to name.
+    // A RESTORE UNDER THE ORIGINAL TOPIC NAMES declares
+    // `topicNaming.originalName: true` with an EMPTY prefix (every topic maps
+    // onto its own name), the one request whose prefix may be empty. The two
+    // rules below are the route's own (`prefix_with_original_name`,
+    // `invalid_prefix`); the mode and the complete coverage the choice also
+    // needs are the server's to name.
     const naming = target.topicNaming || {};
     if (naming.originalName === true) {
       if (typeof naming.prefix !== "string" || naming.prefix.length > 0) {

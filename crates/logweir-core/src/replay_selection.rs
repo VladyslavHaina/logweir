@@ -1,17 +1,16 @@
-//! **PROD-11.1 — replay selection.** The ONE function a restore's preview and
-//! its execution select records by.
+//! Replay selection: the ONE function a restore's preview and its execution
+//! select records by.
 //!
 //! A plan may narrow a restore by an inclusive window START, stated in its
 //! bytes (inside `plan_hash`) as `restore.point_in_time: "<start>/<end>"`, and
-//! (PROD-11.1b, the owner's decision OD-9 (a)) by per-topic PARTITION SUBSETS,
-//! `restore.partitions`, written beside an interval form of the point in time
-//! (`"<start>/<end>"`, or `"../<end>"` from the archive's floor) that a runner
-//! older than either cannot parse. A run that states a subset signs scorecard
-//! format **2.0.0**, which every reader before it refuses as an unsupported
-//! major instead of reading it as a full restore. Absent both, the selection
-//! is exactly what every plan before PROD-11.1 restored: every partition of
-//! every selected topic, from the archive's floor to the window's end (guard
-//! G-WIN).
+//! by per-topic PARTITION SUBSETS, `restore.partitions`, written beside an
+//! interval form of the point in time (`"<start>/<end>"`, or `"../<end>"` from
+//! the archive's floor) that a runner older than either cannot parse. A run
+//! that states a subset signs scorecard format **2.0.0**, which every reader
+//! before it refuses as an unsupported major instead of reading it as a full
+//! restore. Absent both, the selection is every partition of every selected
+//! topic, from the archive's floor to the window's end (guard G-WIN), as in a
+//! plan that predates both.
 //!
 //! # Who calls it
 //!
@@ -36,15 +35,14 @@
 //!   restore filter is (`r.timestamp >= s && r.timestamp <= e`,
 //!   `restore/helpers.rs` in the pinned source). Without a stated start there
 //!   is NO lower bound on a record: the window starts at the archive's floor,
-//!   and a record older than every segment's first record (PROD-01.1 S8) is
-//!   still expected — its absence is the engine's floor dropping it, a fault
-//!   (PROD-08.1 §2).
+//!   and a record older than every segment's first record is still expected —
+//!   its absence is the engine's floor dropping it, a fault.
 //! - **Partition**: selected when its topic is selected and the plan names no
 //!   subset for the topic, or names one containing it.
 //! - **Segment** (what the engine reads, and what a preview lists): a segment of
 //!   a selected partition whose first/last timestamps overlap
 //!   `[start-or-floor, end]` (`overlaps_time_window` in the pinned source).
-//!   That is the ENGINE's selection, which PROD-01.1 S6/S7 shows can skip an
+//!   That is the ENGINE's selection, which can skip an
 //!   in-window record of a non-monotonic segment; a complete verification
 //!   computes its expected output from each record's own timestamp instead
 //!   ([`ReplaySelection::selects_timestamp`]) and so detects the skip.
@@ -264,8 +262,7 @@ impl ReplaySelection {
     ///
     /// Every path that turns a plan into a selection goes through here
     /// (phase 0, the resolution before phase 2, plan construction and the
-    /// restore preflight). (Until PROD-11.1b, the owner's OD-9 (a), any subset
-    /// was refused here by name.)
+    /// restore preflight).
     ///
     /// # Errors
     ///
@@ -310,7 +307,7 @@ impl ReplaySelection {
         if let Some(start_ms) = window_start_ms {
             // `>=`: a window `[t, t]` holds one instant, which is the same
             // refusal `build_plan_with_floor` makes for a recovery point at
-            // the floor (plan erratum E7(a)).
+            // the floor.
             if start_ms >= window_end_ms {
                 return Err(SelectionRefusal::EmptyWindow {
                     start_ms,
@@ -336,7 +333,7 @@ impl ReplaySelection {
     }
 
     /// `true` when the plan states no selection of its own — no start, no
-    /// subset — so it restores what every plan before PROD-11.1 restored.
+    /// subset — so it restores every partition from the archive's floor.
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.window_start_ms.is_none() && self.partitions.is_empty()
@@ -372,7 +369,7 @@ impl ReplaySelection {
 
     /// `facts` with every partition this selection does not select removed
     /// (topics kept, so a selected topic the plan narrowed to nothing in the
-    /// archive still reads as listed). Phase 7's count bound, FX-23's
+    /// archive still reads as listed). Phase 7's count bound, the
     /// per-partition presence check and its engine-report check judge a
     /// narrowed restore over THIS, never over the whole archive.
     #[must_use]
@@ -428,8 +425,8 @@ impl ReplaySelection {
     /// source topics): one with no partition filter for every topic without a
     /// subset, and one per distinct subset. Deterministic: the unfiltered run
     /// first, then the subsets in ascending order. A selection with no subset
-    /// is ONE run with no filter — the document every plan before PROD-11.1
-    /// rendered.
+    /// is ONE run with no filter — the document a plan that predates selections
+    /// renders.
     #[must_use]
     pub fn engine_runs<'a>(
         partitions: &BTreeMap<String, BTreeSet<i32>>,
@@ -462,7 +459,7 @@ impl ReplaySelection {
     ///
     /// `topics` is the manifest's topic list (`BackupSetFacts::topics`, or the
     /// preview's projection of the same JSON). Topics the plan does not select
-    /// are ignored, as the G-WIN floor ignores them (plan erratum E7(b)). A
+    /// are ignored, as the G-WIN floor ignores them. A
     /// selected topic the manifest does not describe contributes nothing
     /// here: whether that is refused is the caller's (`TopicNotInBackupSet`
     /// in the preview).
@@ -765,7 +762,7 @@ mod tests {
 
     /// The plan grammar: absent fields are the full selection; the end follows
     /// `build_plan_with_floor`'s rule; a start is the interval form of
-    /// `point_in_time`; a partition subset (PROD-11.1b, OD-9 (a)) is read
+    /// `point_in_time`; a partition subset is read
     /// beside an interval form, sorted and unique; every shape refusal fires
     /// before the archive is read. KILLS: refusing a well-formed subset (the
     /// lifted refusal), accepting a subset for an unselected topic, an empty,
@@ -852,7 +849,7 @@ mod tests {
         }
     }
 
-    /// The wire form of a SUBSET (PROD-11.1b): `restore.partitions` parses
+    /// The wire form of a SUBSET: `restore.partitions` parses
     /// only beside an interval form of `point_in_time` — `"<start>/<end>"`, or
     /// `"../<end>"` from the archive's floor — which a runner that predates
     /// partition subsets cannot parse, so it refuses the plan instead of
@@ -983,9 +980,7 @@ mod tests {
                 end_ms: 500
             })
         );
-        // a/1 only, after its single segment: nothing selected anywhere else
-        // because b is restricted to an empty... b has no subset, so restrict
-        // the window instead.
+        // a/1 only, with a window after its single segment.
         let only_a1 = ReplaySelection {
             topics: ["a".to_string()].into_iter().collect(),
             ..selection(Some(260), 400, &[("a", &[1])])

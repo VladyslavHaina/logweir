@@ -1,5 +1,5 @@
 // select.js -- the saved-cluster selector, and the words a connection probe is
-// allowed to be described with (PLAT-07.2).
+// allowed to be described with.
 //
 // PURE. Every function here is a function from JSON objects -- ones the API
 // server could have returned, which is what the checked-in fixtures are -- and
@@ -9,15 +9,11 @@
 // function of when the test ran.
 //
 // WHY THIS IS ONE MODULE AND NOT THREE COPIES. Three surfaces choose a saved
-// KafkaCluster -- the schedule form's source, the restore wizard's target, and
-// the clusters page's own list -- and before this module each one did it by
-// NAME, in its own spelling. A name is not an identity: delete a cluster and
-// recreate it under the same name and every one of those references silently
-// follows the new object, which is a different set of brokers reached with a
-// different credential. PLAT-11.1 fixed exactly this for recovery points by
-// pinning the Backup's UID in the route and REFUSING when the UID is gone; this
-// module is the same rule for connections, and the refusal wording is
-// deliberately parallel.
+// KafkaCluster -- the schedule form's source, the restore wizard's target and
+// the clusters page's own list. A name is not an identity: a cluster deleted
+// and recreated under the same name is a different set of brokers reached
+// with a different credential. So the UID is pinned and a gone UID is
+// REFUSED, the rule recovery points follow, with parallel wording.
 //
 // THE THREE THINGS IT OWNS
 //
@@ -47,11 +43,11 @@ import { badge, cell, esc, when } from "./render.js";
 
 /** The noun every surface uses for `status.reachable`.
  *
- *  D2 section 9 fixes it: "Connection health (`status.reachable`) is labelled
- *  'connection probe', never 'ready'." A `Ready` condition on a schedule means
- *  the controller accepted the object; a probe means a pod dialled a broker
- *  once, minutes ago, and said what happened. Conflating them is how a
- *  dashboard tells someone their disaster-recovery path is fine. */
+ *  Connection health (`status.reachable`) is labelled "connection probe",
+ *  never "ready". A `Ready` condition on a schedule means the controller
+ *  accepted the object; a probe means a pod dialled a broker once, minutes
+ *  ago, and said what happened. Conflating them is how a dashboard tells
+ *  someone their disaster-recovery path is fine. */
 export const PROBE_NOUN = "connection probe";
 
 /** The word this module refuses to print, held as data so
@@ -68,8 +64,7 @@ export const FORBIDDEN_PROBE_WORD = "ready";
  *  at which a missed refresh is no longer explainable by scheduling jitter, so
  *  it is the point at which this page stops presenting the observation as
  *  current. A shorter budget would flag a working installation; a longer one
- *  would keep showing a dead probe as fresh, which is the defect PLAT-07.2
- *  exists to remove.
+ *  would keep showing a dead probe as fresh.
  *
  *  It is a parameter everywhere below: every function takes `freshSeconds` and
  *  falls back to this, so an installation that re-probes on another cadence has
@@ -93,7 +88,7 @@ export const PROBE_SKEW_SECONDS = 60;
  *  connection starts no probe Job. */
 export const NEVER_OBSERVED_WORDS = "never observed";
 
-/** The four `status.reason` values PLAT-07.1's resolver writes when it REFUSES
+/** The four `status.reason` values the resolver writes when it REFUSES
  *  a saved connection before any probe Job exists.
  *
  *  Byte for byte `weirkeeper::conditions`' terminal states and
@@ -228,9 +223,8 @@ export function haystackMatches(haystack, query) {
  *  adopter picks and the controller reports", and the restore wizard already
  *  carries the sentence explaining that the runner's own guard is the gate: a
  *  `newTopic` restore into the source cluster is exactly where a point-in-time
- *  recovery belongs, and Task 28a removed a role filter here that rendered an
- *  empty select for the product's own demo. So the role travels WITH each
- *  option and decides only which one is preselected ([`preferredCluster`]).
+ *  recovery belongs. So the role travels WITH each option and decides only
+ *  which one is preselected ([`preferredCluster`]).
  *
  *  Ordered by name so the list a person reads twice is the same list twice;
  *  `kubectl`'s order is creation order, which reshuffles as objects come and
@@ -371,11 +365,10 @@ export function resolveClusterSelection(clusters, selection) {
  *   - absent, no reason at all                   -> `never`
  *
  *  `stale` is about the OBSERVATION and is independent of the verdict: a
- *  `reachable: true` older than the budget is a stale success, which is the
- *  case this whole task is about. No `observedAt`, an unparseable one, or one
- *  more than [`PROBE_SKEW_SECONDS`] in the future is stale too -- in the last
- *  case the arithmetic itself is untrustworthy, and presenting an untrustworthy
- *  number as current is the same defect wearing a different hat.
+ *  `reachable: true` older than the budget is a stale success. No
+ *  `observedAt`, an unparseable one, or one more than [`PROBE_SKEW_SECONDS`]
+ *  in the future is stale too -- in the last case the arithmetic itself is
+ *  untrustworthy, and an untrustworthy number is not presented as current.
  *
  *  A `probing` verdict is NOT stale: a probe in flight has not observed
  *  anything yet, so there is no observation to be old. Its `observedAt` (when
@@ -407,8 +400,8 @@ export function probeState(cluster, now, freshSeconds) {
   // STALENESS IS A STATEMENT ABOUT AN OBSERVATION, so it needs one. With no
   // `observedAt` -- which is every refused connection, because the resolver
   // refuses before a probe Job exists and the refusal clears the whole reading
-  // -- there is nothing for "older than the budget" to be about, and the honest
-  // answer is `observed: false` and its own word (review finding F2).
+  // -- there is nothing for "older than the budget" to be about, and the
+  // honest answer is `observed: false` and its own word.
   let stale = false;
   if (verdict !== "probing" && parsed !== null) {
     stale = ageMs > budget || ageMs < -PROBE_SKEW_SECONDS * 1000;
@@ -485,10 +478,10 @@ export function observedBadge(state) {
  *  success -- the CONTROLLER'S OWN `status.reason`, verbatim, with its gloss
  *  when this module has one.
  *
- *  THE REASON IS NEVER REWORDED. `ConnectionConfigInvalid` is what the operator
- *  will grep the controller logs for and what `docs/kubernetes.md` section 20
- *  documents; a page that printed "connection problem" instead would have
- *  thrown away the only handle they have. */
+ *  THE REASON IS NEVER REWORDED. `ConnectionConfigInvalid` is what the
+ *  operator will grep the controller logs for; a page that printed
+ *  "connection problem" instead would have thrown away the only handle they
+ *  have. */
 export function probeLine(state) {
   const s = state || {};
   const parts = [probeBadge(s)];
@@ -534,12 +527,11 @@ export function probeLine(state) {
 export const VERDICT_OWN_REASONS = Object.freeze(["Reachable", "ProbeReportedUnreachable"]);
 
 /** What a LATER probe's reason means when it stands beside an EARLIER
- *  reading. A probe Job that crashed under a controller older than FX-11's
- *  O-1 fix wrote `observedAt` and its reason and left `reachable` alone
- *  (`crashed_status_patch`), so "reachable" beside `NoExitCode` read as a
- *  contradiction (MCP-9); it is two facts about two probes. The controller
- *  now clears `reachable` on every `Unknown` verdict, so this pairing is only
- *  ever an older controller's object until its next probe. */
+ *  reading. An older controller left `reachable` alone when a probe Job
+ *  crashed (writing `observedAt` and the reason), so "reachable" beside
+ *  `NoExitCode` is two facts about two probes, not a contradiction. The
+ *  controller now clears `reachable` on every `Unknown` verdict, so this
+ *  pairing is only ever an older controller's object until its next probe. */
 export const LATER_PROBE_GLOSS = Object.freeze({
   NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
   ProbeOutputUnreadable: "the latest probe's output could not be read",
@@ -562,13 +554,10 @@ export function laterProbeNote(state) {
       " reading is from an earlier probe") + "</span>";
 }
 
-/** THE PROBE AS A CELL (MCP-28): the verdict badge, the stale or never-observed
- *  badge, and the observation's age -- with [`probeLine`]'s whole sentence, in
- *  plain text, as the cell's title. The wizard's connection cells used to be
- *  paragraphs: two badges, an instant, the cluster id a second time and "this
- *  observation is older than the 630s freshness budget". The reason a
- *  non-reachable reading carries is still printed, verbatim, because it is
- *  what an operator greps for. */
+/** THE PROBE AS A CELL: the verdict badge, the stale or never-observed badge,
+ *  and the observation's age -- with [`probeLine`]'s whole sentence, in plain
+ *  text, as the cell's title. The reason a non-reachable reading carries is
+ *  still printed, verbatim, because it is what an operator greps for. */
 export function probeSummary(state) {
   const s = state || {};
   const parts = [probeBadge(s)];
@@ -580,7 +569,7 @@ export function probeSummary(state) {
   if (never.length > 0) {
     parts.push(never);
   }
-  // THE EXACT INSTANT IS THE HOVER (review L4): the cell shows the age, and
+  // THE EXACT INSTANT IS THE HOVER: the cell shows the age, and
   // the recorded value -- nanoseconds and all -- is its title, as every other
   // instant on the page carries it. With no age to show, the shared formatter.
   if (s.observedAt) {
@@ -614,12 +603,9 @@ export const PROBE_SENTENCE =
  *  own `ttlSecondsAfterFinished` in `weirkeeper`. So this control re-reads the
  *  object and shows the newest observation the controller recorded.
  *
- *  UNTIL D2-SOURCECHECK THE BUTTON SAID "Test connection" AND DID THIS, which
- *  was the defect PLAT-07.2's row named: the only honest reading of that label
- *  is "dial the broker now", and nothing in the console could. There is now a
- *  check kind that can (`sourceConnection`), so the DIAL took the label and
- *  this control took the name of what it actually does. Two controls with one
- *  label would have been the same lie in a second place. */
+ *  The control that DIALS is the clusters page's "Test connection" (a
+ *  `sourceConnection` check); this one is named for what it does, because
+ *  one label on two controls would claim a dial this one cannot make. */
 export const TEST_CONNECTION_SENTENCE =
   "Re-read probe re-reads this KafkaCluster and shows the newest connection probe the " +
   "controller has recorded. It dials nothing: the controller owns the probe and re-runs it on " +
@@ -659,8 +645,6 @@ export function renderProbePanel(cluster, view) {
     "</section>"
   );
 }
-
-// --------------------------------------------------------------- the selector
 
 /** The option a refused selector opens on: no identity, marked `selected`, and
  *  saying what has to happen next. `value=""` is what
@@ -764,15 +748,12 @@ export function renderClusterSelector(view) {
   const field = typeof v.name === "string" && v.name.length > 0 ? v.name : "cluster";
   const all = savedClusters(v.clusters);
   const resolved = resolveClusterSelection(all, v.selection);
-  // A REFUSAL SELECTS NOTHING (review finding F1). `recreated` and `missing`
-  // are the two states in which the connection this form was bound to is not
-  // there, and the page has just said so. Preselecting a DEFAULT under that
-  // refusal -- which is what a `none`-shaped fallback did -- leaves a
-  // submit-ready form bound to a connection nobody chose: a browser defaults an
-  // unselected `<select>` to its first option, so one more click on Create sent
-  // a schedule at whatever happened to sort first. So the two refusal states
-  // render an explicit empty option, marked `selected`, and the empty value is
-  // what `validateSchedule` and `validateRestore` refuse.
+  // A REFUSAL SELECTS NOTHING. Under `recreated` or `missing` the bound
+  // connection is gone, and a browser defaults an unselected `<select>` to
+  // its first option, so a preselected default would leave a submit-ready
+  // form bound to a connection nobody chose. The refusal states render an
+  // explicit empty option, marked `selected`, and the empty value is what
+  // `validateSchedule` and `validateRestore` refuse.
   const refused = resolved.state === "recreated" || resolved.state === "missing";
   const fallback = resolved.state === "selected" || refused
     ? resolved.cluster
@@ -857,8 +838,6 @@ export function renderClusterSelector(view) {
     "</div>"
   );
 }
-
-// ---------------------------------------------------------------- the DOM half
 
 /** Reads one selector's answer back out of a form: the UID the select carries
  *  and the NAME of the option that carries it. Falls back to the hidden inputs

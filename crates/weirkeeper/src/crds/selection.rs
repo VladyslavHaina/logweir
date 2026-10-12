@@ -1,31 +1,30 @@
-//! How a run decides which topics it covers — the one type `Backup` and
+//! How a run decides which topics it covers: the one type `Backup` and
 //! `BackupSchedule` both use.
 //!
 //! # Two modes, and the third shape is refused
 //!
 //! | `topics` | `allUserTopics` | Mode |
 //! |---|---|---|
-//! | non-empty | absent | **SelectedTopics** — today's named allowlist, unchanged |
-//! | `[]` | present | **AllUserTopics** — resolved per run by discovery |
+//! | non-empty | absent | **SelectedTopics**: the named allowlist |
+//! | `[]` | present | **AllUserTopics**: resolved per run by discovery |
 //! | anything else | | refused before any POST |
 //!
-//! `topics` STAYS REQUIRED AND STAYS PRESENT IN BOTH MODES. That is what keeps
-//! an older controller able to DESERIALIZE a dynamic object at all: it reads
-//! `topics: []`, renders an empty list, and the runner's own empty-list rail
-//! (`phase_minus1_admit.rs`) exits 3 without contacting the engine. Making
-//! `topics` optional would have turned a rollback into a reflector decode
-//! error across the whole kind — the same reason D2's destination sentinel
-//! keeps `archive` required.
+//! **`topics` stays required and present in both modes**, so an older
+//! controller can still deserialize a dynamic object: it reads `topics: []`,
+//! renders an empty list, and the runner's empty-list rail
+//! (`phase_minus1_admit.rs`) exits 3 without contacting the engine. An
+//! optional `topics` would turn a rollback into a reflector decode error
+//! across the whole kind (the reason the destination sentinel keeps `archive`
+//! required).
 //!
 //! # `incompleteDiscovery` is required and has no default
 //!
 //! Kafka silently omits topics a principal cannot describe, so **no discovery
 //! can prove whole-cluster visibility** without an administrator attestation.
-//! Defaulting to refusal would make dynamic mode unusable out of the box;
-//! defaulting to visible-only would silently weaken the promise the mode's own
-//! name makes. So the choice is the user's, it is explicit, and the schema has
-//! no `default` for it — an operator who has not thought about it cannot
-//! accidentally ship either answer.
+//! Defaulting to refusal would make dynamic mode unusable out of the box, and
+//! defaulting to visible-only would weaken the promise the mode's name makes,
+//! so the schema has no `default`: an operator who has not thought about it
+//! cannot accidentally ship either answer.
 //!
 //! Every run then records what it actually covered, and no surface renders
 //! "all topics" unless the coverage is `AllUserTopicsAttested`.

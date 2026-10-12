@@ -7,7 +7,7 @@ use logweir_core::guard::{
 use std::collections::BTreeMap;
 
 /// The guard is on the KEY, not the value: `purge_topics: false` is refused
-/// exactly like `true` (spec §9.3 phase 0, GT-9).
+/// exactly like `true`.
 #[test]
 fn purge_topics_is_refused_at_either_value() {
     for v in ["true", "false"] {
@@ -76,11 +76,10 @@ fn every_selected_topic_must_have_a_mapping_whose_target_differs() {
 }
 
 /// THE SCANNER FAILS CLOSED. A document it cannot parse is a document it did
-/// not scan, and it must say so rather than answering "I found nothing" — the
-/// predecessor returned an empty list, which is indistinguishable from a clean
-/// document to every caller. This is the same "reported a pass having examined
-/// nothing" shape the integrity chokepoint exists to prevent, in the guard
-/// layer.
+/// not scan, and it must say so rather than answering "I found nothing": an
+/// empty list is indistinguishable from a clean document to every caller.
+/// This is the same "reported a pass having examined nothing" shape the
+/// integrity chokepoint exists to prevent, in the guard layer.
 #[test]
 fn a_document_the_scanner_cannot_parse_is_refused_never_reported_clean() {
     let err = scan_forbidden_keys("restore:\n  a: [unclosed\n\t\tbad: : :\n")
@@ -92,8 +91,8 @@ fn a_document_the_scanner_cannot_parse_is_refused_never_reported_clean() {
     );
 }
 
-// --------------------------------------------------------------- I11 / I9
-// The credential that cannot break out, and the refusal-reason contract.
+// I11 / I9: the credential that cannot break out, and the refusal-reason
+// contract.
 
 /// Interface **I11**. The projected password is NOT in the bytes Logweir
 /// renders: the document names `${LOGWEIR_SOURCE_PASSWORD}` and the engine
@@ -109,7 +108,7 @@ fn a_document_the_scanner_cannot_parse_is_refused_never_reported_clean() {
 /// choosing where the restore writes.
 #[test]
 fn credential_is_renderable_refuses_a_yaml_break_out() {
-    // The brief's value, verbatim: a double quote, a newline, then a key line.
+    // A double quote, a newline, then a key line.
     const BREAK_OUT: &str = "\"\n bootstrap_servers:";
     let refusal = credential_is_renderable(BREAK_OUT)
         .expect_err("a value that closes the scalar and opens a key must be refused");
@@ -172,13 +171,10 @@ fn credential_is_renderable_refuses_a_yaml_break_out() {
         "the message must not vary with the value"
     );
     // (b) And directly: the message contains neither the value nor any 4-byte
-    // window of it. (The brief says "any substring longer than one
-    // character"; at two characters that is unsatisfiable for this payload by
-    // ANY English sentence — `quote` alone contains `ot` from
-    // `bootstrap` — and the same brief requires the message to name the
-    // character class. Four is the threshold that admits no coincidence: no
-    // 4-gram of this payload is an English fragment. Recorded as a deviation
-    // in the task report, with this reason.)
+    // window of it. Four is the threshold that admits no coincidence: at two
+    // characters no English sentence passes (`quote` alone contains `ot` from
+    // `bootstrap`), and the message must name the character class; no 4-gram of
+    // this payload is an English fragment.
     let msg = refusal.to_string();
     assert!(!msg.contains(BREAK_OUT), "{msg}");
     let bytes: Vec<char> = BREAK_OUT.chars().collect();
@@ -266,7 +262,7 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
     assert_eq!(terminal_state(""), "GuardRefused");
     assert_eq!(refusal_reason_line(""), "refusal-reason=GuardRefused");
 
-    // The three names are exactly spec §3.2's, spelled once.
+    // The three names, spelled once.
     assert_eq!(TERMINAL_STATE_GUARD_REFUSED, "GuardRefused");
     assert_eq!(
         TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
@@ -276,7 +272,7 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
         "TargetTopicConfigRefused"
     );
-    // FX-8's state, the fourth: a time selection over a `LogAppendTime`
+    // The fourth state: a time selection over a `LogAppendTime`
     // source the plan did not accept by producer time.
     assert_eq!(
         logweir_core::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
@@ -286,7 +282,7 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         refusal_reason_line("PointInTimeByProducerTime: topic `lat` is LogAppendTime"),
         "refusal-reason=PointInTimeByProducerTime"
     );
-    // PROD-01.3's state, the fifth: SASL/PLAIN without TLS. The refusal's own
+    // The fifth: SASL/PLAIN without TLS. The refusal's own
     // text opens with it, so the line names it with no second spelling.
     assert_eq!(
         logweir_core::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
@@ -296,8 +292,8 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         refusal_reason_line(&logweir_core::connection::PlainWithoutTls.to_string()),
         "refusal-reason=PlainWithoutTls"
     );
-    // The PROD-01.3 security follow-up's state, the sixth: a projected
-    // credential whose binding does not name this connection.
+    // The sixth: a projected credential whose binding does not name this
+    // connection.
     assert_eq!(
         refusal_reason_line(
             &logweir_core::connection::CredentialBindingRefusal {
@@ -308,7 +304,7 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         ),
         "refusal-reason=CredentialBindingMismatch"
     );
-    // PROD-01.1a's state, the seventh: an archive holding transaction markers
+    // The seventh: an archive holding transaction markers
     // under a plan that does not allow them.
     assert_eq!(
         refusal_reason_line(
@@ -328,10 +324,10 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
     assert!(!line.contains('\n'), "{line}");
 }
 
-/// RECEIPT-DUP's `failure-reason=` vocabulary is closed in BOTH directions: a
+/// The `failure-reason=` vocabulary is closed in BOTH directions: a
 /// state is lifted only beside the one exit code it belongs to.
 ///
-/// **And the closed set is PER KIND** (PROD-15.1 review 2, M1's class note):
+/// **And the closed set is PER KIND**:
 /// a Backup's log lifts only the two execution-claim states, a Restore's only
 /// the stopped creation step's two. KILLS: one list for both reconcilers (a
 /// Backup's log could then put `CreatedTopicsLeft` on a `Backup`, and a
@@ -418,7 +414,7 @@ fn a_failure_reason_is_lifted_only_beside_its_own_exit_code_and_only_for_its_own
     }
 }
 
-/// **C15 at the spec layer** (PROD-00.3f, A-C15-1): the predicate and the
+/// **The plaintext-endpoint refusal at the spec layer**: the predicate and the
 /// refusal both drill and backup admission call. Only an S3 location with a
 /// plain `http://` endpoint AND `allow_http: false` is refused; plaintext
 /// stated explicitly, TLS, no endpoint and the other backends are not.
@@ -472,9 +468,8 @@ fn an_http_endpoint_without_allow_http_is_refused_and_nothing_else_is() {
     }
 }
 
-/// **FX-20 fix round (review F1).** An S3 region that is not a region name is
-/// refused before any client, by name (`StorageRegionInvalid`), and never
-/// echoed — the review's probe spelled it `x@127.0.0.1:<port>/`, a host
+/// An S3 region that is not a region name is refused before any client, by name
+/// (`StorageRegionInvalid`), and never echoed — `x@127.0.0.1:<port>/` is a host
 /// injection on an endpoint-less location. Every real region spelling, and no
 /// region at all, is admitted (the negative control).
 #[test]

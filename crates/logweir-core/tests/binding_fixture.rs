@@ -1,10 +1,10 @@
-//! FX-20 (and its fix round, review F1/F2): every credential binding form is
-//! computed in two places — the product (`logweir_core::credential_binding`
-//! and, for a `KafkaCluster`, `logweir_core::connection::credential_binding`:
-//! what the controller publishes and every runner Job expects) and the
-//! operator's upgrade tool (`scripts/bind-credential.py`, which COMPUTES the
-//! binding from the object's spec, compares it with the published one and
-//! writes it into a Secret). A fixture both sides read is the agreement;
+//! Every credential binding form is computed in two places — the product
+//! (`logweir_core::credential_binding` and, for a `KafkaCluster`,
+//! `logweir_core::connection::credential_binding`: what the controller
+//! publishes and every runner Job expects) and the operator's upgrade tool
+//! (`scripts/bind-credential.py`, which COMPUTES the binding from the object's
+//! spec, compares it with the published one and writes it into a Secret). A
+//! fixture both sides read is the agreement;
 //! `scripts/test_bind_credential_rows.py` reads the same file.
 
 use logweir_core::credential_binding::{
@@ -104,7 +104,7 @@ fn the_tool_and_the_product_compute_one_location_binding() {
             "{case}"
         );
     }
-    // Review F1's shape, in the agreement itself: the victim's bucket on the
+    // In the agreement itself: the victim's bucket on the
     // AWS-default endpoint with an injected region is a DIFFERENT location.
     let by_region: std::collections::BTreeSet<&str> = cases(&doc, "location", 8)
         .iter()
@@ -140,7 +140,7 @@ fn the_tool_and_the_product_compute_one_destination_and_retention_binding() {
     }
 }
 
-/// PROD-01.3's form, from a `KafkaCluster` spec as the controller resolves it
+/// The connection form, from a `KafkaCluster` spec as the controller resolves it
 /// (`weirkeeper::connection::resolve` then `credential_binding`).
 #[test]
 fn the_tool_and_the_product_compute_one_kafka_binding() {

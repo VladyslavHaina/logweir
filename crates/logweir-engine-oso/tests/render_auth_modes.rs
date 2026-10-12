@@ -1,4 +1,4 @@
-//! PROD-01.3: the engine's `security:` block for `scramSha256`, `plain` and
+//! The engine's `security:` block for `scramSha256`, `plain` and
 //! `mtls`, in all three rendered documents, and the renderer's refusals — the
 //! backstops behind the runner's guards.
 //!

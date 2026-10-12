@@ -26,9 +26,7 @@ use logweir_reaper::{
     EVIDENCE_ROOT, MAX_ATTEMPTS, PLAN_MEDIA_TYPE, RECORD_MEDIA_TYPE,
 };
 
-// ===========================================================================
-// The fakes
-// ===========================================================================
+// The fakes.
 
 /// A deleter that records every key and answers from a script.
 #[derive(Default)]
@@ -116,19 +114,17 @@ struct Ver {
     marker: bool,
 }
 
-/// An S3-compatible bucket, modelled the way MinIO behaves — the lab's
-/// (harness-rows-11 `object-lock`, ctl-batch-2's probe) and the reviewer's
-/// local one (ctl-batch-2 review H1):
+/// An S3-compatible bucket, modelled the way MinIO behaves (measured):
 ///
 /// * a PUT answers a version id only while versioning is ENABLED;
-/// * a HEAD answers the current version's id, and nothing for a null version
-///   — **including an object written BEFORE versioning was enabled** (H1);
-///   a key whose latest version is a marker answers 404;
-/// * a DELETE with no version id is ANSWERED SUCCESS: it removes the object
-///   on an unversioned bucket, pushes a marker over everything under Enabled
+/// * a HEAD answers the current version's id, and nothing for a null version,
+///   **including an object written BEFORE versioning was enabled**; a key whose
+///   latest version is a marker answers 404;
+/// * a DELETE with no version id is ANSWERED SUCCESS: it removes the object on
+///   an unversioned bucket, pushes a marker over everything under Enabled
 ///   versioning, and under Suspended replaces the null version with a null
 ///   marker (older, Enabled-era versions survive). No legal hold is consulted
-///   by a delete that names no version — which is the defect.
+///   by a delete that names no version.
 ///
 /// The worker cannot delete a specific version (`object_store` 0.14 has no
 /// such call), so neither can this. What a row reads afterwards is the truth:
@@ -140,8 +136,8 @@ struct ModelBucket {
     versions: RefCell<BTreeMap<String, Vec<Ver>>>,
     next_id: std::cell::Cell<u32>,
     /// An operator's hand: after this many more tombstone PUTs, the bucket's
-    /// versioning becomes `Enabled` (re-check RH1 — versioning switched on
-    /// while a point's deletes are in flight).
+    /// versioning becomes `Enabled` (switched on while a point's deletes are in
+    /// flight).
     enable_after_sink_puts: std::cell::Cell<Option<usize>>,
 }
 
@@ -377,9 +373,7 @@ impl Lister for HostileLister {
     }
 }
 
-// ===========================================================================
-// Fixtures
-// ===========================================================================
+// Fixtures.
 
 const SCOPE: &str = "kafka-backups/team-a";
 const UID: &str = "3f1c8a5e-0000-4000-8000-000000000016";
@@ -458,9 +452,7 @@ fn run(
     )
 }
 
-// ===========================================================================
-// Dry preview — PLAT-16.2 "dry preview"
-// ===========================================================================
+// Dry preview.
 
 /// A dry run issues NO delete at all.
 ///
@@ -536,9 +528,7 @@ fn the_digest_is_checked_before_the_document_is_parsed() {
     );
 }
 
-// ===========================================================================
-// Wrong-prefix rejection — PLAT-16.2
-// ===========================================================================
+// Wrong-prefix rejection.
 
 /// A key outside `<scope>/<backupId>/` refuses the plan with ZERO deletes.
 #[test]
@@ -642,12 +632,11 @@ fn an_enumerated_key_outside_the_bound_stops_the_point_with_zero_deletes() {
     assert!(sink.keys().is_empty(), "and no tombstone was written");
 }
 
-/// **RECEIPT-DUP's execution claim** (`logweir/backups/<backupId>/
-/// execution.claim.json`, the one execution-scoped object beside the
-/// run-scoped receipts) is evidence-root material: never a plan key, never a
-/// listed key, whatever set it names. Deleting it would let a later re-created
-/// Job of that execution run the engine again over a set whose manifest a
-/// signed receipt attests — the overwrite the claim exists to prevent.
+/// **The execution claim** (`logweir/backups/<backupId>/execution.claim.json`,
+/// the one execution-scoped object beside the run-scoped receipts) is
+/// evidence-root material: never a plan key, never a listed key, whatever set
+/// it names. Deleting it would let a re-created Job of that execution run the
+/// engine again over a set a signed receipt attests.
 #[test]
 fn the_execution_claim_is_never_deletable() {
     let claim = format!("{EVIDENCE_ROOT}backups/set-a/execution.claim.json");
@@ -698,11 +687,10 @@ fn a_widened_set_prefix_is_refused() {
 
 /// The plan must be for THIS policy.
 ///
-/// **By UID and not by generation** (review `d3w9` C1): approving a plan is a
-/// spec patch and a spec patch bumps the generation, so a plan bound to one
-/// could never be approved. What binds the plan to the run is the policy's
-/// identity, its scope, and the approved digest `parse_plan` checked over the
-/// exact bytes.
+/// **By UID and not by generation**: approving a plan is a spec patch and a
+/// spec patch bumps the generation, so a plan bound to one could never be
+/// approved. What binds the plan to the run is the policy's identity, its
+/// scope, and the approved digest `parse_plan` checked over the exact bytes.
 #[test]
 fn a_plan_for_another_policy_is_refused() {
     let mut q = plan(vec![line("lwp1-a", "set-a", &["seg-0"])]);
@@ -778,9 +766,7 @@ fn a_plan_over_a_ceiling_is_refused_rather_than_trimmed() {
     ));
 }
 
-// ===========================================================================
-// Execution order, partial failure and idempotent completion
-// ===========================================================================
+// Execution order, partial failure and idempotent completion.
 
 /// The manifest goes FIRST, then the segments in plan order.
 #[test]
@@ -891,9 +877,7 @@ fn one_failing_point_does_not_stop_the_run() {
     assert_eq!(outcome.failed(), vec![("lwp1-a", "AccessDenied")]);
 }
 
-// ===========================================================================
-// Bounded retry — PLAT-16.2 "denied deletion", "bounded retry"
-// ===========================================================================
+// Bounded retry.
 
 /// `AccessDenied` is answered ONCE. A second attempt at a policy decision is
 /// three seconds of nothing.
@@ -1027,9 +1011,7 @@ fn provider_messages_classify_into_the_closed_vocabulary() {
     assert_eq!(classify_text("something new"), DeleteError::Unclassified);
 }
 
-// ===========================================================================
-// Attribution — PLAT-16.2 "every deletion is attributable"
-// ===========================================================================
+// Attribution.
 
 /// The intent tombstone is written BEFORE the first delete, and the completion
 /// after the last.
@@ -1154,9 +1136,7 @@ fn the_record_bytes_are_deterministic() {
     assert_eq!(a, b);
 }
 
-// ===========================================================================
-// The object budget
-// ===========================================================================
+// The object budget.
 
 /// The object ceiling stops the run and says so; it does not half-delete a
 /// point and call it done.
@@ -1188,9 +1168,7 @@ fn the_object_ceiling_stops_the_run_and_names_the_reason() {
     );
 }
 
-// ===========================================================================
-// Enumeration
-// ===========================================================================
+// Enumeration.
 
 /// When the plan names the set directory, the listing supplies the rest — and
 /// the manifest still goes first.
@@ -1227,9 +1205,7 @@ fn an_enumerated_set_deletes_the_manifest_first_and_then_what_was_listed() {
     assert_eq!(outcome.points[0].state, PointState::Deleted.as_str());
 }
 
-// ===========================================================================
-// The document shapes
-// ===========================================================================
+// The document shapes.
 
 /// A plan carrying a field this build does not know is REFUSED, not partially
 /// obeyed.
@@ -1306,16 +1282,9 @@ fn an_empty_plan_is_valid_and_deletes_nothing() {
     assert!(outcome.complete());
 }
 
-// ===========================================================================
-// FIX ROUND 1
-// ===========================================================================
-
-/// **M1.** A dry run over an enumerating plan reports the REAL object count.
-///
-/// Every plan this build writes sets `enumerate_set: true` — the catalog view
-/// carries no segment keys — so a preview that reported the plan's own key list
-/// reported `1`, the manifest and nothing else, for a point whose removal takes
-/// thousands of objects.
+/// A dry run over an enumerating plan reports the REAL object count: every plan
+/// this build writes enumerates the set (the catalog view carries no segment
+/// keys), so the plan's own key list is only the manifest.
 #[test]
 fn a_dry_run_enumerates_and_reports_the_real_count() {
     let mut l = line("lwp1-a", "set-a", &[]);
@@ -1357,7 +1326,7 @@ fn a_dry_run_enumerates_and_reports_the_real_count() {
     );
 }
 
-/// **M1, the fall-back.** A preview by a caller holding no list grant reports
+/// **The fall-back.** A preview by a caller holding no list grant reports
 /// the plan's own keys rather than failing.
 #[test]
 fn a_dry_run_without_a_lister_falls_back_to_the_plans_own_keys() {
@@ -1380,7 +1349,7 @@ fn a_dry_run_without_a_lister_falls_back_to_the_plans_own_keys() {
     assert_eq!(outcome.points[0].code.as_deref(), Some("DryRun"));
 }
 
-/// **M2.** A run stopped by its own ceiling mid-point is named
+/// A run stopped by its own ceiling mid-point is named
 /// `BudgetExhausted`, not `Unclassified`.
 #[test]
 fn a_mid_point_budget_stop_is_named_and_is_not_a_failure() {
@@ -1417,7 +1386,7 @@ fn a_mid_point_budget_stop_is_named_and_is_not_a_failure() {
     assert!(!mixed.bounded_only());
 }
 
-/// **M7.** The deleter refuses Azure and GCS rather than reading the process
+/// The deleter refuses Azure and GCS rather than reading the process
 /// environment for a delete-capable credential.
 #[test]
 fn the_deleter_refuses_azure_and_gcs_rather_than_reading_the_environment() {
@@ -1465,7 +1434,7 @@ fn the_deleter_refuses_azure_and_gcs_rather_than_reading_the_environment() {
     );
 }
 
-/// **M8.** A key whose normalised form differs from the plan's is refused, not
+/// A key whose normalised form differs from the plan's is refused, not
 /// deleted in its normalised form.
 ///
 /// `object_store::path::Path::from` normalises AFTER every rail above has run:
@@ -1509,9 +1478,7 @@ fn a_key_whose_normalised_form_differs_is_refused() {
     }
 }
 
-// ===========================================================================
-// Defect OBJECT-LOCK-DELETE-MARKER — a delete marker is not a deletion
-// ===========================================================================
+// A delete marker is not a deletion.
 
 fn run_over<D: Deleter, T: TombstoneSink>(
     p: &Plan,
@@ -1572,12 +1539,11 @@ fn assert_refused_and_intact(
     );
 }
 
-/// **REVIEW H1, THE CASE THE FIRST FIX MISSED.** The set was written BEFORE
-/// versioning was enabled, so every object is a NULL version and its HEAD
-/// carries no version id — the per-key probe says `Unversioned`. Under Enabled
-/// versioning a delete by key still writes a marker over it (measured on MinIO
-/// by the review). The run's own intent tombstone, PUT into the same bucket,
-/// comes back WITH a version id, and that refuses the line.
+/// **The set was written BEFORE versioning was enabled**, so every object is a
+/// NULL version and its HEAD carries no version id: the per-key probe says
+/// `Unversioned`. Under Enabled versioning a delete by key still writes a
+/// marker over it (measured on MinIO). The run's own intent tombstone, PUT into
+/// the same bucket, comes back WITH a version id, and that refuses the line.
 ///
 /// MUTANT: ignore the intent tombstone's version id in `execute`. The point
 /// is recorded `Deleted`, markers are written, the data survives, and this row
@@ -1588,8 +1554,8 @@ fn an_object_written_before_versioning_was_enabled_is_not_recorded_deleted() {
     assert_refused_and_intact("pre-versioning, now Enabled", &bucket, &point, &outcome);
 }
 
-/// Versioning (or Object Lock) ENABLED throughout — the live lab shape
-/// (harness-rows-11 `object-lock`). Both signals fire; nothing is deleted.
+/// Versioning (or Object Lock) ENABLED throughout. Both signals fire;
+/// nothing is deleted.
 ///
 /// MUTANT: drop BOTH the intent-version refusal and the per-key HEAD refusal.
 /// Markers are written, the point is `Deleted`, and this row fails. (Either
@@ -1756,13 +1722,10 @@ fn a_version_id_on_the_head_is_what_versioned_means() {
     assert_eq!(versioning_of(&meta(Some(""))), Versioning::Unversioned);
 }
 
-// ===========================================================================
-// Review M2 — one line per shared set, every point attributed
-// ===========================================================================
+// One line per shared set, every point attributed.
 
 /// Two receipts over ONE set, both due: ONE line, the second receipt a
-/// co-point. The plan validates (it used to be refused whole as
-/// `DuplicateKey` on every run), the set is removed ONCE, the objects are
+/// co-point. The plan validates, the set is removed ONCE, the objects are
 /// counted once, and BOTH points get an outcome and a pair of tombstones.
 ///
 /// MUTANT: `push_line` records only the line's own point. `lwp1-b` has no
@@ -1834,7 +1797,7 @@ fn the_point_ceiling_counts_co_points() {
     ));
 }
 
-/// Review L9: the dry run says when the run would refuse a versioned manifest.
+/// The dry run says when the run would refuse a versioned manifest.
 #[test]
 fn a_dry_run_names_a_versioned_manifest() {
     let bucket = ModelBucket::new(Mode::Enabled);
@@ -1859,9 +1822,7 @@ fn a_dry_run_names_a_versioned_manifest() {
     assert_eq!(bucket.markers(), 0);
 }
 
-// ===========================================================================
-// Re-check RH1 — versioning switched on WHILE a point's deletes run
-// ===========================================================================
+// Versioning switched on WHILE a point's deletes run.
 
 /// A plain bucket; the operator enables versioning right after the point's
 /// intent tombstone is written. The intent came back unversioned, every key's
@@ -1934,9 +1895,8 @@ fn a_refused_versioning_check_is_not_recorded_deleted() {
         .is_some_and(|c| c.starts_with("VersionCheckRefused:")));
 }
 
-/// **FX-17 review L-5: a scheduled set and its retry are string-prefix
-/// siblings**, `<uid>-<slot>` and `<uid>-<slot>-r1`, and FX-17 makes them reach
-/// retention whole for the first time. The bucket holds both; deleting the
+/// **A scheduled set and its retry are string-prefix siblings**, `<uid>-<slot>`
+/// and `<uid>-<slot>-r1`. The bucket holds both; deleting the
 /// first enumerates `<scope>/<uid>-<slot>/` and must leave every key of the
 /// retry where it is. The trailing `/` of the set bound is the whole property:
 /// without it the listing (S3 lists by plain string prefix, as this lister

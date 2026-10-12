@@ -1,23 +1,23 @@
-//! PROD-01.3 fix round, review F1 (HIGH): **no stored or logged digest moves
-//! when only an entered credential moves.**
+//! **No stored or logged digest moves when only an entered credential
+//! moves.**
 //!
-//! THE DEFECT THIS PINS. A create's canonical request was hashed into
+//! A create's canonical request is hashed into
 //! `api.logweir.dev/request-sha256` (on the object), the audit record's
-//! `requestHash` and the "created" log line — and the request carried the
-//! entered SASL password (or S3 secret key). The scope digest mixed into the
-//! hash is itself published (`api.logweir.dev/idempotency-scope-sha256`), so
-//! anyone who may `get` the object — the chart's `logweir-viewer` included —
-//! could rebuild the request from the public spec with a guessed password,
-//! hash and compare: an offline confirmation oracle. The fix is that the
-//! write-only DTOs serialize a placeholder, never a value.
+//! `requestHash` and the "created" log line, and the scope digest mixed into
+//! the hash is itself published (`api.logweir.dev/idempotency-scope-sha256`),
+//! so if the request carried the entered SASL password (or S3 secret key),
+//! anyone who may `get` the object -- the chart's `logweir-viewer` included
+//! -- could rebuild the request from the public spec with a guessed password,
+//! hash and compare: an offline confirmation oracle. So the write-only DTOs
+//! serialize a placeholder, never a value.
 //!
 //! Each row creates the SAME request twice, on two fresh fakes under the same
 //! Idempotency-Key, differing ONLY in the credential value, and requires every
 //! published or logged digest to be byte-identical. NEGATIVE CONTROL: the same
 //! pair differing in a NON-secret field (the username, the bucket) must move
 //! the request digest, so the equality above is not a digest that hashes
-//! nothing. And the reviewer's oracle, attempted: the request rebuilt with the
-//! REAL value does not reproduce the published hash, while the request rebuilt
+//! nothing. And the oracle, attempted: the request rebuilt with the REAL
+//! value does not reproduce the published hash, while the request rebuilt
 //! with the placeholder does (the recompute harness is right).
 //!
 //! A TEST BINARY OF ITS OWN, for the reason `connection_credentials_log.rs`
@@ -101,9 +101,9 @@ fn destination_body(bucket: &str, secret_access_key: &str) -> Value {
 }
 
 /// Capture this thread's log lines. EVERY ROW IN THIS FILE CALLS THIS before
-/// it logs (the digest row through [`create`]), as in `tests/sign_in_state.rs`
-/// (FX-37): a row with no subscriber can switch a log statement off for a
-/// capturing row.
+/// it logs (the digest row through [`create`]), as in `tests/sign_in_state.rs`:
+/// a row with no subscriber can switch a log statement off for a capturing
+/// row.
 fn capture() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
     let buffer = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
@@ -168,8 +168,8 @@ async fn create(path: &str, plural: &str, body: &Value) -> (Digests, Value) {
     )
 }
 
-/// The published request hash, recomputed the way the reviewer's probe did
-/// it: from the route, the PUBLISHED scope digest and canonical bytes.
+/// The published request hash, recomputed from outside: from the route, the
+/// PUBLISHED scope digest and canonical bytes.
 fn recompute(route: &str, scope: &str, canonical: &[u8]) -> String {
     let mut buf = b"logweir-api/request/v2\n".to_vec();
     buf.extend_from_slice(&(route.len() as u64).to_be_bytes());
@@ -194,7 +194,7 @@ fn assert_nothing_is_empty(d: &Digests) {
 
 #[tokio::test]
 async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
-    // ---- connections: the SASL password ------------------------------------
+    // Connections: the SASL password.
     let path = format!("/api/v1/namespaces/{NS_A}/connections");
     let (one, kc) = create(
         &path,
@@ -228,9 +228,8 @@ async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
         "same key, same scope"
     );
 
-    // THE ORACLE, ATTEMPTED, from the object alone: the request the reviewer's
-    // probe rebuilt — the typed request with the real password, serialized —
-    // as the bytes the pre-fix serialization produced.
+    // THE ORACLE, ATTEMPTED, from the object alone: the typed request with the
+    // real password, serialized as a value-carrying serialization would.
     let route = logweir_api::routes::connections::ROUTE_CREATE;
     let typed: logweir_api::contract::CreateConnectionRequest =
         serde_json::from_value(connection_body("logweir", PASSWORD_ONE)).unwrap();
@@ -264,7 +263,7 @@ async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
         "the KafkaCluster carries the password"
     );
 
-    // ---- destinations: the S3 secret access key ------------------------------
+    // Destinations: the S3 secret access key.
     let path = format!("/api/v1/namespaces/{NS_A}/destinations");
     let first = concat!("wJalrXUtnFEMI", "K7MDENGbPxRfiCYEXAMPLEKEYONE");
     let second = concat!("wJalrXUtnFEMI", "K7MDENGbPxRfiCYEXAMPLEKEYTWO");
@@ -335,10 +334,9 @@ fn the_write_only_dtos_serialize_no_value() {
     for value in ["AKIA", PASSWORD_ONE, PASSWORD_TWO] {
         assert!(!text.contains(value), "{text}");
     }
-    // FX-20 (PROD-01.3 review P3): EXACTLY the placeholder, field by field.
-    // The substring scan above misses a value serialized as something derived
-    // from it — its length, a prefix, a hash — and mutant R9 (the secret
-    // access key written as its length) survived it.
+    // EXACTLY the placeholder, field by field. The substring scan above misses a
+    // value serialized as something derived from it -- its length, a prefix, a
+    // hash.
     assert_eq!(
         serde_json::to_value(&s3).unwrap(),
         json!({

@@ -36,8 +36,7 @@ use serde::{Deserialize, Serialize};
 pub const PAYLOAD_TYPE_SCORECARD: &str =
     "application/vnd.logweir.drill-scorecard+json;version=1.0.0";
 pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+json;version=1.0.0";
-/// The post-put storage receipt (Task 21a, discharging Task 20's carried
-/// obligation). A scorecard is SIGNED before it is PUT — bytes cannot be
+/// The post-put storage receipt. A scorecard is SIGNED before it is PUT — bytes cannot be
 /// signed before they are serialised — so `evidence.create_only_enforced`,
 /// `immutable`, `retain_until` and `version_id` are unknowable at signing
 /// time and the scorecard neutralises all four. This second document carries
@@ -46,34 +45,33 @@ pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+
 /// memory ever held.
 pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
     "application/vnd.logweir.drill-put-receipt+json;version=1.0.0";
-/// The BACKUP receipt (Task 5) — the signed record of one `logweir backup
+/// The BACKUP receipt — the signed record of one `logweir backup
 /// run`, and not to be confused with `PAYLOAD_TYPE_PUT_RECEIPT` above, which
 /// is the post-put storage readback of a drill SCORECARD.
 ///
-/// It is a new DOCUMENT rather than new scorecard fields (spec §7, Global
+/// It is a new DOCUMENT rather than new scorecard fields (Global
 /// Constraint 12 as amended): the scorecard stays frozen at 21 top-level
 /// properties and 17 required ones, and top-level information about a
 /// different operation on a different cluster ships as its own media type
 /// with its own `format_version`. The type is
 /// `logweir_core::backup_receipt::BackupReceipt`; the schema is
 /// `schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR
-/// (1.1.0 since FX-4, 1.2.0 for a receipt that pins its manifest version since
-/// FX-7), the older ones frozen. The media type's `version=1.0.0` did not
+/// (1.1.0 added the configuration coverage, 1.2.0 a receipt that pins its
+/// manifest version), the older ones frozen. The media type's `version=1.0.0` did not
 /// change.
 ///
-/// DECLARED HERE, in the verify-only crate, and NOT in `logweir-evidence`
-/// (critique A F8, critique B H2, chain V: Task 14 → Task 5). `weirkeeper`
-/// links `logweir-verify` and never the signer, and Task 24's verifier has to
-/// name this constant in order to check a receipt — so a constant declared on
-/// the signing side would have dragged the signer into the control plane to
-/// serve a string. `docs/test_verify_scorecard.py` reads THIS file for the
-/// literals, because `logweir-evidence`'s `pub use logweir_verify::*;`
+/// DECLARED HERE, in the verify-only crate, and NOT in `logweir-evidence`.
+/// `weirkeeper` links `logweir-verify` and never the signer, and its verifier
+/// has to name this constant in order to check a receipt — so a constant
+/// declared on the signing side would have dragged the signer into the control
+/// plane to serve a string. `docs/test_verify_scorecard.py` reads THIS file for
+/// the literals, because `logweir-evidence`'s `pub use logweir_verify::*;`
 /// contains none of them.
 pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
     "application/vnd.logweir.backup-receipt+json;version=1.0.0";
-/// The RECOVERY CATALOG POINT record (decision D3 §5.2, PLAT-15.1) — the
-/// signed, durable, append-only description of one recovery point, written
-/// under `logweir/catalog/v1/points/<pointId>/record.json`.
+/// The RECOVERY CATALOG POINT record — the signed, durable, append-only
+/// description of one recovery point, written under
+/// `logweir/catalog/v1/points/<pointId>/record.json`.
 ///
 /// DECLARED HERE, in the verify-only crate, for the reason
 /// `PAYLOAD_TYPE_BACKUP_RECEIPT` above records: D3's `RecoveryCatalog`
@@ -86,8 +84,8 @@ pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
 /// **What a signature under this type proves, and what it does not.** It
 /// proves the bytes were signed by the holder of a key. It is NOT a claim
 /// that the point is available, that its archive is readable, or that its
-/// facts are true: the receipt's own signature is the verification root
-/// (D3 §5.2 rule 3), and `logweir drill verify --payload-type catalog-point`
+/// facts are true: the receipt's own signature is the verification root,
+/// and `logweir drill verify --payload-type catalog-point`
 /// and `docs/verify_scorecard.py --payload-type catalog-point` both report
 /// SIGNATURE-ONLY for exactly that reason.
 pub const PAYLOAD_TYPE_CATALOG_POINT: &str =

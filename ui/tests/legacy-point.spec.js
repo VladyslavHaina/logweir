@@ -1,20 +1,16 @@
-// legacy-point.spec.js -- the console half of the legacy-point-restore round:
-// a recovery point written by a release before saved destinations (`v0.1.5`),
-// restored after the upgrade.
+// legacy-point.spec.js -- a recovery point written by a release before saved
+// destinations (`v0.1.5`), restored after the upgrade.
 //
-// P5: such a point's plan used to name evidence bucket `logweir-evidence`
-// whatever its archive was; the controller reads an inline-archive run's
-// scorecard only through its own archive handle, in that handle's bucket, so
-// the PoC restore finished with no verification and no completion. The
-// default is now the archive's own bucket.
-// P5's class sweep: a Restore's "check it yourself" commands fetched the
-// scorecard from the SOURCE archive's bucket; they now fetch it from the
-// bucket the approved plan wrote it to.
-// P6: the Catalog page said a Full sync "walks the receipts and manifests";
-// it reads catalog records only.
+// Its plan's evidence bucket defaults to the archive's own bucket: the
+// controller reads an inline-archive run's scorecard only through its own
+// archive handle, in that handle's bucket, so a fixed `logweir-evidence`
+// would leave the restore with no verification and no completion. A
+// Restore's "check it yourself" commands fetch the scorecard from the bucket
+// the approved plan wrote it to, not the SOURCE archive's. The Catalog page
+// says a Full sync reads catalog records only.
 //
-// Every row carries its negative control: it FAILS on the code before this
-// round. Pure functions from JSON to strings; no DOM, no network, no clock.
+// Every row carries its negative control. Pure functions from JSON to
+// strings; no DOM, no network, no clock.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -145,7 +141,7 @@ test("the_catalog_page_says_a_full_sync_reads_records_and_how_old_points_appear"
   assert.ok(out.includes(CATALOG_MODE_HELP.slice(0, 40)));
 });
 
-// ------------------------------------------------ the review round (M1a, L5)
+// The review round.
 
 /** A ready verdict for `prepared`, as the product API would hand it back:
  *  every blocking row ready, bound to this plan's hash. */

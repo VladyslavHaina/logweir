@@ -1,31 +1,25 @@
-// operation-watch.js -- FOLLOWING ONE DURABLE OPERATION, AND THE BOUNDED D3
-// READS THE FOUR NEW SURFACES MAKE.
+// operation-watch.js -- FOLLOWING ONE DURABLE OPERATION, AND THE BOUNDED READS
+// THE D3 SURFACES MAKE.
 //
-// ===========================================================================
-// WHAT A WATCH IS, AND THE ONE THING IT IS NOT
-// ===========================================================================
+// WHAT A WATCH IS. A watch is a READ that repeats. It opens the product API's
+// server-sent stream for one operation, renders every document that arrives,
+// and stops -- on a terminal operation whose verification has settled, or
+// when the route that owns it goes away.
 //
-// A watch is a READ that repeats. It opens the product API's server-sent
-// stream for one operation, renders every document that arrives, and stops --
-// on a terminal operation whose verification has settled, or when the route
-// that owns it goes away.
-//
-// ABORTING A WATCH NEVER CANCELS THE OPERATION (D3 section 2.6, and the same
-// P17 rule `ui/api.js` states for a create: "a route leaving after a click
-// must not cancel an operation the API server has already accepted"). Closing
-// this stream closes a connection. The Job keeps running, the controller keeps
-// reconciling, and coming back to the same route resumes the same operation
-// because the custom resource is the source of truth -- not because anything
-// was kept alive in this page.
+// ABORTING A WATCH NEVER CANCELS THE OPERATION (the rule `ui/api.js` states
+// for a create: "a route leaving after a click must not cancel an operation
+// the API server has already accepted"). Closing this stream closes a
+// connection. The Job keeps running, the controller keeps reconciling, and
+// coming back to the same route resumes the same operation because the
+// custom resource is the source of truth -- not because anything was kept
+// alive in this page.
 //
 // THAT IS ALSO WHY A REFRESH AND A NEW TAB WORK. Nothing about this watch is
 // state: the route carries the namespace, the kind, the name and the UID, and
 // the DTO that arrives is complete every time. There is no incremental
 // reduction to lose and no cursor to resume.
 //
-// ===========================================================================
-// THE TWO TRANSPORTS, AND WHY THE FALLBACK IS NOT A DEGRADED MODE
-// ===========================================================================
+// THE TWO TRANSPORTS, AND WHY THE FALLBACK IS NOT A DEGRADED MODE.
 //
 // CONSOLE MODE gets the stream: `GET .../operations/{kind}/{name}/events`,
 // same origin, no token in the identifier, opened by `ui/api.js` -- the only
@@ -52,28 +46,20 @@
 // document; this module reads `terminal` and the recorded verification state
 // and stops. It never compares an instant with the browser's own clock.
 //
-// ===========================================================================
-// THE SECOND HALF OF THIS FILE: THE D3 READS
-// ===========================================================================
+// THE D3 READS. The D3 surfaces read through the small, explicit layer
+// below: it asks `client.js` which mode the page is in (the one probe,
+// decided once at boot) and calls `ui/api.js` directly, decoding every
+// answer with `ui/contract.js`'s declared shapes.
 //
-// `ui/client.js` is the one object every page reads through, and it is not
-// this task's to extend (D3 section 11 names `api.js`, this module, the pages
-// and `contract.js`; it does not name `client.js`). So the four D3 surfaces
-// read through the small, explicit layer below: it asks `client.js` which mode
-// the page is in -- the one probe, decided once at boot, which this module
-// reads and never re-decides -- and then calls `ui/api.js` directly, decoding
-// every answer with `ui/contract.js`'s declared shapes.
-//
-// EVERY ROUTE IT CAN REACH IS IN ONE FROZEN TABLE below, for the same reason
-// `CONSOLE_ACTIONS` is one in `api.js`: the set of identifiers any D3 page can
-// address is a list a reviewer reads in one place.
+// EVERY ROUTE IT CAN REACH IS IN ONE FROZEN TABLE below, as `CONSOLE_ACTIONS`
+// is in `api.js`: the identifiers any D3 page can address are a list a
+// reviewer reads in one place.
 //
 // IN LEGACY MODE each of these is the CUSTOM RESOURCE, read by `kubectl proxy`
-// with the viewer's own credential, and validated by the same `contract.js`
-// against the kind's own required fields. Where a flow has no legacy shape at
-// all -- a catalog's point list lives in page ConfigMaps, which this page
-// holds no verb on and must not -- the call is refused BY NAME with a sentence
-// saying which API serves it, exactly as D2's three domains are.
+// with the viewer's own credential and validated by `contract.js`. A flow
+// with no legacy shape at all (a catalog's point list lives in page
+// ConfigMaps, which this page holds no verb on) is refused BY NAME with a
+// sentence saying which API serves it.
 
 import {
   consoleClusterGet,
@@ -104,18 +90,14 @@ import { active, cancelled, readOptions } from "./lifecycle.js";
  *  `ui/api.js` records the `Date` of the most recent answer -- the
  *  `logweir-api` process in console mode, kube-apiserver through `kubectl
  *  proxy` in legacy mode. The keys view needs it to decide whether an
- *  evaluation is fresh (D3 section 7.7), and a page module may not name an
- *  `api.js` export outside the six the page contract allows
- *  (`ui_lint.rs::the_suspend_toggle_is_the_only_update`) -- which is the right
- *  rule and not one to widen for a clock. So it travels through this module,
- *  as `serverClock`, with the api.js name appearing nowhere under `ui/pages/`. */
+ *  evaluation is fresh, and a page module may not name an `api.js` export
+ *  outside the page contract's allowlist
+ *  (`ui_lint.rs::the_suspend_toggle_is_the_only_update`) -- the right rule,
+ *  and not one to widen for a clock. So it travels through this module, as
+ *  `serverClock`, with the api.js name appearing nowhere under `ui/pages/`. */
 export function serverClock() {
   return serverTime();
 }
-
-// ===========================================================================
-// the watch
-// ===========================================================================
 
 /** The reconnect delays, in order, and the last one repeats. */
 export const BACKOFF_MS = Object.freeze([1000, 2000, 5000, 30000]);
@@ -123,17 +105,12 @@ export const BACKOFF_MS = Object.freeze([1000, 2000, 5000, 30000]);
 /** The three reasons the server's `end` frame carries, and what each MEANS
  *  (`StreamEnd` in `crates/logweir-api/src/status.rs`).
  *
- *  `end` IS NOT A DOCUMENT. Its payload is `{"reason": "..."}` and nothing
- *  else -- no operation, no envelope. The first round decoded it as an
- *  operation and stopped the watch on every one of them, which is wrong in
- *  BOTH directions: a normal close raised a decode error on screen, and a
- *  `maxDuration` close -- the 300-second connection ceiling, which a running
- *  backup hits while it is still running -- stopped the watch and left the
- *  page showing a mid-run snapshot with nothing saying it had stopped looking.
- *
- *  `maxDuration` IS THE SERVER SAYING "RECONNECT", and it is the only one of
- *  the three that is not the end of anything. `settled` is the end of the
- *  operation; `vanished` is the end of the object. */
+ *  `end` IS NOT A DOCUMENT: its payload is `{"reason": "..."}` and nothing
+ *  else. `maxDuration` IS THE SERVER SAYING "RECONNECT" -- the 300-second
+ *  connection ceiling, which a running backup hits while it is still
+ *  running -- and the only one of the three that is not the end of
+ *  anything. `settled` is the end of the operation; `vanished` is the end of
+ *  the object. */
 export const STREAM_END_REASONS = Object.freeze({
   /** Terminal, and the verification verdict is in. Nothing more is coming. */
   settled: "settled",
@@ -195,18 +172,13 @@ export function backoffFor(attempt, fraction) {
  *
  *  TWO CONDITIONS, NOT ONE. `terminal` alone is not enough: a run that has
  *  exited still has a verification the controller has not written yet, and a
- *  watch that stopped at the exit would leave the page showing `pending`
- *  evidence for ever with nothing on screen saying it stopped looking. D3's
- *  own `end` event has the same two conditions.
+ *  watch that stopped at the exit would leave `pending` evidence on screen
+ *  for ever. The server's `end` event has the same two conditions.
  *
- *  A DOCUMENT THIS FUNCTION DOES NOT UNDERSTAND IS NOT SETTLED, and a
- *  document it understands is one of TWO. Console mode is handed the product
- *  API's DTO and reads `terminal` + `verification.state`. LEGACY MODE IS
- *  HANDED THE CUSTOM RESOURCE, which publishes neither: it has no top-level
- *  `terminal` and no normalized `verification.state`, so the DTO rule alone
- *  answered `false` for every legacy document ever written and a console left
- *  open on a FINISHED run polled the kube-apiserver every 5 s for ever. The
- *  same two conditions are read off `status.phase` and
+ *  A DOCUMENT THIS FUNCTION DOES NOT UNDERSTAND IS NOT SETTLED. Console mode
+ *  is handed the API's DTO and reads `terminal` + `verification.state`;
+ *  legacy mode is handed the custom resource, which has neither, so the same
+ *  two conditions are read off `status.phase` and
  *  `status.evidence.verification.result` below. */
 export function isSettled(operation) {
   const o = operation || {};
@@ -362,7 +334,7 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
     }
     stream = source;
     source.onmessage = null;
-    // FOUR NAMED EVENT TYPES AND NO DEFAULT HANDLER (D3 section 2.6).
+    // FOUR NAMED EVENT TYPES AND NO DEFAULT HANDLER.
     // `operation` carries the bare view, `reset` carries the same shape as a
     // fresh snapshot after the server dropped the resume point, `end` carries
     // `{reason}` and says why this CONNECTION closed, and `heartbeat` says
@@ -387,9 +359,7 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
     source.addEventListener("reset", document);
     source.addEventListener("end", (event) => {
       // `end` CARRIES A REASON AND NO DOCUMENT, and only two of the three
-      // reasons are an end. Feeding it to `document` was a decode error per
-      // stream; stopping on all three was a watch that gave up every 300 s on
-      // any operation that took longer than that.
+      // reasons are an end.
       const reason = endReason(event.data);
       if (reason === STREAM_END_REASONS.settled) {
         stop();
@@ -501,10 +471,6 @@ function streamable(EventSourceClass) {
   return typeof EventSourceClass === "function" || typeof globalThis.EventSource === "function";
 }
 
-// ===========================================================================
-// the D3 reads
-// ===========================================================================
-
 /** THE ROUTES THIS PAGE MAY ADDRESS FOR D3, AND NOTHING ELSE.
  *
  *  `console` is the product API plural; `legacy` is the custom-resource plural
@@ -557,8 +523,7 @@ export function inConsole(modeOf) {
  *  one vocabulary, and a page that cannot read one way in one mode and another
  *  way in the other. The projection is mechanical -- identity into
  *  `metadata`, `spec` and `status` verbatim -- because D3's controllers and
- *  D3's routes publish the same status contract (D3 sections 3.1, 5.3, 6.2,
- *  7.1). */
+ *  D3's routes publish the same status contract. */
 export async function readD3(family, ns, name, options, deps) {
   const route = D3_ROUTES[family];
   if (route === undefined) {
@@ -605,8 +570,8 @@ export async function listD3(family, ns, options, deps) {
 /** ONE PAGE OF A CATALOG'S POINTS. CONSOLE ONLY, AND SAID SO BY NAME.
  *
  *  The materialised view lives in page ConfigMaps the sync Job owns, and the
- *  page holds no verb on `configmaps` -- deliberately (D2 section 5.6, the
- *  chart's own ClusterRole): reading those pages means checking their owner
+ *  page holds no verb on `configmaps` -- deliberately (the chart's own
+ *  ClusterRole): reading those pages means checking their owner
  *  UID, their immutability and their digest, which is the console API's job
  *  and not a browser's. So in legacy mode the catalog view renders the
  *  catalog's own `status` -- counts, signers, conditions, the sync job -- and
@@ -633,7 +598,7 @@ export async function readCatalogSigners(ns, name, options, deps) {
   ).value;
 }
 
-/** CONNECT AN EXISTING ARCHIVE (D3 section 5.5 step 1).
+/** CONNECT AN EXISTING ARCHIVE.
  *
  *  A DURABLE CREATE, WITH THE KEY THAT MAKES IT ONE. The body is checked
  *  against the published request shape before anything is sent -- a field this
@@ -660,12 +625,9 @@ export async function connectArchive(ns, body, key, deps) {
         "input that carries one is a 422 from the product API",
     );
   }
-  // THE TOKEN IS THE SESSION'S, READ FROM THE TYPED CLIENT AT SEND TIME
-  // (POC-P4). This used to be `deps.token`, which no caller supplies -- the
-  // shell mounts the catalog page with no `deps` at all -- so the request
-  // went out without `X-CSRF-Token` and the shared console answered every
-  // "Connect an existing archive" with 403. It is not a `deps` seam any more:
-  // a write whose token can be handed in is a write whose token can be wrong.
+  // THE TOKEN IS THE SESSION'S, read from the typed client at send time, and
+  // not a `deps` seam: a write whose token can be handed in is a write whose
+  // token can be wrong.
   const answer = await (d.consoleCreate || consoleCreate)(ns, "catalogs", body, {
     idempotencyKey: key,
     token: sessionToken(),
@@ -683,7 +645,7 @@ export async function connectArchive(ns, body, key, deps) {
  *  ten normalized words `logweir-api` computes. Legacy mode returns the custom
  *  resource, whose `status.progress` is the controller's own stage and reason
  *  -- and NO normalized state at all, because computing one here would be a
- *  second implementation of D3 section 2.5's table living in a browser. */
+ *  second implementation of the normalization table living in a browser. */
 export async function readOperation(ns, kind, name, options, deps) {
   const d = deps || {};
   if (inConsole(d.modeOf)) {
@@ -695,26 +657,19 @@ export async function readOperation(ns, kind, name, options, deps) {
   return api.get(ns, kind === "backup" ? "backups" : "restores", name, options);
 }
 
-// --------------------------------------------------------------- the private
-
 /** THE FLAT VIEW INTO THE CUSTOM RESOURCE'S OWN THREE BLOCKS, PER FAMILY.
  *
- *  The published D3 views are FLAT -- "DTOs are separate from CRDs" is
- *  PLAT-17.1's rule and every projection this console already reads is flat.
- *  The page renderers speak the custom resource's vocabulary, because legacy
- *  mode hands them exactly that, so the projection happens here, once, in a
+ *  The published D3 views are FLAT, like every projection this console
+ *  reads; the page renderers speak the custom resource's vocabulary (legacy
+ *  mode hands them exactly that), so the projection happens here, once, in a
  *  table a reader can check field by field against
- *  `schemas/logweir-api-v1.openapi.json`. It is the same decision
- *  `ui/client.js` made for the five older kinds and it buys the same thing: one
- *  renderer, one vocabulary, and no page that reads one way in one mode and
- *  another way in the other.
+ *  `schemas/logweir-api-v1.openapi.json`.
  *
  *  NOTHING IS INVENTED HERE. A field the view does not carry is absent from
- *  the projection, and every renderer already treats an absent field as "not
- *  observed" (D3 section 12). Three of them are named in the projections
- *  below, because a reader looking for a Job name, a ConfigMap name or a
- *  `locationDigest` will not find one and should learn why from the code
- *  rather than from a blank cell. */
+ *  the projection, and every renderer treats an absent field as "not
+ *  observed". Three are named in the projections below, so a reader looking
+ *  for a Job name, a ConfigMap name or a `locationDigest` learns why there is
+ *  none from the code rather than from a blank cell. */
 const D3_PROJECTIONS = Object.freeze({
   protection: projectProtection,
   catalog: projectCatalog,
@@ -870,8 +825,8 @@ function projectRetention(item, ns) {
  *  has no room for.
  *
  *  ONE ROW PER KEY BECOMES TWO HALVES AGAIN. The view carries the declaration
- *  and the verdict on one object, which is what section 7.7 asks a ROW to
- *  show; the CRD keeps them in `spec.keys[]` and `status.keys[]`, and the
+ *  and the verdict on one object, which is what a ROW shows; the CRD keeps
+ *  them in `spec.keys[]` and `status.keys[]`, and the
  *  renderer joins them. Splitting the one row back into two is mechanical and
  *  loses nothing: every field goes to exactly one side.
  *
@@ -902,13 +857,12 @@ function projectTrust(item, ns) {
     conditions: item.conditions,
   });
   delete object.metadata.namespace;
-  // THE EVALUATION IS RE-KEYED ON THE WAY THROUGH, for one reason a reader
-  // should not have to guess at: `ui_lint.rs::the_suspend_toggle_is_the_only_
-  // update` forbids a page module from naming any `ui/api.js` export outside
-  // the six a page may use, and the instant this block carries happens to share
-  // its spelling with one of them. The rule is right and is not weakened for a
-  // field name, so the rename happens here, in the module that already
-  // translates between the two documents.
+  // THE EVALUATION IS RE-KEYED ON THE WAY THROUGH:
+  // `ui_lint.rs::the_suspend_toggle_is_the_only_update` forbids a page module
+  // from naming any `ui/api.js` export outside the page allowlist, and the
+  // instant this block carries shares its spelling with one of them. The rule
+  // is right and is not weakened for a field name, so the rename happens
+  // here, in the module that already translates between the two documents.
   object.__evaluation = item.evaluation === null || item.evaluation === undefined
     ? null
     : {

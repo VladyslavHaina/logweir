@@ -20,12 +20,9 @@ pub fn render_table(sc: &Scorecard) -> String {
     ));
     o.push_str(&"-".repeat(72));
     o.push('\n');
-    // The WIRE spelling, not Rust `Debug`. One binary produced three
-    // spellings of the same enum — `Pass` here, `pass` on `drill run`'s stdout
-    // line, `pass` in the JSON and the Prometheus labels — so a reader
-    // comparing the table against the signed document (which is what this
-    // table is FOR) had to translate. `wire_name` is pinned against each
-    // enum's own `Serialize` impl in `logweir_core::outcome`.
+    // The WIRE spelling, not Rust `Debug`: a reader compares this table with
+    // the signed document. `wire_name` is pinned against each enum's own
+    // `Serialize` impl in `logweir_core::outcome`.
     row(&mut o, "outcome", sc.outcome.wire_name());
     row(
         &mut o,
@@ -44,11 +41,8 @@ pub fn render_table(sc: &Scorecard) -> String {
             sc.engine.levers.dry_run_check_segments.wire_name()
         ),
     );
-    // The MODE is printed, and `marker=` appears only when the document
-    // carries a marker topic (review F1). It used to print
-    // `marker=logweir.scratch` for a `newTopic` run too, from a field the run
-    // had never verified, with no mode anywhere on the screen to say so. A
-    // reader of `drill show` could not tell the two kinds of run apart.
+    // The MODE is printed, and `marker=` only when the document carries a
+    // marker topic, so a reader can tell a scratch drill from a `newTopic` run.
     row(
         &mut o,
         "target",
@@ -71,7 +65,7 @@ pub fn render_table(sc: &Scorecard) -> String {
             // only a Scorecard), so it can report the document's CLAIM and
             // nothing more. `drill verify` derives the finding by comparing
             // `approval.key_id` against the key that verified the signature and
-            // refuses a document whose claim disagrees. T0-1.
+            // refuses a document whose claim disagrees.
             "SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing key)"
                 .to_string()
         } else {
@@ -162,11 +156,11 @@ pub fn render_table(sc: &Scorecard) -> String {
     o
 }
 
-/// The configuration-parity qualifier on the `topic parity` row (FX-4).
+/// The configuration-parity qualifier on the `topic parity` row.
 ///
 /// ABSENT (a 1.0.0 document, or one whose phase 7 never ran) says the
 /// assessment was NOT RECORDED, because an empty `unexpected []` beside it is
-/// exactly the "no divergence" a denied capture used to produce. `Some([])`
+/// exactly what a denied capture produces. `Some([])`
 /// adds nothing: every topic's configuration was assessed. Otherwise the
 /// unassessed topics are listed.
 fn parity_assessment(not_assessed: Option<&[String]>) -> String {
@@ -177,7 +171,7 @@ fn parity_assessment(not_assessed: Option<&[String]>) -> String {
     }
 }
 
-/// The reconstruction qualifier on the `topic parity` row (FX-3), from the
+/// The reconstruction qualifier on the `topic parity` row, from the
 /// same three cases as `crate::verify::reconstruction_line`.
 ///
 /// A format 1.2.0 document lists what it did NOT reconstruct; `[]` adds
@@ -200,7 +194,7 @@ fn reconstruction_assessment(
     }
 }
 
-/// The `source.time_basis` footer value (FX-8). ABSENT — a document before
+/// The `source.time_basis` footer value. ABSENT — a document before
 /// 1.3.0 — is NOT RECORDED, never "every selection used the topic's own
 /// clock"; an empty block is an em dash; otherwise each non-empty list.
 fn time_basis_qualifier(label: Option<&logweir_core::scorecard::TimeBasisLabel>) -> String {
@@ -227,7 +221,7 @@ fn time_basis_qualifier(label: Option<&logweir_core::scorecard::TimeBasisLabel>)
     }
 }
 
-/// The `integrity.verification` footer value (PROD-08.1). ABSENT — a document
+/// The `integrity.verification` footer value. ABSENT — a document
 /// before 1.4.0 — is NOT RECORDED and read as a sample, never as complete; a
 /// complete verification shows whether it covered every partition and its
 /// exact counts, an incomplete one why it stopped.
@@ -279,25 +273,13 @@ fn redactions_line(redactions: &[logweir_core::scorecard::Redaction]) -> String 
     )
 }
 
-/// Task 22, carried obligation 3.
-///
-/// The fourteen rows above are spec §13's frozen layout and are NOT touched
-/// here — no row is added, removed or reordered. What is added is a FOOTER,
-/// below the table, in the same place `sample.coverage_note` already sits.
-///
-/// The reason is a review finding, not a preference: the frozen table cites
-/// `objectives.rto_seconds` in the starred row's annotation but never displays
-/// it, never says whether the objectives were `met`, and omits both
-/// `integrity.partial_reason` and `engine_subreport.caveat` — which in this
-/// repository's own fixture reads that the engine sub-report "corroborates
-/// nothing Logweir claims". A reader who saw only the table therefore came away
-/// MORE confident than the signed document supports, which is the exact failure
-/// this surface exists to prevent.
-///
-/// Every value below is read from the scorecard; nothing is inferred, and the
-/// closing line says plainly that the table is a summary of a signed document
-/// rather than the document. Task 4 fix round 1 adds the `redactions` line: a
-/// non-empty `redactions[]` is a qualifier in exactly this footer's sense.
+/// The footer below the table. The fourteen rows are spec §13's frozen layout
+/// and are not touched, so what they omit that changes how the table should be
+/// read (the RTO objective and whether objectives were `met`,
+/// `integrity.partial_reason`, `engine_subreport.caveat`, the qualifiers below
+/// and redactions) is printed here. Every value is read from the scorecard,
+/// and the closing line says the table is a summary of a signed document, not
+/// the document.
 fn qualifiers(sc: &Scorecard) -> String {
     let mut o = String::new();
     o.push('\n');
@@ -339,36 +321,21 @@ fn qualifiers(sc: &Scorecard) -> String {
              this is NOT \"the engine reported nothing wrong\"\n",
         ),
     }
-    // T0-3, the display half. `redactions[]` is a qualifier in exactly the
-    // sense this footer's heading names: something the fourteen rows above
-    // silently omit that changes how the whole table should be read. It was
-    // displayed by NOTHING — this footer, the Prometheus textfile and the
-    // notification body were all silent — while
-    // `docs/formats/drill-scorecard.md` called it "Always `[]` in v0.1", so a
-    // document announcing that a field the reader is looking at had been
-    // removed rendered a clean table.
-    //
-    // `show` still does not VERIFY (see this module's argument above, and
-    // `refuse_unreadable_major` is the one refusal a renderer owes). A
-    // redaction is not a "this reader cannot honestly render this document"
-    // condition — it is a qualifier — so this RENDERS it and the exit code
-    // stays 0. The two verifiers are the ones that refuse.
-    // FX-8: which clock the restore's time selection read, where it was not
-    // the topic's own. A qualifier in this footer's sense — the rows above
-    // say `pass` for a point-in-time restore of a `LogAppendTime` topic
-    // either way — so it is rendered here and the frozen rows are untouched.
+    // Which clock the restore's time selection read, where it was not the
+    // topic's own: the rows above say `pass` for a point-in-time restore of a
+    // `LogAppendTime` topic either way.
     o.push_str(&format!(
         "    source.time_basis         {}\n",
         time_basis_qualifier(sc.source.time_basis.as_ref())
     ));
-    // PROD-08.1: whether the `integrity` row above is a sample's verdict or
+    // Whether the `integrity` row above is a sample's verdict or
     // every record's. A qualifier in this footer's sense: the row reads
     // `byte-fingerprint/pass` either way.
     o.push_str(&format!(
         "    integrity.verification    {}\n",
         verification_qualifier(sc.integrity.verification.as_ref())
     ));
-    // FX-23: the topics a sampled verification's `max_partitions` left without
+    // The topics a sampled verification's `max_partitions` left without
     // a sampled partition (scorecard 1.6.0). A qualifier in this footer's
     // sense — the `integrity` row reads `pass` either way — and printed only
     // when the document names one, so every other table is unchanged.
@@ -384,7 +351,7 @@ fn qualifiers(sc: &Scorecard) -> String {
             topics.join(", ")
         ));
     }
-    // PROD-16.2: a second person approved this run in the console (scorecard
+    // A second person approved this run in the console (scorecard
     // 1.9.0, or 2.1.0 for a partition subset). The `approval` row above shows
     // the approver and the ticket either way; this says HOW: the mode, who
     // asked, both instants, and that the approval's key is the console's,
@@ -395,7 +362,7 @@ fn qualifiers(sc: &Scorecard) -> String {
             o.push_str(&format!("    approval.console          {line}\n"));
         }
     }
-    // PROD-15.1: the restore wrote under the source's ORIGINAL topic names
+    // The restore wrote under the source's ORIGINAL topic names
     // (scorecard 1.8.0). A qualifier in this footer's sense — the `target`
     // row reads `mode=newTopic` either way — printed only for a document
     // carrying the block, so every other table is unchanged.
@@ -425,6 +392,8 @@ fn qualifiers(sc: &Scorecard) -> String {
             if on.owner_path { "; owner path" } else { "" }
         ));
     }
+    // `redactions[]` is a qualifier, not a reason to refuse: `show` renders it
+    // and exits 0, and the two verifiers are the ones that refuse.
     o.push_str(&format!(
         "    redactions                {}\n",
         redactions_line(&sc.redactions)
@@ -448,25 +417,12 @@ pub fn run(path: &std::path::Path, format: &str) -> crate::exit::ExitCode {
     run_writing(path, format, &mut std::io::stdout())
 }
 
-/// The whole of `run`'s behaviour, parameterised over the writer. `run` is a
-/// one-line wrapper over this that supplies real stdout; the indirection
-/// exists so a test can inspect exactly what would reach stdout — including
-/// the "never a re-serialisation" guarantee on `--format json` — without
-/// spawning the compiled binary, which does not dispatch `drill show` yet
-/// (Task 22 wires `main.rs`).
-///
-/// Fix round 1 (F1/F2): the earlier version parsed only on the `table` path,
-/// so `--format json` printed and exited 0 over ANY file, scorecard or not,
-/// and a stdout write failure on that path was silently discarded, still
-/// exiting 0. Both are wrong for the same reason: an exit code a CronJob or
-/// CI branches on must not claim success over a document that was not
-/// rendered, or that is not a scorecard at all. Now every format parses the
-/// bytes first, so "is this a scorecard" means the same thing regardless of
-/// how the caller asked to see it — and `--format json` still writes
-/// `bytes`, the exact slice read from disk, never `sc` re-serialised, so
-/// this parse-for-validation cannot regress the passthrough it sits next
-/// to: the parsed `sc` is used only to decide the exit code and, on the
-/// `table` path, to render.
+/// The whole of `run`'s behaviour, parameterised over the writer, so a test
+/// can inspect exactly what would reach stdout. Every format parses the bytes
+/// first, so "is this a scorecard" means the same under both, and an exit
+/// code a CronJob branches on never claims success over a document that is not
+/// one or was not rendered. `--format json` still writes `bytes`, the exact
+/// slice read from disk, never `sc` re-serialised.
 fn run_writing(
     path: &std::path::Path,
     format: &str,
@@ -486,28 +442,11 @@ fn run_writing(
             return crate::exit::ExitCode::Operational;
         }
     };
-    // GLOBAL CONSTRAINT 12. `drill show` IS A READER, and the reader contract
-    // is "ignore unknown fields, refuse a higher major". Task ownership treated
-    // this command as a renderer, so it never inherited the refusal that
-    // `drill verify` gets for free from `validate_invariants` — a real
-    // scorecard with `format_version` rewritten to `"2.0.0"` printed the full
-    // table, header reading `v2.0.0`, `outcome Pass`, and exited 0. Rendering
-    // a document under field meanings a future major may have redefined is
-    // exactly the overstatement the constraint exists to prevent, and it is
-    // worse on the `table` path than anywhere else: the table is the surface a
-    // human reads instead of the JSON.
-    //
-    // BOTH formats, deliberately. `--format json` writes the raw bytes, so it
-    // looks like a harmless passthrough — but its exit code is what a CronJob
-    // or a CI step branches on, and exit 0 over a document this build cannot
-    // honestly interpret is the same claim by a quieter route (the same
-    // argument `run_writing`'s own fix round 1 makes about parsing on every
-    // format rather than only on `table`).
-    //
-    // Exit 1, not 4: `show` performs no signature check and makes no claim
-    // about one, and `docs/verify-a-scorecard.md` defines 4 as a signature or
-    // lock-proof failure. "This reader cannot honestly render this document"
-    // is an operational refusal.
+    // Global Constraint 12: `drill show` is a reader, so it refuses a higher
+    // major rather than render it under field meanings that major may have
+    // redefined. Both formats: `--format json`'s exit code is what a CronJob
+    // branches on. Exit 1, not 4: `show` checks no signature, and "this reader
+    // cannot honestly render this document" is an operational refusal.
     if let Err(e) = sc.refuse_unreadable_major() {
         eprintln!("refusing to render: {e}");
         return crate::exit::ExitCode::Operational;
@@ -540,13 +479,8 @@ fn run_writing(
 
 #[cfg(test)]
 mod tests {
-    //! Coverage for `run`/`run_writing` specifically (fix round 1, F1/F2).
-    //! Colocated here rather than in `crates/logweir/tests/show.rs` because
-    //! these tests exercise `run_writing`, which is deliberately NOT `pub`
-    //! (an integration test cannot see it) — `run`'s own public signature
-    //! and behaviour are frozen exactly as task-21b-brief.md Step 3 writes
-    //! them, so testing the writer-injected core in place, rather than
-    //! widening the public API, is what keeps that true.
+    //! Coverage for `run`/`run_writing`, here because `run_writing` is not
+    //! `pub`.
     use super::*;
 
     fn write_temp(contents: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -571,19 +505,9 @@ mod tests {
         );
     }
 
-    /// Exercises the real public `run`, not just `run_writing`, so the thin
-    /// wrapper itself is covered — a mutation that stopped `run` from
-    /// delegating to `run_writing` (or delegated with the wrong path/format)
-    /// would still be caught here. Deliberately uses the missing-file path
-    /// rather than a good scorecard: `run`'s real writer is actual process
-    /// stdout, which `cargo test`'s output capturing does not suppress for
-    /// a direct `Write` call the way it suppresses `println!` (capturing
-    /// only intercepts the print! family of macros) — so a success-path
-    /// call here would print the rendered table to the test console on
-    /// every run. The missing-file path writes nothing and still proves the
-    /// delegation: `run_writing` alone (tested above and below) already
-    /// covers the success and json-passthrough behaviour in full, with a
-    /// `Vec<u8>` writer that never touches real stdout.
+    /// Exercises the real public `run`, so the thin wrapper's delegation is
+    /// covered. The missing-file path, because `run`'s writer is real stdout,
+    /// which test output capturing does not suppress for a direct `Write`.
     #[test]
     fn run_itself_delegates_to_run_writing_on_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -617,10 +541,8 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// F2's headline gap: a non-scorecard file must exit 1 the same way
-    /// under `--format json` as it does under `table` — the two formats
-    /// must agree on what "this is a scorecard" means. Before this fix,
-    /// `--format json` never parsed and so exited 0 over any file at all.
+    /// A non-scorecard file exits 1 under `--format json` as under `table`:
+    /// the two formats agree on what "this is a scorecard" means.
     #[test]
     fn unparseable_bytes_exit_operational_under_json_format_too() {
         let (_dir, path) = write_temp(b"not json at all");
@@ -635,7 +557,7 @@ mod tests {
         );
     }
 
-    /// F2: an unrecognised `--format` must be refused, not silently treated
+    /// An unrecognised `--format` must be refused, not silently treated
     /// as `table`.
     #[test]
     fn an_unknown_format_is_rejected_not_silently_treated_as_table() {
@@ -649,7 +571,7 @@ mod tests {
         );
     }
 
-    /// F1/M13's guarantee: `--format json` writes the EXACT bytes read from
+    /// `--format json` writes the EXACT bytes read from
     /// disk, never a re-serialisation. The fixture is given odd-but-valid
     /// trailing whitespace after its closing brace (which `serde_json`
     /// tolerates but no `to_string`/`to_vec` call would ever reproduce), so
@@ -670,7 +592,7 @@ mod tests {
         );
     }
 
-    /// F2's second item: a write failure must be reported (`Operational`),
+    /// A write failure must be reported (`Operational`),
     /// never silently discarded while still returning `Ok`. `Vec<u8>` can't
     /// exercise this (it never fails to write), so this uses a writer that
     /// always errors, standing in for a closed pipe or a full disk.
@@ -702,11 +624,9 @@ mod tests {
         );
     }
 
-    /// GLOBAL CONSTRAINT 12. The README says "a reader ... refuses a higher
-    /// major"; this reader rendered one and exited 0. The mutant that undoes
-    /// the fix — deleting the `refuse_unreadable_major` call — turns both
-    /// assertions below red at ASSERTION time: the exit code becomes `Ok` and
-    /// the table is written.
+    /// Global Constraint 12: a higher major is refused. KILLS: deleting the
+    /// `refuse_unreadable_major` call (the exit code becomes `Ok` and the
+    /// table is written).
     fn a_scorecard_at_format_version(v: &str) -> Vec<u8> {
         let mut doc: serde_json::Value = serde_json::from_slice(GOOD_SCORECARD).unwrap();
         doc["format_version"] = serde_json::Value::String(v.into());
@@ -715,8 +635,8 @@ mod tests {
 
     #[test]
     fn a_higher_major_format_version_is_refused_and_never_rendered() {
-        // 3.0.0: since PROD-11.1b this build reads major 2 (the
-        // partition-subset format), so the first major it does not read is 3.
+        // 3.0.0: this build reads major 2 (the partition-subset format), so the
+        // first major it does not read is 3.
         let (_dir, path) = write_temp(&a_scorecard_at_format_version("3.0.0"));
         let mut out = Vec::new();
         assert_eq!(
@@ -746,7 +666,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// **PROD-11.1b (OD-9 (a)): major 2 is read for ONE shape.** A 2.0.0
+    /// **Major 2 is read for ONE shape.** A 2.0.0
     /// document carrying a partition subset renders; a 2.0.0 document
     /// without one is refused (arm PS-1) and nothing is written, under both
     /// formats. KILLS: `drill show` rendering any 2.x document; refusing the

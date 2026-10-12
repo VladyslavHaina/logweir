@@ -1,5 +1,5 @@
-//! `testing::CapturedLog` — the log capture FX-19's rows assert "no WARN"
-//! with — sees its own thread's events even when another thread hit the same
+//! `testing::CapturedLog`, the log capture the "no WARN" rows assert with,
+//! sees its own thread's events even when another thread hit the same
 //! callsite first.
 //!
 //! ONE ROW, IN A BINARY OF ITS OWN, ON PURPOSE: the property is about how many
@@ -15,10 +15,9 @@ fn emit() {
 
 /// **A CALLSITE FIRST HIT ON ANOTHER THREAD STILL REACHES THE CAPTURE.**
 /// `tracing-core` caches a callsite's interest on its first hit, and while one
-/// dispatcher is registered it asks the hitting thread's default — here a
-/// thread with no subscriber, which says `never`. Measured: the catalog
-/// class-sweep row's control saw no WARN once in a full-suite run, and passed
-/// alone.
+/// dispatcher is registered it asks the hitting thread's default: here a
+/// thread with no subscriber, which says `never`, and a "no WARN" row would
+/// then pass alone and see nothing in a full-suite run.
 ///
 /// NEGATIVE CONTROL: with `CapturedLog::start`'s permanent second dispatcher
 /// removed, this row fails (no event captured), deterministically: the capture

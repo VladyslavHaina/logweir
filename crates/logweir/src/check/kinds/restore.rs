@@ -99,7 +99,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     let mut details: Vec<String> = Vec::new();
     checks.push(runner_contract(now));
 
-    // 0 — FX-20c: the binding of every grant the restore presents (the
+    // 0. The binding of every grant the restore presents (the
     // source's `archiveRead`, the evidence destination's `evidenceWrite`),
     // compared with no request and before the plan bytes, because it is not a
     // claim about them: a refused grant is refused whatever the plan says.
@@ -113,7 +113,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
 
     // 1 — THE PLAN BYTES, BEFORE ANY SOCKET.
     let spec = match plan_spec(req, wiring).and_then(|spec| {
-        // PROD-11.1: a replay selection the plan states WRONGLY is a fact
+        // A replay selection the plan states WRONGLY is a fact
         // about these bytes, like a parse failure: refused here, and nothing
         // later runs. The same shape refusals as execution's phase 0
         // (`ReplaySelection::from_spec`, the shared function).
@@ -121,7 +121,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
             Ok(_) => {}
             Err(refusal) => return Err((CheckCode::SelectionInvalid, refusal.to_string())),
         }
-        // PROD-15.1 review L6: an original-name block in a shape phase 0
+        // An original-name block in a shape phase 0
         // refuses (scratch mode, beside a prefix, or in a plan that does not
         // ask for complete verification) is a fact about these bytes too, in
         // the runner's own words.
@@ -182,7 +182,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     // 4 — the evidence destination.
     //
     // D2 §6.3 lists `destination.evidenceWritable` for a Restore, but
-    // `RestorePreflightRequest` (the landed W1 contract) carries no
+    // `RestorePreflightRequest` carries no
     // `writeProbe` flag for it, and a check may not write unasked. The row is
     // therefore execution-only with `WriteNotProbed`, which is the same answer
     // a Backup readiness plan gives when its destination configures no probe.
@@ -319,8 +319,8 @@ fn same_object_key(a: &str, b: &str) -> bool {
         .eq(b.split('/').filter(|s| !s.is_empty()))
 }
 
-/// **FX-14 — what a plan's point binding may make this check READ, decided
-/// from the plan alone, before any store call.**
+/// **What a plan's point binding may make this check READ, decided from the
+/// plan alone, before any store call.**
 ///
 /// A preflight runs BEFORE any approval, for anyone who can create a
 /// `Preflight` or a `Restore` in the namespace, with the namespace's
@@ -333,8 +333,8 @@ fn same_object_key(a: &str, b: &str) -> bool {
 ///
 /// 1. the binding is well-formed ([`binding::point_shape_faults`]);
 /// 2. the plan restores the set this check reads: `source.backup` is the
-///    request's `backupId`. A bound plan names its point's own set (FX-16;
-///    the runner refuses any other, `latestCompleted` included);
+///    request's `backupId`. A bound plan names its point's own set (the
+///    runner refuses any other, `latestCompleted` included);
 /// 3. the receipt key is the WRITER's key for that set —
 ///    `logweir/backups/<backupId>/<run id>.receipt.json`, re-derived by
 ///    [`crate::catalog::record::receipt_run_id`] and compared whole. Another
@@ -378,7 +378,7 @@ fn confine_bound_point(
     Ok(())
 }
 
-/// **FX-14 — the manifest this preflight read, judged by the point the plan
+/// **The manifest this preflight read, judged by the point the plan
 /// is bound to, as the runner's binding will judge it**
 /// (`drill::binding::verify_point_binding`). `Ok(Some(note))` when the receipt's
 /// pin could not be checked in this bucket and the digest decided; `Ok(None)`
@@ -391,8 +391,8 @@ fn confine_bound_point(
 ///    the binding reads it), held to the plan's digest before a byte of it is
 ///    parsed; the point id it derives; the manifest digest it attests;
 /// 2. the set it describes is the plan's, and the manifest it names is the
-///    one this preflight read (FX-16; the binding's `PointBindingSetMismatch`);
-/// 3. FX-7's pin, through the one shared [`pin::judge`]: `Superseded` refuses
+///    one this preflight read (the binding's `PointBindingSetMismatch`);
+/// 3. the pin, through the one shared [`pin::judge`]: `Superseded` refuses
 ///    (`ManifestSuperseded`), `Unreadable` is "could not tell" with the remedy
 ///    that names `s3:GetObjectVersion`, `Unchecked` is the note;
 /// 4. the current bytes' digest against the bound one.
@@ -406,7 +406,7 @@ fn confine_bound_point(
 /// own code — a missing grant is something to fix, and it is a fact about the
 /// credential.
 ///
-/// **The reads name their caps (FX-31), in the runner binding's own classes**
+/// **The reads name their caps, in the runner binding's own classes**
 /// (`drill::binding::verify_point_binding`), so the two readers agree on
 /// which objects can be read at all: the receipt under
 /// [`caps::SIGNED_DOCUMENT`], the pinned version of the manifest under
@@ -579,11 +579,11 @@ fn archive_checks(
 ) {
     let dest = &req.source_destination;
     let scope = catalogue::scope("BackupDestination", &dest.name, Some(&dest.uid));
-    // **FX-14 — WHAT A BOUND PLAN MAY MAKE THIS CHECK READ IS DECIDED FIRST,
-    // FROM THE PLAN ALONE.** No handle is opened and no object is read for a
-    // plan whose point binding is malformed, names another set than the one
-    // this check reads, or names a receipt key outside that set's own receipt
-    // namespace ([`confine_bound_point`]).
+    // What a bound plan may make this check read is decided first, from the
+    // plan alone: no handle is opened and no object is read for a plan whose
+    // point binding is malformed, names another set than the one this check
+    // reads, or names a receipt key outside that set's own receipt namespace
+    // ([`confine_bound_point`]).
     if let Some(point) = spec.source.point.as_ref() {
         if let Err(refusal) = confine_bound_point(point, spec, &req.backup_id) {
             refuse_bound_point(&refusal, scope, want, now, checks);
@@ -608,28 +608,18 @@ fn archive_checks(
         }
     };
 
-    // THE PREFIX IS JOINED HERE, ONCE, AND EVERY LATER KEY IS DERIVED FROM
-    // THE RESULT. `RestorePreflightRequest::manifest_key` is the archive's own
-    // convention — `<backupId>/manifest.json`, RELATIVE to the destination's
-    // `storage.prefix`, which is how the backup engine writes it and how the
-    // manifest names its own segments — and `ObjectAccess::get` and
-    // `list_page` operate in the fully-qualified key space. Reading it
-    // unqualified made every restore preflight against a prefixed destination
-    // answer `archive.backupSet notReady AccessDenied` for a manifest the same
-    // principal reads with `mc`, because the object is not at the bucket root
-    // and listing the root is denied (D2-PREFLIGHT-PREFIX; `d2w14.result.md`
-    // §5.2, `objects/s16/preflight-pf-flat.json`). It is the same fix
-    // `Store::segment_keys_for` already carries, in the one place that had
-    // been left out, and `segment_keys_for_topics` below has always qualified
-    // — so `expected` and `listed` were being compared in two different key
-    // spaces as well.
+    // The prefix is joined here, once, and every later key is derived from
+    // the result. `RestorePreflightRequest::manifest_key` is relative to the
+    // destination's `storage.prefix` (`<backupId>/manifest.json`, as the
+    // engine writes it), while `ObjectAccess::get` and `list_page` operate in
+    // the fully-qualified key space, as `Store::segment_keys_for` and
+    // `segment_keys_for_topics` do.
     let manifest_key = access.qualify(&req.manifest_key);
-    // FX-31: under the manifest cap; an object over it is refused unread, and
-    // the message below names the cap.
-    // WITH THE VERSION THE STORE ANSWERED (FX-14): a plan bound to a recovery
-    // point is judged below against the point's pinned version, exactly as the
-    // runner's binding judges it. For a plan bound to nothing the version is
-    // read and never used.
+    // Under the manifest cap; an object over it is refused unread, and the
+    // message below names the cap. With the version the store answered: a
+    // plan bound to a recovery point is judged below against the point's
+    // pinned version, exactly as the runner's binding judges it. For a plan
+    // bound to nothing the version is read and never used.
     let (bytes, answered_version) = match access.get_with_version(&manifest_key, caps::MANIFEST) {
         Ok(read) => read,
         Err(e) => {
@@ -643,8 +633,8 @@ fn archive_checks(
                 _ => class.to_string(),
             };
             // NOTHING REFUSED, so the store's remedy would send an operator
-            // to a bucket policy that is fine (review F7): the object is too
-            // big for this build to read.
+            // to a bucket policy that is fine: the object is too big for this
+            // build to read.
             let remedy = if matches!(e, StoreError::TooLarge { .. }) {
                 OVER_CAP_MANIFEST_REMEDY
             } else {
@@ -685,18 +675,15 @@ fn archive_checks(
         }
     };
 
-    // **FX-14 — THE BOUND POINT'S WORD ON THESE BYTES, BEFORE THEY ARE
-    // BELIEVED.** A plan bound to a recovery point (`source.point`) is
-    // restored only if the runner's binding proves, against this archive, that
-    // the manifest is the one the point's signed receipt attests, at the
-    // version it pins. A preview that read the current manifest alone would
-    // be green over a set that was written again after the point was signed
-    // (FX-7: engine 0.21.0 can rewrite a set's segments under a byte-identical
-    // manifest, which only the version shows), and the run would then be
-    // refused. So the preview applies the binding's own pin and digest
-    // judgement here, and every later row describes a manifest the run will
-    // accept. The receipt is read only now: at the key the confinement above
-    // accepted, and after this set's manifest was read under the
+    // The bound point's word on these bytes, before they are believed: a plan
+    // bound to a recovery point is restored only if the runner's binding
+    // proves the manifest is the one the point's signed receipt attests, at
+    // the version it pins. A preview of the current manifest alone would be
+    // green over a set written again after the point was signed (engine
+    // 0.21.0 can rewrite a set's segments under a byte-identical manifest,
+    // which only the version shows), so the preview applies the binding's own
+    // pin and digest judgement. The receipt is read only now, at the key the
+    // confinement accepted, after this set's manifest was read under the
     // destination's own prefix.
     let pin_note = match spec.source.point.as_ref() {
         None => None,
@@ -768,13 +755,13 @@ fn archive_checks(
         checks.push(row.with_message(&message).with_scope(scope.clone()));
     }
 
-    // ---- coverage ------------------------------------------------------
+    // Coverage.
     let window = archive::window(&manifest);
     if want(CheckId::ArchiveCoverage) {
         checks.push(coverage_row(req, spec, &manifest, window, now));
     }
 
-    // ---- segments ------------------------------------------------------
+    // Segments.
     if want(CheckId::ArchiveSegments) {
         checks.push(segments_row(
             req,
@@ -876,10 +863,9 @@ fn coverage_row(
          epoch-ms {pit}",
         req.backup_id, w.oldest_ms, w.newest_ms
     );
-    // PROD-11.1: the plan's replay selection, resolved through the SAME
-    // function execution binds and restores it with
-    // (`ReplaySelection::resolve`), over the same manifest. A plan that states
-    // none is answered exactly as before.
+    // The plan's replay selection, resolved through the SAME function
+    // execution binds and restores it with (`ReplaySelection::resolve`), over
+    // the same manifest.
     let selection = match ReplaySelection::from_spec(spec) {
         Ok(s) if !s.is_full() => s,
         _ => {
@@ -950,8 +936,8 @@ fn segments_row(
     }
     // The segments the restore will actually read: the plan's selection —
     // every partition of every selected topic from the archive's own floor
-    // (guard G-WIN) unless the plan states a start or a partition subset
-    // (PROD-11.1) — resolved by the ONE function execution restores it with
+    // (guard G-WIN) unless the plan states a start or a partition subset,
+    // resolved by the ONE function execution restores it with
     // (`ReplaySelection::resolve`), then qualified into this handle's key
     // space. A selection the coverage row refuses names no segment here.
     let mut expected: Vec<String> = ReplaySelection::from_spec(spec)
@@ -970,7 +956,7 @@ fn segments_row(
     // `segment_keys_for_topics` above qualifies every key it lifts out of the
     // manifest body, so a set prefix taken from the unqualified request would
     // have compared two different key spaces and reported every segment of a
-    // present set as missing (D2-PREFLIGHT-PREFIX).
+    // present set as missing.
     let set_prefix = access
         .qualify(&req.manifest_key)
         .trim_end_matches("/manifest.json")
@@ -1050,7 +1036,7 @@ fn target_checks(
 ) {
     let scope = catalogue::scope("RestoreTarget", &req.target.principal, None);
     let budget = deadline.slice(2);
-    // PROD-01.2: the capability rows the plan lists (`capabilityChecks`), and
+    // The capability rows the plan lists (`capabilityChecks`), and
     // only those: `checks` being empty never includes one. A skipped one is
     // refused by the plan validation, so the list is taken as written.
     let capabilities = &req.capability_checks;
@@ -1098,7 +1084,7 @@ fn target_checks(
     if want(CheckId::TargetAuthenticated) {
         checks.push(row);
     }
-    // PROD-01.2: `target.engineProtocol`, right after the row it depends on
+    // `target.engineProtocol`, right after the row it depends on
     // and before any row about topics: an endpoint the engine cannot write to
     // is not a restore target whatever its topics look like.
     for row in super::readiness::capability_rows(
@@ -1127,14 +1113,14 @@ fn target_checks(
         return;
     }
 
-    // ---- the scratch segregation proof ---------------------------------
+    // The scratch segregation proof.
     if spec.target.mode == TargetMode::Scratch && want(CheckId::TargetScratchMarker) {
         checks.push(
             marker_row(probe.as_ref(), &spec.target.marker_topic, now).with_scope(scope.clone()),
         );
     }
 
-    // ---- the mapped names ----------------------------------------------
+    // The mapped names.
     let prefix = target_topic_prefix(spec);
     let mapped: Vec<String> = spec
         .source
@@ -1366,7 +1352,7 @@ fn topic_create_row(
 /// (`phase0_admit.rs`'s `target_topic_preflight`, step 2).
 ///
 /// `controller_knows_the_code`: whether the plan's controller can read
-/// `TimestampBoundNotReported` (PROD-01.2). The code vocabulary is closed on
+/// `TimestampBoundNotReported`. The code vocabulary is closed on
 /// the READING side, so a controller from before that row refuses a whole
 /// result that carries it (`ResultUnreadable`). The row is one this runner
 /// answers for every restore plan, so the code cannot be volunteered: a plan
@@ -1399,15 +1385,12 @@ fn timestamp_bound_row(
         .or_else(|| broker.get(BROKER_TIMESTAMP_DIFFERENCE_MAX_MS))
         .and_then(|v| v.trim().parse::<i64>().ok());
     let Some(bound) = bound else {
-        // PROD-01.2: NEITHER KEY IN THE ANSWER IS "NOT REPORTED", NOT "NO
-        // BOUND". Every Apache Kafka broker reports at least one of the two
-        // keys (unbounded is the value 9223372036854775807), so an answer
-        // without either comes from an endpoint that keeps the setting
-        // elsewhere. Measured on Redpanda v26.2.4: nine broker keys, neither
-        // of these, while each topic reports
-        // `message.timestamp.before.max.ms`. This row used to answer `ready`,
-        // "the target declares no record-timestamp bound": an empty answer
-        // recorded as a fact.
+        // Neither key in the answer is "not reported", not "no bound": every
+        // Apache Kafka broker reports at least one (unbounded is the value
+        // 9223372036854775807), so an answer without either comes from an
+        // endpoint that keeps the setting elsewhere (Redpanda v26.2.4 answers
+        // nine broker keys, neither of these, while each topic reports
+        // `message.timestamp.before.max.ms`).
         let code = if controller_knows_the_code {
             CheckCode::TimestampBoundNotReported
         } else {
@@ -1495,13 +1478,10 @@ fn block_rest(
 ///
 /// # The redaction, and why it is at this line and not at the push sites
 ///
-/// A details line carries adopter identifiers — a segment key, a mapped topic
-/// name — and the controller writes the stream VERBATIM into an immutable
-/// `<job>-details` `ConfigMap` (D2 §6.7). `CheckOutcome`'s own builders redact
-/// `message`, `remedy` and `facts`, and `catalogue::scope` and
-/// `readiness::detail` were made to redact for the same reason; this stream was
-/// the third exception to a rule the code, `docs/stability.md` and the report
-/// all state has exactly one. It has one now.
+/// A details line carries adopter identifiers (a segment key, a mapped topic
+/// name), and the controller writes the stream VERBATIM into an immutable
+/// `<job>-details` `ConfigMap` (D2 §6.7), so it is redacted like
+/// `CheckOutcome`'s `message`, `remedy` and `facts`.
 ///
 /// It is applied HERE because this function is the ONE place the stream is
 /// assembled, so a new producer of a detail line cannot forget — which is the
@@ -1535,7 +1515,7 @@ pub fn details_stream(lines: &[String]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// The remedy for a backup manifest over the read cap (FX-31 review F7): the
+/// The remedy for a backup manifest over the read cap: the
 /// store answered, the object is larger than this build reads, and no grant,
 /// bucket policy or network change makes it smaller.
 pub const OVER_CAP_MANIFEST_REMEDY: &str =
