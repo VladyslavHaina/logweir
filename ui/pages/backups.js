@@ -44,6 +44,7 @@ import {
   esc,
   evidenceBlock,
   facts,
+  hasEvidenceKeys,
   independentCheck,
   listFooter,
   runPhaseBadge,
@@ -270,13 +271,16 @@ export function evidenceRoute(object, where) {
       "froze " + frozen + ", so its bucket is not where this run wrote.");
   }
   const storage = destination.storage || {};
-  return { bucket: storage.bucket, endpoint: storage.endpoint, region: storage.region };
+  return { bucket: storage.bucket, endpoint: storage.endpoint, region: storage.region,
+    pathStyle: storage.addressing === "pathStyle" };
 }
 
-/** Said in place of the four lines while a run has recorded no receipt key. */
+/** Said in place of the four lines while a run has not recorded both of the
+ *  keys they fetch (`hasEvidenceKeys`): a pending run, or one that wrote no
+ *  evidence. The Restore detail says the same. */
 export const NO_EVIDENCE_KEYS_SENTENCE =
-  "This run has recorded no evidence keys yet, so there is nothing to fetch. The commands " +
-  "appear here once it records them.";
+  "This run has recorded no evidence keys, so there is nothing to fetch. The commands " +
+  "appear here if it records them.";
 
 /** The identity a run presented to the brokers, from `status.auth`: its mode
  *  and username, as many of them as were recorded, or "not recorded" (it read
@@ -327,7 +331,7 @@ export function renderBackupDetail(object, where) {
     "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
     evidenceBlock(evidence) +
     "<section class=\"check\" id=\"backup-check\"><h3>Check it yourself</h3>" +
-    (typeof evidence.receiptKey !== "string" || evidence.receiptKey.length === 0
+    (!hasEvidenceKeys(evidence.receiptKey, evidence.sidecarKey)
       ? "<p class=\"note\" id=\"backup-check-no-keys\">" + esc(NO_EVIDENCE_KEYS_SENTENCE) + "</p>"
       : "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
         "take local files. So the first two lines fetch, and the last two verify -- once " +
@@ -339,7 +343,7 @@ export function renderBackupDetail(object, where) {
           "backup-receipt",
           route.bucket,
           evidence.receiptKey,
-          evidence.sidecarKey || "",
+          evidence.sidecarKey,
           "receipt.json",
           "receipt.sig",
           route,

@@ -2180,6 +2180,23 @@ export function planEvidenceBucket(planBytes) {
   return bucket !== null && isBucketName(bucket) ? bucket : "";
 }
 
+/** How the store a restore plan writes its evidence to is reached: the
+ *  `endpoint`, `region` and `path_style` of the same `evidence:` block
+ *  [`planEvidenceBucket`] reads, as [`independentCheck`]'s route. An absent
+ *  (or `null`) endpoint or region is `""`, which prints no flag. The values
+ *  are plan text, and [`shellWord`] quotes each as one word. */
+export function planEvidenceRoute(planBytes) {
+  const value = (key) => {
+    const v = planBlockValue(planBytes, "evidence", key);
+    return v === null || v === "null" || v === "~" ? "" : v;
+  };
+  return {
+    endpoint: value("endpoint"),
+    region: value("region"),
+    pathStyle: value("path_style") === "true",
+  };
+}
+
 /** The plan's `restore.time_basis`: `"producerTime"` when the approved
  *  plan bytes state it, `""` when this reader finds no such value.
  *
@@ -2312,6 +2329,15 @@ export function prefixOf(url) {
   return prefix;
 }
 
+/** Said above the fetches when the store is addressed path-style at an
+ *  endpoint. The AWS CLI has no per-command flag for it; with
+ *  `--endpoint-url` it already addresses path-style unless the profile sets
+ *  `s3.addressing_style` to `virtual` (botocore's `args.py`, AWS CLI 2.34). */
+export const PATH_STYLE_SENTENCE =
+  "This store is addressed path-style. With `--endpoint-url` the AWS CLI addresses a bucket " +
+  "path-style unless your profile sets `s3.addressing_style` to `virtual`; if it does, run " +
+  "`aws configure set s3.addressing_style path` before the two fetches.";
+
 /** THE INDEPENDENT CHECK, AND IT FETCHES BEFORE IT VERIFIES.
  *
  *  `status.evidence.receiptKey` and `scorecardKey` are OBJECT-STORE KEYS, and
@@ -2324,31 +2350,34 @@ export function prefixOf(url) {
  *
  *  `payloadType` is `backup-receipt` for a `Backup` and `scorecard` for a
  *  `Restore`. `document` is the local filename the fetch writes. `route`,
- *  when given, is `{endpoint, region}` of the store the bucket is on: an
- *  S3-compatible endpoint is not AWS, and a fetch without it asks AWS. */
+ *  when given, is `{endpoint, region, pathStyle}` of the store the bucket is
+ *  on: an S3-compatible endpoint is not AWS, and a fetch without it asks AWS.
+ *  A path-style store at an endpoint gets [`PATH_STYLE_SENTENCE`] above the
+ *  block. The caller prints the block only when [`hasEvidenceKeys`] holds. */
 export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile,
   sidecarFile, route) {
   const r = route || {};
   const flags = (r.endpoint ? " --endpoint-url " + shellWord(r.endpoint) : "") +
     (r.region ? " --region " + shellWord(r.region) : "");
-  return copyBlock([
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile + flags,
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile + flags,
-    "logweir drill verify --payload-type " +
-      payloadType +
-      " --scorecard ./" +
-      documentFile +
-      " --signature ./" +
-      sidecarFile +
-      " --public-key <your key>",
-    "python3 verify_scorecard.py --payload-type " +
-      payloadType +
-      " --scorecard ./" +
-      documentFile +
-      " --signature ./" +
-      sidecarFile +
-      " --public-key <your key>",
-  ]);
+  return (r.pathStyle === true && r.endpoint
+    ? "<p class=\"note\" data-addressing=\"path-style\">" + codeSpans(PATH_STYLE_SENTENCE) + "</p>"
+    : "") +
+    copyBlock([
+      "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile + flags,
+      "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile + flags,
+      "logweir drill verify --payload-type " + payloadType + " --scorecard ./" + documentFile +
+        " --signature ./" + sidecarFile + " --public-key <your key>",
+      "python3 verify_scorecard.py --payload-type " + payloadType + " --scorecard ./" +
+        documentFile + " --signature ./" + sidecarFile + " --public-key <your key>",
+    ]);
+}
+
+/** Whether a run recorded BOTH keys the fetches name. A fetch of an empty key
+ *  is a fetch of the bucket root, which is not a command that works, so a run
+ *  without both prints no command, only why. */
+export function hasEvidenceKeys(documentKey, sidecarKey) {
+  return typeof documentKey === "string" && documentKey.length > 0 &&
+    typeof sidecarKey === "string" && sidecarKey.length > 0;
 }
 
 // THE FORM HALF: field-level errors and one mutation status every form

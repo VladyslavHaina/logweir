@@ -2,7 +2,9 @@
 // found on the PoC console, each pinned where it originated.
 //
 // H1  the Backup detail's "Check it yourself" read the bucket off the
-//     destination sentinel URL (`s3://primary/...`);
+//     destination sentinel URL (`s3://primary/...`); and, the class swept,
+//     every "Check it yourself" prints commands that work as printed: the
+//     Restore detail's store, a path-style store, and a run with no keys;
 // H2  the destination's "Rotate access" form opened with every optional grant
 //     at `absent`, so rotating one key removed the others;
 // H3  the schedule's Retention panel never found the RetentionPolicy naming
@@ -39,7 +41,7 @@ import {
   renderRetentionPanel,
 } from "../pages/schedules.js";
 import { NOT_PUBLISHED, renderRestoreDetail } from "../pages/history.js";
-import { ENFORCEMENT_SENTENCES, RETENTION_SENTENCE } from "../render.js";
+import { ENFORCEMENT_SENTENCES, PATH_STYLE_SENTENCE, RETENTION_SENTENCE } from "../render.js";
 import { decoded, wire } from "./console-fixture.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
 
@@ -199,6 +201,136 @@ test("h1_a_run_with_no_receipt_key_yet_prints_no_fetch_of_the_bucket_root", asyn
   assert.equal(checkLines(html).length, 0,
     "THE DEFECT: `aws s3 cp s3://primary/ ./receipt.json` while the run was pending");
   resetMode();
+});
+
+// H1, THE CLASS: EVERY "CHECK IT YOURSELF" WORKS AS PRINTED. Both pages
+// that print one read `primary`: named unlike its bucket (`kafka-backups`),
+// path-style at a MinIO endpoint, in a region.
+
+const RESTORE = "orders-drill-20260911";
+
+/** `primary`'s storage, with the premises every row below stands on. */
+function primaryStorage() {
+  const item = decoded("destination.json").item;
+  const storage = item.storage;
+  assert.notEqual(item.name, storage.bucket, "PREMISE: the destination is named unlike its bucket");
+  assert.equal(storage.addressing, "pathStyle", "PREMISE: the store is path-style");
+  assert.ok(storage.endpoint.length > 0 && storage.region.length > 0,
+    "PREMISE: a custom endpoint and a region");
+  return storage;
+}
+
+/** The page's "Check it yourself" section, found by its heading. */
+function section(html) {
+  const heading = html.indexOf("<h3>Check it yourself</h3>");
+  assert.notEqual(heading, -1, "the page has its check section");
+  const at = html.lastIndexOf("<section class=\"check\"", heading);
+  return html.slice(at, html.indexOf("</section>", heading));
+}
+
+/** The two fetches go to the store's bucket, at its endpoint and region, and
+ *  the path-style note stands above them. */
+function assertFetchesAsPrinted(check, storage, keys, files) {
+  const lines = checkLines(check);
+  assert.equal(lines.length, 4, check);
+  const route = " --endpoint-url " + storage.endpoint + " --region " + storage.region;
+  assert.equal(lines[0], "aws s3 cp s3://" + storage.bucket + "/" + keys[0] + " ./" + files[0] +
+    route, "bucket, key, --endpoint-url and --region of the store the run wrote to");
+  assert.equal(lines[1], "aws s3 cp s3://" + storage.bucket + "/" + keys[1] + " ./" + files[1] +
+    route);
+  assert.equal(lines[0].indexOf(storage.prefix), -1,
+    "the evidence keys are bucket-absolute under logweir/, not under the archive prefix");
+  const note = check.indexOf("data-addressing=\"path-style\"");
+  assert.ok(note !== -1 && note < check.indexOf("<pre class=\"copy\">"),
+    "THE DEFECT (F8): nothing said the store is path-style");
+  assert.ok(check.includes(PATH_STYLE_SENTENCE.replace(/`([^`]*)`/g, "<code>$1</code>")),
+    check);
+  assert.match(PATH_STYLE_SENTENCE, /`aws configure set s3\.addressing_style path`/);
+  return lines;
+}
+
+/** The restore plan's `evidence:` block replaced by `primary`'s evidence
+ *  store, as the wizard signs it (`evidenceStoreOf`). */
+function planOnPrimary(planBytes, storage) {
+  const at = planBytes.indexOf("\nevidence:\n");
+  const end = planBytes.indexOf("\nnotifications:", at);
+  assert.ok(at !== -1 && end !== -1, "the fixture plan has an evidence block");
+  return planBytes.slice(0, at + 1) + [
+    "evidence:",
+    "  backend: \"s3\"",
+    "  bucket: \"" + storage.bucket + "\"",
+    "  prefix: \"logweir/\"",
+    "  region: \"" + storage.region + "\"",
+    "  endpoint: \"" + storage.endpoint + "\"",
+    "  path_style: true",
+    "  allow_http: false",
+  ].join("\n") + planBytes.slice(end);
+}
+
+/** The Restore detail as a reader sees it, read through the real client. */
+async function restoreDetail(restoreDoc, operationDoc) {
+  await sharedConsole();
+  const wire_ = transport((u) => {
+    const path = u.split("?")[0];
+    if (path.indexOf("/api/v1/namespaces/" + NS + "/operations/restore/") === 0) {
+      return { status: 200, body: operationDoc };
+    }
+    if (path.indexOf("/api/v1/namespaces/" + NS + "/restores/") === 0) {
+      return { status: 200, body: restoreDoc };
+    }
+    return undefined;
+  });
+  try {
+    return decode(renderRestoreDetail(await apiClient().get(NS, "restores", RESTORE)));
+  } finally {
+    wire_.restore();
+    resetMode();
+  }
+}
+
+test("h1_the_backup_check_prints_bucket_key_endpoint_region_and_the_path_style_note",
+  async () => {
+    const storage = primaryStorage();
+    await sharedConsole();
+    const destination = wire("destination.json");
+    const backup = wire("backup.json");
+    backup.item.locationDigest = destination.item.locationDigest;
+    const { html } = await backupDetail(backup, { status: 200, body: destination });
+    resetMode();
+    const evidence = decoded("operation-backup.json").item.evidence;
+    assertFetchesAsPrinted(section(html), storage,
+      [evidence.payloadKey, evidence.sidecarKey], ["receipt.json", "receipt.sig"]);
+  });
+
+test("h1_the_restore_check_fetches_from_its_plans_evidence_store_as_printed", async () => {
+  const storage = primaryStorage();
+  const restore = wire("restore-results.json");
+  assert.equal(restore.item.evidenceDestinationRef.name, "primary",
+    "PREMISE: the restore writes its evidence to primary");
+  restore.item.planBytes = planOnPrimary(restore.item.planBytes, storage);
+  const html = await restoreDetail(restore, wire("operation-restore-completed.json"));
+  const evidence = decoded("operation-restore-completed.json").item.evidence;
+  const lines = assertFetchesAsPrinted(section(html), storage,
+    [evidence.payloadKey, evidence.sidecarKey], ["scorecard.json", "scorecard.sig"]);
+  assert.match(lines[2], /^logweir drill verify --payload-type scorecard /);
+  assert.equal(html.indexOf("s3://primary"), -1, "the destination's name is never a bucket");
+});
+
+test("h1_a_pending_restore_prints_no_command_and_says_why", async () => {
+  const storage = primaryStorage();
+  const restore = wire("restore-results.json");
+  restore.item.planBytes = planOnPrimary(restore.item.planBytes, storage);
+  restore.item.operation = { state: "pending", stateReason: "Pending", terminal: false,
+    verificationState: "pending", verifiedSuccess: false };
+  const operation = wire("operation-restore-completed.json");
+  Object.assign(operation.item, { state: "pending", stateReason: "Pending", terminal: false,
+    verifiedSuccess: false, result: { status: "pending" }, verification: { state: "pending" },
+    evidence: {} });
+  const check = section(await restoreDetail(restore, operation));
+  assert.equal(checkLines(check).length, 0,
+    "THE DEFECT (I2): `aws s3 cp s3://<bucket>/ ./scorecard.json` -- a fetch of the bucket root");
+  assert.equal(check.indexOf("aws s3 cp"), -1);
+  assert.ok(check.includes("id=\"restore-check-no-keys\">" + NO_EVIDENCE_KEYS_SENTENCE), check);
 });
 
 // H2. A ROTATION STARTS FROM WHAT THE DESTINATION HAS.

@@ -40,9 +40,11 @@ import {
   inert,
   evidenceBlock,
   facts,
+  hasEvidenceKeys,
   independentCheck,
   listFooter,
   planEvidenceBucket,
+  planEvidenceRoute,
   planTimeBasis,
   runPhaseBadge,
   LEFT_TOPIC_SENTENCE,
@@ -75,7 +77,13 @@ import {
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
-import { backupBadge, greenLabel, operationCell, validVerification } from "./backups.js";
+import {
+  NO_EVIDENCE_KEYS_SENTENCE,
+  backupBadge,
+  greenLabel,
+  operationCell,
+  validVerification,
+} from "./backups.js";
 import { operationRoute } from "./operation.js";
 import { isRecoveryPoint, restorePointRoute } from "./restore-wizard.js";
 import {
@@ -716,20 +724,24 @@ export function renderRestoreDetail(object, operation) {
     evidenceBlock(evidence) +
     "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +
     "<section class=\"check\"><h3>Check it yourself</h3>" +
-    "<p class=\"note\">The two keys above name objects in the evidence bucket this " +
-    "restore's approved plan wrote to; the verifiers take local files. So the first two " +
-    "lines fetch, and the last two verify -- once with the Rust reader and once with the " +
-    "Python one.</p>" +
-    independentCheck(
-      "scorecard",
-      // The plan's evidence bucket, never the source archive's: the scorecard is
-      // where the approved plan wrote it.
-      planEvidenceBucket(spec.planBytes) || bucketOf(""),
-      evidence.scorecardKey || "",
-      evidence.sidecarKey || "",
-      "scorecard.json",
-      "scorecard.sig",
-    ) +
+    (!hasEvidenceKeys(evidence.scorecardKey, evidence.sidecarKey)
+      ? "<p class=\"note\" id=\"restore-check-no-keys\">" + esc(NO_EVIDENCE_KEYS_SENTENCE) + "</p>"
+      : "<p class=\"note\">The two keys above name objects in the evidence bucket this " +
+        "restore's approved plan wrote to; the verifiers take local files. So the first two " +
+        "lines fetch, and the last two verify -- once with the Rust reader and once with the " +
+        "Python one.</p>" +
+        independentCheck(
+          "scorecard",
+          // The plan's evidence store, never the source archive's: the
+          // scorecard is where the approved plan wrote it, reached at the
+          // plan's endpoint and region.
+          planEvidenceBucket(spec.planBytes) || bucketOf(""),
+          evidence.scorecardKey,
+          evidence.sidecarKey,
+          "scorecard.json",
+          "scorecard.sig",
+          planEvidenceRoute(spec.planBytes),
+        )) +
     "</section>"
   );
 }
