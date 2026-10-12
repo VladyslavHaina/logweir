@@ -104,8 +104,28 @@ class Release(unittest.TestCase):
     def state(self):
         return json.loads(self.registry.read_text())
 
+    def bootstrap_pin(self):
+        """The chart's identity.bootstrapImage, as the copied values.yaml pins it."""
+        for line in (self.repo / "charts/logweir/values.yaml").read_text().splitlines():
+            if line.split()[:1] == ["bootstrapImage:"]:
+                return line.split()[1]
+        self.fail("values.yaml pins no identity.bootstrapImage")
+
+    def publish_bootstrap(self, revision=None, arches=("amd64", "arm64"), digest=None):
+        """The bootstrap pin's own build, by its digest: the base commit's, for both platforms."""
+        state = self.state()
+        ref = self.bootstrap_pin()
+        labels = {"org.opencontainers.image.revision": revision or self.head}
+        configs = {f"linux/{a}": {"os": "linux", "architecture": a, "config": {"Labels": labels}} for a in arches}
+        image = next(iter(configs.values())) if len(arches) == 1 else configs
+        state[ref] = {"digest": digest or ref.split("@", 1)[1], "platforms": list(configs), "image": image}
+        self.registry.write_text(json.dumps(state))
+
     def publish(self, commit, revision=None, skip=(), platforms=None):
-        """main CI's publication of `commit`: three sha-<commit> images."""
+        """main CI's publication of `commit`: three sha-<commit> images, and the
+        bootstrap pin's build when the registry does not hold it yet."""
+        if self.bootstrap_pin() not in self.state():
+            self.publish_bootstrap()
         state = self.state()
         for product in PRODUCTS:
             if product in skip:
@@ -256,6 +276,45 @@ class Resolve(Release):
             self.assertEqual(images["images"][product]["published_as"], ref)
         self.assertEqual(images["images"]["logweir"]["platforms"], ["linux/amd64", "linux/arm64"])
         self.assertEqual(images["images"]["weirkeeper"]["platforms"], ["linux/amd64", "linux/arm64"])
+
+    def test_the_identity_bootstrap_image_is_recorded(self):
+        """The fourth image an install pulls: the chart's pin, recorded with its
+        digest, platforms and the commit it was built from, never re-pinned."""
+        self.publish(self.head)
+        images, _ = self.resolve(self.head)
+        pin = self.bootstrap_pin()
+        repository, digest = pin.split("@")
+        self.assertEqual(images["bootstrap"], {"repository": repository, "digest": digest, "reference": pin,
+                                               "platforms": ["linux/amd64", "linux/arm64"],
+                                               "revision": self.head})
+        self.assertNotIn("bootstrap", images["images"], "the bootstrap image is not promoted")
+
+    def test_a_bootstrap_pin_that_is_not_that_build_is_refused(self):
+        """Controls: each read the three images get, refused for the bootstrap pin."""
+        pin = self.bootstrap_pin()
+        for change, reason in (
+            (dict(), None),
+            (dict(arches=("amd64",)), "is built for 'linux/amd64'"),
+            (dict(revision="b" * 40), "not a commit"),
+            (dict(revision="none"), "not a commit"),
+            (dict(digest="sha256:" + "e" * 64), "reports digest"),
+        ):
+            with self.subTest(change=change):
+                self.registry.write_text("{}")
+                self.publish(self.head)
+                self.publish_bootstrap(**change)
+                images, result = self.resolve(self.head, success=reason is None)
+                if reason is None:
+                    self.assertEqual(images["bootstrap"]["reference"], pin)
+                else:
+                    self.assertIn(reason, result.stderr)
+                    self.assertIn(f"{pin} (identity.bootstrapImage)", result.stderr)
+        # Not published at all: refused by name, not taken for "nothing to record".
+        state = self.state()
+        del state[pin]
+        self.registry.write_text(json.dumps(state))
+        _, result = self.resolve(self.head, success=False)
+        self.assertIn(f"{pin} (identity.bootstrapImage) is not published", result.stderr)
 
     def test_a_docs_only_commit_ships_its_newest_published_ancestor(self):
         self.publish(self.head)
@@ -494,12 +553,16 @@ class Assemble(Release):
         for product in PRODUCTS:
             self.assertIn(f"docker.io/{NS}/{product}:{self.TAG}@{self.images['images'][product]['digest']}", values)
         self.assertNotIn(":latest", values)
+        self.assertEqual(release["images"]["bootstrap"], self.images["bootstrap"])
+        self.assertIn(f"bootstrapImage: {self.bootstrap_pin()}", values)
         ui = (out / "ui-files.sha256").read_text().splitlines()
         self.assertTrue(ui and all("  ui/" in line for line in ui))
         self.assertFalse(any("ui/tests/" in line or line.endswith(".md") for line in ui))
         notes = (self.base / "notes.md").read_text()
         for needle in (f"--version 0.2.0-rc.1", "(pre-release)", f"sha-{self.head}", "drill countersign",
-                       "sha256sum -c SHA256SUMS", "kafka-backup-LICENSE", "glibc: 2.34 or newer"):
+                       "sha256sum -c SHA256SUMS", "kafka-backup-LICENSE", "glibc: 2.34 or newer",
+                       f"| identity bootstrap | `{self.bootstrap_pin()}` | linux/amd64, linux/arm64 |",
+                       f"built from `{self.head}`"):
             self.assertIn(needle, notes)
         self.assertNotIn("libc.so.6", notes, "the notes list what to install, not the OS itself")
         self.release("verify", str(out))
@@ -529,6 +592,18 @@ class Assemble(Release):
                 out = self.base / ("assets-" + label.replace(" ", "-"))
                 self.assemble(success=False, out=out)
                 self.archive("aarch64-apple-darwin")
+
+    def test_a_chart_that_does_not_pin_the_recorded_bootstrap_image_is_refused(self):
+        """The packaged chart must pin the bootstrap image resolve recorded."""
+        images = json.loads((self.inputs / "images.json").read_text())
+        other = images["bootstrap"]["repository"] + "@sha256:" + "a" * 64
+        (self.inputs / "images.json").write_text(json.dumps({**images, "bootstrap": {**images["bootstrap"],
+                                                                                     "reference": other}}))
+        _, result = self.assemble(success=False)
+        self.assertIn(f"does not pin identity.bootstrapImage {other}", result.stderr)
+        (self.inputs / "images.json").write_text(json.dumps({k: v for k, v in images.items() if k != "bootstrap"}))
+        _, result = self.assemble(success=False, out=self.base / "assets-none")
+        self.assertIn("records no identity.bootstrapImage", result.stderr)
 
     def test_inputs_from_another_commit_or_an_old_directory_are_refused(self):
         images = json.loads((self.inputs / "images.json").read_text())
