@@ -94,7 +94,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `identity.kubernetesApiCIDRs` | `[]` | exact API `/32` or `/128` endpoints, TCP 443 or 6443 |
 | `identity.externalSecret.name`, `.key` | `""`, `signing.pem` | adopt a P-256 or Ed25519 PKCS#8 Secret; never marked fresh |
 | `identity.installationTrust.enabled`, `.policyName` | `true`, `logweir-installation` | the fresh install's `TrustPolicy` (*`approvalPolicy`*) |
-| `identity.installationTrust.allowedTargetClusterIds` | `[]` | written into it once; `demoKafka.enabled` adds its target |
+| `identity.installationTrust.allowedTargetClusterIds` | `[]` | written into it once; `demoKafka.enabled` adds its target, each id listed once |
 | `identity.resources` | 10m / 32Mi, limit 128Mi | |
 
 ### Controller and the installation policy

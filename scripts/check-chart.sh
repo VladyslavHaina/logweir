@@ -1849,6 +1849,25 @@ else
   echo "   rc=$rc  (Kubernetes 1.28.15 refused by kubeVersion >=1.29.0-0; control: 1.29.0 renders)"
 fi
 
+# ---------------------------------------------------------------- 14. restore targets
+# poc-14-1a D7: values that list the demo target demoKafka also adds give the
+# identity hook each cluster id once, in the order first given.
+echo "== 14. the fresh install's allowed restore targets name each cluster id once =="
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  -f "$EXAMPLES/demo.values.yaml" --set demoKafka.clusterIds.target=demoTargetClusterId000 \
+  --set-json 'identity.installationTrust.allowedTargetClusterIds=["demoTargetClusterId000","other-target"]' \
+  > "$tmp/targets.yaml" 2> "$tmp/targets.err"
+rc=$?
+targets="$(grep -A1 -x -F -- '            - --allowed-target-cluster-id' "$tmp/targets.yaml" \
+  | sed -n 's/^            - "\(.*\)"$/\1/p' | paste -sd, -)"
+if [ "$rc" -ne 0 ] || [ "$targets" != "demoTargetClusterId000,other-target" ]; then
+  echo "FAIL: the demo target, in the values and added by demoKafka, must reach the hook once; got '$targets' (rc=$rc)" >&2
+  sed 's/^/      /' "$tmp/targets.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (allowed targets $targets: the demo target once, in the order given)"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
