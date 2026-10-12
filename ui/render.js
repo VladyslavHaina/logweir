@@ -2291,11 +2291,17 @@ export function prefixOf(url) {
  *  files the fetches just wrote.
  *
  *  `payloadType` is `backup-receipt` for a `Backup` and `scorecard` for a
- *  `Restore`. `document` is the local filename the fetch writes. */
-export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile, sidecarFile) {
+ *  `Restore`. `document` is the local filename the fetch writes. `route`,
+ *  when given, is `{endpoint, region}` of the store the bucket is on: an
+ *  S3-compatible endpoint is not AWS, and a fetch without it asks AWS. */
+export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile,
+  sidecarFile, route) {
+  const r = route || {};
+  const flags = (r.endpoint ? " --endpoint-url " + shellWord(r.endpoint) : "") +
+    (r.region ? " --region " + shellWord(r.region) : "");
   return copyBlock([
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile,
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile + flags,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile + flags,
     "logweir drill verify --payload-type " +
       payloadType +
       " --scorecard ./" +
