@@ -2,13 +2,11 @@
 # optionally, its own object-store backend, two throwaway Kafka clusters and
 # the UI. Task 35 (post-plan).
 #
-# `version` is the chart's, `appVersion` the workspace's (`Cargo.toml`), and
-# both are 0.1.0 because nothing has been released: the digests `values.yaml`
-# pins are LOCALLY BUILT measurements (Global Constraint 37,
-# `blocked: images not published`), and a chart
-# that installs them on a cluster with no access to `docker.io/vladyslavhaina/…` leaves
-# the controller pod in `ImagePullBackOff` — the same recorded, expected result
-# as path (a) of `docs/install.md`.
+# `version` and `appVersion` are a checkout's. `scripts/ci-images.sh
+# chart-package` sets both when it publishes: `<version>-sha-<commit>` for a
+# `main` publication, `<semver>` for a `v<semver>` release tag. It also
+# rewrites the three Logweir image defaults from `:latest` to that
+# publication's tag, and for a release to `:<tag>@sha256:…`.
 #
 # `kubeVersion` is Global Constraint 25's floor: the thirteen CRDs use CEL
 # validation rules, GA at 1.29. Helm refuses an older cluster before anything
