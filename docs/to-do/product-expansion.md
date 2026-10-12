@@ -824,6 +824,11 @@ What it fixed:
   - **The orchestrator merged #34 before reading #33's red main run.** This is recorded as a rule: read the conclusion before the next merge.
 - **Published and signed:** main run 38205597618 signed `sha-a575b65a`. Neither `dcd6e5b3` nor `36a7ee73` was published.
 
+**PR #36 — merged (2026-10-12) as `1f15d15d`: a release blocker the rc.2 rehearsal found.** Every `release.yml` run since `c36897a2` (2026-10-08) ended in `startup_failure`. ci.yml's `publish` asks for `id-token` and `attestations` (keyless signing), and release.yml called ci.yml as `tests` with `contents: read` only. GitHub refuses to start a call whose jobs ask for more than the caller grants, skipped jobs included.
+- **The fix:** `tests` grants exactly those two scopes and is handed no secret.
+- **The new lint row** `the_release_tests_call_can_never_reach_ci_publish` proves the only ci.yml job that uses them runs only on a push to main, so a dispatch is still a dry run that reaches no credential. Its controls ran.
+- **Proof:** dry run 38209125597 on the branch passed every job up to `assemble`, and `release.sh verify` passed on its 14 assets (three multi-arch images from the `sha-a575b65a` publication).
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
