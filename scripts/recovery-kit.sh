@@ -186,7 +186,8 @@ while IFS= read -r -d '' file; do
   case "$rel" in
     bin/*|images/*.tar) continue ;;   # release-built or locally built executables and image layers
     chart/*.tgz)
-      if tar -xzOf "$file" | grep -aEq -- "$pem|$b64"; then refuse "$rel" "the chart carries private-key material"; fi
+      # Not -q: grep must read to the end, or tar dies of SIGPIPE and pipefail reads a match as none.
+      if tar -xzOf "$file" | grep -aE -- "$pem|$b64" >/dev/null; then refuse "$rel" "the chart carries private-key material"; fi
       continue ;;
   esac
   if grep -aEq -- "$pem|$b64" "$file"; then refuse "$rel" "it holds a private key"; fi

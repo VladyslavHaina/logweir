@@ -28,6 +28,9 @@ TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-app
 PRODUCTS = ("weirkeeper", "logweir", "logweir-console")
 DIGEST = "sha256:" + "ab" * 32
 BOOTSTRAP = "docker.io/vladyslavhaina/logweir@sha256:" + "cd" * 32
+CHART = "logweir-chart-9.9.9.tgz"
+CHART_MEMBERS = {"logweir-chart/Chart.yaml": "name: logweir-chart\n",
+                 "logweir-chart/values.yaml": f"identity:\n  bootstrapImage: {BOOTSTRAP} # pin\n"}
 # Assembled at run time, never one literal (push protection scans for the shape).
 PEM_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
 PEM_END = "-----END " + "PRIVATE KEY-----"
@@ -77,19 +80,21 @@ class RecoveryKit(unittest.TestCase):
         self.assets.mkdir()
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
                               check=True, timeout=30).stdout.strip()
-        files = {}
+        self.files = {}
         for target in TARGETS:
             name = f"logweir-{target}.tar.xz"
-            files[name] = os.urandom(64)
-            files[name + ".sha256"] = f"{sha256(files[name])}  {name}\n".encode()
-        chart = "logweir-chart-9.9.9.tgz"
-        files[chart] = tgz({"logweir-chart/Chart.yaml": "name: logweir-chart\n",
-                            "logweir-chart/values.yaml": f"identity:\n  bootstrapImage: {BOOTSTRAP} # pin\n"})
-        files["verify_scorecard.py"] = (ROOT / "docs/verify_scorecard.py").read_bytes()
-        files["release.json"] = json.dumps({
-            "tag": VERSION, "commit": head, "chart": {"package": chart},
+            self.files[name] = os.urandom(64)
+            self.files[name + ".sha256"] = f"{sha256(self.files[name])}  {name}\n".encode()
+        self.files[CHART] = tgz(CHART_MEMBERS)
+        self.files["verify_scorecard.py"] = (ROOT / "docs/verify_scorecard.py").read_bytes()
+        self.release = {
+            "tag": VERSION, "commit": head, "chart": {"package": CHART},
             "images": {"refs": {p: {"reference": f"docker.io/vladyslavhaina/{p}:{VERSION}@{DIGEST}"}
-                                for p in PRODUCTS}}}).encode()
+                                for p in PRODUCTS}}}
+        self.write_assets()
+
+    def write_assets(self):
+        files = dict(self.files, **{"release.json": json.dumps(self.release).encode()})
         for name, data in files.items():
             (self.assets / name).write_bytes(data)
         (self.assets / "SHA256SUMS").write_text("".join(f"{sha256(d)}  {n}\n" for n, d in sorted(files.items())))
@@ -163,6 +168,19 @@ class RecoveryKit(unittest.TestCase):
                 self.assertEqual(done.returncode, 3, (what, done.stderr))
                 self.assertIn("REFUSED trust/" + next(iter(files)), done.stderr)
                 self.assert_nothing_written()
+
+    def test_the_guard_refuses_a_private_key_early_in_a_large_chart(self):
+        # The key comes first and more than a pipe's 64 KB follows it, as in the real
+        # chart, whose crds/ come after 688 KB of values, examples and templates. A
+        # `tar | grep -q` exits at the key, tar dies of SIGPIPE, and pipefail says "no match".
+        self.files[CHART] = tgz({"logweir-chart/files/old-signer.pem": f"{PEM_BEGIN}\nMIGHAgEA\n{PEM_END}\n",
+                                 "logweir-chart/templates/large.yaml": "# filler\n" * 120_000,
+                                 **CHART_MEMBERS})
+        self.write_assets()
+        done = self.run_kit("--release-assets", str(self.assets))
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertIn(f"REFUSED chart/{CHART}", done.stderr)
+        self.assert_nothing_written()
 
     def test_its_twin_public_material_is_packed(self):
         trust = self.trust_dir({
