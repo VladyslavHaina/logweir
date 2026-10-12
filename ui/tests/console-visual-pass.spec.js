@@ -19,7 +19,12 @@ import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
 import { restoreDestination } from "../pages/restore-wizard.js";
-import { renderApprovalList, restoreProgressSentence } from "../pages/approvals.js";
+import {
+  PRINCIPAL_SHORT_CHARS,
+  principalShort,
+  renderApprovalList,
+  restoreProgressSentence,
+} from "../pages/approvals.js";
 import { ident } from "../render.js";
 import { LONG_TOKEN_CHARS, SHORT_CHIP_CHARS } from "../app.js";
 import { renderOperation } from "../pages/operation.js";
@@ -243,4 +248,40 @@ test("m6_the_approvals_table_keeps_one_line_a_row_and_every_identifier_whole", (
   // And an absent identifier is the absent mark, not an empty copy button.
   assert.equal(ident(null), "-");
   assert.ok(LONG_TOKEN_CHARS < KEY.length, "the key id is a long token the old cell broke anywhere");
+});
+
+// M7. The approver was shown only as `https://dex.localtest.me#CiQx...`:
+// alice and bob could not be told apart at a glance. The signed approval
+// carries no name or email, so the cell shows a short form of the subject,
+// the full principal on hover -- and "you" for the signed-in actor.
+
+const BOB = "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAyLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDISBWxvY2Fs";
+
+/** What a person SEES in the approver cell: the drawn short form. */
+function seen(cellHtml) {
+  const shown = /<span aria-hidden="true">([^<]*)<\/span>/.exec(cellHtml);
+  return shown === null ? cellHtml.replace(/<[^>]*>/g, "").replace(/copy$/, "") : shown[1];
+}
+
+test("m7_two_approvers_read_differently_at_a_glance_and_the_signed_in_one_is_you", async () => {
+  const two = renderApprovalList({ items: [pocApproval("a-1", DEX), pocApproval("a-2", BOB)] },
+    Date.parse("2026-10-12T09:30:00Z"));
+  const rows = two.slice(two.indexOf("<tbody>"), two.indexOf("</tbody>")).split("<tr").slice(1);
+  const approvers = rows.map((row) => seen(firstRowCells("<tbody><tr" + row + "</tbody>")[2]));
+  assert.notEqual(approvers[0], approvers[1],
+    "NEGATIVE CONTROL: both read https://dex.localtest.me#CiQx... in a cut-off cell");
+  for (const shown of approvers) {
+    assert.ok(!shown.includes("dex.localtest.me"), "the issuer is on hover, not in the way: " + shown);
+    assert.ok(shown.length <= 6 + 3 + 12, shown);
+  }
+  assert.deepEqual(approvers, ["CiQxZj...MDcSBWxvY2Fs", "CiQxZj...MDISBWxvY2Fs"]);
+  // A subject that is already short is shown whole.
+  assert.equal(principalShort("https://idp.example#bob", null), "bob");
+  assert.ok("bob".length <= PRINCIPAL_SHORT_CHARS);
+  // THE SESSION NAMES ITS OWN ACTOR, so the signed-in approver reads "you".
+  const viewer = session("session-viewer.json");
+  const mine = await signedInAs(viewer, async () =>
+    renderApprovalList({ items: [pocApproval("a-3", viewer.actor.id)] }, 0));
+  assert.equal(seen(firstRowCells(mine)[2]), "you (Dana Viewer)");
+  assert.ok(firstRowCells(mine)[2].includes("title=\"oidc#dana\""), "with the principal on hover");
 });

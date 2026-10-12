@@ -51,7 +51,7 @@
 // rejected attempt and not a failure of this page -- and this page never offers
 // to reuse an Approval bound to another subject or another execution.
 
-import { apiClient, granted } from "../client.js";
+import { apiClient, granted, sessionIdentity } from "../client.js";
 import {
   active,
   cancelled,
@@ -303,7 +303,7 @@ function approvalTable(collection, now, policy) {
     return [
       cell(subject.kind ? subject.kind + "/" + String(subject.name) : subject.name),
       verifiedChip(status),
-      ident(status.approver),
+      principalCell(status.approver),
       ident(status.matchedKeyId),
       cell(ageOf(meta.creationTimestamp, at)),
     ];
@@ -413,7 +413,7 @@ export function renderApprovalStatus(object) {
       ["verified subject uid", cell((status.verifiedSubjectRef || {}).uid)],
       ["Verified reason", cell((condition || {}).reason)],
       ["matched key id", cell(status.matchedKeyId)],
-      ["approver", cell(status.approver)],
+      ["approver", principalCell(status.approver)],
       ["ticket", cell(status.ticket)],
       // What the signed document authorises.
       ["approval subject", "<span class=\"approval-subject-value\">" +
@@ -1095,6 +1095,37 @@ export async function submitApproval(subject, documents, deps, options) {
 
 /** The verified badge. It reads `status.verified` and nothing else: this page
  *  verified nothing, and neither did the browser. */
+/** The longest subject a principal's short form shows whole. */
+export const PRINCIPAL_SHORT_CHARS = 20;
+
+/** A PRINCIPAL, `<issuer>#<subject>`, IN A FORM A PERSON CAN TELL APART AT A
+ *  GLANCE (PROD-14.1 visual pass, M7). The signed approval names its approver
+ *  by issuer and subject only, never a name or an email
+ *  (`logweir_core::approval_policy::Approver`), and the sign-in names only its
+ *  own actor. So: "you (<display name>)" for the signed-in actor's own
+ *  principal; else the subject alone, its middle cut when it is longer than
+ *  [`PRINCIPAL_SHORT_CHARS`] (an IdP's opaque subject differs in its tail as
+ *  often as in its head). `self` is `sessionIdentity`'s answer, or `null`. */
+export function principalShort(id, self) {
+  const full = String(id === null || id === undefined ? "" : id);
+  const me = self || {};
+  if (typeof me.actorId === "string" && me.actorId.length > 0 && me.actorId === full &&
+    typeof me.displayName === "string" && me.displayName.length > 0) {
+    return "you (" + me.displayName + ")";
+  }
+  const at = full.indexOf("#");
+  const subject = at === -1 ? full : full.slice(at + 1);
+  return subject.length <= PRINCIPAL_SHORT_CHARS
+    ? subject
+    : subject.slice(0, 6) + "..." + subject.slice(-12);
+}
+
+/** A principal as a cell: its short form, the full principal on hover, in the
+ *  text and on the copy button. */
+export function principalCell(id) {
+  return ident(id, principalShort(id, sessionIdentity("")));
+}
+
 /** The table's verdict chip: `verified` in one word, with the sentence the
  *  card says -- which key, by whom -- as its hover title. Every other state is
  *  [`verifiedBadge`]'s own words. */
@@ -1677,7 +1708,7 @@ export function renderConsoleApprovalPanel(view) {
   }
   const original = r.approvalSubject === "originalName";
   const rows = [
-    ["requested by", "<code id=\"request-requester\">" + esc(r.requester) + "</code>"],
+    ["requested by", "<span id=\"request-requester\">" + principalCell(r.requester) + "</span>"],
     ["Restore", "<code>" + esc(r.restore) + "</code>"],
     ["Restore uid", "<code>" + esc(r.restoreUid) + "</code>"],
     ["plan hash", "<code id=\"request-plan-hash\">" + esc(r.planHash) + "</code>"],
@@ -1690,7 +1721,8 @@ export function renderConsoleApprovalPanel(view) {
     ["expires at", "<span id=\"request-expires-at\">" + when(r.expiresAt) + "</span>"],
   ];
   if (r.state === "approved") {
-    rows.push(["approved by", "<code id=\"request-approver\">" + esc(r.approver) + "</code>"]);
+    rows.push(["approved by", "<span id=\"request-approver\">" + principalCell(r.approver) +
+      "</span>"]);
     rows.push(["approved at", when(r.approvedAt)]);
   }
   // THE SCOPE, WHOLE, or the server's sentence saying why it cannot be

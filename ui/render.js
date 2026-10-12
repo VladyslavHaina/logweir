@@ -643,7 +643,8 @@ export function ident(value, shown) {
   const full = String(value);
   const short = typeof shown === "string" && shown.length > 0 && shown !== full;
   return (
-    "<span class=\"ident\"><code class=\"ident-text\" title=\"" + esc(inert(full)) + "\">" +
+    "<span class=\"ident\"><code class=\"ident-text" + (short ? " ident-shown" : "") +
+    "\" title=\"" + esc(inert(full)) + "\">" +
     (short
       ? "<span aria-hidden=\"true\">" + esc(inert(shown)) + "</span>" +
         "<span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"

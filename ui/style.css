@@ -290,6 +290,7 @@
   --lw-list-indent: 1.25rem;
   --lw-subset-max-height: 24rem;
   --lw-ident-width: 14ch;
+  --lw-ident-shown-width: 24ch;
   /* The sticky wizard footer's height where it wraps to two rows (390 px:
    * about 110 px), with room to spare -- what a focused status keeps clear. */
   --lw-wizard-nav-clearance: 8rem;
@@ -987,6 +988,12 @@ main > h2 + .blurb,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A short form a page drew itself (a principal's subject) is bounded by its
+ * maker, so it gets the room to be read whole. */
+.ident-text.ident-shown {
+  max-width: var(--lw-ident-shown-width);
 }
 
 .ident-copy {
