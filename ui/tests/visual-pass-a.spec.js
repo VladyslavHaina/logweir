@@ -279,6 +279,10 @@ test("h2_rotating_one_key_keeps_the_others_exactly_as_the_destination_has_them",
   assert.deepEqual(keptGrant({ mode: "secretKeys", secretName: "s",
     keys: ["access-key-id", "secret-access-key", "session-token"] }),
   { mode: "secretKeys", secret: { existing: { name: "s", sessionTokenKey: "session-token" } } });
+  assert.deepEqual(keptGrant({ mode: "secretKeys", secretName: "s",
+    keys: ["access-key-id", "secret-access-key", "token"] }),
+  { mode: "secretKeys", secret: { existing: { name: "s", sessionTokenKey: "token" } } },
+    "beside the two defaults, the one key left is the session token's");
 });
 
 test("h2_keep_is_refused_rather_than_guessed_when_the_key_names_are_not_the_defaults", async () => {

@@ -173,16 +173,16 @@ export function holdsGrant(view) {
 
 /** The data keys a `secret.existing` without key names stands for. */
 const DEFAULT_SECRET_KEYS = Object.freeze(["access-key-id", "secret-access-key"]);
-const DEFAULT_SESSION_TOKEN_KEY = "session-token";
 
 /** THE GRANT A DESTINATION HAS NOW, AS A REQUEST: what `keep` sends.
  *
  *  `null` for an absent grant (kept absent). `undefined` when this page
- *  cannot spell it: a Secret whose data keys are not the API's defaults is
- *  published as a sorted list that does not say which key holds the key id,
- *  and guessing would point the grant at the wrong value. Naming a Secret the
- *  destination already names is what `:update-access` accepts for "keeping a
- *  grant as it is". */
+ *  cannot spell it: a Secret whose two credential keys are not the API's
+ *  defaults is published as a sorted list that does not say which key holds
+ *  the key id, and guessing would point the grant at the wrong value. Beside
+ *  the two defaults, the one key left is `sessionTokenKey`. Naming a Secret
+ *  the destination already names is what `:update-access` accepts for
+ *  "keeping a grant as it is". */
 export function keptGrant(view) {
   const g = view || {};
   if (!holdsGrant(g)) {
@@ -200,14 +200,13 @@ export function keptGrant(view) {
     return undefined;
   }
   const keys = Array.isArray(g.keys) ? g.keys : [];
-  const others = keys.filter((k) =>
-    DEFAULT_SECRET_KEYS.indexOf(k) === -1 && k !== DEFAULT_SESSION_TOKEN_KEY);
-  if (others.length > 0 || DEFAULT_SECRET_KEYS.some((k) => keys.indexOf(k) === -1)) {
+  const others = keys.filter((k) => DEFAULT_SECRET_KEYS.indexOf(k) === -1);
+  if (others.length > 1 || DEFAULT_SECRET_KEYS.some((k) => keys.indexOf(k) === -1)) {
     return undefined;
   }
   const existing = { name: g.secretName };
-  if (keys.indexOf(DEFAULT_SESSION_TOKEN_KEY) !== -1) {
-    existing.sessionTokenKey = DEFAULT_SESSION_TOKEN_KEY;
+  if (others.length === 1) {
+    existing.sessionTokenKey = others[0];
   }
   return { mode: "secretKeys", secret: { existing: existing } };
 }
