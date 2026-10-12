@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85 and 86 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84, 85, 86 and 88 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1824,6 +1824,47 @@ of `v0.2.0-rc.1`'s document against this one.
 **Rollback:** an older console image serves `1.0.0-alpha.2` again; roll it
 back with the items it names.
 
+#### 88. The console's check commands, Rotate access, Retention panel, "What uses this" and Restore detail say what is so (PROD-14.1)
+
+**Changed.** Five defects the PROD-14.1 visual pass found on the console:
+- A Backup's *Check it yourself* fetches from the bucket of the destination the
+  run names, with `--endpoint-url` and `--region` when the destination has them.
+  It printed the destination's name as the bucket (`s3://primary/…`). A
+  destination that now names another location than the run froze, or that this
+  login may not read, gets a placeholder bucket and the reason; a run with no
+  evidence keys yet says so instead of fetching the bucket root.
+- *Rotate access* starts every grant on `keep`, which sends the grant as the
+  destination has it. It started the three optional grants on `absent`, so
+  rotating one key removed the others and turned evidence verification off.
+  Choosing `absent` for a grant the destination holds says what turns off. A
+  Secret whose data keys are not `access-key-id` and `secret-access-key` cannot
+  be kept from the console, and the form says so and sends nothing.
+- A schedule's *Retention* panel shows the `RetentionPolicy` whose
+  `spec.destinationRef` names the schedule's destination: a `Report` policy
+  deletes nothing, an `Enforce` one is shown as deleting, and two such policies
+  are the `Conflict` the controller marks them. "Logweir never deletes from your
+  archive" appears only when the policies were read and none names the
+  destination.
+- `GET …/destinations/{name}/usage` lists the schedules and Backups whose
+  `spec.destinationRef` names the destination, from at most 1,600 of each kind,
+  and says `truncated` past either bound. It selected on a label no schedule or
+  Backup carried, so the console said nothing used a destination that a schedule
+  and its Backups used.
+- The `Restore` view gains `integrityResult`, `integrityPartialReason`,
+  `topicPreflight` (`TopicPreflightView`) and `oldTopics` (OpenAPI
+  `1.0.0-alpha.3`, additive), and a Restore's detail shows them. The objectives
+  and the measured values, which no route publishes, are one sentence in place
+  of six "not published" rows.
+**Do:** nothing. `:update-access` still takes the complete grant block; a script
+that sends only the grant it changes still removes the others.
+**Scope:** `ui/tests/visual-pass-a.spec.js` (`h1_*`, `h2_*`, `h3_*`, `m9_*`),
+`crates/logweir-api/tests/destinations.rs` (usage) and
+`crates/logweir-api/tests/list_projection_additions.rs` (the Restore members),
+each with a control that fails on the old code.
+[UNVERIFIED — no PoC page has shown these fixes yet; the PoC re-check after merge walks each page again.]
+**Rollback:** an older console image serves the old pages and the old usage
+route; nothing is stored, and an older console ignores the four new members.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1960,7 +2001,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85 and 86, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86 and 88, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2024,6 +2065,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 84 | the identity hook's image | nothing |
 | 85 | the chart only | nothing until `minio.persistence.keep` is set |
 | 86 | the API document's version (the console image) | nothing |
+| 88 | the console image (the API and the page) | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

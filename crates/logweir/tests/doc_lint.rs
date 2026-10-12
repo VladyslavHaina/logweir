@@ -2134,6 +2134,8 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // Item 86: the API document's version step for the next candidate.
         ("the API document is 1.0.0-alpha.3", "`1.0.0-alpha.3`"),
+        // Item 88: the visual pass's console fixes; the member the Restore view gains.
+        ("the visual pass's console fixes", "`integrityResult`"),
     ];
     assert_eq!(
         items.len(),
