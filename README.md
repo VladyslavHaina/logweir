@@ -27,17 +27,18 @@ resulting scorecard. It requires Docker, Rust, `just`, OpenSSL, `awk`, and
 Python with `cryptography`. Output goes to the ignored `.demo/mvp/` directory.
 The generated demo keys prove integrity but have no independent provenance.
 
-[Quickstart](docs/quickstart.md) starts with the one supported setup-and-recovery
-path on Kubernetes, then covers running a drill against your own archive.
+[The installation guide](docs/install.md) is the one supported setup-and-recovery
+path on Kubernetes; [the quickstart](docs/quickstart.md) runs this demo without
+a Rust toolchain (`just sandbox`) and a drill against your own archive.
 [Verification](docs/verify-a-scorecard.md) explains what the signed result proves.
 
 ## Install
 
 Kubernetes 1.29 or newer is required. The supported path is the published Helm
-chart with its managed installation identity: [quickstart](docs/quickstart.md),
-*The supported path*, then [the installation guide](docs/install.md) and
-[the chart reference](charts/logweir/README.md). The chart is the only install;
-locally built images remain in the installation guide.
+chart with its managed installation identity: [the installation
+guide](docs/install.md) and [the chart reference](charts/logweir/README.md).
+The chart is the only install; locally built images remain in the installation
+guide.
 
 **What is published.** A push to `main` that changes something outside
 `docs/` and passes CI publishes the controller (`weirkeeper`), runner
@@ -189,10 +190,9 @@ package and fixture READMEs stay beside the files they describe.
 
 | Task | Guide |
 |---|---|
-| Set up, back up, restore and recover — the one supported path | [Quickstart, *The supported path*](docs/quickstart.md) |
-| Install with manifests or local images | [Installation](docs/install.md) |
+| Install, back up, restore and recover — the one supported path | [Installation](docs/install.md) |
 | Install or configure Helm | [Chart guide](charts/logweir/README.md) |
-| Run the demos, a drill, or the standalone CLI | [Quickstart, *Demos and the standalone CLI*](docs/quickstart.md) |
+| Run the demos (with or without Rust), a drill, or the standalone CLI | [Quickstart](docs/quickstart.md) |
 | Operate controllers, jobs, approvals and retention | [Kubernetes](docs/kubernetes.md) |
 | Look up an exit code, a status reason or a runner output line | [Reference](docs/reference.md) |
 | Use or develop the static UI | [UI guide](ui/README.md) |

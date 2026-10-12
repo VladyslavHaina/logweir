@@ -1,357 +1,40 @@
 # Quickstart
 
-This page is **the one supported setup-and-recovery guide**. A new operator
-follows [*The supported path*](#the-supported-path-install-to-disaster-restore)
-from top to bottom: install, a saved connection and destination, a schedule, the
-first backup, a restore of a chosen point, verification, and a disaster restore
-from a connected archive. Each step names who decides it and links to the
-reference that owns the detail; this page does not restate those references.
-
-The CLI and the local stack come after it, as
-[*Demos and the standalone CLI*](#demos-and-the-standalone-cli): the product
-backup/restore demo and a drill against your own archive. To interpret evidence someone gives you,
-use [verify-a-scorecard.md](verify-a-scorecard.md). What changed since the last
-release, and what an upgrade requires, is [release-notes.md](release-notes.md).
+Two ways to see Logweir work in minutes, on a laptop, with no cluster: the local
+demo, with or without a Rust toolchain, and a drill against an archive you
+already have. Neither is an installation. To install, back up, restore and
+recover on Kubernetes, follow [install.md](install.md). To read evidence
+someone gives you, use [verify-a-scorecard.md](verify-a-scorecard.md).
 
 ---
 
 ## The supported path: install to disaster restore
 
-**What this path is.** The Helm chart with its managed installation identity,
-the `weirkeeper` controller, the product console (`logweir-api`, in `localAdmin`
-or `shared` mode), and saved `KafkaCluster` connections and `BackupDestination`s.
-The legacy static page behind `kubectl proxy` was withdrawn in v1
-(release-notes item 75). Each step
-is a shipped task with its own docker-desktop evidence; what has not been run —
-this page as one walk on a fresh install, among others — is named in the last
-section.
+The supported path is the Helm chart with its managed identity, the
+`weirkeeper` controller and the console, and it lives in
+[install.md](install.md):
 
-**The PoC install profile is this path, made concrete.**
-[deploy/poc/](../deploy/poc/README.md) installs it end to end with Helm, from the
-published OCI chart and its `sha-` images, with no post-install patch: Traefik, a
-cert-manager local CA for real TLS,
-Dex for sign-in with one user per console role, the shared console, a scoped
-controller, an approval-policy binding and a demo Kafka and MinIO to back up —
-ordered commands, a check per step, first sign-in per role, the first backup
-and restore, the two upgrade rehearsals and uninstall. Use it for a proof of
-concept; the steps below are the same path for any installation.
+1. [Install](install.md#install), with the console on, so restores are
+   confirmed in one click and nobody handles a key.
+2. [The first backup](install.md#the-first-backup): a connection, a
+   destination, a schedule, *Run first backup now*.
+3. [The first restore, and verifying it](install.md#the-first-restore-and-verifying-it).
+4. [Approval modes](install.md#5f-approval-modes-confirm-two-person-strict-approvalpolicy):
+   confirm, two-person or strict, per namespace.
+5. [Recover onto a clean installation with the kit](install.md#recover-onto-a-clean-installation-with-the-kit).
+6. [Upgrade and roll back](install.md#upgrade-crds-before-upgrading-the-controller).
 
-### Who decides what
-
-| Decision | Who | Where it is made |
-|---|---|---|
-| Install, upgrade, CRDs, controller scope | cluster administrator | Helm values ([install.md](install.md)) |
-| Whose keys may approve and attest, per namespace | `logweir-trust-admin` (a `TrustPolicy`), or a cluster administrator (the legacy `TrustRoster/default`) | [keys.md](keys.md); never a namespace operator |
-| How a namespace's restores are approved: **confirm** (one click, no key — a fresh install's default), **two-person** (a second person signs in to the shared console and clicks Approve, no key) or **strict** (a personal key) | installation administrator | `approvalPolicy.*` values, one rollout ([install.md](install.md) §5f); never a namespace object |
-| Approving one restore | **confirm**: the requester, in the console. **two-person**: an Approver who is not the requester, in the console. **strict**: an approver who is not the requester | **confirm**: *Create the Restore*. **two-person**: *Approve this Restore* on the Restore's approval page, in the shared console. **strict**: `logweir drill approve` / `logweir drill countersign`, on their own machine, with the CLI from the release archive for that machine ([README](../README.md#install)) |
-| Connections, destinations, schedules, backups, restore requests | `logweir-operator` (console role Operator) | the console |
-| Whether archive objects are ever deleted | `logweir-retention-admin`, plus an administrator's approval of each plan digest | a `RetentionPolicy` ([kubernetes.md](kubernetes.md) §7f); the default deletes nothing |
-
-Bind the operator, approver, trust-admin and retention-admin roles to
-**different** people ([install.md](install.md) §5): one person holding two of
-them can approve their own restore, or enforce a deletion plan they wrote.
-
-### 1. Install
-
-1. Check the floors: Kubernetes 1.29+, amd64 or arm64 nodes, and engine
-   0.21.0, with Logweir's build of 0.23.3 (`0.23.3+logweir.3`) the engine the
-   images ship
-   ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
-2. Choose images: the published digests of the exact CI run you deploy, not
-   `latest` ([install.md](install.md), *Choose an image and installation path*).
-3. Install with Helm and the managed identity — path (c) — declaring every
-   namespace where backups and restores will run in
-   `identity.authorizedRunnerNamespaces` (those namespaces must exist first).
-   **Turn the console on in this same first install** (`api.enabled`,
-   `api.console.enabled`, `api.console.mode`; step 3 and [install.md](install.md)
-   §5e): a fresh install with a console starts in **confirm**, so its first
-   restore needs no key (Helm 3.19+ or 4.x, and a chart whose
-   `identity.bootstrapFeatures.consoleKey` is on — the release default once its
-   bootstrap image is re-pinned); a console turned on by a later upgrade does
-   not, and then you opt in ([install.md](install.md) §5f). Name the clusters a restore
-   may write into in `identity.installationTrust.allowedTargetClusterIds` if
-   you know them. Add `retention.enabled=true` only if you will ever enforce
-   retention.
-4. Back up the installation identity at once ([install.md](install.md),
-   *Back up and recover the installation identity*). Losing it loses the
-   ability to sign; losing its public half loses the ability to verify old
-   archives.
-
-**Check:** the controller Deployment is ready, and
-`logweir-signing-trust` carries a `key-id` ([install.md](install.md) §1).
-
-### 2. Trust, keys and approval policy
-
-On a **fresh install with the console** there is nothing to do here: the
-identity hook generated the console's key and — on a cluster with no trust of
-its own — created the default `TrustPolicy` `logweir-installation` for it and
-for the installation's signing key, and every namespace without its own policy
-is **confirm** (`installation-trust skipped:…` in the hook's log says when it
-did not, and which public key ids to add to your trust). No
-key file, no `openssl`, no roster ([install.md](install.md) §5f).
-
-The steps below are for what that does not cover — a **strict** namespace, an
-install that existed before this release, or trust you manage yourself:
-
-1. Generate the approver's key pair on the approver's machine; its private half
-   never enters the cluster ([install.md](install.md) §1).
-2. Establish trust: a `TrustPolicy` — retirement, revocation and overlap
-   rotation — or, the smallest first step on an install without one,
-   `TrustRoster/default` with the approver key and the installation's signing
-   key from `logweir-signing-trust` ([install.md](install.md) §2); `logweir
-   trust migrate-roster` writes a policy from the roster ([keys.md](keys.md)).
-3. Decide each namespace's approval mode: **confirm**, **strict** (a change
-   ticket and an independent approver's key), or leave it on the installation's
-   default ([install.md](install.md) §5f; [kubernetes.md](kubernetes.md) §8,
-   *The three modes*). An older install keeps `legacy-governed-v1` until you opt
-   in.
-
-**Check:** `kubectl --context <ctx> get trustpolicy logweir-installation`
-reads `DEFAULT true`, `KEYS 2`, `LOADED True` (or your own policy or roster
-reports its keys loaded).
-
-### 3. Roles and the console
-
-1. Bind the human roles ([install.md](install.md) §5): viewer, operator,
-   approver and retention-admin with a `RoleBinding` per namespace, and
-   `logweir-trust-admin` once, with a `ClusterRoleBinding` (it is
-   cluster-scoped).
-2. Turn the console on ([install.md](install.md) §5e). `localAdmin` is one
-   administrator reached by `kubectl port-forward` — for a lab or break-glass;
-   `shared` is the SSO console, needs `controller.watchNamespaces`, an OIDC
-   client and a TLS Ingress. Both serve **confirm**; in `localAdmin` the
-   confirming principal is the one local administrator, so whoever can
-   port-forward to the console can confirm (SECURITY.md).
-3. If the cluster is 1.30+, fence the console's `create secrets` with the
-   admission policy ([install.md](install.md) §5b).
-
-**Check:** the console loads and `GET /api/v1/session` lists your namespaces.
-
-### 4. A saved connection
-
-Create the Kafka credential Secret with `kubectl`, then the connection in the
-console's cluster page, naming that Secret — the console never shows or reads a
-credential value. The console names the connection itself (`conn-` and 26
-characters, shown once it exists); its role is how later steps tell a source
-from a target. TLS is a checkbox on the form. **A private CA (`auth.tlsCa`) or a
-non-default Secret key (`auth.secretRef.passwordKey`) cannot be set through the
-console yet:** the product API's connection create has no field for either
-(PLAT-07.2), so the console refuses such a connection rather than create one
-without them. Create it with `kubectl` — set the CA once and both of the runner's TLS clients use it
-([kubernetes.md](kubernetes.md) §20) — and the console then reads it like any
-other.
-
-**Check:** *Test connection* creates a `SourceConnection` readiness check and
-shows each row's state, code and remedy ([kubernetes.md](kubernetes.md) §21.0).
-A `ready` connection check authorises nothing by itself.
-
-### 5. A saved destination
-
-Create a `BackupDestination` on the console's *Destinations* page with separate
-grants per role — `archiveWrite`, `archiveRead`, `evidenceWrite`, `evidenceRead`
-— scoped exactly as the measured table says ([install.md](install.md) §3.11).
-**Give it an `evidenceRead` grant**: without one, every run's verification is
-`NotAttempted` and no badge can turn green. No role is ever granted
-`s3:DeleteObject`.
-
-**Check:** the destination reads `Valid`, and *Test access* (a
-`DestinationAccess` readiness check) is `ready` for the roles you configured
-([kubernetes.md](kubernetes.md) §7a).
-
-### 6. A schedule, and the first backup
-
-1. On *Schedules*, create one: the source connection, **named topics** or **all
-   user topics** (a discovery per run; say what happens when completeness
-   cannot be established), the cadence with its preview in your time zone, and
-   the destination.
-   Everything but the source connection can be edited later, and an edit never
-   reaches a run that already exists ([kubernetes.md](kubernetes.md) §9).
-2. Press *Run first backup now* rather than waiting: a slot due before the
-   schedule existed never fires.
-
-**Check:** the run's operation page reaches `Succeeded` with a green badge —
-*verified by weirkeeper … against key …* — and the run shows the window it
-covered. A run that succeeded but reads `unverified: not attempted` is almost
-always a destination with no `evidenceRead` grant.
-
-### 7. Restore a chosen point
-
-1. From the schedule's page, choose *Restore this point* on the exact row you
-   want — an older point is its own link, not a highlighted row.
-2. In the wizard, choose the target connection (a `target` role), the topics and
-   the new-topic mapping, and the point in time inside the covered window.
-   Restores only ever write **new** topics. Check the **replication factor** in
-   step 4: it defaults to the source's factor when a recovery catalog's view of
-   the point records it (the largest of the selected topics', from backups
-   whose receipt is format 1.3.0 or later), capped at the target's broker
-   count; otherwise to the target's broker count, at most 3, when a
-   *Discover topics* of the target connection has read it (until the controller
-   collects that discovery, a day by default; past the discovery's freshness,
-   15 minutes by default, the count sets the default but refuses no factor),
-   and otherwise to 1, which the step says; run the discovery first, or set the
-   factor yourself. This factor can differ from
-   the source's, and the target's storage follows it: a topic the source kept
-   at replication factor 1, restored at 3, takes three times the storage it
-   took there, with the replication traffic on top; a factor below the
-   source's keeps fewer copies than the source had.
-3. Run the readiness check in step 5 before *Create the Restore*. Once a check
-   has run for the plan, Create is held until it reads ready: every blocking
-   row `ready`, except the approval row, which is `skipped` until the Restore
-   exists ([kubernetes.md](kubernetes.md) §21.7). The check is advisory, so with no
-   check at all Create stays enabled, beside a warning, and nothing has
-   validated the replication factor against the target's brokers: the page
-   refuses a factor above the broker count only on a fresh discovery's count. A
-   factor the brokers cannot hold is then refused by the broker when the runner
-   creates the topics, after the approval and phases 0–5: the Restore ends
-   `Failed` with `exitCode 1` / `operational`, no signed result and nothing
-   restored, and the runner's log (`kubectl logs job/<Restore name>` in its
-   namespace) names `InvalidReplicationFactor`. A point with no saved destination —
-   every point `v0.1.5` wrote — is checked the same way: the check reads its
-   inline archive with the Secret its Backup named, as the restore will. Its
-   evidence bucket starts as the archive's own; keep it there, because the
-   controller verifies such a run only in its archive handle's bucket, and an
-   advisory `destination.evidenceReadable` row says when a plan would not be
-   verified ([kubernetes.md](kubernetes.md) §15.1a, §21.8).
-4. Get it approved, by the namespace's mode:
-   - **confirm** (a fresh install's default): *Create the Restore* is the
-     approval — the console signs its confirmation of you and the Restore runs
-     once weirkeeper verifies it. No key, nothing to paste;
-   - **strict**, `legacy-governed-v1`: download the plan bytes; the approver runs
-     `logweir drill approve … --subject-kind Restore` on their machine and
-     records the two files through the console (Approver role) or `kubectl`
-     ([kubernetes.md](kubernetes.md) §17);
-   - **strict**, a `Governed` binding: the console confirms the requester, and a
-     different approver runs `logweir drill countersign` and submits it
-     ([kubernetes.md](kubernetes.md) §8, *Approval policy*).
-
-**Check:** the `Approval` reads `Verified=True`, the `Restore` is admitted,
-and its operation page reaches `Succeeded` with a completion panel.
-
-### 8. Verify what you got
-
-- **The badge** is green only when the signed document verified under a key the
-  namespace's trust accepts **and** the run succeeded (a Backup's `exitCode 0`,
-  a Restore's `outcome pass`). *Signed before that key was retired* is still a
-  pass; *recorded before revocation* never is ([kubernetes.md](kubernetes.md)
-  §15.2).
-- **The record check is a sample.** *Records verified in the sampled window* is
-  the count read back from the new topics inside the sampled window, and *records
-  sampled and matching* is how many of those matched byte for byte. Neither is
-  the total the restore wrote, and a `Restore` cannot ask for a comparison of
-  every record in this version; only the command-line runner can, with
-  `sample.coverage: complete` ([release notes](release-notes.md), item 30;
-  *Terms* below).
-- **Check it without Logweir.** Fetch the scorecard and its sidecar from the
-  keys on the `Restore` (`status.evidence`) and run
-  `python3 docs/verify_scorecard.py` over them ([verify-a-scorecard.md](verify-a-scorecard.md)).
-
-### 9. Disaster restore from a connected archive
-
-When the cluster that ran the backups is gone — or this is a fresh installation
-pointed at an archive another installation wrote — no `Backup`, schedule or
-source connection is needed ([kubernetes.md](kubernetes.md) §7d.1):
-
-1. Create a destination whose `archiveRead` grant is the archive's read-only key
-   pair, entered once on the *Destinations* page (*new*): the console creates a
-   Secret bound to the destination. (With `kubectl`, create the destination, then
-   a Secret carrying the key pair and its `status.credentialBinding` under
-   `logweir-binding` — [kubernetes.md](kubernetes.md) §20.10.) Widen `archiveRead`
-   to the catalog row of [install.md](install.md) §3.11, or the catalog will not
-   sync.
-2. *Catalog* → *Connect an existing archive* (a `Full` sync). A sync reads the
-   archive's catalog records; points written before the catalog existed
-   (`v0.1.5` and earlier) have none until `logweir catalog sync` backfills them
-   once ([kubernetes.md](kubernetes.md) §7d).
-3. Establish trust for the archive's signing key out of band, then re-sync;
-   there is no one-click trust ([keys.md](keys.md)).
-4. Choose a point the catalog marks selectable (`Available` and `Verified` or
-   `VerifiedHistorical`), name the topics, and restore it as in step 7 — the plan
-   is bound to that exact receipt, and the runner re-verifies it before any data
-   moves.
-
-**Check:** the catalog reads `Synced`, the signer panel lists the key you
-trusted, and the restore's completion panel appears.
-
-### 10. Retention: reported by default, deleted only by decision
-
-A schedule's own retention settings are withdrawn; retention is a
-`RetentionPolicy`'s. A `RetentionPolicy` starts in `mode: Report`. Moving it to `Enforce` is a
-retention administrator's decision that also needs a separate delete-capable
-credential with `s3:GetObject`, an unversioned bucket, the `logweir-retention`
-ServiceAccount, and an administrator's approval of each plan digest
-([kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md), items
-1–3). `mode: ExternalLifecycle` declares that the bucket's own rule deletes.
-
-### 11. Upgrade and roll back
-
-Read [release-notes.md](release-notes.md) before every upgrade: it lists the
-required actions in order. The standing rule is **CRDs first, then the controller
-and runner together, then the console** (on the Helm path these are successive
-`helm upgrade`s of one release: first the image values, then any
-approval-policy binding) ([install.md](install.md), *Upgrade CRDs
-before upgrading the controller*), with the identity backed up beforehand.
-
-### Terms: what the console says, and what it means
-
-| The console says | The field behind it | What it means |
-|---|---|---|
-| *verified by weirkeeper at T against key K* | `status.evidence.verification.result: Valid` with `trust.basis` `Current` or `Historical` (or no `trust` block, on an object an older controller wrote), plus `exitCode 0` or `outcome pass` | the green badge ([kubernetes.md](kubernetes.md) §15.2) |
-| *(signed before that key was retired)* | `trust.basis: Historical` | a pass; the key was valid when it signed |
-| *unverified: invalid* | `result: Invalid` | a fact about the **document**: a signature or digest did not match |
-| *unverified: not attempted* | `result: NotAttempted` | a fact about the **controller**: no credential, no object, or no trust material |
-| *unverified: untrusted signer* | `result: Untrusted` | a fact about the **signer**: authentic bytes, a key this installation does not accept |
-| *recorded before revocation* | `trust.basis: RecordedBeforeRevocation` | never green; a compromise-revoked key signed it |
-| *pending* | `result: Pending` | the evidence fetch has not answered yet |
-| *records verified in the sampled window* | `Restore.status.completion.recordsRestored` (`sample.records_restored`) | records read back from the new topics inside the sampled window — not the total written, and not the matching count |
-| *records sampled and matching* | `completion.recordsSampledMatching` | how many sampled records matched byte for byte |
-| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` is not a level |
-| *coverage: sampled* / *complete, covered* / *complete, NOT covered -- not a pass* | `Restore.status.integrity.coverage` and `.complete.covered` (`verificationScope.coverage`) | how MUCH was compared, as the signed scorecard says (PROD-08.1a); absent is not recorded, never complete, and `covered: false` is never a pass ([kubernetes.md](kubernetes.md) §12) |
-| *Visible user topics only — completeness not established* | `status.selection.coverage: VisibleUserTopicsOnly` | a dynamic run backed up what its principal could see; Kafka hides the rest silently |
-| *All user topics (attested complete)* | `AllUserTopicsAttested` | only with an administrator's attestation ([kubernetes.md](kubernetes.md) §22.2) |
-| catalog availability / verification | `Available`…`Partial` / `Verified`…`NotAttempted` | two separate axes; *selectable* needs both ([kubernetes.md](kubernetes.md) §7d) |
-| protection health | `Healthy`, `AtRisk`, `Stale`, `Unprotected`, `Unknown` | `Unknown` is never healthy and never a failure ([kubernetes.md](kubernetes.md) §7e) |
-| *Logweir reports what would be removed under this policy and removes nothing* | `RetentionPolicy.status.enforcement: RecommendationOnly` | nothing is deleted |
-| *An isolated Logweir retention worker deletes archive objects under this policy* | `status.enforcement: LogweirWorker` | an approved plan is being enforced |
-| *enforced by Logweir* / *declared by your provider; Logweir cannot verify it* / *not enforced* | `status.guarantees.*` | who, if anyone, enforces each retention guarantee |
-| key evaluation `unknown` | a `TrustPolicy` with no fresh status | never read as valid |
-
-### What this path has not yet been shown to do end to end
-
-Every step above is on `main` and was exercised on docker-desktop by its own
-task's journey; every one of those tasks is Done, and
-[release-handoff.md](release-handoff.md) says where each was proven. This
-page as one walk on a fresh install, and an upgrade from the last published
-image that keeps identities, schedules and archive readability, are PLAT-20.2's
-live half: the PoC profile ran them on docker-desktop on 2026-09-24 — a clean
-install from the published chart, steps 4–9 through the shared console behind
-Traefik (TLS) and Dex (OIDC), and upgrades from `v0.1.5` and `sha-f49849d…`
-([deploy/poc/](../deploy/poc/README.md), *What the first live round showed*). It
-found console defects on the way (among them: the names typed for a connection
-and a schedule are replaced by minted ones, and *Test access* does not show its
-result). The PoC's five in-place upgrades, the last to `fdb48cd8` on
-2026-09-25, closed those defects and the later ones (P1–P16) live: a legacy
-inline-archive point passed its readiness check and restored `Valid`,
-*Catalog → Connect* connected, a readiness check slower than the page's old
-follow is read to its verdict, restore step 5 keeps its status line in view on
-a narrow screen while a check runs, and the PoC README's §10 walk ran clean end
-to end in the console as a new user ([release-handoff.md](release-handoff.md)).
-One small console defect is open: a check the page follows stops being followed
-if the ingress answers `503` while no console pod is ready (P17;
-[release-notes.md](release-notes.md), *Limitations*); run the check again.
-A corporate identity provider bound by group, AWS S3, MSK and a
-NetworkPolicy-enforcing CNI have not been run at all
-([release-notes.md](release-notes.md), *Limitations*).
+[deploy/poc/](../deploy/poc/README.md) installs the same path end to end with
+Traefik, a local CA, Dex and the shared console.
 
 ---
 
 ## Demos and the standalone CLI
 
-The two paths below run the CLI and the local stack. They are demos and
-drills, not an installation: nothing in them is the supported path above.
-Paths 2 and 4, the v0.1 drill demo and the `kubectl apply` laptop walk, were
-withdrawn in v1 ([release notes](release-notes.md), item 76).
-
----
+The paths below run the CLI and the local compose stack. They are demos and
+drills, not an installation. Paths 2 and 4, the v0.1 drill demo and the
+`kubectl apply` laptop walk, were withdrawn in v1
+([release notes](release-notes.md), item 76).
 
 ## Path 1: `just mvp-demo` — backup, point-in-time restore, signed receipt
 
@@ -361,7 +44,7 @@ just mvp-demo
 just e2e-down
 ```
 
-This is the one command that exercises the whole CLI path, in order:
+The one command that runs the whole CLI path, in order:
 
 | step | what runs | what it proves |
 |---|---|---|
@@ -370,59 +53,63 @@ This is the one command that exercises the whole CLI path, in order:
 | 3 | `logweir backup run` | **the product** takes the backup, behind phase −1's admission guard, and signs a backup receipt |
 | 4 | two readers | `logweir drill verify --payload-type backup-receipt` **and** `python3 docs/verify_scorecard.py --payload-type backup-receipt` |
 | 5 | `logweir drill approve` | the plan is approved by hash, with a **different key** from the one that signs the result |
-| 6 | `logweir restore run` | `target.mode: newTopic` at a `restore.point_in_time`: the records land in topics that did not exist, and nothing is torn down |
+| 6 | `logweir restore run` | `target.mode: newTopic` at a `restore.point_in_time`: records land in topics that did not exist, and nothing is torn down |
 | 7 | two readers again | over the scorecard, plus the evidence object keys an auditor would fetch |
 | 8 | summary | the new topics, their record count off the broker, the measured RTO and RPO, the receipt key and the scorecard key |
 
-Use a fresh stack: the demo refuses existing records in `orders` or
-`payments` before producing or backing up. Restart it with
-`just e2e-down && just e2e-up` when repeating this disposable demo.
+It refuses a stack whose `orders` or `payments` already hold records; restart
+with `just e2e-down && just e2e-up`. It needs `docker`, `cargo`, `openssl`,
+`awk` and `python3` with `cryptography` (`LOGWEIR_PYTHON` overrides the
+interpreter), writes to the ignored `.demo/mvp/`, and removes its own archive
+prefix on exit. Its approval and signing keys are freshly minted: they show
+integrity, not provenance ([keys.md](keys.md)).
 
-Requirements: `docker`, `cargo`, `openssl`, `awk`, and `python3` with
-`cryptography`. Set `LOGWEIR_PYTHON` to override the interpreter. Output is in
-gitignored `.demo/mvp/`; the script removes its own archive prefix on exit.
+### No Rust toolchain: `just sandbox`
 
-The demo generates separate approval and signing keys. They demonstrate
-integrity, not organizational provenance; see [keys.md](keys.md).
+The same demo, with every `logweir` command and its engine run from the
+**published runner image** instead of a local build:
+
+```bash
+just e2e-up
+just sandbox docker.io/vladyslavhaina/logweir:<tag>   # default: …/logweir:latest
+just e2e-down
+```
+
+It needs `docker`, `openssl`, `awk` and `python3` with `cryptography`, and no
+`cargo`. `scripts/logweir-image.sh` runs the image's own `logweir` with the
+current directory mounted at the same path, and points `localhost` inside the
+container at the Docker host, where compose publishes the broker and MinIO. The
+demo names the engine from the image's `/etc/logweir/engine-identity`. Pin the
+image of your checkout's release, so the examples and the binary agree.
 
 ---
 
 ## Path 3: a scratch cluster you already have
 
-### 0. What you need before you start
+A drill restores an **existing** archive into a scratch cluster, verifies it and
+signs a scorecard.
 
-- An **existing** `kafka-backup` archive in an S3-compatible bucket, created
-  by `logweir backup run` or another compatible producer. This drill path reads
-  that archive; integrated `--from-cluster` capture remains deferred
-  ([architecture](architecture.md#adr-0007-source-capture-scope)). An archive
-  written by a `kafka-backup` engine before 0.21, which includes anything
-  `kafka-backup-operator` 1.3.0 writes, carries no segment digests. Such an
-  archive drills as `outcome: fail-integrity` with `integrity.result: partial`
-  and exits 2 ([support-matrix.md](support-matrix.md)).
-- A **scratch** Kafka cluster you are willing to have topics created in. Not
-  your production cluster, and not a cluster anything else depends on.
-- A **marker topic** on that scratch cluster. This is v0.1's segregation proof:
-  if it is absent, phase 0 refuses the drill with exit 3 before anything runs.
-  Create it with any name you like and put that name in the spec.
-- Logweir's build of the `kafka-backup` engine on `$PATH`, or the container
-  image, which carries it. Copy it out of the runner image for your
-  architecture (`docker create` the image, then `docker cp
-  <container>:/usr/local/bin/kafka-backup .`), or build it from a checkout
-  with `scripts/engine-source.sh build`. `kafka-backup --version` prints
+### 0. What you need
+
+- An archive in an S3-compatible bucket, written by `logweir backup run` or
+  another compatible producer (integrated `--from-cluster` capture is deferred,
+  [architecture](architecture.md#adr-0007-source-capture-scope)). An archive
+  from an engine before 0.21, which includes anything `kafka-backup-operator`
+  1.3.0 writes, has no segment digests and drills as `outcome: fail-integrity`,
+  `integrity.result: partial`, exit 2 ([support-matrix.md](support-matrix.md)).
+- A **scratch** Kafka cluster that nothing else depends on, with a **marker
+  topic** of any name, named in the spec. Without it phase 0 refuses with exit 3.
+- Logweir's build of the engine on `$PATH`: `docker create` the runner image and
+  `docker cp <container>:/usr/local/bin/kafka-backup .`, or
+  `scripts/engine-source.sh build`. `kafka-backup --version` prints
   `kafka-backup 0.23.3+logweir.3`.
 
 ### 1. Write the drill spec
 
-Start from [`examples/drill.yaml`](../examples/drill.yaml). Three blocks need
-your attention:
-
-**`source`** — where the archive is. `prefix` is the backup id's prefix in the
-bucket, not the bucket root; getting this wrong produces "the archive holds no
-backup set at the configured source storage location", which is the correct
-refusal and a confusing first experience.
-
-**`sample`** — **the window is deployment-specific and the example's dates are
-illustrative.**
+Start from [`examples/drill.yaml`](../examples/drill.yaml). **`source.prefix`**
+is the backup id's prefix in the bucket, not the bucket root; a wrong one is
+refused with "the archive holds no backup set at the configured source storage
+location". **`sample`**'s window is yours; the example's dates are illustrative:
 
 ```yaml
 sample:
@@ -430,93 +117,57 @@ sample:
   window_end:   "2026-09-05T00:00:00Z"
   records_per_partition: 25
   anchor: head
-```
-
-A window that overlaps no segment is **refused** — "a drill over an empty window
-would report a pass that means nothing" — rather than reported as a pass over
-nothing. `anchor: head` is the only value v0.1 implements; `tail` and `random`
-are refused at phase 0, for reasons [stability.md](stability.md) sets out in
-full (they are unsound here, not merely unimplemented).
-
-**`objectives`** — what you are actually testing.
-
-```yaml
 objectives:
   rto_seconds: 900
   rpo_seconds: 300
   pass_rate: 1.0
 ```
 
-`rto_seconds` is compared against `measured.rto_excluding_preflight_seconds`,
-not against the wall clock — see
-[formats/drill-scorecard.md](formats/drill-scorecard.md) for why.
+A window that overlaps no segment is refused ("a drill over an empty window
+would report a pass that means nothing"). `anchor: head` is the only value;
+`tail` and `random` are refused at phase 0 ([stability.md](stability.md) says
+why). `rto_seconds` is compared with `measured.rto_excluding_preflight_seconds`
+([formats/drill-scorecard.md](formats/drill-scorecard.md)).
 
 ### 2. Check before you run
 
 ```bash
-logweir doctor \
-  --spec drill.yaml \
-  --allowed-clusters allowed-clusters.json \
+logweir doctor --spec drill.yaml --allowed-clusters allowed-clusters.json \
   --approver-key approver.pub.pem
 ```
 
 `doctor` checks credentials, the engine **version** and glibc floor, target
-reachability, the marker topic and the approver key — before a drill is
-attempted. It compares the engine's own `--version` output against the pinned
-`0.23.3+logweir.3`, Logweir's build, as a whole token (`0.23.3+logweir.2` or
-`0.23.3` is a mismatch; OSO's own `0.23.3` passes only as the declared
-rollback, named as OSO's release). It also refuses an engine whose version is
-not the one the run would sign (`LOGWEIR_ENGINE_VERSION`, or the image's
-`/etc/logweir/engine-identity`). It does **not** compute or compare a digest,
-so a green `ok engine version` line says the right version ran, not that the
-right binary did. Add `--strict` to treat a check it could not perform (for example
-`storage`, with no live bucket to list against) as a failure rather than a skip.
-
-`allowed-clusters.json` must name the target cluster's own id:
+reachability, the marker topic and the approver key. It compares the engine's
+`--version` with `0.23.3+logweir.3` as a whole token (`0.23.3+logweir.2` or
+`0.23.3` is a mismatch; OSO's `0.23.3` passes only as the declared rollback) and
+refuses an engine that is not the one the run would sign. It computes no digest:
+a green `ok engine version` says the right version ran, not the right binary.
+`--strict` turns a check it could not perform into a failure.
+`allowed-clusters.json` names the scratch cluster's own id, read from the
+running broker; an allowlist without it is refused at phase 0 with exit 3:
 
 ```json
 { "allowed_cluster_ids": ["<the scratch cluster's id>"], "source_cluster_id": null }
 ```
 
-**Derive it from the running broker rather than typing it.** An allowlist that
-does not name this cluster is refused at phase 0 with exit 3, which is the guard
-doing its job and looks like a bug the first time.
+### 3. The two-key approval
 
-### 3. The two-key approval flow
-
-The approval is a separate signed document. In a real deployment it is produced
-on the **approver's** machine, with the **approver's** key, and only
-`approval.json` and `approval.sig` cross the boundary.
+On the **approver's** machine, with the approver's private key; only
+`approval.json` and `approval.sig` cross the boundary:
 
 ```bash
-# On the approver's machine, with the approver's PRIVATE key:
-logweir drill approve \
-  --spec drill.yaml \
-  --key approver.pem \
-  --approver sre-oncall@example.com \
-  --ticket CHG-40881 \
-  --out approval.json
+logweir drill approve --spec drill.yaml --key approver.pem \
+  --approver sre-oncall@example.com --ticket CHG-40881 --out approval.json
 ```
 
-That writes `approval.json` **and** `approval.sig` beside it — the only path
-`drill run` looks for the sidecar. It needs nothing but the `logweir` binary:
-no clone, no Rust toolchain, no `jq`, no `shasum`. In the container image it is
-`docker run --rm -v "$PWD:/w" -w /w logweir:v0.1.0 drill approve …`.
-
-`plan_hash` binds the approval to the **exact bytes** of the spec that will run.
-Edit the spec after approving — including moving the sample window — and phase 1
-refuses with exit 3, which is the point: **re-run `drill approve` on every spec
-edit.** `openssl dgst` cannot produce this sidecar: the signature covers
-PAE(payloadType, payload), never the bare bytes.
-
-**If the approver key equals the signing key**, Logweir does not refuse; it
-labels the scorecard `approval.self_attested: true`, and both verifiers print
-`SELF-ATTESTED` — **because they derived it**, by comparing `approval.key_id`
-against the key that verified the signature, not because the document said so.
-A document whose claim disagrees with that derivation is refused (`drill
-verify` exits 4, `verify_scorecard.py` exits 1). A self-attested run is not a
-forgery, but it is a materially weaker governance signal, and an auditor is
-entitled to treat it as a reason to seek corroboration.
+It needs only the `logweir` binary (in the image: `docker run --rm -v
+"$PWD:/w" -w /w logweir:v0.1.0 drill approve …`). `plan_hash` binds the
+approval to the spec's exact bytes, so **re-run `drill approve` on every spec
+edit**; phase 1 refuses an edited spec with exit 3. `openssl dgst` cannot make
+this sidecar: the signature covers PAE(payloadType, payload). If the approver
+key is the signing key, the scorecard says `approval.self_attested: true` and
+both verifiers print `SELF-ATTESTED`, because they derive it; a document whose
+claim disagrees is refused (`drill verify` exit 4, `verify_scorecard.py` exit 1).
 
 ### 4. Run the drill
 
@@ -528,71 +179,47 @@ export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
 export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3
 export LOGWEIR_ENGINE_DIGEST=sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4
 
-logweir drill run \
-  --spec drill.yaml \
+logweir drill run --spec drill.yaml \
   --approval approval.json --approver-key approver.pub.pem \
-  --allowed-clusters allowed-clusters.json \
-  --signing-key signer.pem \
-  --out scorecard.json \
-  --metrics-file /var/lib/node_exporter/textfile/logweir.prom \
+  --allowed-clusters allowed-clusters.json --signing-key signer.pem \
+  --out scorecard.json --metrics-file /var/lib/node_exporter/textfile/logweir.prom \
   --triggered-by "quarterly DR drill"
 ```
 
-Credentials come from `object_store`'s **own** chain (static keys, then web
-identity / IRSA, ECS, EKS Pod Identity, IMDS). That is **not** the AWS SDK
-chain: `~/.aws/credentials`, `AWS_PROFILE` and SSO are unsupported.
+Credentials come from `object_store`'s own chain (static keys, web identity /
+IRSA, ECS, EKS Pod Identity, IMDS), not the AWS SDK's: `~/.aws/credentials`,
+`AWS_PROFILE` and SSO are unsupported. `LOGWEIR_ENGINE_VERSION` and
+`LOGWEIR_ENGINE_DIGEST` are mandatory outside the runner image (empty is exit
+1): they are Logweir's build (`third_party/kafka-backup-build.env`), and inside
+the image `/etc/logweir/engine-identity` is what is signed. `--out` writes
+`scorecard.json` and `scorecard.sig`.
 
-`LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST` are mandatory outside the
-runner image. An empty value is refused with exit 1: a signed scorecard must
-name the engine that produced the restore. The values above are Logweir's
-build (`third_party/kafka-backup-build.env`: its version and its build-input
-digest). Inside the runner image the image's own declaration,
-`/etc/logweir/engine-identity`, is what is signed.
-
-`--out` writes `scorecard.json` and its DSSE sidecar beside it as
-`scorecard.sig`.
-
-### 5. Read the exit code — it is the result
+### 5. The exit code is the result
 
 | Code | Meaning | What you do |
 |---|---|---|
 | 0 | Pass. | Archive the scorecard. |
-| 1 | Operational — the drill could not be attempted or continued. **No artifact.** | Fix the environment and re-run. |
+| 1 | Operational: the drill could not be attempted or continued. **No artifact.** | Fix the environment and re-run. |
 | **2** | **A drill ran, was measured, and did not pass. A scorecard WAS written and signed.** | **Read the scorecard.** This is the finding you scheduled the drill for. |
 | 3 | Refused by a guard, before anything ran. | Fix the plan. Nothing happened. |
-| 4 | Signing or lock proof failed — and nothing was uploaded. | Fix keys or bucket permissions. |
+| 4 | Signing or lock proof failed, and nothing was uploaded. | Fix keys or bucket permissions. |
 
-**1 and 2 are completely different things** and are easy to confuse under a
-scheduler. Under Kubernetes they are actively hard to tell apart unless the Job
-is shaped correctly — read [kubernetes.md](kubernetes.md) before scheduling one.
+1 and 2 are different things; under Kubernetes they are hard to tell apart
+unless the Job is shaped correctly ([kubernetes.md](kubernetes.md)).
 
-### 6. Read the scorecard
+### 6. Read and verify the scorecard
 
 ```bash
 logweir drill show scorecard.json
-```
-
-The table is a fixed-width summary of a signed document. Below the fourteen rows
-it prints the objectives, whether they were met, `integrity.partial_reason` and
-the engine sub-report's own caveat — the qualifiers that most change how much a
-result is worth and that the frozen layout does not carry.
-
-Verify it, twice:
-
-```bash
 logweir drill verify --scorecard scorecard.json \
   --signature scorecard.sig --public-key signer.pub.pem
-
 python3 docs/verify_scorecard.py scorecard.json scorecard.sig signer.pub.pem
 ```
 
-The second shares no code with Logweir. If they ever disagree, the format is
-broken, not merely one of the tools.
-
-### 7. What landed in the bucket
-
-Under your evidence prefix — Logweir writes under `logweir/` and nowhere else,
-and refuses a prefix that is not exactly that:
+`drill show` prints the fourteen rows, then the objectives, whether they were
+met, `integrity.partial_reason` and the engine sub-report's caveat. The Python
+reader shares no code with Logweir: if the two disagree, the format is broken.
+Logweir writes under the evidence prefix `logweir/` and refuses any other:
 
 ```
 logweir/drills/<run_id>.json           the signed scorecard
@@ -603,23 +230,16 @@ logweir/drills/<run_id>.teardown.json  what was torn down
 logweir/drills/<run_id>.teardown.sig
 ```
 
-The receipt exists because the scorecard's four `evidence` fields describe facts
-that only exist after the upload, and the scorecard is signed before it. Verify
-it with the same tool:
+The receipt exists because the scorecard's `evidence` fields describe the
+upload, which happens after signing. Verify it and its binding:
 
 ```bash
 python3 docs/verify_scorecard.py --payload-type receipt \
     <run_id>.receipt.json <run_id>.receipt.sig signer.pub.pem
+shasum -a 256 scorecard.json   # equals the receipt's scorecard_sha256
 ```
 
-Then check the binding by hand — `scorecard_sha256` in the receipt is the sha256
-of the scorecard's exact stored bytes:
-
-```bash
-shasum -a 256 scorecard.json
-```
-
-A **missing** receipt means "no storage evidence was published for this run" —
+A **missing** receipt means "no storage evidence was published for this run",
 never "the upload was not create-only".
 
 ---

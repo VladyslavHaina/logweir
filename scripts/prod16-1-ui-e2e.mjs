@@ -193,6 +193,7 @@ function chartIdentityRender() {
     "--set", "api.enabled=true", "--set", "api.console.enabled=true",
     "--set", "api.console.mode=localAdmin", "--set", "api.console.keySecret=unused",
     "--set", "identity.bootstrapFeatures.consoleKey=true",
+    "--set", "identity.renderedOffline=false",
     "--show-only", "templates/identity.yaml"], { encoding: "utf8", timeout: 60000 });
   check(helm.status === 0, "helm template failed: " + helm.stderr);
   const asJson = kube(["create", "--dry-run=client", "-o", "json", "-f", "-"], { input: helm.stdout });
@@ -495,6 +496,9 @@ async function main() {
   check(legacyStep.toLowerCase().includes("approve it out of band"), "the strict step: " + legacyStep.slice(0, 600));
   await shot("01-unmarked-strict-step");
   const since = bodies.length;
+  // Create is on step 6: require the wizard to still show it, so the click never lands on a
+  // hidden step (toPlanStep walked there, but a click must not rely on a helper's last state).
+  await wizardAt(page, 6, 30);
   await page.click("#create-restore");
   let answer = null;
   for (let i = 0; i < 60 && answer === null; i += 1) {
@@ -548,6 +552,7 @@ async function main() {
   check(!confirmStep.includes("logweir drill"), "and no command for a key holder");
   await shot("03-confirm-step");
   const since3 = bodies.length;
+  await wizardAt(page, 6, 30);
   await page.click("#create-restore");
   answer = null;
   for (let i = 0; i < 60 && answer === null; i += 1) {

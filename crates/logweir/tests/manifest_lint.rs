@@ -1998,14 +1998,39 @@ fn install_docs_name_all_operator_managed_secrets() {
              is not a command: the install docs have to carry a line an adopter can run)"
         );
     }
-    assert!(
-        !docs.match_indices("create secret generic").any(|(at, _)| {
-            let end = (at + 400).min(docs.len());
-            docs.get(at..end)
-                .is_some_and(|window| window.contains("logweir-signing-key"))
-        }),
-        "the managed Helm path must not teach users to create the signing Secret"
-    );
+    // The managed Helm path never creates the signing Secret, and no path
+    // creates it WITH a key. PROD-14.1: the one exception is the offline path
+    // (Argo CD, `helm template | kubectl apply`), where the chart renders no
+    // retained object and the operator creates it EMPTY, once, for the hook
+    // to fill: a command line naming it must stand in that section and carry
+    // no `--from-…` source.
+    let offline = docs
+        .find("#### Argo CD and other offline renders")
+        .expect("docs/install.md has the offline-render section");
+    let offline_end = docs[offline + 1..]
+        .find("\n#")
+        .map_or(docs.len(), |end| offline + 1 + end);
+    for (at, _) in docs.match_indices("create secret generic") {
+        // The whole command: backslash continuations joined into one line.
+        let mut line = String::new();
+        for l in docs[at..].lines() {
+            match l.trim_end().strip_suffix('\\') {
+                Some(head) => line.push_str(head),
+                None => {
+                    line.push_str(l);
+                    break;
+                }
+            }
+        }
+        if !line.contains("logweir-signing-key") {
+            continue;
+        }
+        assert!(
+            (offline..offline_end).contains(&at) && !line.contains("--from-"),
+            "the managed Helm path must not teach users to create the signing Secret, and the \
+             offline path creates it empty: `{line}`"
+        );
+    }
     assert!(
         docs.contains("short-lived bootstrap Job")
             && docs.contains("identity.authorizedRunnerNamespaces")

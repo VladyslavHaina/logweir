@@ -9,8 +9,12 @@
 #       --from-file=cursor.key && rm cursor.key
 #     helm install logweir charts/logweir -n logweir-system \
 #       -f charts/logweir/examples/demo.values.yaml \
-#       -f charts/logweir/examples/author-only.values.yaml --wait --timeout 10m
+#       -f charts/logweir/examples/author-only.values.yaml \
+#       --set identity.installationTrust.enabled=false --wait --timeout 10m
 #     bash scripts/helm-demo.sh
+#
+# (The walk administers trust with its own TrustRoster; a fresh install's
+# default TrustPolicy would supersede it, hence installationTrust off.)
 #
 # (`--wait` returns only when both brokers and MinIO are Ready and the two
 # seed Jobs have succeeded — they are Helm hooks.) The path above uses locally

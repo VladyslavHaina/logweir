@@ -8,7 +8,14 @@ permissions:
 jobs:
   demo:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Three image builds (the runner with its engine, the controller, the
+    # console) before the walk.
+    timeout-minutes: 120
+    # Every image is built natively for this runner and its kind node:
+    # `just image`'s default is linux/arm64, and Dockerfile.console refuses a
+    # cross-compile.
+    env:
+      LOGWEIR_IMAGE_PLATFORM: linux/amd64
     steps:
       - uses: actions/checkout@v4
       - name: Pull Docker Hub images through a mirror
@@ -43,18 +50,34 @@ jobs:
         run: ./scripts/extract-engine.sh
       - name: The demo binary (step 7 mints the approval with the shipped CLI)
         run: cargo build -p logweir
-      - name: just image (the runner image; amd64, Global Constraint 10)
+      - name: just image (the runner image)
         run: just image
-      - name: just image-weirkeeper (the controller image, built NATIVELY for this runner)
-        env:
-          LOGWEIR_IMAGE_PLATFORM: linux/amd64
+      - name: just image-weirkeeper (the controller image)
         run: just image-weirkeeper
+      - name: just image-console (the console, which step 9 of the walk serves)
+        run: just image-console
       - name: kind create cluster
         run: kind create cluster --name logweir --config e2e/k8s/kind-config.yaml
       - name: kind load the three author-only tags
-        run: kind load docker-image logweir:check weirkeeper:check --name logweir
+        run: kind load docker-image logweir:check weirkeeper:check logweir-console:check --name logweir
+      # The console's cursor key is the operator's Secret (the chart never
+      # generates it, api.console.keySecret). It is minted here, on this
+      # runner, for this throwaway cluster: no repository secret, never printed.
+      # The console's confirmation key is the chart's: the identity hook
+      # generates it (identity.bootstrapFeatures.consoleKey).
+      - name: the console's cursor key, minted for this cluster
+        run: |
+          kubectl --context kind-logweir create namespace logweir-system
+          key="$RUNNER_TEMP/cursor.key"
+          head -c 32 /dev/urandom > "$key"
+          kubectl --context kind-logweir -n logweir-system create secret generic logweir-console-keys --from-file=cursor.key="$key"
+          rm -f "$key"
+      # demo.values.yaml turns on MinIO, both brokers and the console
+      # (localAdmin). The walk administers trust itself (its TrustRoster at
+      # step 3, its approver key at step 7), so the fresh install's default
+      # TrustPolicy, which would supersede that roster, is turned off.
       - name: helm install (author-only images; NOT evidence for §16 clause 1)
-        run: helm install logweir charts/logweir -n logweir-system --create-namespace --kube-context kind-logweir -f charts/logweir/examples/author-only.values.yaml --set demoKafka.enabled=true --set minio.enabled=true --wait --timeout 10m
+        run: helm install logweir charts/logweir -n logweir-system --kube-context kind-logweir -f charts/logweir/examples/demo.values.yaml -f charts/logweir/examples/author-only.values.yaml --set identity.installationTrust.enabled=false --wait --timeout 10m
       - name: "The walk — scripts/helm-demo.sh, every step, on the kind cluster the job created"
         env:
           LOGWEIR_KUBE_CONTEXT: kind-logweir

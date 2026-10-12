@@ -13,8 +13,26 @@
 {{- $externalKey := .Values.identity.externalSecret.key | default "" }}
 {{- if and $externalName (not $externalKey) }}{{ fail "identity.externalSecret.key must be set when identity.externalSecret.name is set" }}{{ end }}
 {{- if and (not $externalName) (ne $externalKey "signing.pem") }}{{ fail "identity.externalSecret.name must be set when identity.externalSecret.key is customized" }}{{ end }}
-{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace "logweir-signing-key" }}
-{{- $existingPublic := lookup "v1" "ConfigMap" .Release.Namespace $publicName }}
+{{- /*
+PROD-14.1: A RENDER THAT CANNOT ASK THE CLUSTER IS REFUSED. Everything below
+that is rendered once (the empty placeholders, the fresh-install trust grant)
+is decided by `lookup`, which returns nothing under `helm template`, `helm
+lint`, `--dry-run=client` and Argo CD. Such a render looks like a fresh install
+every time: Argo CD deletes and re-creates the filled placeholders as hooks on
+every sync, and `kubectl apply` re-creates the trust grant. The API server keeps
+`default/kubernetes` in every cluster, and networkpolicy.yaml already reads it,
+so finding it says `lookup` works with no new grant. `identity.renderedOffline`
+is the operator's answer: `true` renders no placeholder and no grant (the
+retained objects are created once by hand); `false` renders what `helm install`
+would, for a preview that is never applied (this chart's own gates).
+*/ -}}
+{{- $renderedOffline := .Values.identity.renderedOffline }}
+{{- if and (kindIs "invalid" $renderedOffline) (not (lookup "v1" "Service" "default" "kubernetes")) }}
+{{- fail "identity.renderedOffline is unset and this render cannot ask the cluster (Helm's lookup finds no default/kubernetes Service: helm template, helm lint, --dry-run=client, Argo CD), so it cannot tell a fresh install from an established one; applied, it could replace the filled signing Secret with an empty placeholder. Install with helm install or helm upgrade (preview with --dry-run=server). For Argo CD or `helm template | kubectl apply` set identity.renderedOffline=true and create the retained objects first (docs/install.md, \"Argo CD and other offline renders\"). identity.renderedOffline=false renders what helm install would, only for a preview that is never applied." }}
+{{- end }}
+{{- $offline := eq (toString $renderedOffline) "true" }}
+{{- $existingSecret := or $offline (lookup "v1" "Secret" .Release.Namespace "logweir-signing-key") }}
+{{- $existingPublic := or $offline (lookup "v1" "ConfigMap" .Release.Namespace $publicName) }}
 {{- /*
 PROD-16.1: the console's ConsoleConfirmation key, managed exactly like the
 installation identity — empty retained placeholders the hook fills once, never
@@ -26,8 +44,8 @@ console runs and the operator named no other Secret).
 {{- $consoleManaged := include "logweir.consoleKey.managed" . }}
 {{- $consoleSecret := include "logweir.consoleKey.managedName" . }}
 {{- $consolePublic := include "logweir.consoleKey.publicName" . }}
-{{- $existingConsoleSecret := lookup "v1" "Secret" .Release.Namespace $consoleSecret }}
-{{- $existingConsolePublic := lookup "v1" "ConfigMap" .Release.Namespace $consolePublic }}
+{{- $existingConsoleSecret := or $offline (lookup "v1" "Secret" .Release.Namespace $consoleSecret) }}
+{{- $existingConsolePublic := or $offline (lookup "v1" "ConfigMap" .Release.Namespace $consolePublic) }}
 {{- $trust := .Values.identity.installationTrust }}
 {{- /*
 PROD-16.1 security review: THE ONE GUARD for the fresh install's trust step. A
@@ -42,6 +60,8 @@ console's key — the managed key the hook generates (`logweir.freshInstallConfi
 which needs `identity.bootstrapFeatures.consoleKey`) and no external identity
 Secret (an adopted identity is never `generated`, so the grant would be dead
 weight): an install that never uses confirm gets no grant and no automatic trust.
+PROD-14.1: nor does `identity.renderedOffline=true` (`$existingSecret` is true
+there): outside Helm nothing deletes the grant, and a re-apply re-creates it.
 */ -}}
 {{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) (not $externalName) (include "logweir.freshInstallConfirm" .) }}
 {{- /*
@@ -434,7 +454,7 @@ subjects:
 {{- end }}
 {{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
 {{- $suffix := trunc 10 (sha256sum $namespace) }}
-{{- $targetSecret := lookup "v1" "Secret" $namespace "logweir-signing-key" }}
+{{- $targetSecret := or $offline (lookup "v1" "Secret" $namespace "logweir-signing-key") }}
 {{- if not $targetSecret }}
 ---
 # Empty retained target: the distributor atomically copies the primary bytes.

@@ -279,7 +279,7 @@ raises against that engine or against an operator that defaults to it.**
 
 | Image or binary | linux/amd64 | linux/arm64 |
 |---|---|---|
-| Runner image (Logweir's engine build, `logweir`, `logweir-retention`) | yes | **yes, since PROD-00.2** |
+| Runner image (Logweir's engine build, `logweir`, `logweir-retention`; the identity hook's `identity.bootstrapImage`) | yes | **yes, since PROD-00.2** (the identity hook's pin since PROD-14.1) |
 | Controller, console, UI images | yes | yes |
 | OSO's released engine image (the rollback, the compose stack's seeding engine) | yes | no: OSO publishes none |
 | Standalone CLI archives (`release.yml`) | `x86_64-unknown-linux-gnu` | `aarch64-unknown-linux-gnu`, and `aarch64-apple-darwin` |

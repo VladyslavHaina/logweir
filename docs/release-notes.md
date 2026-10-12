@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81 and 82 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83 and 84 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1675,6 +1675,69 @@ standalone CLI install replaces its engine with build 3 and exports
 **Rollback:** roll both images back together; the engine is build 2 again,
 and its documents say so. Documents build 3 signed stay valid.
 
+#### 83. A render that cannot ask the cluster is refused, and `identity.renderedOffline` makes Argo CD and `kubectl apply` safe (PROD-14.1)
+
+**Changed.** The identity's create-once objects (the empty signing Secret, its
+public ConfigMap, the console key's pair, each runner namespace's copy) and the
+fresh install's trust grant are rendered only when Helm's `lookup` finds them
+absent. `helm template`, `helm lint`, `--dry-run=client` and Argo CD answer
+nothing, so they rendered all of them every time: Argo CD runs them as PreSync
+hooks and deletes and re-creates each one on every sync, replacing the filled
+signing Secret with an empty one (the next hook then generated a new key), and
+`kubectl apply` re-created the cluster-wide trust grant, which nothing deleted.
+Such a render is now refused by name unless `identity.renderedOffline` is set:
+`true` renders no retained object and no trust grant (create the empty objects
+once; the install starts strict), `false` renders what `helm install` would,
+for a preview only. `helm install`, `helm upgrade` and `--dry-run=server` are
+unchanged.
+**Do:** nothing on the Helm path. Argo CD and `helm template | kubectl apply`:
+back the identity up, create the retained objects if they are missing, and set
+`identity.renderedOffline: true` ([install.md, *Argo CD and other offline
+renders*](install.md#argo-cd-and-other-offline-renders)). If an earlier render
+was applied with `kubectl apply --prune`, first remove
+`kubectl.kubernetes.io/last-applied-configuration` from the retained objects
+(`kubectl annotate <object> kubectl.kubernetes.io/last-applied-configuration-`),
+or the next prune deletes them. A preview or a lint adds
+`--set identity.renderedOffline=false`.
+**Scope:** `scripts/check-chart.sh` arm 12 (the refusal by name with its
+control, no placeholder, grant or trust argument with `true` and all of them in
+the `false` control, adoption offline, no key material in any render) with five
+mutants, and FX-10's row. The Argo CD behaviour is read from gitops-engine's
+source (`pkg/sync/hook/delete_policy.go`: no policy means `BeforeHookCreation`),
+not run. [UNVERIFIED — no Argo CD install has synced this chart; the clean
+install proves only the Helm path (no refusal with `lookup`).]
+**Rollback:** an older chart renders the placeholders again on every offline
+render; remove `identity.renderedOffline` from the values first (an older
+schema refuses it).
+
+#### 84. The identity hook runs natively on arm64, and the install constraints are on the first page (PROD-14.1)
+
+**Changed.** `identity.bootstrapImage` is re-pinned from runner rev `2fe8d907`
+(linux/amd64 only, from before PROD-00.2) to the runner main CI published and
+signed for rev `d4e32956`:
+`docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6`,
+an index of linux/amd64 and linux/arm64, so the hook no longer needs amd64
+emulation on an arm64 node. Its `identity bootstrap --help` is byte for byte
+the old pin's, so the chart passes the same flags. `helm show chart`, the
+chart README's first screen and install.md's first section now state the
+Kubernetes floor (1.29, which Helm enforces from `kubeVersion`), the Helm floor
+(3.19 or 4.x), both node architectures and the supported brokers.
+**Do:** nothing; the next `helm upgrade` runs the hook from the new pin and
+validates the existing identity. Remove a `kubernetes.nodeSelector` you set
+only to keep the hook on amd64 nodes.
+**Scope:** the help of both platforms of the new pin captured with `docker run`
+(2026-10-11; `uname -m` x86_64 and aarch64), the refreshed fixture with
+`chart_lint_the_hook_passes_only_flags_its_pinned_image_runs`,
+`chart_lint_constraints_show_before_install` with a
+moved-floor control, and `scripts/check-chart.sh` arm 13 (Helm refuses 1.28.15;
+1.29.0 renders), and `gh attestation verify` of the index: SLSA provenance from
+`images.yml` on `main` at `d4e32956`, run 38173609124.
+[UNVERIFIED — the cosign signature itself was not checked on this host (no
+cosign); the clean install runs `cosign verify` before it installs.]
+**Rollback:** set `identity.bootstrapImage` back to
+`docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968`;
+both images run the same identity steps.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1695,6 +1758,9 @@ In addition to the next entry's six, in its order.
 - **An install made with `kubectl apply -f logweir.yaml` moves to the chart**
   (item 76); the two commands there remove the bundle's control plane and keep
   everything else.
+- **A render that cannot ask the cluster now stops** (item 83): Argo CD,
+  `helm template | kubectl apply` and `helm lint` set
+  `identity.renderedOffline` (`true` to apply, `false` for a preview).
 
 **Before the controller rolls:**
 - **List every `RehearsalSchedule`** (item 73): after the upgrade none runs,
@@ -1808,7 +1874,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81 and 82, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83 and 84, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -1868,6 +1934,8 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 80 | the runner's phase 3 | nothing |
 | 81 | only how the repository is tested | nothing |
 | 82 | the engine in the runner image | the controller and runner images rolled together |
+| 83 | the chart only | an offline render (Argo CD, `helm template`) sets `identity.renderedOffline` |
+| 84 | the identity hook's image | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
@@ -1878,8 +1946,9 @@ rollback steps:
 2. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
    document carrying `defaultMode` at start. Unbound namespaces of a fresh
    install are `legacy-governed-v1` again under the older build.
-3. **Remove `api.console.trustedProxy` from the values** (item 53) before
-   rolling the chart back: an older chart's schema refuses the key.
+3. **Remove `api.console.trustedProxy` from the values** (item 53), and
+   `identity.renderedOffline` (item 83), before rolling the chart back: an
+   older chart's schema refuses both keys.
 4. **Finish or delete any original-name `Restore`** (item 56), so none waits on
    a runner that refuses it; rolling the `Restore` CRD back prunes the field.
 5. **Before rolling the controller back past item 50, let every run whose

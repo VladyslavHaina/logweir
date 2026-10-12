@@ -3008,7 +3008,7 @@ export const REPLICATION_HELP =
 /** THE FACTOR CAN DIFFER FROM THE SOURCE'S, AND WHAT THAT COSTS. A default
  *  from the TARGET's brokers knows nothing of the source's factor. Said beside
  *  the basis on step 4 and under the review row on step 6 whenever
- *  [`replicationMayDiffer`]. `ui/README.md` and `docs/quickstart.md` carry the
+ *  [`replicationMayDiffer`]. `ui/README.md` and `docs/install.md` carry the
  *  same sentence, and `ui/tests/replication-factor.spec.js` holds all three to
  *  it. */
 export const REPLICATION_DIFFERS_NOTE =
