@@ -819,6 +819,22 @@ function boot() {
     });
   }
 
+  // THE COPY BUTTON BESIDE A SHORTENED IDENTIFIER (`render.js` `ident`): the
+  // full value onto the clipboard. One listener for every page, because the
+  // pages render strings and wire nothing they did not write.
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    const button = target !== null && typeof target.closest === "function"
+      ? target.closest(".ident-copy")
+      : null;
+    if (button === null || !navigator.clipboard) {
+      return;
+    }
+    navigator.clipboard.writeText(String(button.getAttribute("data-copy") || "")).then(() => {
+      button.textContent = "copied";
+    }, () => {});
+  });
+
   // A region that scrolls is a region a keyboard can reach. Whether a table or
   // a plan block overflows is a fact of layout, so it is read after every
   // change to the view and on every resize, once per frame.

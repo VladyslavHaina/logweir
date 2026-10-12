@@ -82,12 +82,14 @@ import {
   inert,
   facts,
   fieldErrorLine,
+  ident,
   invalidAttributes,
   listFooter,
   mutationStatus,
   phaseBadge,
   replace,
   table,
+  titledBadge,
   when,
 } from "../render.js";
 import { planHash } from "../plan.js";
@@ -294,13 +296,15 @@ function approvalTable(collection, now, policy) {
     const spec = object.spec || {};
     const status = object.status || {};
     const subject = spec.subjectRef || {};
+    // ONE LINE A ROW (PROD-14.1 visual pass, M6): the verdict chip says one
+    // word, its key one hover away and in the KEY-ID column; the key id and
+    // the approver are shortened identifiers with the full value on hover and
+    // a copy button. The card below each table keeps every value in full.
     return [
       cell(subject.kind ? subject.kind + "/" + String(subject.name) : subject.name),
-      verifiedBadge(status),
-      cell(status.approver),
-      typeof status.matchedKeyId === "string" && status.matchedKeyId.length > 0
-        ? "<code>" + esc(status.matchedKeyId) + "</code>"
-        : cell(null),
+      verifiedChip(status),
+      ident(status.approver),
+      ident(status.matchedKeyId),
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
@@ -1091,6 +1095,17 @@ export async function submitApproval(subject, documents, deps, options) {
 
 /** The verified badge. It reads `status.verified` and nothing else: this page
  *  verified nothing, and neither did the browser. */
+/** The table's verdict chip: `verified` in one word, with the sentence the
+ *  card says -- which key, by whom -- as its hover title. Every other state is
+ *  [`verifiedBadge`]'s own words. */
+function verifiedChip(status) {
+  if ((status || {}).verified === true) {
+    return titledBadge("green", "verified",
+      "verified by weirkeeper against key " + String((status || {}).matchedKeyId));
+  }
+  return verifiedBadge(status);
+}
+
 function verifiedBadge(status) {
   const verified = (status || {}).verified;
   if (verified === true) {

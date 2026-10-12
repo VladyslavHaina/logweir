@@ -289,6 +289,7 @@
   --lw-visually-hidden-size: 1px;
   --lw-list-indent: 1.25rem;
   --lw-subset-max-height: 24rem;
+  --lw-ident-width: 14ch;
   /* The sticky wizard footer's height where it wraps to two rows (390 px:
    * about 110 px), with room to spare -- what a focused status keeps clear. */
   --lw-wizard-nav-clearance: 8rem;
@@ -965,6 +966,36 @@ main > h2 + .blurb,
 
 .technical code {
   overflow-wrap: anywhere;
+}
+
+/* A LONG IDENTIFIER (PROD-14.1 visual pass, M6 and M11): one line, cut with an
+ * ellipsis at a fixed width, so a key id or a point id cannot wrap over ten
+ * lines or push a column out of sight. The full value stays in the text, on
+ * hover and on the copy button beside it (`render.js` `ident`). */
+.ident {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cds-global-space-3);
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.ident-text {
+  display: inline-block;
+  min-width: 0;
+  max-width: var(--lw-ident-width);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ident-copy {
+  flex: none;
+  padding: 0 var(--cds-global-space-4);
+  border-color: transparent;
+  background: transparent;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 /* The first of two stacked lines inside a cell. */

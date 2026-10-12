@@ -19,7 +19,9 @@ import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
 import { restoreDestination } from "../pages/restore-wizard.js";
-import { restoreProgressSentence } from "../pages/approvals.js";
+import { renderApprovalList, restoreProgressSentence } from "../pages/approvals.js";
+import { ident } from "../render.js";
+import { LONG_TOKEN_CHARS, SHORT_CHIP_CHARS } from "../app.js";
 import { renderOperation } from "../pages/operation.js";
 
 const PREPARED = Object.freeze({
@@ -175,4 +177,70 @@ test("m5_an_approver_lands_on_approvals_and_a_viewer_on_clusters", () => {
   assert.ok(asked > 0 && asked < body.indexOf("renderRoleRefusal(current"),
     "the landing is redirected before the refusal renders");
   assert.match(app, /context\.landing = window\.location\.hash === "" \|\| window\.location\.hash === DEFAULT_HASH;/);
+});
+
+// M6. The Recorded approvals table: the APPROVER (an unwrapped Dex subject
+// URL) took about 60% of the width, the VERIFIED chip wrapped one word per
+// line, KEY-ID wrapped over 10 lines, and AGE sat behind a sideways scroll.
+
+const CSS = () => readFileSync(fileURLToPath(new URL("../style.css", import.meta.url)), "utf8");
+const KEY = "4e6b22944519f669fcc67dd85456c23576306de97121709c2ee382b0750251f7";
+const DEX = "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA3LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDcSBWxvY2Fs";
+
+/** A recorded Approval as the page is handed it, shaped like the PoC's. */
+function pocApproval(name, approver) {
+  return {
+    metadata: { name: name, creationTimestamp: "2026-10-12T09:00:00Z" },
+    spec: { subjectRef: { kind: "Restore", name: "rst-" + name }, planHash: "sha256:" + "a".repeat(64) },
+    status: {
+      verified: true, matchedKeyId: KEY, approver: approver,
+      conditions: [{ type: "Verified", status: "True", reason: "Verified" }],
+    },
+  };
+}
+
+/** The cells of the first body row of `html`'s first table, as HTML. */
+function firstRowCells(html) {
+  const body = html.slice(html.indexOf("<tbody>"), html.indexOf("</tbody>"));
+  return body.split("<td").slice(1).map((c) => c.slice(c.indexOf(">") + 1, c.lastIndexOf("</td>")));
+}
+
+test("m6_the_approvals_table_keeps_one_line_a_row_and_every_identifier_whole", () => {
+  const html = renderApprovalList({ items: [pocApproval("approval-1", DEX)] },
+    Date.parse("2026-10-12T09:30:00Z"));
+  const [, verified, approver, keyId, age] = firstRowCells(html);
+  // THE CHIP IS ONE SHORT WORD, so `markLongTokens` marks it `short` and the
+  // stylesheet keeps it on one line; its sentence is the hover title.
+  assert.match(verified, /^<span class="badge badge-green" title="verified by weirkeeper against key 4e6b/);
+  const words = verified.replace(/<[^>]*>/g, "");
+  assert.equal(words, "verified",
+    "NEGATIVE CONTROL: the chip carried the 64-hex key and wrapped one word per line");
+  assert.ok(words.length <= SHORT_CHIP_CHARS);
+  // THE KEY ID AND THE APPROVER are identifiers on one line, whole on hover,
+  // in the copy payload and in the text.
+  for (const [cellHtml, full] of [[keyId, KEY], [approver, DEX]]) {
+    assert.ok(cellHtml.startsWith("<span class=\"ident\">"),
+      "NEGATIVE CONTROL: an unbounded <code> or text cell: " + cellHtml);
+    assert.ok(cellHtml.includes("title=\"" + full + "\""), "the full value on hover");
+    assert.ok(cellHtml.includes("data-copy=\"" + full + "\""), "and on the copy button");
+    assert.ok(cellHtml.replace(/<[^>]*>/g, "").includes(full), "and in the text");
+  }
+  assert.equal(age, "30m", "and AGE is a cell like any other");
+  // THE RULE THAT HOLDS THE LINE: one line, an ellipsis, a bounded width, and
+  // the width is a token.
+  const css = CSS();
+  const rule = css.slice(css.indexOf(".ident-text {"), css.indexOf("}", css.indexOf(".ident-text {")));
+  for (const declaration of ["white-space: nowrap;", "overflow: hidden;", "text-overflow: ellipsis;",
+    "max-width: var(--lw-ident-width);"]) {
+    assert.ok(rule.includes(declaration), ".ident-text carries " + declaration + "; it was:\n" + rule);
+  }
+  assert.match(css, /--lw-ident-width: 14ch;/);
+  // THE COPY BUTTON IS WIRED ONCE, for every page: the full value it carries
+  // goes onto the clipboard.
+  const app = readFileSync(fileURLToPath(new URL("../app.js", import.meta.url)), "utf8");
+  assert.match(app, /target\.closest\("\.ident-copy"\)/);
+  assert.match(app, /navigator\.clipboard\.writeText\(String\(button\.getAttribute\("data-copy"\)/);
+  // And an absent identifier is the absent mark, not an empty copy button.
+  assert.equal(ident(null), "-");
+  assert.ok(LONG_TOKEN_CHARS < KEY.length, "the key id is a long token the old cell broke anywhere");
 });

@@ -628,6 +628,31 @@ export function cell(value) {
   return esc(inert(value));
 }
 
+/** A LONG IDENTIFIER IN A TABLE CELL -- a key id, a point id, a backup set, a
+ *  principal -- on one line, cut with an ellipsis at a fixed width
+ *  (`.ident-text`), so it cannot take the table's width or wrap over ten lines
+ *  and push a column out of sight. It is never hidden: the full value is the
+ *  hover title, the copy button's payload, and the text a filter, a sort and a
+ *  screen reader read. `shown`, when given, is a short form drawn instead of
+ *  the value's head (the full value stays in the text, visually hidden).
+ *  `app.js` wires every `.ident-copy` button once. */
+export function ident(value, shown) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const full = String(value);
+  const short = typeof shown === "string" && shown.length > 0 && shown !== full;
+  return (
+    "<span class=\"ident\"><code class=\"ident-text\" title=\"" + esc(inert(full)) + "\">" +
+    (short
+      ? "<span aria-hidden=\"true\">" + esc(inert(shown)) + "</span>" +
+        "<span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
+      : esc(inert(full))) +
+    "</code><button type=\"button\" class=\"ident-copy\" data-copy=\"" + esc(full) +
+    "\" title=\"copy the full value\">copy</button></span>"
+  );
+}
+
 /** WHAT A CELL SAYS FOR A VALUE THE PRODUCT API SERVING THIS CONSOLE DOES NOT
  *  PUBLISH. Not [`ABSENT`]: "-" says the object carries none, and a page that
  *  is never sent a member cannot say that of it. */
