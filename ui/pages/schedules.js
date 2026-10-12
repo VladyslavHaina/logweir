@@ -362,27 +362,48 @@ export function renderSuspendStatus(object, state) {
 /** THE RETENTION PANEL for one schedule: where its retention is set, and what
  *  this page can tell about the namespace's RetentionPolicies. */
 export function renderRetentionPanel(object, policy, policies) {
-  // "LOGWEIR NEVER DELETES" IS NOT PRINTED WHERE THIS PAGE CANNOT PROVE IT.
-  // Nothing records which RetentionPolicy covers a schedule's destination, so
-  // where a policy in this namespace is not recommendation-only the panel says
-  // that it cannot tell, names the policies, and does not print the
-  // no-deletion sentence. A failed read of the namespace's policies is not
-  // "no policy": the panel says the read failed and prints no sentence either.
+  // "LOGWEIR NEVER DELETES" IS PRINTED ONLY WHEN THE READ SUCCEEDED AND NO
+  // POLICY NAMES THIS DESTINATION. A failed read of the namespace's policies is
+  // not "no policy": the panel says the read failed. The policy naming the
+  // destination is shown with its own mode's sentence; two naming it are a
+  // Conflict, and neither evaluates. Where none names it but one that is not
+  // recommendation-only names another destination, the panel does not compare
+  // the two locations, names the policies, and prints no sentence either.
+  // Where one names it and such a policy names another destination, both are
+  // shown: the covering one's own sentence, then the caveat and the others.
   const readFailed = policies !== null && typeof policies === "object" &&
     !Array.isArray(policies);
-  const unproven = policy === null || policy === undefined ? deletingPolicies(policies) : [];
+  const named = readFailed ? [] : policiesNaming(object, policies);
+  const covering = policy !== null && policy !== undefined
+    ? policy
+    : named.length === 1 ? named[0] : null;
+  const unproven = covering === null ? deletingPolicies(policies) : [];
+  const elsewhere = covering === null || named.length > 1
+    ? []
+    : deletingPolicies(policies).filter((p) => p !== covering);
   const enforcement = readFailed
     ? renderPoliciesUnread(policies.readFailed)
-    : unproven.length > 0
-      ? renderCoverageUnknown(unproven)
-      : renderEnforcement(null, policy);
-  const sentence = readFailed || unproven.length > 0 ? "" : retentionSentenceFor(null, policy);
+    : named.length > 1
+      ? renderPolicyConflict(named)
+      : covering !== null
+        ? renderEnforcement(null, covering)
+        : unproven.length > 0
+          ? renderCoverageUnknown(unproven)
+          : "<p class=\"note\" data-enforcement=\"none\">" + esc(noPolicySentence(object)) +
+            "</p>";
+  const sentence = readFailed || named.length > 1 || unproven.length > 0
+    ? ""
+    : covering !== null
+      ? coveringSentence(covering)
+      : retentionSentenceFor(null, null);
   return (
     "<section class=\"retention\"><h3>Retention</h3>" +
     "<p class=\"note\" data-retention-pointer=\"true\">" + esc(RETENTION_POINTER_SENTENCE) +
     "</p>" +
     enforcement +
-    sentence + "</section>"
+    sentence +
+    (elsewhere.length > 0 ? renderCoverageUnknown(elsewhere, RETENTION_ELSEWHERE_SENTENCE) : "") +
+    "</section>"
   );
 }
 
@@ -408,18 +429,78 @@ export function deletingPolicies(policies) {
   });
 }
 
-/** The sentence a schedule's retention panel carries in place of both the
- *  no-deletion sentence and the "own recommendation" line, when a policy in
- *  its namespace deletes and nothing records which destination it covers. */
+/** The sentence a schedule's retention panel carries in place of the
+ *  no-deletion sentence when no policy names its destination and one that is
+ *  not recommendation-only names another. */
 export const RETENTION_COVERAGE_UNKNOWN_SENTENCE =
-  "Nothing records which RetentionPolicy covers this schedule's destination, and a " +
-  "RetentionPolicy in this namespace is not recommendation-only. So this page does not say " +
-  "that Logweir never deletes from this schedule's archive: check which destination each " +
-  "policy below governs.";
+  "No RetentionPolicy names this schedule's destination, and one in this namespace that is " +
+  "not recommendation-only names another. This page does not compare the two locations, so it " +
+  "does not say that Logweir never deletes from this schedule's archive: check which " +
+  "destination each policy below governs.";
 
-/** The panel's enforcement block when coverage cannot be told: the sentence
- *  above and each deleting policy with the destination and state it recorded. */
-export function renderCoverageUnknown(policies) {
+/** The caveat under the covering policy's own sentence when a policy that is
+ *  not recommendation-only names another destination: two destinations can be
+ *  at one bucket and prefix, and retention matches points by location. */
+export const RETENTION_ELSEWHERE_SENTENCE =
+  "A RetentionPolicy in this namespace that is not recommendation-only names another " +
+  "destination. This page does not compare locations: if that destination is at this one's " +
+  "bucket and prefix, that policy can delete this schedule's points, or declares a bucket rule " +
+  "that can. Check which destination each policy below governs.";
+
+/** What the panel says when no RetentionPolicy names this schedule's
+ *  destination, and the read that says so succeeded. */
+export function noPolicySentence(object) {
+  const name = destinationOf(object);
+  return name === null
+    ? "This schedule writes to an inline archive, which no RetentionPolicy names."
+    : "No RetentionPolicy in this namespace names this schedule's destination, " + name + ".";
+}
+
+/** The sentence two RetentionPolicies naming one destination carry. */
+export const RETENTION_CONFLICT_SENTENCE =
+  "More than one RetentionPolicy names this schedule's destination. The controller marks each " +
+  "of them Ready=False (Conflict): neither evaluates and neither enforces until one is removed.";
+
+/** The panel's block for that Conflict: the sentence and each policy. */
+export function renderPolicyConflict(policies) {
+  return (
+    "<div class=\"enforcement\" data-enforcement=\"conflict\">" +
+    "<p class=\"caveat\">" + esc(RETENTION_CONFLICT_SENTENCE) + "</p>" +
+    table(["RETENTION POLICY", "MODE"], policies.map((p) => [
+      cell(((p || {}).metadata || {}).name), cell(((p || {}).spec || {}).mode),
+    ]), "") +
+    "</div>"
+  );
+}
+
+/** What the policy naming this schedule's destination does to it, by what is
+ *  happening and then by the mode asked for: a deleting state says so in its
+ *  own words; `Enforce` is shown as deleting even while it is not enforcing;
+ *  `Report` reports and deletes nothing. Never the no-deletion sentence, which
+ *  is for a destination no policy names. */
+export function coveringSentence(policy) {
+  const state = enforcementOf(policy);
+  const mode = ((policy || {}).spec || {}).mode;
+  const name = String((((policy || {}).metadata) || {}).name || "");
+  const deleting = state === "LogweirWorker" || state === "ExternalLifecycleDeclared";
+  const words = deleting
+    ? ENFORCEMENT_SENTENCES[state]
+    : mode === "Enforce"
+      ? "RetentionPolicy " + name + " is in Enforce mode: it deletes archive objects under " +
+        "this policy whenever it enforces. It is not enforcing now; what is happening is above."
+      : mode === "ExternalLifecycle"
+        ? ENFORCEMENT_SENTENCES.ExternalLifecycleDeclared
+        : "RetentionPolicy " + name + " is in Report mode: it reports what its rules would " +
+          "remove and deletes nothing.";
+  return "<p class=\"never-deletes\" data-covering=\"" +
+    esc(deleting || mode === "Enforce" || mode === "ExternalLifecycle" ? "deletes" : "reports") +
+    "\">" + esc(words) + "</p>";
+}
+
+/** The panel's enforcement block when coverage cannot be told: `sentence` (by
+ *  default the one above) and each deleting policy with the destination and
+ *  state it recorded. */
+export function renderCoverageUnknown(policies, sentence) {
   const rows = policies.map((p) => [
     cell(((p || {}).metadata || {}).name),
     cell((((p || {}).spec || {}).destinationRef || {}).name),
@@ -427,7 +508,7 @@ export function renderCoverageUnknown(policies) {
   ]);
   return (
     "<div class=\"enforcement\" data-enforcement=\"unknown-coverage\">" +
-    "<p class=\"caveat\">" + esc(RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
+    "<p class=\"caveat\">" + esc(sentence || RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
     table(["RETENTION POLICY", "DESTINATION", "ENFORCEMENT"], rows, "") +
     "</div>"
   );
@@ -468,12 +549,31 @@ export function retentionSentenceFor(report, policy) {
     esc(ENFORCEMENT_SENTENCES[state] || "") + "</p>";
 }
 
-/** WHICH RetentionPolicy COVERS THIS SCHEDULE: nothing records it, so none.
- *  Matching on a destination name or a bucket prefix would be this page
- *  deciding which policy governs a schedule, a decision whose authority is
- *  not a browser. */
+/** The destination a schedule names, or `null` for an inline archive. */
+function destinationOf(object) {
+  const name = ((((object || {}).spec) || {}).destinationRef || {}).name;
+  return typeof name === "string" && name.length > 0 ? name : null;
+}
+
+/** THE RetentionPolicies THAT NAME THIS SCHEDULE'S DESTINATION: those whose
+ *  `spec.destinationRef.name` is the schedule's, in the one namespace both are
+ *  read from. That is the controller's own rule for which policy governs a
+ *  destination (`contesting_policy` compares exactly this name), not a match
+ *  this page invents; a bucket or a prefix is never compared. */
+export function policiesNaming(object, policies) {
+  const name = destinationOf(object);
+  if (name === null || !Array.isArray(policies)) {
+    return [];
+  }
+  return policies.filter((p) => ((((p || {}).spec) || {}).destinationRef || {}).name === name);
+}
+
+/** WHICH RetentionPolicy COVERS THIS SCHEDULE: the one that names its
+ *  destination, or `null` when none does or two do (a Conflict, in which
+ *  neither evaluates). */
 export function policyForSchedule(object, policies) {
-  return null;
+  const named = policiesNaming(object, policies);
+  return named.length === 1 ? named[0] : null;
 }
 
 /** `status.enforcement` off the RetentionPolicy covering this destination, or

@@ -6,7 +6,7 @@
       "name": "nightly-20260917-030000"
     }
   ],
-  "basis": "Objects carrying the label logweir.dev/destination=primary, which this service sets on the objects it creates. A schedule created with kubectl carries no such label and is not listed here.",
+  "basis": "schedules and backups in this namespace whose spec.destinationRef names this destination, from at most 1600 of each",
   "name": "primary",
   "requestId": "01M2PVJAG6XYXD15XXHNZFGC2H",
   "schedules": [

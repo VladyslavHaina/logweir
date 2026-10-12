@@ -458,9 +458,10 @@ controller ends a mismatch `Failed` / `ExecutionSpecInvalid`.
 `completeMaxRecords` below 1 is `out_of_range`, and without complete coverage
 `requires_complete_coverage`. Complete coverage costs about a minute per GiB of
 one-KiB records, against about five seconds sampled. **`covered: false` is
-never a pass** (`CompleteNotCovered`). `coverage`, `timeBasis`, `selection` and
-`targetTopicsAppeared` are claims of the signed scorecard, described in the
-OpenAPI document.
+never a pass** (`CompleteNotCovered`). `coverage`, `timeBasis`, `selection`,
+`integrityResult`, `integrityPartialReason` and `targetTopicsAppeared` are claims
+of the signed scorecard, described in the OpenAPI document; `topicPreflight` and
+`oldTopics` are what phase 0 read and what the restore read from.
 
 ## Destinations and credentials
 

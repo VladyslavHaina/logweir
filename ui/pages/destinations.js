@@ -143,6 +143,82 @@ export const EXISTING_ON_ROTATION =
   "new value: it is written to a NEW Secret bound to this destination, and the old one is left " +
   "for you to delete.";
 
+/** The sources the ROTATION form offers: `keep` first, and the default for
+ *  every role. A rotation sends the complete access block and the API
+ *  removes a grant it omits, so a form that started a grant at `absent`
+ *  would remove every grant the reader did not touch. `keep` sends the grant
+ *  the destination has now, as [`keptGrant`] spells it. */
+export const ROTATE_GRANT_SOURCES = Object.freeze(["keep"].concat(GRANT_SOURCES));
+
+/** What choosing `absent` on the rotation form turns off, by role, said beside
+ *  the control while it is chosen for a grant the destination has. The same
+ *  absences as [`ABSENT_GRANT_MEANING`], as what changes. */
+export const ABSENT_REMOVES = Object.freeze({
+  archiveRead: "absent REMOVES this destination's archiveRead grant: restores then read the " +
+    "archive with the archiveWrite credential.",
+  evidenceWrite: "absent REMOVES this destination's evidenceWrite grant: evidence is then " +
+    "written with the archiveWrite credential.",
+  evidenceRead: "absent REMOVES this destination's evidenceRead grant: evidence verification " +
+    "stops, and is recorded as NotAttempted, until a grant is set again.",
+});
+
+/** The response-only modes that say a grant is absent. */
+const ABSENT_MODES = Object.freeze(["inheritsArchiveWrite", "notConfigured"]);
+
+/** Whether the destination holds `view` as a grant of its own. */
+export function holdsGrant(view) {
+  const mode = (view || {}).mode;
+  return typeof mode === "string" && ABSENT_MODES.indexOf(mode) === -1;
+}
+
+/** The data keys a `secret.existing` without key names stands for. */
+const DEFAULT_SECRET_KEYS = Object.freeze(["access-key-id", "secret-access-key"]);
+
+/** THE GRANT A DESTINATION HAS NOW, AS A REQUEST: what `keep` sends.
+ *
+ *  `null` for an absent grant (kept absent). `undefined` when this page
+ *  cannot spell it: a Secret whose two credential keys are not the API's
+ *  defaults is published as a sorted list that does not say which key holds
+ *  the key id, and guessing would point the grant at the wrong value. Beside
+ *  the two defaults, the one key left is `sessionTokenKey`. Naming a Secret
+ *  the destination already names is what `:update-access` accepts for
+ *  "keeping a grant as it is". */
+export function keptGrant(view) {
+  const g = view || {};
+  if (!holdsGrant(g)) {
+    return g.mode === undefined ? undefined : null;
+  }
+  if (g.mode === "controllerIdentity" || g.mode === "archiveReadGrant") {
+    return { mode: g.mode };
+  }
+  if (g.mode === "workloadIdentity") {
+    return typeof g.serviceAccountName === "string" && g.serviceAccountName.length > 0
+      ? { mode: "workloadIdentity", workloadIdentity: { serviceAccountName: g.serviceAccountName } }
+      : { mode: "workloadIdentity" };
+  }
+  if (g.mode !== "secretKeys" || typeof g.secretName !== "string" || g.secretName.length === 0) {
+    return undefined;
+  }
+  const keys = Array.isArray(g.keys) ? g.keys : [];
+  const others = keys.filter((k) => DEFAULT_SECRET_KEYS.indexOf(k) === -1);
+  if (others.length > 1 || DEFAULT_SECRET_KEYS.some((k) => keys.indexOf(k) === -1)) {
+    return undefined;
+  }
+  const existing = { name: g.secretName };
+  if (others.length === 1) {
+    existing.sessionTokenKey = others[0];
+  }
+  return { mode: "secretKeys", secret: { existing: existing } };
+}
+
+/** The `keep` option's words: what the grant is now. */
+function keepLabel(view) {
+  const g = view || {};
+  const what = [g.mode, g.secretName, g.serviceAccountName]
+    .filter((x) => typeof x === "string" && x.length > 0).join(" ");
+  return "keep (as it is" + (what.length > 0 ? ": " + what : "") + ")";
+}
+
 /** The two `evidenceRead`-only modes, which the form offers for that role and
  *  refuses for the other three -- as the product API does. */
 export const EVIDENCE_READ_ONLY_SOURCES = Object.freeze([
@@ -162,6 +238,12 @@ export const DESTINATION_DEFAULTS = Object.freeze({
   evidenceWriteSource: "absent", evidenceWriteSecret: "", evidenceWriteServiceAccount: "",
   evidenceReadSource: "absent", evidenceReadSecret: "", evidenceReadServiceAccount: "",
 });
+
+/** What the ROTATION form starts from: every grant kept as it is. */
+export const ROTATE_DEFAULTS = Object.freeze(Object.assign({}, DESTINATION_DEFAULTS, {
+  archiveWriteSource: "keep", archiveReadSource: "keep",
+  evidenceWriteSource: "keep", evidenceReadSource: "keep",
+}));
 
 /** THE DRAFT ALLOWLIST (rule 1 at the top of this file). Every field here is
  *  a name, a flag or an enum member; every name in [`CREDENTIAL_INPUTS`] is
@@ -469,9 +551,9 @@ export function renderPreflight(preflight) {
 /** What names this destination, with the BASIS on which the lists were built.
  *
  *  The basis is rendered beside an empty list, not instead of it: the product
- *  API builds these from a label it sets on objects IT creates, so a schedule
- *  made with kubectl is invisible here, and an unexplained empty list would
- *  read as "nothing uses this" -- the sentence an operator deletes on. */
+ *  API matches `spec.destinationRef` over a bounded read and says how much it
+ *  read, and an unexplained empty list would read as "nothing uses this" --
+ *  the sentence an operator deletes on. */
 export function renderUsage(usage, error) {
   if (error !== null && error !== undefined) {
     return "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
@@ -485,7 +567,8 @@ export function renderUsage(usage, error) {
     .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]));
   return (
     "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
-    table(["KIND", "NAME", "CREATED"], rows, "Nothing labelled by this service names it.") +
+    table(["KIND", "NAME", "CREATED"], rows,
+      "No schedule or Backup the product API read names it.") +
     (usage.truncated === true
       ? "<p class=\"note\">One of the lists was cut at its bound; there may be more.</p>"
       : "") +
@@ -596,12 +679,17 @@ export function validateDestination(values) {
  *  not match this form's input names, so it would land as an unplaced banner
  *  on the one form whose subject is a credential. This is the rotation's
  *  only check: the location and transport security are immutable, so there
- *  is nothing else on that form a rule could be about. */
-export function validateGrants(values) {
+ *  is nothing else on that form a rule could be about. `current` is the
+ *  destination's access as read, which a `keep` repeats. */
+export function validateGrants(values, current) {
   const v = values || {};
   const problems = Object.create(null);
   for (const role of GRANT_ROLES) {
     const source = String(v[role + "Source"] || "absent");
+    if (source === "keep" && keptGrant((current || {})[role]) === undefined) {
+      problems[role + "Source"] = "keep cannot be sent for this grant: " +
+        keepRefusal((current || {})[role]) + " Enter a new credential, or rotate it with kubectl";
+    }
     if (role === "archiveWrite" && source === "absent") {
       problems.archiveWriteSource = "archiveWrite is required: it is the credential every " +
         "backup Job writes the archive with";
@@ -634,16 +722,32 @@ export function validateGrants(values) {
   return problems;
 }
 
+/** Why [`keptGrant`] cannot spell `view`. */
+function keepRefusal(view) {
+  const g = view || {};
+  if (g.mode === undefined) {
+    return "this page read no current grant for it.";
+  }
+  return "the product API publishes its Secret's data keys (" +
+    (Array.isArray(g.keys) ? g.keys.join(", ") : "") + ") without saying which holds the key " +
+    "id, so this page cannot name them again.";
+}
+
 /** One grant, as the product API's `AccessGrantRequest`, or `null` for absent.
  *
  *  ABSENT IS `null` AND NEVER `{mode: "inheritsArchiveWrite"}`. Those two
  *  spellings would be one state with two names, which is why the API refuses
- *  the second on a request and uses it only in a RESPONSE. */
-export function grantBody(values, role) {
+ *  the second on a request and uses it only in a RESPONSE. `keep` is the
+ *  grant in `current`, the destination's access as read. */
+export function grantBody(values, role, current) {
   const v = values || {};
   const source = String(v[role + "Source"] || "absent");
   if (source === "absent") {
     return null;
+  }
+  if (source === "keep") {
+    const kept = keptGrant((current || {})[role]);
+    return kept === undefined ? null : kept;
   }
   if (source === "workloadIdentity") {
     const sa = String(v[role + "ServiceAccount"] || "").trim();
@@ -680,10 +784,10 @@ export function grantBody(values, role) {
  *  because `:update-access` takes a COMPLETE access block and a grant omitted
  *  there is REMOVED -- so a rotation form that sent only the changed role
  *  would silently delete the other three. */
-export function accessBody(values) {
+export function accessBody(values, current) {
   const access = {};
   for (const role of GRANT_ROLES) {
-    const grant = grantBody(values, role);
+    const grant = grantBody(values, role, current);
     if (grant !== null) {
       access[role] = grant;
     }
@@ -744,10 +848,10 @@ export function destinationBody(values) {
 /** The `UpdateDestinationAccessRequest` a rotation produces. The generation is
  *  the one this page LAST READ: a stale value is a 412, which is the right
  *  answer to "the object moved under your feet". */
-export function rotationBody(values, generation) {
+export function rotationBody(values, generation, current) {
   const body = {
     expectedGeneration: typeof generation === "number" ? generation : 0,
-    access: accessBody(values),
+    access: accessBody(values, current),
   };
   const caName = String((values || {}).caName || "").trim();
   if (values && values.caChange === "set" && caName.length > 0) {
@@ -767,7 +871,10 @@ export function rotationBody(values, generation) {
  *  re-render keep what was typed, and `grantBody` reads only the ones its
  *  source names. */
 export const SOURCE_INPUTS = Object.freeze({
-  absent: Object.freeze([]),
+  keep: Object.freeze([]),
+  // The rotation form's warning that `absent` removes a grant the
+  // destination has; the create form renders no such group.
+  absent: Object.freeze(["removes"]),
   existing: Object.freeze(["secret"]),
   new: Object.freeze(["keys"]),
   workloadIdentity: Object.freeze(["sa"]),
@@ -781,8 +888,9 @@ export function sourceShows(source, group) {
   return Array.isArray(shown) && shown.indexOf(group) !== -1;
 }
 
-function grantFieldset(role, d, field, line, prefixId, sources) {
+function grantFieldset(role, d, field, line, prefixId, sources, current) {
   const source = String(d[role + "Source"] || "absent");
+  const held = current === undefined ? undefined : current[role];
   const hide = (group) => (sourceShows(source, group) ? "" : " hidden");
   const offered = sources || GRANT_SOURCES;
   const options = offered.filter(
@@ -798,8 +906,14 @@ function grantFieldset(role, d, field, line, prefixId, sources) {
     field(id("source"), role + "Source") + ">" +
     options.map((s) =>
       "<option value=\"" + esc(s) + "\"" + (source === s ? " selected" : "") + ">" +
-      esc(s) + "</option>").join("") +
+      esc(s === "keep" ? keepLabel(held) : s) + "</option>").join("") +
     "</select>" + line(id("source"), role + "Source") + "</div>" +
+    // CHOOSING `absent` FOR A GRANT THE DESTINATION HAS SAYS WHAT TURNS OFF,
+    // beside the control, while it is chosen.
+    (ABSENT_REMOVES[role] !== undefined && holdsGrant(held)
+      ? "<p class=\"caveat\" data-grant-inputs=\"removes\" id=\"" + esc(id("removes")) + "\"" +
+        hide("removes") + ">" + esc(ABSENT_REMOVES[role]) + "</p>"
+      : "") +
     "<div class=\"field\" data-grant-inputs=\"secret\"" + hide("secret") + "><label for=\"" +
     esc(id("secret")) + "\">existing Secret name</label>" +
     "<input id=\"" + esc(id("secret")) + "\" name=\"" + esc(role + "Secret") + "\" value=\"" +
@@ -961,11 +1075,12 @@ export function renderRotateForm(item, view) {
     return "<section class=\"rotate\" id=\"destination-rotate\"><h3>Rotate access</h3>" +
       "<p class=\"note\">This login may read destinations and not manage them.</p></section>";
   }
-  const draft = Object.assign({}, DESTINATION_DEFAULTS, rotate.draft || {});
+  const draft = Object.assign({}, ROTATE_DEFAULTS, rotate.draft || {});
   return (
     "<section class=\"rotate\" id=\"destination-rotate\"><h3>Rotate access</h3>" +
-    "<p class=\"note\">This sends the COMPLETE four-grant block: a grant left at " +
-    "<code>absent</code> here is REMOVED from the destination. It carries the generation this " +
+    "<p class=\"note\">This sends the COMPLETE four-grant block. Each grant starts on " +
+    "<code>keep</code>, which sends it as it is; a grant set to <code>absent</code> here is " +
+    "REMOVED from the destination. It carries the generation this " +
     "page read (<code id=\"rotate-generation\">" + cell(d.generation) + "</code>); if the object " +
     "moved since, the answer is a 412 and nothing is written.</p>" +
     "<p class=\"note\">The location and the transport security are immutable. Only the " +
@@ -975,7 +1090,8 @@ export function renderRotateForm(item, view) {
     "<input type=\"hidden\" name=\"expectedGeneration\" id=\"rotate-expected-generation\" value=\"" +
     esc(String(d.generation === undefined || d.generation === null ? "" : d.generation)) + "\">" +
     GRANT_ROLES.map((role) =>
-      grantFieldset(role, draft, field, line, "rotate", GRANT_SOURCES)).join("") +
+      grantFieldset(role, draft, field, line, "rotate", ROTATE_GRANT_SOURCES, d.access || {}))
+      .join("") +
     "<div class=\"field\"><label for=\"rotate-ca-change\">private CA</label>" +
     "<select id=\"rotate-ca-change\" name=\"caChange\">" +
     "<option value=\"keep\"" + (draft.caChange === "keep" || draft.caChange === undefined
@@ -1066,12 +1182,13 @@ export async function submitDestination(ns, values, deps) {
 
 /** Checks the grants, then rotates. Nothing is sent when a grant does not make
  *  a credential the API could use -- see [`validateGrants`]. */
-export async function submitRotation(ns, name, values, generation, deps) {
-  const problems = validateGrants(values);
+export async function submitRotation(ns, name, values, generation, deps, current) {
+  const problems = validateGrants(values, current);
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
-  return (deps || API).updateDestinationAccess(ns, name, rotationBody(values, generation));
+  return (deps || API).updateDestinationAccess(ns, name,
+    rotationBody(values, generation, current));
 }
 
 export async function mountDestinations(node, ns, parse, lifecycle, deps) {
@@ -1384,6 +1501,6 @@ function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {
     }
     const values = readDestinationValues(form);
     keepDraft(key, values, DESTINATION_DRAFT_FIELDS.concat(["caChange"]));
-    mutation.run(() => submitRotation(ns, name, values, item.generation, api));
+    mutation.run(() => submitRotation(ns, name, values, item.generation, api, item.access));
   }, lifecycle);
 }

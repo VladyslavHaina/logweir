@@ -641,34 +641,90 @@ async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
     app.fake.assert_strict();
 }
 
+/// **What uses a destination is read off `spec.destinationRef`, not a label.**
+///
+/// The PoC's schedule, made through the console, and its Backups, the
+/// scheduled ones made by the controller, carry no `logweir.dev/destination`
+/// label, and "What uses this" listed none of them (PROD-14.1 visual pass,
+/// M1). CONTROL: the label read this replaced lists neither the schedule nor
+/// the Backup, and lists the labelled schedule that names nothing.
 #[tokio::test]
-async fn usage_is_a_bounded_label_read_that_states_its_own_basis() {
+async fn usage_lists_what_names_the_destination_by_its_reference_and_states_its_basis() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
+    let schedule = |name: &str, destination: Option<&str>, labelled: bool| {
+        let mut object = json!({
+            "metadata": {"name": name},
+            "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"],
+                     "archive": {"url": "s3://kafka-backups/team-a/prod"}}
+        });
+        if let Some(d) = destination {
+            object["spec"]["destinationRef"] = json!({"name": d});
+            object["spec"]["archive"] = json!({"url": format!("logweir-destination://{d}")});
+        }
+        if labelled {
+            object["metadata"]["labels"] = json!({"logweir.dev/destination": "primary"});
+        }
+        object
+    };
     app.fake.seed(
         "backupschedules",
         NS_A,
-        json!({
-            "metadata": {"name": "nightly", "labels": {"logweir.dev/destination": "primary"}},
-            "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://kafka-backups/team-a/prod"}}
-        }),
+        schedule("nightly", Some("primary"), false),
     );
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        schedule("elsewhere", Some("cold"), false),
+    );
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        schedule("labelled-only", None, true),
+    );
+    let backup = |name: &str, destination: &str| {
+        json!({
+            "metadata": {"name": name, "creationTimestamp": "2026-10-12T09:28:33Z"},
+            "spec": {"sourceRef": {"name": "source"}, "topics": ["orders"],
+                     "archive": {"url": format!("logweir-destination://{destination}")},
+                     "destinationRef": {"name": destination},
+                     "triggeredBy": "schedule", "deadlineSeconds": 3600}
+        })
+    };
+    app.fake.seed(
+        "backups",
+        NS_A,
+        backup("nightly-20261012-031500", "primary"),
+    );
+    app.fake
+        .seed("backups", NS_A, backup("cold-20261012-031500", "cold"));
     let response = app
         .get(&format!(
             "/api/v1/namespaces/{NS_A}/destinations/primary/usage"
         ))
         .await;
+    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
     let v = response.json();
-    assert_eq!(v["schedules"][0]["name"], "nightly");
+    let names = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        names(&v["schedules"]),
+        ["nightly"],
+        "THE DEFECT: an unlabelled schedule naming the destination was not listed"
+    );
     assert_eq!(v["schedules"][0]["kind"], "BackupSchedule");
-    assert_eq!(v["backups"], json!([]));
+    assert_eq!(names(&v["backups"]), ["nightly-20261012-031500"]);
+    assert_eq!(v["backups"][0]["kind"], "Backup");
     assert_eq!(v["truncated"], false);
-    // THE BASIS IS PART OF THE ANSWER: an empty list is "nothing carries the
-    // label", not "nothing uses this destination".
-    assert!(v["basis"]
-        .as_str()
-        .unwrap()
-        .contains("logweir.dev/destination"));
+    // THE BASIS IS PART OF THE ANSWER: what was read, and its bound.
+    let basis = v["basis"].as_str().unwrap();
+    assert!(basis.contains("spec.destinationRef"), "{basis}");
+    assert!(!basis.contains("labelled"), "{basis}");
     app.fake.assert_strict();
 }
 

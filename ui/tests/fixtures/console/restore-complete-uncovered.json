@@ -28,6 +28,7 @@
       "topicPrefix": "drill-20260911-",
       "originalName": false
     },
+    "approvalSubject": "ordinary",
     "deadlineSeconds": 3600,
     "newTopics": [
       "drill-20260911-orders",
@@ -40,6 +41,17 @@
       "covered": false,
       "incompleteReason": "sample.complete_max_records is 300: orders/1 and every later partition were not compared"
     },
+    "integrityResult": "partial",
+    "integrityPartialReason": "complete coverage did not cover the restore: sample.complete_max_records is 300; orders/1 and every later partition were not compared",
+    "topicPreflight": {
+      "timestampType": "CreateTime",
+      "retentionMs": 604800000,
+      "timestampBound": 1756649100000
+    },
+    "oldTopics": [
+      "orders",
+      "orders-dlq"
+    ],
     "operation": {
       "state": "failed",
       "stateReason": "DrillNotPass",
@@ -48,7 +60,6 @@
       "verifiedSuccess": false,
       "exitCode": 2,
       "outcome": "fail-integrity"
-    },
-    "approvalSubject": "ordinary"
+    }
   }
 }

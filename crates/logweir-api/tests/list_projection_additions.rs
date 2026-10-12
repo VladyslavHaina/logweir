@@ -145,3 +145,58 @@ fn a_restore_publishes_its_signed_time_basis_or_nothing() {
         "a list past the bound is omitted, never truncated"
     );
 }
+
+/// **A Restore publishes what the controller copied onto its status**: the
+/// signed scorecard's integrity result and partial reason, phase 0's target
+/// topic preflight, and the old topics. A succeeded, verified restore showed
+/// each as "not published by the product API". BOTH SIDES READ ONE FIXTURE:
+/// `console/restore-results.json` carries this projection's three members of
+/// `restore-valid-pass.json`, and `ui/tests/visual-pass-a.spec.js` renders it.
+///
+/// KILLS: dropping any of the four; a partial reason unbounded; an absent
+/// block published as an empty one.
+#[test]
+fn a_restore_publishes_its_integrity_result_target_preflight_and_old_topics() {
+    let cr = support::fixture("restore-valid-pass.json");
+    let restored: RestoreCr = serde_json::from_value(cr.clone()).unwrap();
+    let projected = serde_json::to_value(restore(&restored, true)).unwrap();
+    assert_eq!(projected["integrityResult"], "pass");
+    assert_eq!(projected["topicPreflight"], cr["status"]["topicPreflight"]);
+    assert_eq!(projected["oldTopics"], cr["status"]["oldTopics"]);
+    assert!(projected.get("integrityPartialReason").is_none());
+    let golden = support::fixture("console/restore-results.json");
+    for member in ["integrityResult", "topicPreflight", "oldTopics"] {
+        assert_eq!(
+            golden["item"][member], projected[member],
+            "the console fixture is this crate's projection of {member}"
+        );
+    }
+
+    let mut partial = cr.clone();
+    partial["status"]["integrity"]["result"] = serde_json::json!("partial");
+    partial["status"]["integrity"]["partialReason"] = serde_json::json!("r".repeat(5000));
+    let partial: RestoreCr = serde_json::from_value(partial).unwrap();
+    let projected = serde_json::to_value(restore(&partial, false)).unwrap();
+    assert_eq!(projected["integrityResult"], "partial");
+    let reason = projected["integrityPartialReason"].as_str().unwrap();
+    assert!(reason.starts_with("rrr") && reason.len() <= 1024 + '…'.len_utf8());
+
+    let mut bare = cr;
+    let status = bare["status"].as_object_mut().unwrap();
+    status.remove("topicPreflight");
+    status.remove("oldTopics");
+    status["integrity"]
+        .as_object_mut()
+        .unwrap()
+        .remove("result");
+    let bare: RestoreCr = serde_json::from_value(bare).unwrap();
+    let projected = serde_json::to_value(restore(&bare, true)).unwrap();
+    for member in [
+        "integrityResult",
+        "integrityPartialReason",
+        "topicPreflight",
+        "oldTopics",
+    ] {
+        assert!(projected.get(member).is_none(), "{member}: {projected}");
+    }
+}

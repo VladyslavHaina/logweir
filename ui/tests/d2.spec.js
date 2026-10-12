@@ -178,12 +178,12 @@ test("the_usage_list_renders_its_basis_beside_an_empty_answer", () => {
   const usage = decodeDestinationUsage(console_("destination-usage.json")).value;
   const html = renderUsage(usage, null);
   assert.match(html, /id="usage-basis"/);
-  assert.match(html, /created with kubectl carries no such label/);
+  assert.match(html, /whose spec\.destinationRef names this destination/);
   const empty = renderUsage(
     { name: "primary", truncated: false, basis: usage.basis, schedules: [], backups: [] },
     null,
   );
-  assert.match(empty, /Nothing labelled by this service names it/);
+  assert.match(empty, /No schedule or Backup the product API read names it/);
   assert.match(empty, /id="usage-basis"/,
     "an empty list without its basis would read as 'nothing uses this'");
 });
@@ -337,7 +337,8 @@ test("every_body_this_page_builds_is_the_published_request_shape", () => {
 
 test("a_rotation_sends_the_complete_access_block_because_an_omitted_grant_is_removed", () => {
   const html = renderDestinationDetail(destination("destination.json"), { mayOperate: true });
-  assert.match(html, /a grant left at <code>absent<\/code> here is REMOVED/);
+  assert.match(html, /a grant set to <code>absent<\/code> here is REMOVED/);
+  assert.match(html, /Each grant starts on <code>keep<\/code>, which sends it as it is/);
   assert.match(html, /id="rotate-generation"/);
   assert.match(html, /the answer is a 412 and nothing is written/);
 });

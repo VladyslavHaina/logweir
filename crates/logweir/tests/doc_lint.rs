@@ -2140,6 +2140,8 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a refused run stays named until the next run",
             "`status.lastEnforcement.refusalCode`",
         ),
+        // Item 88: the visual pass's console fixes; the member the Restore view gains.
+        ("the visual pass's console fixes", "`integrityResult`"),
     ];
     assert_eq!(
         items.len(),

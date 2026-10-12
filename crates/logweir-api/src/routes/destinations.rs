@@ -86,8 +86,8 @@ pub const TEST: &str = ":test";
 /// per namespace may hold it; the create route refuses a second.
 pub const DEFAULT_ANNOTATION: &str = "logweir.dev/default-destination";
 
-/// The label every object the API creates for a destination carries, so
-/// `usage` is a label read and never an unbounded scan.
+/// The label on every `Preflight` the API starts against a destination (an
+/// access test or a Backup readiness check).
 pub const DESTINATION_LABEL: &str = "logweir.dev/destination";
 
 /// The label ONLY `:test` sets, and the one `lastTest` selects on.
@@ -1571,6 +1571,13 @@ pub async fn get_one(
 }
 
 /// `GET .../destinations/{name}/usage`.
+///
+/// BY THE REFERENCE FIELD, NOT A LABEL. A schedule or a Backup names its
+/// destination in `spec.destinationRef`, and that is what is matched. A label
+/// would miss every object this service did not create: a scheduled `Backup`
+/// is the controller's, and an object made before the label existed carries
+/// none. Each kind is read in pages of [`MAX_LIMIT`], at most [`MAX_PAGES`] of
+/// them, and an answer cut by either bound says `truncated`.
 pub async fn usage(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
@@ -1581,27 +1588,23 @@ pub async fn usage(
     authorize(&state, &actor, &ns, Action::ReadDestinations)?;
     crate::http::parse_query(uri.query(), &[])?;
     check_name(&name)?;
-    let page = PageRequest {
-        limit: MAX_USAGE_ENTRIES as u32 + 1,
-        continue_token: None,
-        label_selector: Some(format!("{DESTINATION_LABEL}={name}")),
-    };
-    let schedules = state
-        .kube()
-        .list::<BackupSchedule>(&ns, &page)
-        .await
-        .map_err(KubeFailure::into_api_error)?;
-    let backups = state
-        .kube()
-        .list::<BackupCr>(&ns, &page)
-        .await
-        .map_err(KubeFailure::into_api_error)?;
-    let truncated =
-        schedules.items.len() > MAX_USAGE_ENTRIES || backups.items.len() > MAX_USAGE_ENTRIES;
+    let (schedules, schedules_cut) = naming::<BackupSchedule>(&state, &ns, |s| {
+        s.spec
+            .destination_ref
+            .as_ref()
+            .is_some_and(|r| r.name == name)
+    })
+    .await?;
+    let (backups, backups_cut) = naming::<BackupCr>(&state, &ns, |b| {
+        b.spec
+            .destination_ref
+            .as_ref()
+            .is_some_and(|r| r.name == name)
+    })
+    .await?;
     let rows = |kind: &str, items: &[ObjectMeta]| -> Vec<DestinationUseView> {
         items
             .iter()
-            .take(MAX_USAGE_ENTRIES)
             .map(|m| DestinationUseView {
                 kind: kind.to_string(),
                 name: m.name.clone().unwrap_or_default(),
@@ -1609,28 +1612,61 @@ pub async fn usage(
             })
             .collect()
     };
-    let schedule_meta: Vec<ObjectMeta> =
-        schedules.items.iter().map(|s| s.metadata.clone()).collect();
-    let backup_meta: Vec<ObjectMeta> = backups.items.iter().map(|b| b.metadata.clone()).collect();
     Ok(json(
         StatusCode::OK,
         &DestinationUsageResponse {
             request_id,
             name,
-            schedules: rows("BackupSchedule", &schedule_meta),
-            backups: rows("Backup", &backup_meta),
-            truncated,
-            // THE BASIS IS PART OF THE ANSWER. An empty list means "no object
-            // carries this label", which is not the same as "nothing uses this
-            // destination": an object created outside this API, or before the
-            // label existed, is not listed. Saying so is the difference
-            // between a bounded answer and a wrong one.
+            schedules: rows("BackupSchedule", &schedules),
+            backups: rows("Backup", &backups),
+            truncated: schedules_cut || backups_cut,
+            // THE BASIS IS PART OF THE ANSWER: what was read, so an empty list
+            // is read as "nothing read names it" and no more.
             basis: format!(
-                "objects in this namespace labelled {DESTINATION_LABEL}=<name>, which the API \
-                 sets on the objects it creates. Objects created outside the API are not listed."
+                "schedules and backups in this namespace whose spec.destinationRef names this \
+                 destination, from at most {} of each",
+                MAX_PAGES * MAX_LIMIT as usize
             ),
         },
     ))
+}
+
+/// The `K`s in `ns` that `names` holds for, at most [`MAX_USAGE_ENTRIES`], and
+/// whether the answer was cut: more matches than that, or more pages than
+/// [`MAX_PAGES`].
+async fn naming<K: crate::kube::ProductResource>(
+    state: &AppState,
+    ns: &str,
+    names: impl Fn(&K) -> bool,
+) -> Result<(Vec<ObjectMeta>, bool), ApiError> {
+    let mut found = Vec::new();
+    let mut continue_token = None;
+    for _ in 0..MAX_PAGES {
+        let page = PageRequest {
+            limit: MAX_LIMIT,
+            continue_token: continue_token.take(),
+            label_selector: None,
+        };
+        let list = state
+            .kube()
+            .list::<K>(ns, &page)
+            .await
+            .map_err(KubeFailure::into_api_error)?;
+        found.extend(
+            list.items
+                .iter()
+                .filter(|item| names(item))
+                .map(|item| item.meta().clone()),
+        );
+        continue_token = list.metadata.continue_.filter(|token| !token.is_empty());
+        if continue_token.is_none() {
+            let cut = found.len() > MAX_USAGE_ENTRIES;
+            found.truncate(MAX_USAGE_ENTRIES);
+            return Ok((found, cut));
+        }
+    }
+    found.truncate(MAX_USAGE_ENTRIES);
+    Ok((found, true))
 }
 
 /// `POST .../destinations`.

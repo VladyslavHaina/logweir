@@ -156,6 +156,7 @@ export const CONSOLE_FIXTURES = Object.freeze({
   "backup-poc.json": { schema: "BackupResponse" },
   "backups-list.json": { schema: "BackupList" },
   "restore.json": { schema: "RestoreResponse" },
+  "restore-results.json": { schema: "RestoreResponse" },
   "restore-complete-uncovered.json": { schema: "RestoreResponse" },
   "restore-creation-stopped.json": { schema: "RestoreResponse" },
   "restore-creation-unconfirmed.json": { schema: "RestoreResponse" },
