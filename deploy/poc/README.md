@@ -737,10 +737,24 @@ helm uninstall cert-manager --kube-context "$CTX" -n "$CERT_MANAGER_NAMESPACE" -
 helm uninstall traefik --kube-context "$CTX" -n "$INGRESS_NAMESPACE" --wait
 ```
 
-**The demo archive goes with the first line.** The MinIO
-`PersistentVolumeClaim` is an ordinary release object, so `helm uninstall
-logweir` deletes it and, under docker-desktop's `Delete` reclaim policy, every
-backup in it; copy out what you need first.
+**The demo archive goes with the first line, unless the release keeps it.**
+The MinIO `PersistentVolumeClaim` is an ordinary release object, so `helm
+uninstall logweir` deletes it and, under docker-desktop's `Delete` reclaim
+policy, every backup in it. A `helm.sh/resource-policy: keep` annotation set by
+hand on the PVC does not keep it (Helm reads the manifest it stored; PROD-14.1
+lost the PVC that way). Before the uninstall, keep it through Helm and mirror
+it too:
+
+```bash
+helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
+  --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --reuse-values \
+  --set minio.persistence.keep=true --wait --timeout 15m
+```
+
+The mirror commands, and how a reinstall finds the kept PVC, are in
+[docs/install.md](../../docs/install.md#keep-the-demo-archive-across-an-uninstall).
+Deleting the namespace deletes the PVC; `kubectl --context "$CTX" -n
+"$LOGWEIR_NAMESPACE" delete pvc logweir-minio` does it on purpose.
 
 What remains on purpose ([charts/logweir/README.md](../../charts/logweir/README.md),
 *Uninstall, and what it leaves behind*): the retained signing identity

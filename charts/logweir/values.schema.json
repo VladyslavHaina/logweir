@@ -379,7 +379,8 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "size": { "type": "string", "minLength": 1 },
-            "storageClassName": { "type": "string" }
+            "storageClassName": { "type": "string" },
+            "keep": { "type": "boolean" }
           }
         },
         "resources": { "type": "object" },

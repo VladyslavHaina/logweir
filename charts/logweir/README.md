@@ -94,7 +94,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `identity.kubernetesApiCIDRs` | `[]` | exact API `/32` or `/128` endpoints, TCP 443 or 6443 |
 | `identity.externalSecret.name`, `.key` | `""`, `signing.pem` | adopt a P-256 or Ed25519 PKCS#8 Secret; never marked fresh |
 | `identity.installationTrust.enabled`, `.policyName` | `true`, `logweir-installation` | the fresh install's `TrustPolicy` (*`approvalPolicy`*) |
-| `identity.installationTrust.allowedTargetClusterIds` | `[]` | written into it once; `demoKafka.enabled` adds its target |
+| `identity.installationTrust.allowedTargetClusterIds` | `[]` | written into it once; `demoKafka.enabled` adds its target, each id listed once |
 | `identity.resources` | 10m / 32Mi, limit 128Mi | |
 
 ### Controller and the installation policy
@@ -149,6 +149,7 @@ statement**.
 | `minio.image`, `.mcImage` | mirror digests | *Third-party images* |
 | `minio.rootUser`, `.rootPassword` | `minioadmin` | |
 | `minio.persistence.enabled`, `.size`, `.storageClassName` | `true`, `5Gi`, `""` | `false` is an emptyDir: the archive dies with the pod |
+| `minio.persistence.keep` | `false` | `true` keeps the PVC, and the archive, through `helm uninstall`; set it with Helm, as a hand-set annotation is ignored ([install.md](../../docs/install.md#keep-the-demo-archive-across-an-uninstall)) |
 | `minio.resources` | 50m / 256Mi | also placement |
 | `demoKafka.enabled` | `false` | two PLAINTEXT brokers on emptyDir, `orders` and `payments` seeded |
 | `demoKafka.image`, `.clusterIds.source`, `.clusterIds.target` | digests, two ids | the ids must differ: equal ids are one cluster to phase 0 |
@@ -572,8 +573,9 @@ delete crd <name>` removes each with every object under it), the namespace,
 `TrustRoster`, the retained signing Secrets, `logweir-signing-trust`,
 `logweir-identity-singleton` and your RoleBindings. Keep the identity objects
 for recovery and old-archive verification. **The demo MinIO's PVC is deleted**,
-and under a `Delete` reclaim policy the demo archive with it. Logweir never
-deletes an archive or evidence object.
+and under a `Delete` reclaim policy the demo archive with it, unless
+`minio.persistence.keep` is `true`. Logweir never deletes an archive or
+evidence object.
 
 ## The checks that hold the chart to the tree
 

@@ -4494,6 +4494,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "minio.persistence.enabled",
         "minio.persistence.size",
         "minio.persistence.storageClassName",
+        "minio.persistence.keep",
         "minio.resources",
         "minio.nodeSelector",
         "minio.tolerations",

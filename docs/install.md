@@ -917,21 +917,27 @@ just recovery-kit v<X.Y.Z> --release-assets release-assets \
 images, the identity hook's included, carry linux/amd64 and linux/arm64); a
 single-platform image is saved as it is, with a warning. `--local-build` instead
 of `--release-assets` is a dry run with this host's `target/release/logweir`,
-and `kit.json` says `"binaries": "local-build"`. The kit is
-`target/recovery-kit/logweir-recovery-kit-<version>/`, a `.tar.gz` of it and its
-`.sha256`, and holds `bin/` (the CLI for linux-amd64, linux-arm64 and
-darwin-arm64), `chart/`, `images/images.txt` and `values-offline.yaml` (the
-controller, runner, console and identity-hook images by digest), `schemas/`,
-`verify/verify_scorecard.py`, `trust/`, this section as `RECOVERY.md`,
-`kit.json` and `MANIFEST.sha256` (every file's sha256).
+and `kit.json` says `"binaries": "local-build"`; its `sha-<commit>` may be
+short. The kit is `target/recovery-kit/logweir-recovery-kit-<version>/`, a
+`.tar.gz` of it and its `.sha256`, and holds `bin/` (the CLI for linux-amd64,
+linux-arm64 and darwin-arm64), `chart/`, `images/images.txt` and
+`values-offline.yaml` (the controller, runner, console and identity-hook images
+by digest), `schemas/`, `verify/verify_scorecard.py`, `trust/`, this section as
+`RECOVERY.md`, the guides it cites (`docs/install.md`, `docs/keys.md`),
+`kit.json` and `MANIFEST.sha256` (every file's sha256). The demo MinIO, Kafka
+and `mc` images are not in it.
 
 **The kit holds no private key and no password.** It refuses to pack a
 private-key PEM (plain or base64), a Kubernetes Secret, or a file named like a
 key, a password or a credential: exit 3, `REFUSED`, nothing written. Keep these
-in your secret store: the archive's read-only key pair (for `archiveRead`,
-widened to the catalog row of *3.11*), the target cluster's credential, the
-console's key Secret (and, in shared mode, the OIDC client secret and the TLS
-certificate), and the old identity backup if you recover that identity.
+in your secret store:
+- the archive's destination credentials (*3.11*): `archiveWrite`, without
+  which a destination is refused; `archiveRead`, widened to the catalog row;
+  and `evidenceRead`, without which no run is verified;
+- the target cluster's credential;
+- the console's key Secret (and, in shared mode, the OIDC client secret and the
+  TLS certificate);
+- the old identity backup, if you recover that identity.
 
 **Recover.**
 
@@ -940,35 +946,69 @@ certificate), and the old identity backup if you recover that identity.
 2. **Load the images:** `docker load -i images/<role>-<os>-<arch>.tar` for each,
    or push them to your registry; `docker image inspect <reference>` succeeds
    for every line of `images/images.txt`.
-3. **Install the chart from the kit**, with your console values (*5e*):
+3. **Create the console's key Secret, then install the chart from the kit.**
+   The chart does not generate that Secret (*5e*; this is `localAdmin`'s):
 
    ```bash
-   helm install logweir chart/<package>.tgz -n logweir-system --create-namespace \
+   kubectl --context <ctx> create namespace logweir-system
+   head -c 32 /dev/urandom > cursor.key
+   kubectl --context <ctx> -n logweir-system \
+     create secret generic logweir-console-keys --from-file=cursor.key
+   rm cursor.key
+   helm install logweir chart/<package>.tgz -n logweir-system \
      -f values-offline.yaml -f <your values> --wait --timeout 10m
    ```
 
-   With images loaded on the node and no registry, set `imagePullPolicy`,
-   `runnerImagePullPolicy`, `identity.bootstrapImagePullPolicy` and
-   `api.console.imagePullPolicy` to `Never`. The install generates its own
-   identity and console key and the `logweir-installation` policy (*5f*); name
-   the target in `identity.installationTrust.allowedTargetClusterIds`.
+   Your values turn the console on (*5e*). With images loaded on the node and
+   no registry, set `imagePullPolicy`, `runnerImagePullPolicy`,
+   `identity.bootstrapImagePullPolicy` and `api.console.imagePullPolicy` to
+   `Never`. The install generates its own identity and console key and the
+   `logweir-installation` policy (*5f*); name the restore target's cluster id
+   in `identity.installationTrust.allowedTargetClusterIds`.
 4. **Trust the archive's signer.** Compare `trust/signing-key-id.txt` with your
    out-of-band record (`docs/keys.md`), then, as `logweir-trust-admin`, copy that
    key's entry (usage `EvidenceSigning`) from `trust/trustpolicy-<name>.yaml`
    into `spec.keys` of `logweir-installation` (`kubectl edit trustpolicy
    logweir-installation`). Never apply the exported policy beside it: two
    `default: true` policies are `TrustPolicyConflict` everywhere.
-5. **Connect the existing archive:** on *Destinations*, a destination whose
-   `archiveRead` grant is the read-only key pair; on *Catalog*, *Connect an
-   existing archive* (a `Full` sync). Points from v0.1.5 or earlier need one
-   `logweir catalog sync` backfill first.
-6. **Choose a point** the catalog marks selectable (`Available`, and `Verified`
+5. **Reach the archive.** If its bucket survives, the destination names it. If
+   only a copy does (*Keep the demo archive across an uninstall*), create the
+   bucket and the *3.11* users in the new store and copy it in, bucket by
+   bucket: `mc mirror ./archive/<bucket> <alias>/<bucket>`.
+6. **Connect the existing archive:** on *Destinations*, a destination with
+   `archiveWrite`, `archiveRead` and `evidenceRead` grants (an absent
+   `evidenceWrite` uses `archiveWrite`); one with only `archiveRead` is
+   refused. Then on *Catalog*, *Connect an existing archive* (a `Full` sync).
+   Points from v0.1.5 or earlier need one `logweir catalog sync` backfill
+   first.
+7. **Connect the target:** on *Clusters*, the target cluster with its
+   credential (*The first backup*, step 1), the cluster id step 3 allowed.
+8. **Choose a point** the catalog marks selectable (`Available`, and `Verified`
    or `VerifiedHistorical`), name the topics and target, and create the
    restore; in confirm, Create is the approval.
-7. **Verify:** the completion panel shows the verdict. Independently, run
-   `python3 verify/verify_scorecard.py scorecard.json scorecard.sig signing.pub.pem`
-   over the scorecard from `status.evidence` with the NEW installation's public
-   key; the old backup's receipt verifies under `trust/signing.pub.pem`.
+9. **Verify:** the completion panel shows the verdict. To check it yourself,
+   fetch the documents with the `evidenceRead` credential (`mc cat
+   <alias>/<bucket>/<key> > <file>`, or `aws s3 cp s3://<bucket>/<key> <file>`):
+   the scorecard and its signature at the `Restore`'s
+   `status.evidence.scorecardKey` and `sidecarKey`, and the old backup's
+   receipt at the catalog point's `receiptKey`
+   (`logweir/backups/<backupId>/<run id>.receipt.json`) with its `.receipt.sig`.
+   Then verify with the kit's CLI (`tar -xJf bin/logweir-<target>.tar.xz` gives
+   `logweir-<target>/logweir`; a dry-run kit has `bin/<target>/logweir`):
+
+   ```bash
+   kubectl --context <ctx> -n logweir-system get configmap logweir-signing-trust \
+     -o jsonpath='{.data.signing\.pub\.pem}' > new-signing.pub.pem
+   logweir drill verify --scorecard scorecard.json --signature scorecard.sig \
+     --public-key new-signing.pub.pem
+   logweir drill verify --payload-type backup-receipt --scorecard receipt.json \
+     --signature receipt.sig --public-key trust/signing.pub.pem
+   ```
+
+   The CLI is the offline verifier because the kit already carries it.
+   `python3 verify/verify_scorecard.py <document> <signature> <key>` (with
+   `--payload-type backup-receipt` for the receipt) is the independent second
+   reader; it needs Python's `cryptography`, which the kit does not carry.
 
 ---
 
@@ -1121,6 +1161,37 @@ aws s3 rm 's3://logweir-evidence/<prefix>/' --recursive            # evidence ob
 kubectl --context docker-desktop delete rolebinding logweir-viewer logweir-operator logweir-approver -n <namespace>
 kubectl --context docker-desktop -n <namespace> delete serviceaccount logweir-runner
 ```
+
+### Keep the demo archive across an uninstall
+
+The chart's MinIO (`minio.enabled`) holds its archive on the PVC
+`<release>-minio`, and `helm uninstall` deletes it, with every backup on it
+when the volume's reclaim policy is `Delete` (docker-desktop's is). Helm keeps
+an object only when the manifest it **stored** says `helm.sh/resource-policy:
+keep`; an annotation set by hand on the live PVC is ignored. Set it through
+Helm, at install or before the uninstall:
+
+```bash
+helm upgrade logweir <chart> -n logweir-system --reuse-values \
+  --set minio.persistence.keep=true --wait
+```
+
+The PVC then outlives the release until you delete it (`kubectl delete pvc
+<release>-minio`) or its namespace. A later `helm install` of the same release
+into the same namespace, with the same `minio.*` values, takes the PVC over and
+serves the old archive.
+[UNVERIFIED — Helm's adoption of a kept PVC is not yet run on this chart; the next PoC reinstall measures it]
+The PVC is one copy on one node, so mirror every bucket as well:
+
+```bash
+kubectl --context docker-desktop -n logweir-system port-forward svc/<release>-minio 9000:9000 &
+mc alias set old http://127.0.0.1:9000          # prompts for minio.rootUser and its password
+mc ls old                                       # the buckets
+mc mirror old/<bucket> ./archive/<bucket>       # for each
+```
+
+`mc mirror ./archive/<bucket> <alias>/<bucket>` copies one back into a new
+installation's store (*Recover onto a clean installation with the kit*).
 
 ---
 
