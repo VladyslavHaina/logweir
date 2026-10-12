@@ -4709,35 +4709,59 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
             "{owner}.{key} defaults to an empty list"
         );
     }
-    // The schema accepts exactly this set — `additionalProperties: false` means
-    // a key in values.yaml that the schema forgot refuses every install. A
-    // WITHDRAWN key is the one exception: the schema accepts it only so the
-    // render can refuse it by name, and values.yaml no longer shows it.
-    const WITHDRAWN: [&str; 1] = ["notify"];
+    // The schema accepts exactly this set, AT EVERY DEPTH — `additionalProperties:
+    // false` means a key in values.yaml that the schema forgot refuses every
+    // install, and a key the schema types that values.yaml does not show is
+    // accepted and, unless a template reads it, silently ignored (`kafka.markerTopic`
+    // was, until the chart-validate pass). A WITHDRAWN key is the one exception:
+    // the schema accepts it only so the render can refuse it (`notify`, `ui`) or
+    // the install notes can name it, and values.yaml no longer shows it. An open
+    // map (`resources`, `nodeSelector`, annotations: a schema object with no
+    // `properties`) is compared by its own key, not its contents.
+    const WITHDRAWN: [&str; 4] = [
+        "notify",
+        "ui",
+        "checks.discovery.defaultMaxTopics",
+        "checks.preflight.defaultTimeoutSeconds",
+    ];
     let schema: serde_json::Value =
         serde_json::from_str(&read("charts/logweir/values.schema.json"))
             .expect("the schema parses");
-    let typed: BTreeSet<String> = schema["properties"]
-        .as_object()
-        .expect("a properties object")
-        .keys()
-        .filter(|k| !WITHDRAWN.contains(&k.as_str()))
-        .cloned()
-        .collect();
-    let mut written: BTreeSet<String> = values
-        .as_mapping()
-        .expect("a mapping")
-        .keys()
-        .filter_map(|k| k.as_str().map(str::to_string))
-        .collect();
-    // A WITHDRAWN key is typed and not shown: the schema accepts it only so a
-    // template can refuse it BY NAME (`ui`, refused by
-    // templates/ui/ui.yaml pointing at the console).
-    written.insert("ui".to_string());
-    assert_eq!(
-        written, typed,
-        "values.schema.json is additionalProperties:false, so every top-level key in values.yaml \
-         must be typed there and nothing may be typed that values.yaml does not show"
+    let resolve = |node: &serde_json::Value| -> serde_json::Value {
+        match node["$ref"].as_str() {
+            Some(r) => schema["definitions"][r.trim_start_matches("#/definitions/")].clone(),
+            None => node.clone(),
+        }
+    };
+    let mut typed = BTreeSet::new();
+    let mut written: BTreeSet<String> = WITHDRAWN.iter().map(|k| k.to_string()).collect();
+    let mut stack = vec![(String::new(), schema.clone(), Some(values.clone()))];
+    while let Some((prefix, node, shown)) = stack.pop() {
+        let Some(props) = node["properties"].as_object() else {
+            continue;
+        };
+        for (key, child) in props {
+            let path = format!("{prefix}{key}");
+            typed.insert(path.clone());
+            let child_shown = shown.as_ref().map(|v| v[key.as_str()].clone());
+            stack.push((format!("{path}."), resolve(child), child_shown));
+        }
+        if let Some(mapping) = shown.as_ref().and_then(Value::as_mapping) {
+            written.extend(
+                mapping
+                    .keys()
+                    .filter_map(Value::as_str)
+                    .map(|k| format!("{prefix}{k}")),
+            );
+        }
+    }
+    let untyped: Vec<_> = written.difference(&typed).collect();
+    let unshown: Vec<_> = typed.difference(&written).collect();
+    assert!(
+        untyped.is_empty() && unshown.is_empty(),
+        "values.schema.json is additionalProperties:false, so every key in values.yaml must be \
+         typed there, at every depth, and nothing may be typed that values.yaml does not show: \
+         in values.yaml only {untyped:?}; in the schema only {unshown:?}"
     );
 }
 
