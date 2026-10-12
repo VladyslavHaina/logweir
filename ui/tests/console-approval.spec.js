@@ -45,6 +45,7 @@ import {
   noApprovalSentence,
   policyMode,
   renderApprovalSubject,
+  renderApprovalStatus,
   renderConsoleApprovalPanel,
   submitConsoleApproval,
   TRANSACTION_MARKERS_SENTENCE,
@@ -214,12 +215,9 @@ test("a_two_person_namespace_shows_the_request_and_one_button_and_nothing_to_pas
   assert.match(html, /id="console-approval-form"/);
   assert.match(html, /<button type="submit" class="primary" id="approve-in-console">Approve this Restore<\/button>/);
   // What is being approved, as the server showed it.
-  // The requester by a short form of the principal, the full one on hover
-  // and in the text (PROD-14.1 visual pass, M7).
-  assert.ok(html.includes("<span id=\"request-requester\"><button type=\"button\" class=\"ident\" " +
-    "data-copy=\"https://idp.example#alice\" title=\"https://idp.example#alice -- click to copy\">" +
-    "<code class=\"ident-text ident-shown\"><span aria-hidden=\"true\">alice</span><span " +
-    "class=\"visually-hidden\">https://idp.example#alice</span></code></button></span>"), html);
+  // The requester's full principal, never a short form of it.
+  assert.ok(html.includes("<span id=\"request-requester\"><code>https://idp.example#alice</code>" +
+    "</span>"), html);
   assert.ok(html.includes("<code id=\"request-plan-hash\">sha256:" + "e".repeat(64) + "</code>"));
   assert.ok(html.includes("<code>prod-pair</code>"));
   assert.ok(html.includes("sha256:" + "c".repeat(64)), "the policy digest");
@@ -344,10 +342,8 @@ test("a_request_this_console_did_not_confirm_shows_none_of_its_fields", () => {
 
 test("an_approved_request_names_the_approver_and_is_never_green", () => {
   const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: request("approved") }));
-  assert.ok(html.includes("<span id=\"request-approver\"><button type=\"button\" class=\"ident\" " +
-    "data-copy=\"https://idp.example#bob\" title=\"https://idp.example#bob -- click to copy\">" +
-    "<code class=\"ident-text ident-shown\"><span aria-hidden=\"true\">bob</span><span " +
-    "class=\"visually-hidden\">https://idp.example#bob</span></code></button></span>"), html);
+  assert.ok(html.includes("<span id=\"request-approver\"><code>https://idp.example#bob</code></span>"),
+    html);
   assert.ok(html.includes("2026-10-10T12:04:00Z"));
   assert.ok(!/badge-green/.test(html),
     "the console's record of an approval is not weirkeeper's verdict on it");
@@ -355,6 +351,71 @@ test("an_approved_request_names_the_approver_and_is_never_green", () => {
   // NEGATIVE CONTROL: a pending request names no approver.
   assert.ok(!/id="request-approver"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
 });
+
+// WHO REQUESTED AND WHO APPROVED, IN FULL, wherever an approval is decided or
+// audited: the panel's "requested by" and "approved by" and the Approval
+// card's "approver" (a security review of PROD-14.1's M7 fix). A short form
+// there -- the subject alone, its middle cut -- read two principals the same
+// when they differed only in the issuer or in the middle of the subject.
+
+const SUBJECT_A = "CiQxZjBjOWE0ZS0wMDA3LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDcSBWxvY2Fs";
+const LOOKALIKES = Object.freeze([
+  "https://dex.localtest.me#" + SUBJECT_A,
+  // The same issuer, the subject's head and tail, another middle.
+  "https://dex.localtest.me#" + SUBJECT_A.slice(0, 6) + "X".repeat(SUBJECT_A.length - 18) +
+    SUBJECT_A.slice(-12),
+  // The same subject at another identity provider.
+  "https://idp.other.example#" + SUBJECT_A,
+]);
+
+/** `html`'s fact named `label`, as markup. */
+function factAt(html, label) {
+  const from = html.indexOf("<dt>" + label + "</dt>");
+  assert.ok(from !== -1, label + " in " + html);
+  return html.slice(from + label.length + 9, html.indexOf("</dd>", from));
+}
+
+/** What a person reads in a fact: its text, without what is visually hidden. */
+function readAt(html, label) {
+  return factAt(html, label).replace(/<span class="visually-hidden">[^<]*<\/span>/g, "")
+    .replace(/<[^>]*>/g, "");
+}
+
+test("a_requester_and_an_approver_read_in_full_wherever_an_approval_is_decided_or_audited",
+  async () => {
+    const places = [
+      ["requested by", (id) => renderConsoleApprovalPanel(view(TWO_PERSON,
+        { request: Object.assign({}, request("pending"), { requester: id }) }))],
+      ["approved by", (id) => renderConsoleApprovalPanel(view(TWO_PERSON,
+        { request: Object.assign({}, request("approved"), { approver: id }) }))],
+      ["approver", (id) => renderApprovalStatus({
+        metadata: { name: "approval-x" }, spec: {}, status: { verified: true, approver: id } })],
+    ];
+    for (const [place, render] of places) {
+      const read = LOOKALIKES.map((id) => readAt(render(id), place));
+      assert.equal(new Set(read).size, LOOKALIKES.length, "NEGATIVE CONTROL: " + place +
+        " read the same for principals differing in the issuer or a subject's middle: " +
+        read.join(" | "));
+      LOOKALIKES.forEach((id, i) => {
+        assert.ok(read[i].includes(id), place + " shows the whole principal: " + read[i]);
+        // Wrapped, never clamped to one line (`code` wraps anywhere).
+        assert.ok(!factAt(render(id), place).includes("ident-text"), place);
+      });
+    }
+    // THE SIGNED-IN ACTOR'S OWN PRINCIPAL is "you (<display name>)" and then
+    // the principal in full; its lookalike is not "you".
+    const document = fixture("console/session.json");
+    document.actor = Object.assign({}, document.actor, { displayName: "Alice", id: LOOKALIKES[0] });
+    resetMode();
+    await selectMode({ probe: async () => ({ ok: true, status: 200, body: document }) });
+    try {
+      const [place, render] = places[0];
+      assert.equal(readAt(render(LOOKALIKES[0]), place), "you (Alice) " + LOOKALIKES[0]);
+      assert.equal(readAt(render(LOOKALIKES[1]), place), LOOKALIKES[1]);
+    } finally {
+      resetMode();
+    }
+  });
 
 test("an_original_name_request_shows_the_requesters_owner_statement", () => {
   // The plan's owner statement alone decides whether an original-name write

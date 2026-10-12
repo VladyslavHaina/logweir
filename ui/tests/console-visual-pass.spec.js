@@ -38,9 +38,11 @@ import {
   restoreDestination,
 } from "../pages/restore-wizard.js";
 import {
+  PRINCIPAL_CUT_TITLE,
   PRINCIPAL_SHORT_CHARS,
   principalShort,
   renderApprovalList,
+  renderApprovalsPage,
   restoreProgressSentence,
 } from "../pages/approvals.js";
 import { ident } from "../render.js";
@@ -272,31 +274,40 @@ test("m6_the_approvals_table_keeps_one_line_a_row_and_every_identifier_whole", (
 
 // M7. The approver was shown only as `https://dex.localtest.me#CiQx...`:
 // alice and bob could not be told apart at a glance. The signed approval
-// carries no name or email, so the cell shows a short form of the subject,
-// the full principal on hover -- and "you" for the signed-in actor.
+// carries no name or email, so the cell shows the issuer's host and a short
+// form of the subject, the full principal on hover -- and "you" for the
+// signed-in actor.
 
 const BOB = "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAyLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDISBWxvY2Fs";
 
 /** What a person SEES in the approver cell: the drawn short form. */
 function seen(cellHtml) {
-  const shown = /<span aria-hidden="true">([^<]*)<\/span>/.exec(cellHtml);
-  return shown === null ? cellHtml.replace(/<[^>]*>/g, "").replace(/copy$/, "") : shown[1];
+  const shown = /<span aria-hidden="true">(.*?)<\/span><span class="visually-hidden">/.exec(cellHtml);
+  return shown === null
+    ? cellHtml.replace(/<[^>]*>/g, "").replace(/copy$/, "")
+    : shown[1].replace(/<[^>]*>/g, "");
+}
+
+/** The approver cell of each row of the Approvals table in `html`. */
+function approverCells(html) {
+  const rows = html.slice(html.indexOf("<tbody>"), html.indexOf("</tbody>")).split("<tr").slice(1);
+  return rows.map((row) => firstRowCells("<tbody><tr" + row + "</tbody>")[2]);
 }
 
 test("m7_two_approvers_read_differently_at_a_glance_and_the_signed_in_one_is_you", async () => {
   const two = renderApprovalList({ items: [pocApproval("a-1", DEX), pocApproval("a-2", BOB)] },
     Date.parse("2026-10-12T09:30:00Z"));
-  const rows = two.slice(two.indexOf("<tbody>"), two.indexOf("</tbody>")).split("<tr").slice(1);
-  const approvers = rows.map((row) => seen(firstRowCells("<tbody><tr" + row + "</tbody>")[2]));
+  const approvers = approverCells(two).map(seen);
   assert.notEqual(approvers[0], approvers[1],
     "NEGATIVE CONTROL: both read https://dex.localtest.me#CiQx... in a cut-off cell");
   for (const shown of approvers) {
-    assert.ok(!shown.includes("dex.localtest.me"), "the issuer is on hover, not in the way: " + shown);
-    assert.ok(shown.length <= 6 + 3 + 12, shown);
+    assert.ok(shown.startsWith("dex.localtest.me \u00b7 "), "the issuer's host first: " + shown);
+    assert.ok(shown.length <= "dex.localtest.me \u00b7 ".length + 6 + 1 + 12, shown);
   }
-  assert.deepEqual(approvers, ["CiQxZj...MDcSBWxvY2Fs", "CiQxZj...MDISBWxvY2Fs"]);
+  assert.deepEqual(approvers, ["dex.localtest.me \u00b7 CiQxZj\u2026MDcSBWxvY2Fs",
+    "dex.localtest.me \u00b7 CiQxZj\u2026MDISBWxvY2Fs"]);
   // A subject that is already short is shown whole.
-  assert.equal(principalShort("https://idp.example#bob", null), "bob");
+  assert.deepEqual(principalShort("https://idp.example#bob", null), ["idp.example \u00b7 bob"]);
   assert.ok("bob".length <= PRINCIPAL_SHORT_CHARS);
   // THE SESSION NAMES ITS OWN ACTOR, so the signed-in approver reads "you".
   const viewer = session("session-viewer.json");
@@ -305,6 +316,55 @@ test("m7_two_approvers_read_differently_at_a_glance_and_the_signed_in_one_is_you
   assert.equal(seen(firstRowCells(mine)[2]), "you (Dana Viewer)");
   assert.ok(firstRowCells(mine)[2].includes("title=\"oidc#dana -- click to copy\""),
     "with the principal on hover");
+});
+
+// The table's short form after a security review of M7's fix: the subject
+// alone dropped the issuer, so one subject at two identity providers read the
+// same. It names the issuer's host, says where it was cut, and the card under
+// the table shows the principal in full.
+
+test("m7_the_tables_short_form_names_the_issuers_host_and_says_where_it_is_cut", () => {
+  const subject = DEX.slice(DEX.indexOf("#") + 1);
+  const other = "https://idp.other.example#" + subject;
+  const page = renderApprovalsPage({ items: [pocApproval("a-1", DEX), pocApproval("a-2", other)] },
+    { ns: "team-a" }, Date.parse("2026-10-12T09:30:00Z"));
+  const cells = approverCells(page);
+  const shown = cells.map(seen);
+  assert.notEqual(shown[0], shown[1],
+    "NEGATIVE CONTROL: the subject alone read " + shown[0] + " for both issuers");
+  assert.deepEqual(shown, ["dex.localtest.me \u00b7 CiQxZj\u2026MDcSBWxvY2Fs",
+    "idp.other.example \u00b7 CiQxZj\u2026MDcSBWxvY2Fs"]);
+  [DEX, other].forEach((full, i) => {
+    // MARKED AS SHORTENED: an ellipsis character that says so on hover.
+    assert.ok(cells[i].includes("<span class=\"ident-cut\" title=\"" + PRINCIPAL_CUT_TITLE +
+      "\">\u2026</span>"), cells[i]);
+    assert.equal(PRINCIPAL_CUT_TITLE, "shortened; full value on hover and in the card below");
+    // The full value on hover and on copy, as `ident` keeps it.
+    assert.ok(cells[i].includes("title=\"" + full + " -- click to copy\""), "on hover");
+    assert.ok(cells[i].includes("data-copy=\"" + full + "\""), "on copy");
+    // And IN FULL in the card under the table, without a hover.
+    const at = page.indexOf("<section class=\"approval\"><div class=\"card-head\"><h3>a-" + (i + 1) +
+      "</h3>");
+    assert.ok(page.indexOf("</table>") < at, "the card is under the table");
+    const card = page.slice(at, page.indexOf("</section>", at));
+    assert.ok(card.includes("<dt>approver</dt><dd><code>" + full + "</code></dd>"), card);
+  });
+  // An issuer that is more than its https origin is cut after its host; one
+  // that is not a URL is shown whole.
+  assert.deepEqual(principalShort("https://kc.example/realms/a#bob", null), ["kc.example",
+    " \u00b7 bob"]);
+  assert.deepEqual(principalShort("oidc#dana", null), ["oidc \u00b7 dana"]);
+  // ROOM TO BE READ WHOLE: the drawn form's width token holds the longest
+  // PoC-shaped short form and the chip's padding.
+  const css = CSS();
+  const width = /--lw-ident-shown-width: (\d+)ch;/.exec(css);
+  assert.ok(width !== null && Number(width[1]) >= shown[1].length + 2, String(width && width[1]));
+  // And in a phone's stacked card it is two lines broken at its space, not
+  // its subject cut off at 390 px.
+  const phone = css.indexOf("@media (max-width: 767.98px) {");
+  const rule = css.indexOf("  .grid td .ident-text.ident-shown {\n    -webkit-line-clamp: 2;\n" +
+    "    word-break: normal;\n  }", phone);
+  assert.ok(phone !== -1 && rule !== -1 && rule < css.indexOf("\n@media", phone + 1), "the phone rule");
 });
 
 // M8. On wizard step 5 with no topic ticked, Check readiness did nothing: no

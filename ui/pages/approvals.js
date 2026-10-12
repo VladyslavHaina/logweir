@@ -413,7 +413,7 @@ export function renderApprovalStatus(object) {
       ["verified subject uid", cell((status.verifiedSubjectRef || {}).uid)],
       ["Verified reason", cell((condition || {}).reason)],
       ["matched key id", cell(status.matchedKeyId)],
-      ["approver", principalCell(status.approver)],
+      ["approver", principalFull(status.approver)],
       ["ticket", cell(status.ticket)],
       // What the signed document authorises.
       ["approval subject", "<span class=\"approval-subject-value\">" +
@@ -1098,32 +1098,75 @@ export async function submitApproval(subject, documents, deps, options) {
 /** The longest subject a principal's short form shows whole. */
 export const PRINCIPAL_SHORT_CHARS = 20;
 
-/** A PRINCIPAL, `<issuer>#<subject>`, IN A FORM A PERSON CAN TELL APART AT A
- *  GLANCE (PROD-14.1 visual pass, M7). The signed approval names its approver
- *  by issuer and subject only, never a name or an email
- *  (`logweir_core::approval_policy::Approver`), and the sign-in names only its
- *  own actor. So: "you (<display name>)" for the signed-in actor's own
- *  principal; else the subject alone, its middle cut when it is longer than
+/** What the cut in a principal's short form says on hover. */
+export const PRINCIPAL_CUT_TITLE = "shortened; full value on hover and in the card below";
+
+/** "you (<display name>)" when `full` IS the signed-in actor's own principal
+ *  (the whole `<issuer>#<subject>`, compared exactly), else `null`. The signed
+ *  approval names its approver by issuer and subject only, never a name or an
+ *  email (`logweir_core::approval_policy::Approver`), and the sign-in names
+ *  only its own actor. `self` is `sessionIdentity`'s answer, or `null`. */
+function youOf(full, self) {
+  const me = self || {};
+  return typeof me.actorId === "string" && me.actorId.length > 0 && me.actorId === full &&
+    typeof me.displayName === "string" && me.displayName.length > 0
+    ? "you (" + me.displayName + ")"
+    : null;
+}
+
+/** A PRINCIPAL IN FULL, wrapped and never shortened, where a person decides or
+ *  audits an approval: the Approval card's approver and the two-person
+ *  panel's "requested by" and "approved by". Two principals that differ
+ *  anywhere -- in the issuer, or in the middle of a subject -- read
+ *  differently there without a hover. "you (<display name>)" comes first when
+ *  it is the signed-in actor's own. */
+export function principalFull(id) {
+  if (id === null || id === undefined || id === "") {
+    return cell(null);
+  }
+  const full = String(id);
+  const you = youOf(full, sessionIdentity(""));
+  return (you === null ? "" : esc(inert(you)) + " ") + "<code>" + esc(inert(full)) + "</code>";
+}
+
+/** An issuer as its host: `[host]` for an https origin, `[host, ""]` (a cut
+ *  after the host) for an issuer with more than that, and the issuer whole
+ *  when it is not a URL. */
+function issuerParts(issuer) {
+  const url = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]+)(.*)$/.exec(issuer);
+  if (url === null) {
+    return [issuer];
+  }
+  return url[1].toLowerCase() === "https" && url[3] === "" ? [url[2]] : [url[2], ""];
+}
+
+/** THE APPROVALS TABLE'S SHORT FORM OF A PRINCIPAL, `<issuer>#<subject>`
+ *  (PROD-14.1 visual pass, M6 and M7), as the parts left between its cuts
+ *  (`ident` draws each cut as a marked ellipsis): "you (<display name>)" for
+ *  the signed-in actor's own principal; else the issuer's host, a middle dot
+ *  and the subject, its middle cut when it is longer than
  *  [`PRINCIPAL_SHORT_CHARS`] (an IdP's opaque subject differs in its tail as
- *  often as in its head). `self` is `sessionIdentity`'s answer, or `null`. */
+ *  often as in its head). Only the table uses it: the card below shows the
+ *  principal in full ([`principalFull`]). */
 export function principalShort(id, self) {
   const full = String(id === null || id === undefined ? "" : id);
-  const me = self || {};
-  if (typeof me.actorId === "string" && me.actorId.length > 0 && me.actorId === full &&
-    typeof me.displayName === "string" && me.displayName.length > 0) {
-    return "you (" + me.displayName + ")";
+  const you = youOf(full, self);
+  if (you !== null) {
+    return [you];
   }
   const at = full.indexOf("#");
   const subject = at === -1 ? full : full.slice(at + 1);
-  return subject.length <= PRINCIPAL_SHORT_CHARS
-    ? subject
-    : subject.slice(0, 6) + "..." + subject.slice(-12);
+  const cut = subject.length > PRINCIPAL_SHORT_CHARS;
+  const parts = at === -1 ? [""] : issuerParts(full.slice(0, at));
+  parts[parts.length - 1] += (at === -1 ? "" : " \u00b7 ") +
+    (cut ? subject.slice(0, 6) : subject);
+  return cut ? parts.concat([subject.slice(-12)]) : parts;
 }
 
-/** A principal as a cell: its short form, the full principal on hover, in the
- *  text and on the copy button. */
+/** A principal as the Approvals table's cell: its short form, the full
+ *  principal on hover, in the text and on the copy button. */
 export function principalCell(id) {
-  return ident(id, principalShort(id, sessionIdentity("")));
+  return ident(id, principalShort(id, sessionIdentity("")), PRINCIPAL_CUT_TITLE);
 }
 
 /** The table's verdict chip: `verified` in one word, with the sentence the
@@ -1708,7 +1751,7 @@ export function renderConsoleApprovalPanel(view) {
   }
   const original = r.approvalSubject === "originalName";
   const rows = [
-    ["requested by", "<span id=\"request-requester\">" + principalCell(r.requester) + "</span>"],
+    ["requested by", "<span id=\"request-requester\">" + principalFull(r.requester) + "</span>"],
     ["Restore", "<code>" + esc(r.restore) + "</code>"],
     ["Restore uid", "<code>" + esc(r.restoreUid) + "</code>"],
     ["plan hash", "<code id=\"request-plan-hash\">" + esc(r.planHash) + "</code>"],
@@ -1721,7 +1764,7 @@ export function renderConsoleApprovalPanel(view) {
     ["expires at", "<span id=\"request-expires-at\">" + when(r.expiresAt) + "</span>"],
   ];
   if (r.state === "approved") {
-    rows.push(["approved by", "<span id=\"request-approver\">" + principalCell(r.approver) +
+    rows.push(["approved by", "<span id=\"request-approver\">" + principalFull(r.approver) +
       "</span>"]);
     rows.push(["approved at", when(r.approvedAt)]);
   }

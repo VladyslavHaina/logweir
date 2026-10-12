@@ -291,7 +291,7 @@
   --lw-subset-max-height: 24rem;
   --lw-ident-min-width: 8ch;
   --lw-ident-width: 14ch;
-  --lw-ident-shown-width: 24ch;
+  --lw-ident-shown-width: 42ch;
   /* The sticky wizard footer's height where it wraps to two rows (390 px:
    * about 110 px), with room to spare -- what a focused status keeps clear. */
   --lw-wizard-nav-clearance: 8rem;
@@ -1014,8 +1014,9 @@ main > h2 + .blurb,
   word-break: break-all;
 }
 
-/* A short form a page drew itself (a principal's subject) is bounded by its
- * maker, so it gets the room to be read whole. */
+/* A short form a page drew itself (a principal's issuer host and cut
+ * subject, about 38 characters) is bounded by its maker, so it gets the room
+ * to be read whole. */
 .ident-text.ident-shown {
   max-width: var(--lw-ident-shown-width);
 }
@@ -1288,6 +1289,14 @@ th[aria-sort="descending"] .datagrid-sort::after {
    * elsewhere. It wraps only where it does not fit. */
   .grid td .ts {
     white-space: normal;
+  }
+
+  /* A principal's short form (its issuer's host, then the subject) is two
+   * lines in a stacked card, broken at its space, rather than its subject cut
+   * off at 390 px. */
+  .grid td .ident-text.ident-shown {
+    -webkit-line-clamp: 2;
+    word-break: normal;
   }
 
   /* A cell's second line stays under its first, in the value column (L12):

@@ -252,8 +252,11 @@ base, the focus ring's colour, a theme that follows the system).
 - A chip wraps only at a space; `app.js` marks one holding a word over 24
   characters `long`, and only that one may break anywhere.
 - A long identifier in a table (`ident` in `render.js`: a key id, a point id,
-  a backup set, a principal) is one line, cut between 8 and 14 characters wide.
-  The full value is its hover title and its text, and a click copies it.
+  a backup set) is one line, cut between 8 and 14 characters wide.
+  The full value is its hover title and its text, and a click copies it. The
+  Approvals table draws a principal as its issuer's host and a short form of
+  its subject, each cut an ellipsis titled as one; the Approval card and the
+  two-person panel show every principal in full.
 
 ## The rules and their gates
 

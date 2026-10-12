@@ -1834,10 +1834,15 @@ or signed format changes. What a person sees:
 - A role that cannot create a connection or a schedule (a viewer, an approver)
   is not offered those create forms, and an approver lands on Approvals instead
   of a refused Clusters page.
-- In a table a long identifier (a key id, a point id, a backup set, a signer, a
-  principal) is one line, cut between 8 and 14 characters wide, whole on hover,
-  and copied by a click. An approver reads as a short form of their subject, or
-  "you". The restore picker's archive points list the point and its set under
+- In a table a long identifier (a key id, a point id, a backup set, a signer)
+  is one line, cut between 8 and 14 characters wide, whole on hover, and copied
+  by a click. In the Approvals table an approver reads as their identity
+  provider's host and a short form of their subject, its cut marked by an
+  ellipsis, or "you". Where an approval is decided or audited (the Approval
+  card's approver, the two-person panel's "requested by" and "approved by"),
+  the full principal is shown, wrapped, so one subject at two identity
+  providers, or two subjects sharing a head and tail, never read alike. The
+  restore picker's archive points list the point and its set under
   the catalog, so their STATE column is in sight at 1024 px.
 - With no topic ticked, step 5's Check readiness is disabled and says why;
   under a confirm-mode namespace step 5 says "you confirm".

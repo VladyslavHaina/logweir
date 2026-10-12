@@ -636,21 +636,25 @@ export function cell(value) {
  *  read, and what a click copies -- the identifier IS its copy button, because
  *  a button beside every id cost a table its last column at 1024 px. `shown`,
  *  when given, is a short form drawn instead of the value's head (the full
- *  value stays in the text, visually hidden). `app.js` wires every `.ident`
- *  once. */
-export function ident(value, shown) {
+ *  value stays in the text, visually hidden): a string, or the parts left
+ *  between the places it was cut, each cut drawn as an ellipsis whose hover
+ *  title is `cutNote`. `app.js` wires every `.ident` once. */
+export function ident(value, shown, cutNote) {
   if (value === null || value === undefined || value === "") {
     return ABSENT;
   }
   const full = String(value);
-  const short = typeof shown === "string" && shown.length > 0 && shown !== full;
+  const parts = Array.isArray(shown) ? shown.map(String)
+    : (typeof shown === "string" && shown.length > 0 ? [shown] : []);
+  const short = parts.length > 0 && !(parts.length === 1 && parts[0] === full);
   return (
     "<button type=\"button\" class=\"ident\" data-copy=\"" + esc(full) + "\" title=\"" +
     esc(inert(full)) + " -- click to copy\"><code class=\"ident-text" +
     (short ? " ident-shown" : "") + "\">" +
     (short
-      ? "<span aria-hidden=\"true\">" + esc(inert(shown)) + "</span>" +
-        "<span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
+      ? "<span aria-hidden=\"true\">" + parts.map((part) => esc(inert(part))).join(
+        "<span class=\"ident-cut\" title=\"" + esc(String(cutNote || "")) + "\">\u2026</span>") +
+        "</span><span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
       : esc(inert(full))) +
     "</code></button>"
   );
