@@ -18,7 +18,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resetMode, selectMode } from "../client.js";
+import { apiClient, resetMode, selectMode } from "../client.js";
 import {
   NO_EVIDENCE_KEYS_SENTENCE,
   mountBackupDetail,
@@ -32,6 +32,12 @@ import {
   submitRotation,
   validateGrants,
 } from "../pages/destinations.js";
+import {
+  policyForSchedule,
+  readRetentionPolicies,
+  renderRetentionPanel,
+} from "../pages/schedules.js";
+import { ENFORCEMENT_SENTENCES, RETENTION_SENTENCE } from "../render.js";
 import { decoded, wire } from "./console-fixture.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
 
@@ -312,4 +318,118 @@ test("h2_choosing_absent_warns_what_turns_off_and_sends_exactly_that", () => {
   // A grant the destination does not hold carries no warning: absent removes nothing.
   const unheld = decode(renderRotateForm(decoded("destination.json").item, { mayOperate: true }));
   assert.equal(unheld.indexOf("id=\"rotate-evidenceWrite-removes\""), -1);
+});
+
+// H3. THE POLICY NAMING THE DESTINATION IS FOUND, AND SAYS WHAT IT DOES.
+
+/** Schedule `tz`, which names destination `dest`, through the real client. */
+async function scheduleTz() {
+  const wire_ = transport((u) =>
+    u.indexOf("/api/v1/namespaces/" + NS + "/schedules/tz") === 0
+      ? { status: 200, body: wire("schedule-policy.json") }
+      : undefined);
+  try {
+    return await apiClient().get(NS, "backupschedules", "tz");
+  } finally {
+    wire_.restore();
+  }
+}
+
+/** The namespace's RetentionPolicies, as the panel's own reader reads them,
+ *  from `retention-policies-list.json` with `change` applied to its items. */
+async function policiesRead(change, reply) {
+  const list = wire("retention-policies-list.json");
+  if (change) {
+    list.items = change(list.items);
+  }
+  const wire_ = transport((u) =>
+    u.indexOf("/api/v1/namespaces/" + NS + "/retention-policies") === 0
+      ? (reply || { status: 200, body: list })
+      : undefined);
+  try {
+    return await readRetentionPolicies(NS);
+  } finally {
+    wire_.restore();
+  }
+}
+
+/** The panel exactly as the schedule detail renders it. */
+function retentionPanel(schedule, policies) {
+  return decode(renderRetentionPanel(schedule, policyForSchedule(schedule, policies), policies));
+}
+
+const named = (item, destination, name) =>
+  Object.assign({}, item, { name: name || item.name, destinationRef: { name: destination } });
+
+test("h3_the_report_policy_naming_the_schedules_destination_is_shown_and_deletes_nothing",
+  async () => {
+    // The PoC's shape: RetentionPolicy `primary`, mode Report, naming the
+    // schedule's destination. Here: `keep-a` renamed onto `dest`.
+    await sharedConsole();
+    const schedule = await scheduleTz();
+    assert.equal(schedule.spec.destinationRef.name, "dest");
+    const policies = await policiesRead((items) =>
+      [named(items[0], "dest", "primary"), items[1], items[2]]);
+    const panel = retentionPanel(schedule, policies);
+    assert.match(panel, /<dt>policy<\/dt><dd>primary<\/dd>/,
+      "THE DEFECT: 'No RetentionPolicy was read for this schedule's destination'");
+    assert.match(panel, /<dt>mode asked for<\/dt><dd>Report<\/dd>/);
+    assert.match(panel, /RetentionPolicy primary is in Report mode: it reports what its rules would remove and deletes nothing\./);
+    assert.match(panel, /data-covering="reports"/);
+    assert.equal(panel.indexOf(RETENTION_SENTENCE), -1,
+      "the no-deletion sentence is for a destination NO policy names");
+    assert.equal(panel.indexOf("No RetentionPolicy"), -1);
+    resetMode();
+  });
+
+test("h3_an_enforce_policy_naming_the_destination_is_shown_as_deleting", async () => {
+  await sharedConsole();
+  const schedule = await scheduleTz();
+  const enforcing = retentionPanel(schedule,
+    await policiesRead((items) => [named(items[1], "dest")]));
+  assert.match(enforcing, /<dt>policy<\/dt><dd>enforce-a<\/dd>/);
+  assert.ok(enforcing.indexOf(ENFORCEMENT_SENTENCES.LogweirWorker) !== -1, enforcing);
+  assert.match(enforcing, /data-covering="deletes"/);
+  assert.equal(enforcing.indexOf(RETENTION_SENTENCE), -1);
+  // Asked to enforce and not enforcing now: still shown as a policy that deletes.
+  const paused = retentionPanel(schedule, await policiesRead((items) =>
+    [Object.assign(named(items[1], "dest"), { enforcement: "RecommendationOnly" })]));
+  assert.match(paused, /RetentionPolicy enforce-a is in Enforce mode: it deletes archive objects/);
+  assert.match(paused, /data-covering="deletes"/);
+  assert.equal(paused.indexOf(RETENTION_SENTENCE), -1);
+  assert.equal(paused.indexOf("removes nothing"), -1,
+    "an Enforce policy is never summarised as removing nothing");
+  resetMode();
+});
+
+test("h3_a_successful_read_with_no_policy_naming_the_destination_keeps_the_sentence", async () => {
+  await sharedConsole();
+  const schedule = await scheduleTz();
+  for (const [what, change] of [
+    ["a Report policy on another destination", (items) => [items[0]]],
+    ["no policy at all", () => []],
+  ]) {
+    const panel = retentionPanel(schedule, await policiesRead(change));
+    assert.ok(panel.indexOf(RETENTION_SENTENCE) !== -1, what + ": " + panel);
+    assert.match(panel, /No RetentionPolicy in this namespace names this schedule's destination, dest\./,
+      what);
+  }
+  resetMode();
+});
+
+test("h3_a_failed_read_or_a_conflict_never_claims_no_deletion", async () => {
+  await sharedConsole();
+  const schedule = await scheduleTz();
+  const failed = retentionPanel(schedule, await policiesRead(null,
+    problem(403, "forbidden", "no grant on retention-policies")));
+  assert.equal(failed.indexOf(RETENTION_SENTENCE), -1);
+  assert.match(failed, /The read failed: no grant on retention-policies/);
+  // Two policies naming one destination are a Conflict: neither evaluates.
+  const conflict = retentionPanel(schedule, await policiesRead((items) =>
+    [named(items[0], "dest"), named(items[1], "dest")]));
+  assert.equal(conflict.indexOf(RETENTION_SENTENCE), -1);
+  assert.match(conflict, /More than one RetentionPolicy names this schedule's destination/);
+  assert.match(conflict, /<td>keep-a<\/td><td>Report<\/td>/);
+  assert.match(conflict, /<td>enforce-a<\/td><td>Enforce<\/td>/);
+  resetMode();
 });
