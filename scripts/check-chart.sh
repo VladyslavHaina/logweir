@@ -9,7 +9,7 @@ case "${1:-}" in
   "") ;;
   *) echo "usage: check-chart.sh [--write]" >&2; exit 2 ;;
 esac
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
 
 CHART=charts/logweir
 RENDERED="$CHART/rendered"
@@ -50,10 +50,6 @@ if [ "$helm_major" -lt "$HELM_MIN_MAJOR" ]; then
   exit 1
 fi
 echo "   helm ${helm_version}"
-
-# ---------------------------------------------------------------- 1. CRDs
-# Withdrawn with the `config/crd` copy (PROD-17.1 C6): `charts/logweir/crds/` is
-# the one copy, and `just crds-check` holds it to the Rust emitter.
 
 # ---------------------------------------------------------------- 2. the UI
 # The page ships inside the console image (`Dockerfile.console`), whose served
@@ -120,6 +116,51 @@ else
   bootstrap_render_note=" --set identity.renderedOffline=false --set-string identity.bootstrapImage=<unpublished-test-digest>"
   bootstrap_target_note="an unpublished test-only bootstrap digest"
 fi
+# render [args...]: the gate's render, the bootstrap override first.
+render() {
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} "$@"
+}
+# refuses <what> <diagnostic> [args...]: the render must fail, and for the reason
+# the row was written for. A status alone is not enough: when the chart lost its
+# default `api.console.mode`, several console rows started refusing for the
+# missing mode instead, and only the named diagnostic showed it.
+refuses() {
+  what="$1"
+  expect="$2"
+  shift 2
+  render "$@" > /dev/null 2> "$tmp/refusal.err"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: $what was ACCEPTED; it must be refused before anything installs" >&2
+    fail=1
+    return
+  fi
+  grep -F -q -- "$expect" "$tmp/refusal.err"
+  grc=$?
+  if [ "$grc" -ne 0 ]; then
+    echo "FAIL: $what was refused for the WRONG reason. Expected the diagnostic to name" >&2
+    echo "      '$expect'; helm said:" >&2
+    sed 's/^/      /' "$tmp/refusal.err" >&2
+    fail=1
+    return
+  fi
+  echo "   rc=$rc  ($what refused, naming $expect)"
+}
+# renders <what> <out> [args...]: the render must succeed into <out>; otherwise
+# FAIL with helm's message and return 1, so the caller skips its own checks.
+renders() {
+  what="$1"
+  out="$2"
+  shift 2
+  render "$@" > "$out" 2> "$out.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: $what did not render; rc=$rc" >&2
+    sed 's/^/      /' "$out.err" >&2
+    fail=1
+    return 1
+  fi
+}
 # THE THIRD REPOSITORY, D0 stage 7. The console image has no digest pin in the
 # tree to strip a digest off — it is referenced by this chart alone — so its
 # NAMESPACE is taken from the runner's and only the NAME is this chart's: a
@@ -357,109 +398,49 @@ fi
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
 for flag in demoKafka.enabled minio.enabled identity.enabled admissionPolicy.enabled api.enabled api.console.enabled; do
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    echo "FAIL: \`helm template --set $flag=yes\` exited 0; values.schema.json must type $flag as a boolean and refuse the string" >&2
-    fail=1
-  else
-    echo "   rc=$rc  (helm template --set $flag=yes — refused, as it must be)"
-  fi
+  refuses "--set $flag=yes" "/${flag//.//}': got string, want boolean" --set "$flag=yes"
 done
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set-string 'identity.kubernetesApiCIDRs[0]=0.0.0.0/0' > /dev/null 2> "$tmp/schema-broad-api.err"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "FAIL: identity.kubernetesApiCIDRs accepted broad 0.0.0.0/0 egress" >&2
-  fail=1
-else
-  echo "   rc=$rc  (broad bootstrap API CIDR refused, as it must be)"
-fi
+refuses "a broad bootstrap API CIDR (0.0.0.0/0)" "/identity/kubernetesApiCIDRs/0': '0.0.0.0/0' does not match pattern" \
+  --set-string 'identity.kubernetesApiCIDRs[0]=0.0.0.0/0'
 
-# D2 W11 — THE INSTALLATION POLICY'S OWN REFUSALS. The rendered `policy.json`
-# is parsed by `weirkeeper::check::policy` with `deny_unknown_fields` and no
-# per-field default inside `checks`/`discovery`/`preflight`, and a document it
-# refuses fails CLOSED and SILENTLY: empty attestations, empty evidence
-# allowlist, and one advisory `configuration.policy notReady` row nobody sees
-# unless they read a Preflight. So the schema has to refuse the same values at
-# INSTALL time, where the operator is still looking.
-#
-#   keepPerConnection=0   would delete a discovery the moment it finished
-#   a partial attestation  matches nothing while LOOKING like an attestation an
-#                          operator can rely on for `attestedComplete`
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set 'checks.discovery.keepPerConnection=0' > /dev/null 2> "$tmp/schema-keep-zero.err"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "FAIL: checks.discovery.keepPerConnection accepted 0; keeping none deletes a discovery the moment it finishes" >&2
-  fail=1
-else
-  echo "   rc=$rc  (checks.discovery.keepPerConnection=0 refused, as it must be)"
-fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set-string 'checks.discovery.visibilityAttestations[0].id=att-partial' > /dev/null 2> "$tmp/schema-partial-attestation.err"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "FAIL: an attestation naming only \`id\` rendered; every field of a completeness attestation is required" >&2
-  fail=1
-else
-  echo "   rc=$rc  (a partial visibility attestation refused, as it must be)"
-fi
+# The installation policy's bounds. `weirkeeper::check::policy` parses the
+# rendered `policy.json` with `deny_unknown_fields` and range checks, and a
+# document it refuses fails CLOSED and SILENTLY (no attestations, no evidence
+# allowlist, one advisory row), so the chart refuses the same values at install:
+# keeping no discovery, a partial attestation (it would match nothing while
+# looking relied on), a hard topic cap above the parser's, and a total below the
+# per-namespace ceiling (cross-field, so `_validate.tpl` and not the schema).
+refuses "checks.discovery.keepPerConnection=0" "/checks/discovery/keepPerConnection': minimum: got 0, want 1" \
+  --set 'checks.discovery.keepPerConnection=0'
+refuses "a visibility attestation naming only its id" "/checks/discovery/visibilityAttestations/0': missing properties" \
+  --set-string 'checks.discovery.visibilityAttestations[0].id=att-partial'
+refuses "checks.discovery.hardMaxTopics above the parser's ceiling" "/checks/discovery/hardMaxTopics': maximum" \
+  --set 'checks.discovery.hardMaxTopics=100000'
+refuses "checks.maxActiveTotal below checks.maxActivePerNamespace" "must be at least checks.maxActivePerNamespace" \
+  --set 'checks.maxActiveTotal=2'
 
-# P10 review L2 — THE MANUAL-RUN BLOCKS ARE RENDERED ONLY WHEN THEY DIFFER FROM
-# THE BINARIES' DEFAULTS, so an image-only rollback of a DEFAULT install reads the
-# same documents it always did (an older controller refuses a `policy.json` that
-# carries `runs`; an older console refuses a config that carries `rateLimits`).
-# The default render carrying neither is `chart_lint`'s row; this is the other
-# half: a non-default value IS rendered, or the knob would do nothing.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set 'runs.maxManualBackupsActivePerNamespace=6' > "$tmp/runs-nondefault.yaml" 2> "$tmp/runs-nondefault.err"
-rc=$?
-if [ "$rc" -ne 0 ] || ! grep -q '"maxManualBackupsActivePerNamespace": 6' "$tmp/runs-nondefault.yaml"; then
-  echo "FAIL: runs.maxManualBackupsActivePerNamespace=6 did not render the policy's runs block (rc=$rc)" >&2
-  fail=1
-else
-  echo "   rc=$rc  (a non-default runs.* renders the runs block)"
-fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  -f "$CHART/examples/console.values.yaml" --set 'api.console.rateLimits.manualRestoresPerMinute=3' \
-  > "$tmp/ratelimits-nondefault.yaml" 2> "$tmp/ratelimits-nondefault.err"
-rc=$?
-if [ "$rc" -ne 0 ] || ! grep -q 'manualRestoresPerMinute: 3' "$tmp/ratelimits-nondefault.yaml"; then
-  echo "FAIL: api.console.rateLimits.manualRestoresPerMinute=3 did not render the console's rateLimits (rc=$rc)" >&2
-  fail=1
-else
-  echo "   rc=$rc  (a non-default api.console.rateLimits.* renders the rateLimits block)"
-fi
-
-# D2 W11 fix round 1 (review F1) — THE BOUNDS `Policy::validate` ENFORCES
-# THAT AN INSTALL USED TO WALK STRAIGHT PAST.
-#
-#   hardMaxTopics > MAX_TOPICS_CEILING   the schema said 200 000, the parser
-#                                        says 50 000
-#   maxActiveTotal < maxActivePerNamespace       cross-field
-#
-# The cross-field rule cannot be written in JSON Schema draft-07 at all (it
-# cannot compare two siblings), so `templates/policy.yaml` refuses it with a
-# named `fail`. Both are here because the failure they prevent is the silent
-# one: `helm install` succeeds, `weirkeeper-policy` renders, the parser refuses
-# it, and `Policy::fail_closed()` discards every attestation and every evidence
-# location while the install looks healthy. (The third row,
-# `defaultMaxTopics > hardMaxTopics`, went with the value: FX-10 withdrew it,
-# and the arm below proves the opposite of a refusal for it.)
-for bad in \
-  'checks.discovery.hardMaxTopics=100000' \
-  'checks.maxActiveTotal=2'; do
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-    --set "$bad" > /dev/null 2> "$tmp/schema-policy-bound.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    echo "FAIL: \`--set $bad\` rendered; Policy::validate refuses it and a refused policy fails CLOSED and silently" >&2
-    fail=1
+# The manual-run blocks render only away from the binaries' defaults, so an
+# image-only rollback of a default install reads the documents it always did
+# (chart_lint holds the default render to carrying neither); a non-default
+# value IS rendered, or the knob would do nothing.
+if renders "runs.maxManualBackupsActivePerNamespace=6" "$tmp/runs-nondefault.yaml" \
+  --set 'runs.maxManualBackupsActivePerNamespace=6'; then
+  if grep -q '"maxManualBackupsActivePerNamespace": 6' "$tmp/runs-nondefault.yaml"; then
+    echo "   rc=0  (a non-default runs.* renders the runs block)"
   else
-    echo "   rc=$rc  (--set $bad refused, as it must be)"
+    echo "FAIL: runs.maxManualBackupsActivePerNamespace=6 did not render the policy's runs block" >&2
+    fail=1
   fi
-done
+fi
+if renders "api.console.rateLimits.manualRestoresPerMinute=3" "$tmp/ratelimits-nondefault.yaml" \
+  -f "$CHART/examples/console.values.yaml" --set 'api.console.rateLimits.manualRestoresPerMinute=3'; then
+  if grep -q 'manualRestoresPerMinute: 3' "$tmp/ratelimits-nondefault.yaml"; then
+    echo "   rc=0  (a non-default api.console.rateLimits.* renders the rateLimits block)"
+  else
+    echo "FAIL: api.console.rateLimits.manualRestoresPerMinute=3 did not render the console's rateLimits" >&2
+    fail=1
+  fi
+fi
 
 # FX-10 — THE TWO WITHDRAWN VALUES ARE ACCEPTED, IGNORED, AND SAID TO BE.
 #
@@ -475,10 +456,10 @@ done
 #   3. the operator is TOLD — the install notes name each one, and say nothing
 #      when neither is set. `--dry-run=client` with `KUBECONFIG=/dev/null`
 #      renders NOTES.txt and cannot reach any cluster.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   > "$tmp/withdrawn-base.yaml" 2> "$tmp/withdrawn-base.err"
 rc_base=$?
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   --set 'checks.discovery.defaultMaxTopics=60000' --set 'checks.preflight.defaultTimeoutSeconds=900' \
   > "$tmp/withdrawn-set.yaml" 2> "$tmp/withdrawn-set.err"
 rc=$?
@@ -535,34 +516,14 @@ else
   echo "   rc=$rc  (every chart value, changed alone, changes the render)"
 fi
 
-# AND THE ADMISSION POLICY'S SUBJECT, WHICH IS ITS WHOLE EFFECT (review F4). A
-# null name used to render `%!s(<nil>)`: the fence installed, read as enabled,
-# and matched no principal at all.
-# `--set` for the NULL case and `--set-string` for the EMPTY one, deliberately:
-# `--set-string x=null` sets the three-character STRING "null", which is a
-# perfectly legal ServiceAccount name and proves nothing. The reviewer's
-# reproduction used `--set`, which sets an actual YAML null — the value that
-# used to reach `printf "%s"` and render `%!s(<nil>)`.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set admissionPolicy.enabled=true --set 'admissionPolicy.consoleServiceAccountName=null' \
-  > /dev/null 2> "$tmp/schema-vap-null.err"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "FAIL: a NULL admissionPolicy.consoleServiceAccountName rendered an enabled policy whose subject list matches nobody" >&2
-  fail=1
-else
-  echo "   rc=$rc  (a null admissionPolicy.consoleServiceAccountName refused, as it must be)"
-fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set admissionPolicy.enabled=true --set-string 'admissionPolicy.consoleServiceAccountName=' \
-  > /dev/null 2> "$tmp/schema-vap-empty.err"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "FAIL: an EMPTY admissionPolicy.consoleServiceAccountName rendered an enabled policy whose subject list matches nobody" >&2
-  fail=1
-else
-  echo "   rc=$rc  (an empty admissionPolicy.consoleServiceAccountName refused, as it must be)"
-fi
+# The admission policy's subject is its whole effect: a null name used to render
+# `%!s(<nil>)`, a fence that installs, reads as enabled and matches nobody.
+# `--set` for a real null and `--set-string` for the empty string (`--set-string
+# x=null` is the legal name "null" and proves nothing).
+refuses "a null admissionPolicy.consoleServiceAccountName" "/admissionPolicy': missing property 'consoleServiceAccountName'" \
+  --set admissionPolicy.enabled=true --set 'admissionPolicy.consoleServiceAccountName=null'
+refuses "an empty admissionPolicy.consoleServiceAccountName" "/admissionPolicy/consoleServiceAccountName': minLength" \
+  --set admissionPolicy.enabled=true --set-string 'admissionPolicy.consoleServiceAccountName='
 
 # ---- THE FENCE'S SUBJECT UNDER A NON-DEFAULT RELEASE NAME (review F3) ----
 #
@@ -619,7 +580,7 @@ fi
 #
 # `crates/logweir/tests/chart_lint.rs` asserts these from checked-in bytes —
 # the schema's `pattern`, the `fail` strings in
-# `templates/ui/api-config.yaml` — because Global Constraint 22 forbids a
+# `templates/_validate.tpl` — because Global Constraint 22 forbids a
 # `#[test]` that shells out. THIS is the half that proves `helm` ACTS on them,
 # and the difference matters: a `fail` inside a `define` that no rendered path
 # reaches is a refusal that reads correctly and refuses nothing.
@@ -652,73 +613,43 @@ CONSOLE_SHARED=(
   --set api.console.roles.revision=2026-09-21.1
   --set api.console.roles.bindings[0].role=viewer
   --set "api.console.roles.bindings[0].namespace=$CONSOLE_EXEC_NS"
-  --set api.console.roles.bindings[0].groups[0]=logweir-viewers
+  --set "api.console.roles.bindings[0].groups[0]=logweir-viewers"
 )
-console_refuses() {
-  what="$1"
-  expect="$2"
-  shift 2
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-    "$@" > /dev/null 2> "$tmp/console-refusal.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    echo "FAIL: $what was ACCEPTED; it must be refused before anything installs" >&2
-    fail=1
-    return
-  fi
-  grep -F -q "$expect" "$tmp/console-refusal.err"
-  grc=$?
-  if [ "$grc" -ne 0 ]; then
-    echo "FAIL: $what was refused for the WRONG reason. Expected the diagnostic to name" >&2
-    echo "      '$expect'; helm said:" >&2
-    sed 's/^/      /' "$tmp/console-refusal.err" >&2
-    fail=1
-    return
-  fi
-  echo "   rc=$rc  ($what refused, naming $expect)"
-}
 # Release-notes item 74: `notify` is withdrawn with the alert sinks, and a
 # values file that still sets it is refused by name. CONTROL: `notify=null`,
 # which an upgrade with --reuse-values passes to clear it, renders.
-console_refuses "a values file that still sets notify.allowInsecureSinks" "notify.* is withdrawn" \
+refuses "a values file that still sets notify.allowInsecureSinks" "notify.* is withdrawn" \
   --set notify.allowInsecureSinks=false
 # D-C1 (poc-14-1b): the refusal names no sub-key, so a values file that sets
 # another one is not told about `allowInsecureSinks`, a key it never set.
 # CONTROL: the message before D-C1 named it, and this row fails on it.
-console_refuses "a values file that sets another notify key" "notify.* is withdrawn" \
+refuses "a values file that sets another notify key" "notify.* is withdrawn" \
   --set notify.webhookUrl=https://example.invalid/hook
-grep -F -q "allowInsecureSinks" "$tmp/console-refusal.err"
+grep -F -q "allowInsecureSinks" "$tmp/refusal.err"
 grc=$?
 if [ "$grc" -eq 0 ]; then
   echo "FAIL: the notify refusal names notify.allowInsecureSinks, which this values file never set:" >&2
-  sed 's/^/      /' "$tmp/console-refusal.err" >&2
+  sed 's/^/      /' "$tmp/refusal.err" >&2
   fail=1
 else
   echo "   rc=$grc  (the refusal names no notify sub-key the values did not set)"
 fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
-  --set notify=null > /dev/null 2> "$tmp/notify-null.err"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-  echo "FAIL: --set notify=null was refused; an upgrade that clears the withdrawn block must render" >&2
-  sed 's/^/      /' "$tmp/notify-null.err" >&2
-  fail=1
-else
-  echo "   rc=$rc  (notify=null renders: the control)"
-fi
-console_refuses "the console with NO mode at all" "api.console.mode is empty" \
+renders "the control --set notify=null (an upgrade clearing the withdrawn block)" "$tmp/notify-null.yaml" \
+  --set notify=null \
+  && echo "   rc=0  (notify=null renders: the control)"
+refuses "the console with NO mode at all" "api.console.mode is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}"
-console_refuses "the console workload without its principal (api.enabled=false)" "requires api.enabled" \
+refuses "the console workload without its principal (api.enabled=false)" "requires api.enabled" \
   --set api.enabled=false --set api.console.enabled=true "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}"
-console_refuses "the console with no key Secret" "api.console.keySecret is empty" \
+refuses "the console with no key Secret" "api.console.keySecret is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}"
 # PLAT-19.2 — the approval policy's three refusals, run. The first two need no
 # console at all: the controller mounts the same document.
-console_refuses "an Ordinary approval policy without the installation floor" \
+refuses "an Ordinary approval policy without the installation floor" \
   "is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true" \
   --set approvalPolicy.policies[0].name=team-ordinary \
   --set approvalPolicy.policies[0].mode=Ordinary
-console_refuses "a namespace bound to an undeclared approval policy" \
+refuses "a namespace bound to an undeclared approval policy" \
   "which approvalPolicy.policies does not declare" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
@@ -726,14 +657,14 @@ console_refuses "a namespace bound to an undeclared approval policy" \
 # PROD-16.1: with the managed identity the hook GENERATES the console key, so
 # the refusal is for an install with neither the managed identity nor a named
 # key Secret; the same values with the identity render (the managed key).
-console_refuses "a console-served namespace bound to a policy with no confirmation key" \
+refuses "a console-served namespace bound to a policy with no confirmation key" \
   "approvalPolicy.confirmationKeySecret is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
   --set identity.enabled=false \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
   --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed"
-console_refuses "default: confirm with no confirmation key" \
+refuses "default: confirm with no confirmation key" \
   "approvalPolicy.default is confirm and there is no console confirmation key" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
   --set identity.enabled=false \
@@ -743,7 +674,7 @@ console_refuses "default: confirm with no confirmation key" \
 # an older bootstrap image turns it off) a console render passes the hook NONE
 # of the PROD-16.1 flags and renders none of their objects — the chart works
 # with a pinned image that predates them.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
   --set identity.bootstrapFeatures.consoleKey=false > "$tmp/feature-off.yaml" 2> "$tmp/feature-off.err"
 rc=$?
@@ -757,7 +688,7 @@ if [ "$rc" -ne 0 ] || grep -q -E -- "--console-secret-name|--console-public-conf
 else
   echo "   rc=$rc  (bootstrap feature off: no PROD-16.1 hook flag, no managed key, no trust grant)"
 fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=strict \
@@ -779,7 +710,7 @@ fi
 # a `post-install` hook only, so a rollback never runs it. An install over an
 # EXISTING identity is the `lookup` half of the same guard, which only a
 # connected render can see; docs/kubernetes.md §8.)
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --is-upgrade ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render --is-upgrade \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" > "$tmp/upgrade.yaml" 2> "$tmp/upgrade.err"
 rc=$?
 if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/upgrade.yaml" \
@@ -792,7 +723,7 @@ if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/upgrade.yam
 else
   echo "   rc=$rc  (the install-only trust grant is absent from an upgrade render; the revocation stays)"
 fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" > "$tmp/install.yaml" 2> "$tmp/install.err"
 if ! grep -q "name: $RELEASE-identity-trust$" "$tmp/install.yaml" \
   || ! grep -q -- "--mark-fresh-install-confirm" "$tmp/install.yaml"; then
@@ -809,7 +740,7 @@ for case in "no console" "an external identity Secret"; do
     "no console") extra=() ;;
     *) extra=("${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" --set identity.externalSecret.name=company-signer) ;;
   esac
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  render \
     "${FEATURE[@]}" ${extra[@]+"${extra[@]}"} > "$tmp/no-confirm.yaml" 2> "$tmp/no-confirm.err"
   rc=$?
   if [ "$rc" -ne 0 ] || grep -q "name: $RELEASE-identity-trust$" "$tmp/no-confirm.yaml" \
@@ -828,7 +759,7 @@ done
 # fixed versions — the versions whose `hooks.go` the review read.
 mkdir -p "$tmp/floor/templates"
 printf 'apiVersion: v2\nname: floor\nversion: 0.0.1\n' > "$tmp/floor/Chart.yaml"
-awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templates/approval-policy.yaml" > "$tmp/floor/templates/_floor.tpl"
+awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templates/_validate.tpl" > "$tmp/floor/templates/_floor.tpl"
 {
   for v in v3.12.0 v3.18.6 v3.19.0-rc.1 v3.19.0 v4.0.1; do
     printf '# %s=[{{ include "logweir.helmCleansFailedHooks" "%s" }}]\n' "$v" "$v"
@@ -836,8 +767,8 @@ awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templ
 } > "$tmp/floor/templates/floor.yaml"
 floor="$(helm template floor "$tmp/floor" 2> "$tmp/floor.err" | grep '^# v' | tr '\n' ' ')"
 expected="# v3.12.0=[] # v3.18.6=[] # v3.19.0-rc.1=[true] # v3.19.0=[true] # v4.0.1=[true] "
-if [ "$floor" != "$expected" ] || ! grep -q -F '{{- if and $freshTrust (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}' "$CHART/templates/identity.yaml"; then
-  echo "FAIL: the Helm floor for the install-only trust grant: expected '$expected', got '$floor' (or identity.yaml no longer gates the grant on it)" >&2
+if [ "$floor" != "$expected" ] || ! grep -q -F '{{- if and (include "logweir.identity.freshTrust" .) (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}' "$CHART/templates/_validate.tpl"; then
+  echo "FAIL: the Helm floor for the install-only trust grant: expected '$expected', got '$floor' (or _validate.tpl no longer gates the grant on it)" >&2
   sed 's/^/      /' "$tmp/floor.err" >&2
   fail=1
 else
@@ -868,7 +799,7 @@ else
 fi
 # PROD-16.1: the operator's mode names render as the internal ones, and an
 # explicit unbound default renders as defaultMode.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   --set approvalPolicy.allowOrdinaryConfirmation=true \
   --set approvalPolicy.default=confirm \
   --set approvalPolicy.policies[0].name=team --set approvalPolicy.policies[0].mode=confirm \
@@ -895,20 +826,20 @@ TWO_PERSON=(--set approvalPolicy.policies[0].name=pair --set approvalPolicy.poli
 TWO_PERSON_INTERNAL=(--set approvalPolicy.policies[0].name=pair --set approvalPolicy.policies[0].mode=Governed
   --set approvalPolicy.policies[0].approverSignature=Console)
 PAIR_KEY=(--set approvalPolicy.confirmationKeySecret=logweir-console-confirmation)
-console_refuses "a two-person policy with no console at all" "api.console.mode=shared" \
+refuses "a two-person policy with no console at all" "api.console.mode=shared" \
   "${TWO_PERSON[@]}"
-console_refuses "approverSignature: Console with no console at all" "api.console.mode=shared" \
+refuses "approverSignature: Console with no console at all" "api.console.mode=shared" \
   "${TWO_PERSON_INTERNAL[@]}"
-console_refuses "a two-person policy with the principal and no console workload" "api.console.mode=shared" \
+refuses "a two-person policy with the principal and no console workload" "api.console.mode=shared" \
   --set api.enabled=true "${TWO_PERSON[@]}"
-console_refuses "a two-person policy with the in-cluster administrator console" "api.console.mode=localAdmin" \
+refuses "a two-person policy with the in-cluster administrator console" "api.console.mode=localAdmin" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" "${PAIR_KEY[@]}" "${TWO_PERSON[@]}"
-console_refuses "approverSignature: Console with the in-cluster administrator console" "cannot be two people" \
+refuses "approverSignature: Console with the in-cluster administrator console" "cannot be two people" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" "${PAIR_KEY[@]}" "${TWO_PERSON_INTERNAL[@]}"
 two_person_renders() {
   what="$1"
   shift
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  render \
     "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
     --set-string api.console.publicBaseUrl=https://console.example.com \
     "${PAIR_KEY[@]}" "$@" \
@@ -933,7 +864,7 @@ two_person_renders "mode: two-person" "${TWO_PERSON[@]}"
 two_person_renders "mode: Governed, approverSignature: Console" "${TWO_PERSON_INTERNAL[@]}"
 # ... and a policy WITHOUT the setting renders no `approverSignature` key, so an
 # older binary still reads every document that does not ask for two-person.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com "${PAIR_KEY[@]}" \
   --set approvalPolicy.policies[0].name=prod --set approvalPolicy.policies[0].mode=strict \
@@ -946,22 +877,22 @@ if [ "$rc" -ne 0 ] || grep -q "approverSignature" "$tmp/strict-only.yaml"; then
 else
   echo "   rc=$rc  (a strict policy renders no approverSignature key)"
 fi
-console_refuses "shared mode over plain HTTP" "publicBaseUrl" \
+refuses "shared mode over plain HTTP" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=http://console.example.com
-console_refuses "shared mode with a publicBaseUrl carrying a trailing slash" "publicBaseUrl" \
+refuses "shared mode with a publicBaseUrl carrying a trailing slash" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com/
-console_refuses "a shared-console Ingress with no TLS Secret" "api.console.ingress.tlsSecretName is empty" \
+refuses "a shared-console Ingress with no TLS Secret" "api.console.ingress.tlsSecretName is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com
-console_refuses "an Ingress host that is not publicBaseUrl's authority" "They must name the SAME authority" \
+refuses "an Ingress host that is not publicBaseUrl's authority" "They must name the SAME authority" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.internal.example \
   --set api.console.ingress.tlsSecretName=logweir-console-tls
-console_refuses "an Ingress in front of the in-cluster administrator mode" "is refused" \
+refuses "an Ingress in front of the in-cluster administrator mode" "is refused" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
   --set api.console.ingress.tlsSecretName=logweir-console-tls
@@ -974,20 +905,20 @@ CONSOLE_INGRESS=(
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com
   --set api.console.ingress.tlsSecretName=logweir-console-tls
 )
-console_refuses "a shared-console Ingress with no trusted proxy named" \
+refuses "a shared-console Ingress with no trusted proxy named" \
   "api.console.ingress.enabled in shared mode needs the trusted proxy named" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}"
-console_refuses "the trusted-proxy opt-out beside a named proxy" "trustedProxy=none says the console trusts no proxy" \
+refuses "the trusted-proxy opt-out beside a named proxy" "trustedProxy=none says the console trusts no proxy" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
   --set api.console.trustedProxy=none --set "api.console.trustedProxyCidrs={10.42.0.0/24}"
-console_refuses "the trusted-proxy opt-out in the in-cluster administrator mode" \
+refuses "the trusted-proxy opt-out in the in-cluster administrator mode" \
   "api.console.trustedProxy belongs to api.console.mode=shared" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" --set api.console.trustedProxy=none
-console_refuses "a trusted-proxy opt-out that is not \`none\`" "/api/console/trustedProxy': value must be one of" \
+refuses "a trusted-proxy opt-out that is not \`none\`" "/api/console/trustedProxy': value must be one of" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
   --set api.console.trustedProxy=off
 # …and the deliberate opt-out renders the Ingress, with no proxy named.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${CONSOLE_INGRESS[@]}" \
   --set api.console.trustedProxy=none \
   > "$tmp/console-optout.yaml" 2> "$tmp/console-optout.err"
@@ -1003,37 +934,37 @@ elif ! grep -q "^kind: Ingress$" "$tmp/console-optout.yaml" || grep -F -q "trust
 else
   echo "   rc=0  (the deliberate opt-out, api.console.trustedProxy=none, renders the Ingress with no proxy named)"
 fi
-console_refuses "a product role binding for a namespace the console is not bound in" "which is not one the console is bound in" \
+refuses "a product role binding for a namespace the console is not bound in" "which is not one the console is bound in" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "api.console.roles.bindings[0].namespace=some-other-namespace"
-console_refuses "a wildcard in a product role binding" "contains \`*\` or \`?\`" \
+refuses "a wildcard in a product role binding" "contains \`*\` or \`?\`" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set-string "api.console.roles.bindings[0].groups[0]=logweir-*"
-console_refuses "a shared-console NetworkPolicy with no ingress-controller selector" "needs both networkPolicy.ingressNamespace" \
+refuses "a shared-console NetworkPolicy with no ingress-controller selector" "needs both networkPolicy.ingressNamespace" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.networkPolicy.enabled=true
 # PLAT-17.2 — D0 stage 5. The shared console is not rendered inside the
 # controller's Job-create authority, nor with a trusted-proxy gate that has
 # nothing to trust.
-console_refuses "a shared console with the controller unscoped" "requires controller.watchNamespaces" \
+refuses "a shared console with the controller unscoped" "requires controller.watchNamespaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "controller.watchNamespaces=null"
-console_refuses "a shared console whose controller may create Jobs in the key namespace" "includes the release namespace" \
+refuses "a shared console whose controller may create Jobs in the key namespace" "includes the release namespace" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "controller.watchNamespaces={$CONSOLE_EXEC_NS,$NAMESPACE}"
 # PROD-17.1 C4 — `ui.*` IS WITHDRAWN AND REFUSED BY NAME, whatever it carries
 # (an upgraded values file that kept `ui.enabled: false` included), pointing at
 # the console. The control is the same render without the block.
-console_refuses "the withdrawn ui.* block (ui.enabled=true)" "ui.* is withdrawn" \
+refuses "the withdrawn ui.* block (ui.enabled=true)" "ui.* is withdrawn" \
   --set ui.enabled=true
-console_refuses "the withdrawn ui.* block (ui.enabled=false)" "use the console, api.console.*" \
+refuses "the withdrawn ui.* block (ui.enabled=false)" "use the console, api.console.*" \
   --set ui.enabled=false
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   > /dev/null 2> "$tmp/ui-withdrawn-control.err"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -1043,64 +974,83 @@ if [ "$rc" -ne 0 ]; then
 else
   echo "   rc=0  (control: the same render with no ui block renders)"
 fi
-console_refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
+# kafka.markerTopic (the source's) was typed by the schema and read by nothing;
+# it is refused by name, not by the schema's generic unknown-key error.
+# CONTROL: the target's markerTopic, the key that does mark a scratch target,
+# still renders onto the target KafkaCluster.
+refuses "the withdrawn source kafka.markerTopic" "kafka.markerTopic is not read by this chart; set kafka.target.markerTopic instead" \
+  --set kafka.enabled=true --set kafka.bootstrapServers=source:9092 \
+  --set kafka.markerTopic=logweir.scratch
+if renders "the control: kafka.target.markerTopic" "$tmp/marker-target.yaml" \
+  --set kafka.enabled=true --set kafka.bootstrapServers=source:9092 \
+  --set kafka.target.bootstrapServers=target:9092; then
+  grep -F -q 'markerTopic: "logweir.scratch"' "$tmp/marker-target.yaml"
+  grc=$?
+  if [ "$grc" -ne 0 ]; then
+    echo "FAIL: the control for the kafka.markerTopic refusal rendered no target markerTopic" >&2
+    fail=1
+  else
+    echo "   rc=0  (control: kafka.target.markerTopic renders onto the target)"
+  fi
+fi
+refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "api.namespaces={$CONSOLE_EXEC_NS,team-b}" \
   --set "api.console.roles.bindings[0].namespace=team-b"
-console_refuses "a trusted-proxy requirement with no range to trust" "requireTrustedProxy needs" \
+refuses "a trusted-proxy requirement with no range to trust" "requireTrustedProxy needs" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.requireTrustedProxy=true
-console_refuses "a trusted-proxy range wide enough to trust every pod" "wider than /16" \
+refuses "a trusted-proxy range wide enough to trust every pod" "wider than /16" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.requireTrustedProxy=true --set "api.console.trustedProxyCidrs={10.0.0.0/8}"
-console_refuses "a trusted-proxy range of everybody (IPv6)" "wider than /48" \
+refuses "a trusted-proxy range of everybody (IPv6)" "wider than /48" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.requireTrustedProxy=true --set "api.console.trustedProxyCidrs={::/0}"
-console_refuses "a trusted-proxy requirement in the in-cluster administrator mode" "belongs to api.console.mode=shared" \
+refuses "a trusted-proxy requirement in the in-cluster administrator mode" "belongs to api.console.mode=shared" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.requireTrustedProxy=true
-console_refuses "a watched namespace that is not a namespace name" "does not match pattern" \
+refuses "a watched namespace that is not a namespace name" "does not match pattern" \
   --set "controller.watchNamespaces={Team_A}"
 
 # THE PoC CHART GAPS (G1, G2, G3, G6) — each refusal names its value.
 SHARED_URL=(--set-string api.console.publicBaseUrl=https://console.example.com)
-console_refuses "half a trusted-proxy Service" "names only half a Service" \
+refuses "half a trusted-proxy Service" "names only half a Service" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.trustedProxyService.name=traefik
-console_refuses "a trusted-proxy Service in the in-cluster administrator mode" "trustedProxyService belongs to api.console.mode=shared" \
+refuses "a trusted-proxy Service in the in-cluster administrator mode" "trustedProxyService belongs to api.console.mode=shared" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.trustedProxyService.namespace=traefik --set api.console.trustedProxyService.name=traefik
-console_refuses "an issuer CA bundle named twice" "names both ConfigMap" \
+refuses "an issuer CA bundle named twice" "names both ConfigMap" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.caBundle.configMap=ca --set api.console.oidc.caBundle.secret=ca
-console_refuses "an issuer CA bundle with no key" "/api/console/oidc/caBundle/key': minLength" \
+refuses "an issuer CA bundle with no key" "/api/console/oidc/caBundle/key': minLength" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.caBundle.configMap=ca --set-string api.console.oidc.caBundle.key=
-console_refuses "no trust anchor at all for the issuer" "systemRoots=false without" \
+refuses "no trust anchor at all for the issuer" "systemRoots=false without" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.systemRoots=false
-console_refuses "a hostAliases entry with no hostname" "missing property 'hostnames'" \
+refuses "a hostAliases entry with no hostname" "missing property 'hostnames'" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set "api.console.hostAliases[0].ip=10.96.0.50"
-console_refuses "an OIDC egress peer with no pod selector" "missing property 'podLabels'" \
+refuses "an OIDC egress peer with no pod selector" "missing property 'podLabels'" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
   --set "api.console.networkPolicy.oidcPeers[0].port=8443"
-console_refuses "connection objects in a namespace the scoped controller does not watch" "does not include: the controller would never read them" \
+refuses "connection objects in a namespace the scoped controller does not watch" "does not include: the controller would never read them" \
   --set kafka.enabled=true --set-string kafka.bootstrapServers=b1:9092 \
   --set "controller.watchNamespaces={team-a}"
-console_refuses "the demo archive credential outside the watched namespaces" "does not include: the controller would never read them" \
+refuses "the demo archive credential outside the watched namespaces" "does not include: the controller would never read them" \
   --set minio.enabled=true --set "controller.watchNamespaces={team-a}"
 
 # AND THE SAME VALUES, SET RIGHT, RENDER WHAT THEY SAY. One shared console with
 # every PoC gap value: the CA bundle from a Secret, a host alias, an OIDC egress
 # peer by selector, the ingress by its Service, and the connection objects in
 # the watched namespace.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.caBundle.secret=issuer-ca --set api.console.oidc.systemRoots=false \
   --set "api.console.hostAliases[0].ip=10.96.0.50" --set "api.console.hostAliases[0].hostnames[0]=idp.example.com" \
@@ -1155,7 +1105,7 @@ fi
 # in-cluster administrator mode must render NONE, and shared mode must render
 # one, because that is what keeps a loopback listener from also publishing an
 # object every monitor reads as an outage and every pod can dial.
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.networkPolicy.enabled=true \
   > "$tmp/console-local.yaml" 2> "$tmp/console-local.err"
@@ -1194,7 +1144,7 @@ else
     echo "   rc=0  (…and its NetworkPolicy admits nothing)"
   fi
 fi
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
@@ -1242,22 +1192,22 @@ fi
 for case_file in scripts/approval-policy-refusals/*.values.yaml; do
   expect="$(sed -n 's/^# expect: //p' "$case_file")"
   label="approval policy $(basename "$case_file" .values.yaml)"
-  console_refuses "$label" "$expect" -f "$case_file"
+  refuses "$label" "$expect" -f "$case_file"
   if [ -n "$skip_schema" ]; then
-    console_refuses "$label (template arms only)" "$expect" "$skip_schema" -f "$case_file"
+    refuses "$label (template arms only)" "$expect" "$skip_schema" -f "$case_file"
   fi
 done
 
 # The three PoC-gap refusals the schema answers first are ALSO the template's
 # own, so a helm that skips the schema still refuses them by name.
 if [ -n "$skip_schema" ]; then
-  console_refuses "an issuer CA bundle with no key (template arms only)" "caBundle.key is empty" \
+  refuses "an issuer CA bundle with no key (template arms only)" "caBundle.key is empty" \
     "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
     --set api.console.oidc.caBundle.configMap=ca --set-string api.console.oidc.caBundle.key=
-  console_refuses "a hostAliases entry with no hostname (template arms only)" "at least one hostname" \
+  refuses "a hostAliases entry with no hostname (template arms only)" "at least one hostname" \
     "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
     --set "api.console.hostAliases[0].ip=10.96.0.50"
-  console_refuses "an OIDC egress peer with no pod selector (template arms only)" "oidcPeers entries need" \
+  refuses "an OIDC egress peer with no pod selector (template arms only)" "oidcPeers entries need" \
     "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
     --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
     --set "api.console.networkPolicy.oidcPeers[0].port=8443"
@@ -1732,11 +1682,11 @@ check_trust_creators() {
   fi
   rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
   # NOT VACUOUS (PROD-16.1 fix round): at least one variant renders the
-  # install-only grant (`console-fresh-install`, and every console variant once
-  # the bootstrap feature is the default), so the rule above reads a real one.
+  # install-only grant (every console variant with the default bootstrap
+  # feature), so the rule above reads a real one.
   if ! grep -l -E '^  name: [a-z0-9-]+-identity-trust$' charts/logweir/rendered/*.yaml > /dev/null; then
     echo "check-chart: no rendered variant carries the install-only identity trust grant; the" >&2
-    echo "  least-privilege rule above would pass over nothing (examples/console-fresh-install.values.yaml)" >&2
+    echo "  least-privilege rule above would pass over nothing (examples/console.values.yaml)" >&2
     return 1
   fi
   echo "check-chart: only logweir-trust-admin and the install-only identity hook may create a"
@@ -1758,7 +1708,7 @@ check_trust_creators || fail=1
 # each control is the same render with the other answer, and renders exactly
 # what its case says is absent.
 echo "== 12. an offline render is refused unless identity.renderedOffline says what it is =="
-OFFLINE_SHAPE=(-f "$EXAMPLES/console-fresh-install.values.yaml" --set-json 'identity.authorizedRunnerNamespaces=["team-a"]')
+OFFLINE_SHAPE=(-f "$EXAMPLES/console.values.yaml" --set-json 'identity.authorizedRunnerNamespaces=["team-a"]')
 offline_diagnostic="identity.renderedOffline is unset and this render cannot ask the cluster"
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${OFFLINE_SHAPE[@]}" > /dev/null 2> "$tmp/offline-unset.err"
 rc=$?
@@ -1845,10 +1795,10 @@ fi
 # passes the cluster's version), so the chart adds no `fail` of its own. The
 # control is the floor itself.
 echo "== 13. Helm refuses a cluster below Chart.yaml's kubeVersion =="
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   --kube-version 1.28.15 > /dev/null 2> "$tmp/kube-old.err"
 rc=$?
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   --kube-version 1.29.0 > /dev/null 2> "$tmp/kube-floor.err"
 rc_floor=$?
 if [ "$rc" -eq 0 ] || ! grep -F -q "chart requires kubeVersion: >=1.29.0-0" "$tmp/kube-old.err"; then
@@ -1867,7 +1817,7 @@ fi
 # poc-14-1a D7: values that list the demo target demoKafka also adds give the
 # identity hook each cluster id once, in the order first given.
 echo "== 14. the fresh install's allowed restore targets name each cluster id once =="
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+render \
   -f "$EXAMPLES/demo.values.yaml" --set demoKafka.clusterIds.target=demoTargetClusterId000 \
   --set-json 'identity.installationTrust.allowedTargetClusterIds=["demoTargetClusterId000","other-target"]' \
   > "$tmp/targets.yaml" 2> "$tmp/targets.err"
@@ -1889,7 +1839,7 @@ fi
 # else. The control is the same render with keep=false: the diff is the two lines.
 echo "== 15. minio.persistence.keep keeps the demo MinIO's PVC through helm uninstall =="
 for keep in true false; do
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  render \
     --set minio.enabled=true --set "minio.persistence.keep=$keep" > "$tmp/keep-$keep.yaml" 2> "$tmp/keep-$keep.err" \
     || { echo "FAIL: minio.persistence.keep=$keep did not render" >&2; sed 's/^/      /' "$tmp/keep-$keep.err" >&2; fail=1; }
 done

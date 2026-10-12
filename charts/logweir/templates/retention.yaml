@@ -1,64 +1,22 @@
 {{/*
-`retention.enabled` — THE ENFORCEMENT JOB'S IDENTITY, AND NOTHING ELSE.
+`retention.enabled`: the enforcement Job's identity and nothing else.
 
-ONE ServiceAccount: `logweir-retention`, the name
-`weirkeeper::controllers::retention_policy::SERVICE_ACCOUNT` compiles in and
-puts on every `mode: Enforce` Job it builds. Until this renders, that Job is
-admitted by nobody — `serviceAccountName` names an account the API server
-cannot find, the pod never starts, and the whole enforcement path is
-fail-closed by accident rather than by decision. That is the merge-ordering
-constraint `controllers/retention_policy.rs`'s own header records against W13.
+One ServiceAccount, `logweir-retention`, the name
+`weirkeeper::controllers::retention_policy::SERVICE_ACCOUNT` puts on every
+`mode: Enforce` Job; without it that Job's pod is never admitted. No Role and no
+binding: the retention worker makes no Kubernetes API call, and its delete
+capability is an object-store credential scoped to the policy's prefix, which
+no Kubernetes verb widens or narrows. No token, on the account and on the
+PodSpec `weirkeeper::job::build` writes. A separate account so an audit trail
+and a NetworkPolicy can name "what ran as the deleter", with its own
+`imagePullSecrets`. It deletes nothing by itself: `charts/logweir/README.md`
+lists the other gates.
 
-NO Role, NO RoleBinding, NO ClusterRole. **The retention worker makes zero
-Kubernetes API calls.** It reads a plan out of a mounted ConfigMap, talks to an
-object store and exits, exactly as the backup and restore runners do; the
-delete capability that makes this the one irreversible component in the product
-is an OBJECT-STORE credential scoped to the policy's own prefix, and no
-Kubernetes verb can widen or narrow it. A binding here would be a line an
-operator has to audit for no benefit — the same argument holds for
-`logweir-runner`, and twice as hard for the pod that can delete.
-
-`automountServiceAccountToken: false`, on the account AND on the PodSpec
-`weirkeeper::job::build` writes. The pod that holds a delete-capable storage
-credential is the last pod in the installation that should also carry a cluster
-token.
-
-SO WHY A SEPARATE ACCOUNT AT ALL, IF IT IS GRANTED NOTHING? Because a
-ServiceAccount is what an audit trail, a NetworkPolicy podSelector and a
-`kubectl get pods -o wide` can name. `logweir-runner` runs backups, restores,
-checks, catalog syncs and notification deliveries; `logweir-retention` runs the
-one thing that removes data, and keeping the names apart is what lets an
-operator ask "what has run as the deleter" and get an answer. It also carries
-its own `imagePullSecrets`, so a private registry does not have to widen the
-runner's.
-
-AND IT IS OFF BY DEFAULT, like every other optional component. Turning it on
-renders this account and nothing else; it creates no policy, approves no plan
-and deletes nothing. `charts/logweir/README.md` lists the other three gates a
-deletion still has to pass.
-
-RENDERED PER NAMESPACE, EXACTLY AS `logweir-runner` IS — review finding **F2**.
-
-`controllers/retention_policy.rs` creates the enforcement Job with
-`Api::<Job>::namespaced(client, &self.namespace)`, which is the namespace of the
-`RetentionPolicy`, and a `RetentionPolicy` lives with the workload it protects
-rather than in `logweir-system`. A release-namespace-only account was therefore
-the wrong shape for the common case and the failure was undiagnosable: an
-operator binds `logweir-retention-admin` in `team-a`, sets `mode: Enforce`,
-approves the plan — and the Job's pod is never admitted, because
-`serviceAccountName: logweir-retention` names an account that does not exist
-there. Fail-closed, silent, with nothing in any status saying why.
-
-So this ranges over `identity.authorizedRunnerNamespaces` beside the release
-namespace, which is the shape `templates/identity.yaml` already uses for
-`logweir-runner` and is the same list for the same reason: it is the set of
-namespaces this installation runs Logweir Jobs in. It is read here even when
-`identity.enabled` is false, because retention signs nothing — the list is about
-where Jobs run, and only the SIGNER distribution beside it is about identity.
-
-AND A NAMESPACE THE CHART DOES NOT LIST HAS A FRAGMENT:
-`config/samples/retention-serviceaccount.yaml`, applied per namespace exactly as
-`config/samples/backup-runner-serviceaccount.yaml` is (`docs/install.md` step 4).
+Rendered in the release namespace and every
+`identity.authorizedRunnerNamespaces` entry, because the Job runs in the
+RetentionPolicy's namespace (read even when `identity.enabled` is false: the
+list is where Jobs run). Any other namespace applies
+`config/samples/retention-serviceaccount.yaml` (`docs/install.md` step 4).
 */}}
 {{- if .Values.retention.enabled }}
 {{- $namespaces := prepend (.Values.identity.authorizedRunnerNamespaces | default list) .Release.Namespace | uniq }}

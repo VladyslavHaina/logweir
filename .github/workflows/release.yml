@@ -158,9 +158,10 @@ jobs:
       actions: read
     uses: ./.github/workflows/release-drill.yml
 
-  # THE PUBLICATION THIS RELEASE SHIPS, read anonymously: the four sha-<commit>
+  # THE PUBLICATION THIS RELEASE SHIPS, read anonymously: the three sha-<commit>
   # images of the release commit (or of its newest ancestor that differs only
-  # under docs/), their digests, platforms and revision labels.
+  # under docs/), their digests, platforms and revision labels, and the same
+  # for the identity bootstrap image the chart pins.
   images:
     needs: [validate]
     runs-on: ubuntu-24.04

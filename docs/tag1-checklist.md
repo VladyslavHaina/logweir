@@ -28,8 +28,9 @@ workflow summaries and downloaded artifacts provide execution evidence.
 ## What to record
 
 - The candidate commit and version, with the successful CI and release run URLs.
-- Every image digest — runner, controller, console and UI — and the supported
-  architectures. A locally loaded image
+- Every image digest — runner, controller, console, and the identity bootstrap
+  image the chart pins (`release.json` `.images.bootstrap`, with the commit it
+  was built from) — and the supported architectures. A locally loaded image
   proves local execution, not that another machine can pull it.
 - Results from a fresh artifact download and the packaged-binary drill.
 - Any Kubernetes test performed, including its context, authentication mode,
@@ -68,9 +69,10 @@ artifacts.
    ```
 
 3. **The record, before the tag.** The dry run's `release.json` names the
-   publication commit and the four image digests. The tag promotes exactly
-   those, so fill their rows of the [candidate record](release-notes.md) from
-   it. Nothing else carries over: the tag run packages the chart and builds the
+   publication commit, the three image digests the tag promotes, and the
+   identity bootstrap image the chart pins (not re-tagged). Fill their rows of
+   the [candidate record](release-notes.md) from it. Nothing else carries
+   over: the tag run packages the chart and builds the
    archives again. The chart package is not byte-reproducible (`helm package`
    records each file's modification time, its checkout time), and nothing
    shows the archives to be, so the dry run's chart and archive digests are
@@ -132,7 +134,7 @@ artifacts.
 | `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` | Logweir's licence, its notices and the generated dependency inventory | `SHA256SUMS`; identical to the tagged commit's |
 | `kafka-backup-LICENSE` | the engine's MIT licence (`third_party/LICENSE-MIT`), owed because the runner image redistributes the engine | `SHA256SUMS` |
 | `logweir-chart-<version>.tgz` | the chart package, pushed as these bytes to `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <version>` | `SHA256SUMS`; its four images are pinned by digest (`assemble`); the registry serves the same bytes back (`ci-images.sh chart-push`) |
-| `release.json` | the tag, commit, publication commit, the four image references with digests and platforms, the chart, and each archive's run-time needs | `SHA256SUMS` |
+| `release.json` | the tag, commit, publication commit, the three promoted image references and the identity bootstrap pin, each with its digest and platforms, the chart, and each archive's run-time needs | `SHA256SUMS` |
 | `ui-files.sha256` | the page files the console and UI images ship, by digest | `SHA256SUMS`; the candidate record's `ui/` row |
 | `SHA256SUMS` | the sha256 of every asset above | `scripts/release.sh verify`, on the assembled set and on the published release downloaded back |
 

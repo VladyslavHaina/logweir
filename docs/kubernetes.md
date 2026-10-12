@@ -2531,7 +2531,7 @@ before `expiresAt`, to an untruncated listing:
 evidence allowlist, an advisory `configuration.policy notReady PolicyUnreadable`
 row, and one `WARN` line, `the installation policy ConfigMap was REFUSED`
 (`kubectl -n logweir-system logs deploy/weirkeeper | grep REFUSED`). The chart's
-`values.schema.json` and `templates/policy.yaml` check the same rules at
+`values.schema.json` and `templates/_validate.tpl` check the same rules at
 install, so a chart install cannot produce a refused document. Every check
 records the policy's digest in `status.binding.policyDigest`.
 

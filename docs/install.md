@@ -306,6 +306,9 @@ unmodified rebuilds of MinIO and mc (`minio.image`, `minio.mcImage`;
 Without public registry access, mirror them, or use the recovery kit's
 `docker save` archives (*Recover onto a clean installation with the kit*); keep
 the upstream licences and notices with any image you redistribute.
+The demo pods (MinIO, the two Kafka brokers and their seed Jobs) set no
+`securityContext`, so a namespace that enforces the `restricted` Pod Security
+Standard refuses them.
 
 ---
 

@@ -1,13 +1,11 @@
 {{- /*
-NetworkPolicy intent is rendered in the release namespace and every explicitly
-authorized runner namespace. Docker Desktop commonly has no enforcing CNI, so
-successful local traffic is structural evidence only, not production proof.
-
-Bootstrap/distribution pods are excluded from the ordinary runner policy: that
-policy intentionally permits broker/object-store destinations by port. Their
-dedicated policy permits only DNS plus discovered/configured Kubernetes API
-destinations. Service-DNAT enforcement differs by CNI, so we include the
-kubernetes.default ClusterIP, visible endpoint IPs, and operator-supplied CIDRs.
+Rendered in the release namespace and every authorized runner namespace. The
+runner policy permits broker and object-store destinations by port; the
+identity bootstrap and distribution pods are excluded from it and get DNS plus
+the Kubernetes API only. Service DNAT matching differs by CNI, so the API is
+named three ways: the `kubernetes.default` ClusterIP, its endpoint addresses,
+and `identity.kubernetesApiCIDRs`. Docker Desktop commonly has no enforcing
+CNI: local traffic proves the objects' shape, not deny behaviour.
 */ -}}
 {{- $root := . }}
 {{- $namespaces := prepend .Values.identity.authorizedRunnerNamespaces .Release.Namespace | uniq }}
@@ -20,12 +18,13 @@ kubernetes.default ClusterIP, visible endpoint IPs, and operator-supplied CIDRs.
 {{- $mask := ternary "128" "32" (contains ":" $apiService.spec.clusterIP) }}
 {{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $apiService.spec.clusterIP $mask) }}
 {{- end }}
-{{- $apiEndpoints := lookup "v1" "Endpoints" "default" "kubernetes" }}
-{{- if $apiEndpoints }}
-{{- range $subset := $apiEndpoints.subsets }}
-{{- range $address := $subset.addresses }}
-{{- $mask := ternary "128" "32" (contains ":" $address.ip) }}
-{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address.ip $mask) }}
+{{- /* EndpointSlice, not v1 Endpoints: the latter warns on every install from 1.33. */}}
+{{- $apiSlice := lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes" }}
+{{- if $apiSlice }}
+{{- range $endpoint := $apiSlice.endpoints }}
+{{- range $address := $endpoint.addresses }}
+{{- $mask := ternary "128" "32" (contains ":" $address) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address $mask) }}
 {{- end }}
 {{- end }}
 {{- end }}

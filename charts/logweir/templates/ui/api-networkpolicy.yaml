@@ -1,78 +1,29 @@
 {{/*
-`api.console.networkPolicy.enabled` — WHAT MAY REACH THE CONSOLE, AND WHAT THE
-CONSOLE MAY REACH.
+`api.console.networkPolicy.enabled`: what may reach the console, and what it
+may reach. Same shape as `templates/networkpolicy.yaml`, a different argument:
+that policy lets runner Jobs reach brokers and object storage, this one keeps
+the console from both. Docker Desktop commonly has no enforcing CNI, so a local
+install proves the objects' shape, not deny behaviour; the rendered object
+carries the `[UNVERIFIED]` mark `scripts/check-unverified-labels.sh` reads.
 
-THE SAME SHAPE AND THE SAME WARNING AS `templates/networkpolicy.yaml`, which
-this file deliberately mirrors rather than extends: that file's podSelector is
-runner Jobs and identity-bootstrap pods, whose egress must reach brokers and
-object storage; this one's is the console, whose egress must reach neither. Two
-policies, two arguments, one style.
+Ingress: in `shared` mode the configured ingress controller only (both
+selectors are required, `_validate.tpl`). In `localAdmin` the `ingress:` list is
+empty, which with `Ingress` in policyTypes is deny; `kubectl port-forward`
+arrives through the API server and the kubelet, not the pod network.
 
-DOCKER DESKTOP COMMONLY HAS NO ENFORCING CNI. Kubernetes states that a
-NetworkPolicy has no effect without a network plugin that implements it, and
-that Service/source-IP rewriting is implementation-dependent. A local install
-that "works" proves the objects are well-formed and nothing about deny
-behaviour; D0 says so by name — "Docker Desktop without enforcing CNI is
-explicitly NOT acceptable proof of deny behavior". The rendered object carries
-the bracket-anchored mark `scripts/check-unverified-labels.sh` reads, closed in
-place with its reason, exactly as `templates/networkpolicy.yaml` carries it.
-
----------------------------------------------------------------------------
-INGRESS: IN `shared` MODE, THE CONFIGURED INGRESS CONTROLLER AND NOTHING ELSE.
-IN THE IN-CLUSTER ADMINISTRATOR MODE, NOTHING AT ALL.
----------------------------------------------------------------------------
-In `shared` mode both selectors are required (`logweir.api.consoleChecks`
-refuses either one empty): an ingress rule with no `from` admits nothing, and
-one with an empty podSelector admits every pod in the controller's namespace,
-which is not what "only the configured ingress controller" means.
-
-In the in-cluster administrator mode the `ingress:` list below is EMPTY, which
-with `Ingress` in `policyTypes` means deny — and it is the honest rule, because
-in that mode the chart renders no Service either and the listener is loopback,
-so nothing in the cluster is supposed to dial this pod at all. `kubectl
-port-forward` reaches it through the API server's portforward subresource and
-the kubelet, not over the pod network, so it is unaffected by this policy. (The
-enforcement warning above applies to the deny exactly as to the allow: Docker
-Desktop will accept either and enforce neither.)
-
----------------------------------------------------------------------------
-EGRESS: DNS, THE KUBERNETES API, AND THE IDENTITY PROVIDER. NOT KAFKA, NOT S3.
----------------------------------------------------------------------------
-D0: the API "does not dial Kafka or object storage", and `logweir-api`'s
-dependency graph carries no Kafka client and no object-store client — so this
-policy is a second, structural statement of a property the binary already has.
-The ports it does NOT list are the point: 9092/9094/9095/9096/9097 (brokers) and
-9000 (MinIO) appear in `templates/networkpolicy.yaml`'s RUNNER rule and are
-absent here.
-
-The Kubernetes API destinations are discovered the same way that file discovers
-them — the `kubernetes.default` ClusterIP, the visible endpoint addresses, and
-`identity.kubernetesApiCIDRs` — because pre- and post-DNAT matching differs by
-CNI and neither form is portable on its own. `lookup` returns nothing under
-`helm template`, so the rendered fixtures carry only the operator-supplied
-CIDRs and stay byte-stable.
-
-THE IDENTITY PROVIDER IS CIDRs OR NOTHING. NetworkPolicy has no FQDN concept, so
-a provider behind a rotating address cannot be expressed here; D0 requires
-"documented CIDRs or an approved egress proxy and production-CNI validation".
-`api.console.networkPolicy.oidcCIDRs` is that documented list, on 443 only. Left
-empty in shared mode this policy will BLOCK OIDC discovery under an enforcing
-CNI, and the console will start NotReady — which is the honest failure, not a
-reason to widen the rule to 0.0.0.0/0.
-
-AN IN-CLUSTER PROVIDER IS A SELECTOR, NOT A ClusterIP. When the issuer is
-reached inside the cluster — a Dex behind the cluster's own ingress, the issuer
-name mapped there by `api.console.hostAliases` — the console dials a Service
-ClusterIP, and an enforcing CNI evaluates egress AFTER the Service's DNAT: the
-destination it matches is the backend POD, on the pod's port. An `ipBlock` for
-the ClusterIP therefore matches nothing there (the PoC review's finding).
-`api.console.networkPolicy.oidcPeers` is the portable form: each entry allows
-egress to the pods labelled `podLabels` in `namespace`, on `port` — the POD port
-(Traefik's `websecure` listens on 8443 behind the Service's 443). Keep the
-ClusterIP in `oidcCIDRs` as well only for a CNI that matches before DNAT.
+Egress: DNS, the Kubernetes API, the identity provider; never the broker ports
+or 9000, which `logweir-api` has no client for. The API is named the way
+`templates/networkpolicy.yaml` names it (ClusterIP, endpoint addresses,
+`identity.kubernetesApiCIDRs`), because pre- and post-DNAT matching differs by
+CNI; `lookup` returns nothing under `helm template`, so the rendered fixtures
+carry only the configured CIDRs. NetworkPolicy has no FQDN, so the provider is
+`networkPolicy.oidcCIDRs` on 443, or, for a provider inside the cluster,
+`networkPolicy.oidcPeers` (namespace, pod labels, the POD port): an enforcing
+CNI matches egress after the Service's DNAT, so a ClusterIP `ipBlock` matches
+nothing there. Left empty in shared mode, OIDC discovery is blocked and the
+console starts NotReady: the honest failure.
 */}}
 {{- if and .Values.api.console.enabled .Values.api.console.networkPolicy.enabled }}
-{{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}
 {{- $apiCIDRs := list }}
@@ -84,12 +35,13 @@ ClusterIP in `oidcCIDRs` as well only for a CNI that matches before DNAT.
 {{- $mask := ternary "128" "32" (contains ":" $apiService.spec.clusterIP) }}
 {{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $apiService.spec.clusterIP $mask) }}
 {{- end }}
-{{- $apiEndpoints := lookup "v1" "Endpoints" "default" "kubernetes" }}
-{{- if $apiEndpoints }}
-{{- range $subset := $apiEndpoints.subsets }}
-{{- range $address := $subset.addresses }}
-{{- $mask := ternary "128" "32" (contains ":" $address.ip) }}
-{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address.ip $mask) }}
+{{- /* EndpointSlice, not v1 Endpoints: the latter warns on every install from 1.33. */}}
+{{- $apiSlice := lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes" }}
+{{- if $apiSlice }}
+{{- range $endpoint := $apiSlice.endpoints }}
+{{- range $address := $endpoint.addresses }}
+{{- $mask := ternary "128" "32" (contains ":" $address) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address $mask) }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -16,6 +16,11 @@
 # a carbon copy, and the digest under the version tag is asserted equal to the
 # commit tag's. A rebuild would ship bytes no main run or PoC round has seen.
 #
+# THE FOURTH IMAGE an install pulls is the identity hooks' bootstrap image, the
+# chart's reviewed digest pin (`identity.bootstrapImage`). It is neither
+# promoted nor re-pinned per release: `resolve` reads it anonymously like the
+# three and records it, with the commit it was built from, in `release.json`.
+#
 # WHICH PUBLICATION. The release commit's own, when main CI published it; else
 # the newest first-parent ancestor whose publication is complete and from which
 # the release commit differs ONLY under docs/ — the classification main CI
@@ -35,6 +40,7 @@ MAX_ANCESTORS=50
 # A commit no build ever had: `resolve` reads its sha- tag to see the registry
 # answer "not found" before relying on that answer.
 NEVER_BUILT=0000000000000000000000000000000000000000
+BOOTSTRAP_VALUES=charts/logweir/values.yaml
 
 die() { echo "release.sh: $*" >&2; exit 1; }
 
@@ -85,6 +91,14 @@ published() { # ref [file for the manifest JSON]
   fi
   cat "$READS/err" >&2
   die "could not tell whether $ref exists (the registry did not answer 'not found'); nothing was tagged"
+}
+
+bootstrap_pin() { # -> the chart's identity.bootstrapImage, repository@sha256:…
+  local pin
+  pin=$(awk '$1 == "bootstrapImage:" { print $2; exit }' "$BOOTSTRAP_VALUES")
+  [[ "$pin" =~ ^docker\.io/[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*@sha256:[0-9a-f]{64}$ ]] \
+    || die "$BOOTSTRAP_VALUES pins identity.bootstrapImage '$pin', not docker.io/<namespace>/<image>@sha256:<digest>"
+  printf '%s\n' "$pin"
 }
 
 complete_publication() { # commit -> 0 when all three sha-<commit> images exist, 1 when the registry says one does not
@@ -196,10 +210,31 @@ nor for an ancestor it differs from only under docs/. Tag a commit main CI has p
     images=$(jq -c --arg product "$product" --arg digest "$digest" --arg platforms "$platforms" --arg ref "$ref" \
       '. + {($product): {digest: $digest, platforms: ($platforms | split(",")), published_as: $ref}}' <<< "$images")
   done
+  # The bootstrap pin, read the same way: anonymously, its digest, its
+  # platforms, and one revision label naming a commit this release contains.
+  ref=$(bootstrap_pin)
+  published "$ref" "$work/manifest.json" \
+    || die "$ref (identity.bootstrapImage) is not published; re-pin it to a pullable build"
+  anonymous docker buildx imagetools inspect "$ref" --format '{{json .Image}}' > "$work/image.json"
+  digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$work/manifest.json") \
+    || die "$ref reports no sha256 digest"
+  [[ "$digest" == "${ref##*@}" ]] || die "$ref (identity.bootstrapImage) reports digest $digest"
+  platforms=$(jq -r 'if has("architecture") then [.] else [.[]] end
+    | map(select((.os // "unknown") != "unknown") | "\(.os)/\(.architecture)") | unique | join(",")' "$work/image.json")
+  [[ "$platforms" == "$(expected_platforms logweir)" ]] \
+    || die "$ref (identity.bootstrapImage) is built for '$platforms', not $(expected_platforms logweir)"
+  revisions=$(jq -r 'if has("architecture") then [.] else [.[]] end
+    | map(select((.os // "unknown") != "unknown") | .config.Labels["org.opencontainers.image.revision"] // "none")
+    | unique | join(",")' "$work/image.json")
+  if ! [[ "$revisions" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$revisions" "$COMMIT" 2> /dev/null; then
+    die "$ref (identity.bootstrapImage) carries org.opencontainers.image.revision '$revisions', not a commit $COMMIT contains"
+  fi
   rm -rf "$work"
   jq -n --arg commit "$COMMIT" --arg publication "$publication" --arg how "$how" --arg ns "$NS" \
-    --argjson images "$images" \
-    '{commit: $commit, publication: $publication, how: $how, namespace: $ns, images: $images}' > "$out"
+    --argjson images "$images" --arg ref "$ref" --arg platforms "$platforms" --arg revision "$revisions" '
+    {commit: $commit, publication: $publication, how: $how, namespace: $ns, images: $images,
+     bootstrap: {repository: ($ref | split("@")[0]), digest: ($ref | split("@")[1]),
+                 platforms: ($platforms | split(",")), revision: $revision, reference: $ref}}' > "$out"
   echo "release.sh: ships docker.io/$NS sha-$publication ($how)"
 }
 
@@ -226,7 +261,7 @@ check_archive() { # dir target -> checks the archive and its sidecar in dir
 
 assemble() {
   local in="${1:?usage: release.sh assemble <in> <out> <notes.md>}" out="${2:?}" notes="${3:?}"
-  local target name images version_ok package chart_sha work product digest asset file
+  local target name images version_ok package chart_sha work product digest asset file bootstrap
   : "${TAG:?}" "${VERSION:?}" "${PRERELEASE:?}" "${COMMIT:?}" "${NS:?}" "${RUN_URL:?}"
   [[ "$TAG" =~ $TAG_RE && "$VERSION" == "${TAG#v}" ]] || die "TAG '$TAG' and VERSION '$VERSION' disagree"
   images="$in/images.json"
@@ -264,6 +299,9 @@ assemble() {
       || die "the packaged chart does not pin docker.io/$NS/$product:$TAG@$digest"
   done
   if grep -q ':latest' "$work/values.yaml"; then die "the packaged chart still names a :latest image"; fi
+  bootstrap=$(jq -er '.bootstrap.reference' "$images") || die "$images records no identity.bootstrapImage"
+  awk -v ref="$bootstrap" '$1 == "bootstrapImage:" && $2 == ref { found = 1 } END { exit !found }' "$work/values.yaml" \
+    || die "the packaged chart does not pin identity.bootstrapImage $bootstrap"
   version_ok=$(awk -v v="$VERSION" -v a="$TAG" '$1 == "version:" && $2 == v { n++ } $1 == "appVersion:" && $2 == a { n++ } END { print n + 0 }' "$work/chart.yaml")
   [[ "$version_ok" == 2 ]] || die "the packaged chart is not version $VERSION, appVersion $TAG"
   cp "$package" "$out/"
@@ -294,7 +332,8 @@ assemble() {
       images: {
         publication: $images[0].publication,
         how: $images[0].how,
-        refs: ($images[0].images | with_entries(.value += {reference: "docker.io/\($ns)/\(.key):\($tag)@\(.value.digest)"}))
+        refs: ($images[0].images | with_entries(.value += {reference: "docker.io/\($ns)/\(.key):\($tag)@\(.value.digest)"})),
+        bootstrap: $images[0].bootstrap
       },
       chart: {
         repository: "oci://registry-1.docker.io/\($ns)/logweir-chart",
@@ -330,13 +369,14 @@ release_notes() { # release.json -> the GitHub Release body (Markdown)
     "  -n logweir-system --create-namespace --wait --timeout 10m",
     "```",
     "",
-    "The chart pins its three images by digest. They are main CI'"'"'s `sha-\(.images.publication)` publication (\(.images.how)), given the tag `\(.tag)` without a rebuild, so the commit tag and the version tag name the same bytes:",
+    "The chart pins its four images by digest. The first three are main CI'"'"'s `sha-\(.images.publication)` publication (\(.images.how)), given the tag `\(.tag)` without a rebuild, so the commit tag and the version tag name the same bytes. The identity bootstrap image, which the install'"'"'s identity hooks run, is the chart'"'"'s reviewed pin (`identity.bootstrapImage`), built from `\(.images.bootstrap.revision)`; it is not re-tagged:",
     "",
     "| Image | Reference | Platforms |",
     "|---|---|---|",
     "| controller | `\(ref("weirkeeper"))` | \(plats("weirkeeper")) |",
     "| runner | `\(ref("logweir"))` | \(plats("logweir")) |",
     "| console | `\(ref("logweir-console"))` | \(plats("logweir-console")) |",
+    "| identity bootstrap | `\(.images.bootstrap.reference)` | \(.images.bootstrap.platforms | join(", ")) |",
     "",
     "`\(.chart.package)` is the chart package itself (sha256 `\(.chart.sha256)`); `helm pull \(.chart.repository) --version \(.chart.version)` returns the same bytes. Before upgrading an installation, read the upgrade order in [docs/release-notes.md](https://github.com/VladyslavHaina/logweir/blob/\(.commit)/docs/release-notes.md): the CRDs move first.",
     "",
