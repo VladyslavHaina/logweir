@@ -226,7 +226,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-50 | A catalog's `viewLimit` window holds the first points in walk order, not the newest: on the PoC, `viewLimit: 100` over 386 points listed close to the first 100 point ids, only 24 of the 100 newest, and not the newest point. `docs/kubernetes.md:1422`, the CRD text (`crates/weirkeeper/src/crds/recovery_catalog.rs:135`) and the `Synced` message all promise the newest. Retention is safe (FX-40 refuses any window), but the console's Catalog of a larger archive offers a time-random subset. Make the window the newest N by recovery-point time under FX-33's rules, or say exactly what it holds. Also: a resumed `Full` rescan's `Synced` message ("the newest 136 of 136 points") reads as the whole archive. Found by PoC batch 7 (F-2, F-4) | P2 | M1 | fix | — | — | compose | B | Done |
 | 0 | FX-20c | A destination's console *Test access* reports READY when its only grant is a foreign `archiveWrite` Secret: `credentialProjected` says Projected, and nothing evaluates the archiveWrite binding (PoC batch 4, FX-20 F6). Its Backup is still refused `CredentialBindingMismatch` and nothing is dialled, so no credential moves, but the readiness overclaims. Fix: Test access evaluates every grant's binding (archiveWrite included) and reports `CredentialBindingMismatch` per grant; readiness is never READY for a destination a backup would refuse. Rows with the thief fixture; control: a bound destination is READY | P2 | M1 | fix | FX-20 | — | k8s | A | Done |
 | 0 | FX-27 | The engine's Prometheus server listens unauthenticated on `0.0.0.0:8080`, with no deadline and no cap, in every runner pod during a backup or restore and on the operator's host for a CLI run (engine 0.23.3 `config.rs:93-103` defaults it on; Logweir renders no `metrics:` key; nothing scrapes it; observed in run logs). Render `metrics: {enabled: false}` in every engine document both renderers write, with a golden row, an e2e row that the port is closed during a run, and a mutant; the legacy `kubectl proxy` UI has no permit ceiling either (off by default): retire it with PLAT-17.2 or document it here | P2 | M1 | fix | — | — | compose | A | Done |
-| 0 | FX-15 | FX-10's owed items: non-default rows for five configured values (evidence-fetch pool, restore manual-run gate, `api.console.*`, `identity.*`, a Backup's `visibilityAttestations`), the unread `legacyArchiveAddressing` fields, and a retention refusal's reason on its status | P3 | M3 | fix | — | — | none | A | In progress |
+| 0 | FX-15 | FX-10's owed items: non-default rows for five configured values (evidence-fetch pool, restore manual-run gate, `api.console.*`, `identity.*`, a Backup's `visibilityAttestations`), the unread `legacyArchiveAddressing` fields, and a retention refusal's reason on its status | P3 | M3 | fix | — | — | none | A | Done |
 | 0 | FX-11 | Report a rejected Job pod promptly, with its reason, in every Job-owning controller | P2 | M1 | fix | — | — | none | A | Done |
 | 0 | FX-12 | Pass `now` into weirkeeper's evidence verification (trust-window clock reads) | P2 | M1 | fix | FX-9 | — | none | A | Deferred to v1.1 |
 | 0 | FX-13 | Key the sign-in limiter on the trusted-proxy client address | P1 | M1 | fix | — | — | none | A | Done |
@@ -884,6 +884,24 @@ What it fixed:
   - the seven visual-pass LOWs;
   - a safe YAML parser.
 - **Published and signed:** main run 38256093754 signed `sha-96e601f0`, the release-candidate build. `poc-14-1c` upgrades the PoC to it and re-checks every fix live.
+
+**PROD-14.1 live, part 3 (`poc-14-1c`, 2026-10-12): the PoC on the release-candidate build `sha-96e601f0`.** Helm revision 6. The upgrade applied the CRDs first, server-side: all 13 Established, with no foreign field manager. The identity, the schedule and the catalog counts (397/1) are unchanged, the demo Kafka lost no data, and all three images pass cosign (`claude/poc-14-1c.result.md`).
+- **PASS:**
+  - **FX-15's live row:** D-R1, so **FX-15 is Done**; also D-C1.
+  - **H1:** the backup, restore and pending checks. Every printed `aws s3 cp` and the `verify_scorecard.py` line exited 0, run exactly as printed.
+  - **H2, H3.**
+  - **M1–M6, M8–M10,** and the restore picker half of M11.
+  - **LOWs:** L2, L4, L5, L7, L11/L12, L14.
+  - **The identity display,** as `alice` and `bob`.
+- **FAIL, cosmetic:** M11's catalog half. At 1024 px the rows wrap, and the POINT cell reads only "lwp1-…".
+- **New cosmetic findings:**
+  - `timestampBound` shows `9223372036854776000`, a float rendering of i64::MAX;
+  - the schedule's backup-set column wraps;
+  - readiness says "needs approval" in confirm mode;
+  - three wording slips.
+- **These go to v1.1 with the seven visual-pass LOWs.** None blocks the release candidate.
+- **The PoC pin commit** `2525bbdf` (`claude/poc-14-1c`) lands after the tag. It is deploy/-only, so the candidate stays a docs-only descendant of the published `96e601f0`.
+- **Release prep started:** a `release.yml` dry run (`rehearsal_tag=v0.2.0-rc.2`) on main.
 
 ## Carried over from the PLAT tracker
 
