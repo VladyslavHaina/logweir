@@ -19,10 +19,17 @@ import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
 import { pointRow } from "../pages/catalog.js";
+import { renderClusterForm } from "../pages/clusters.js";
+import { renderScheduleForm } from "../pages/schedules.js";
+import { identityPresented, renderBackupDetail } from "../pages/backups.js";
+import { replayWizard } from "../workflow.js";
 import {
   NO_TOPIC_READINESS_SENTENCE,
   initialState,
+  preparePlan,
   renderCatalogOffers,
+  renderPreparedWizard,
+  stepStates,
   preparePlanOrProblem,
   recoveryPoints,
   renderPreflightStep,
@@ -382,4 +389,73 @@ test("m11_catalog_and_picker_ids_are_one_line_and_the_state_column_fits_1024", (
   assert.ok(row[1].includes("data-copy=\"" + entry.pointId + "\""), "the point id, whole on copy");
   assert.ok(row[1].includes("data-copy=\"" + entry.backupId + "\""), "and its backup set");
   assert.match(row[4], /badge-green">Available<\/span> <span class="badge badge-green">Verified/);
+});
+
+// The cheap LOWs.
+
+test("l2_the_operation_state_chip_wears_the_phase_chips_colours", () => {
+  const css = CSS();
+  // The success rule's selector list -- the one with the success colour.
+  const at = css.indexOf("border-color: var(--cds-alias-status-success);");
+  const selectors = css.slice(css.lastIndexOf("}", at) + 1, css.lastIndexOf("{", at));
+  assert.ok(selectors.includes(".badge-phase-succeeded"), selectors);
+  assert.ok(selectors.includes(".badge-state-succeeded"),
+    "NEGATIVE CONTROL: the operation view's `succeeded` was a neutral pill: " + selectors);
+  for (const [phase, state] of [["running", "running"], ["failed", "failed"],
+    ["failed", "refused"], ["pending", "pending"]]) {
+    const rule = new RegExp("\\.badge-phase-" + phase + ",(\\n\\.badge-state-[a-z]+,)*\\n" +
+      "(\\.badge-state-[a-z]+,\\n)*\\.badge-state-" + state + "[ ,]");
+    assert.match(css, rule, "state " + state + " shares phase " + phase + "'s rule");
+  }
+});
+
+test("l4_step_5_says_you_confirm_under_a_confirm_mode_namespace", async () => {
+  const state = wizardState();
+  const prepared = await preparePlan(state);
+  state.readiness = {
+    boundHash: prepared.hash,
+    preflight: {
+      id: "pf-1", terminal: true, applicable: true, stale: false, state: "unknown",
+      binding: { planHash: prepared.hash },
+      checks: [
+        { id: "target.mappedTopics", gating: "blocking", state: "ready", code: "Ok" },
+        { id: "approval.state", gating: "blocking", state: "skipped", code: "SubjectNotCreated" },
+      ],
+    },
+  };
+  assert.equal(stepStates(state, prepared)[4].status, "approval", "no policy read: needs approval");
+  state.approvalPolicy = { legacy: false, mode: "ordinary", name: "default-confirm-v1",
+    ordinaryConfirmationAvailable: true };
+  const steps = stepStates(state, prepared);
+  assert.equal(steps[4].status, "confirm",
+    "NEGATIVE CONTROL: an orange NEEDS APPROVAL where step 6 says no approver is involved");
+  assert.equal(replayWizard(steps).current, "submitted", "and it stays passable");
+  const html = renderPreparedWizard(state, prepared);
+  assert.match(html, /<li class="stepper-item is-confirm[^"]*">[\s\S]*?<span class="stepper-status">you confirm<\/span>/);
+  assert.doesNotMatch(html, /<span class="stepper-status">needs approval<\/span>/);
+  // A governed namespace still needs its approval.
+  state.approvalPolicy = { legacy: false, mode: "governed", name: "strict" };
+  assert.equal(stepStates(state, prepared)[4].status, "approval");
+});
+
+test("l5_a_minted_name_has_no_name_caption_over_no_field", () => {
+  for (const form of [renderClusterForm({ minted: true, draft: {} }),
+    renderScheduleForm({ minted: true, draft: {}, clusters: { items: [] } })]) {
+    const minted = form.slice(form.indexOf("-name-minted\""), form.indexOf("</div>", form.indexOf("-name-minted\"")));
+    assert.ok(minted.length > 0, "the minted-name block is there");
+    assert.doesNotMatch(minted, /<p class="label">name<\/p>/,
+      "NEGATIVE CONTROL: a \"name\" caption with no field under it");
+    assert.match(minted, /<p class="help"/, "the sentence that says the server names it stays");
+  }
+});
+
+test("l7_an_unrecorded_identity_reads_not_recorded", () => {
+  assert.equal(identityPresented({}), "not recorded", "NEGATIVE CONTROL: it read \"- -\"");
+  assert.equal(identityPresented(null), "not recorded");
+  assert.equal(identityPresented({ mode: "plaintext" }), "plaintext");
+  assert.equal(identityPresented({ mode: "scramSha512", username: "logweir-reader" }),
+    "scramSha512 logweir-reader");
+  const html = renderBackupDetail({ metadata: { name: "b", namespace: "team-a" }, spec: {},
+    status: { phase: "Succeeded" } });
+  assert.match(html, /<dt>identity presented<\/dt><dd>not recorded<\/dd>/);
 });

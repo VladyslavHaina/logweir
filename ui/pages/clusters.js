@@ -990,7 +990,9 @@ export function renderClusterForm(view) {
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     (v.minted === true
       // NO FIELD FOR A CHOICE THE SERVER DOES NOT HONOUR.
-      ? "<div class=\"field\" id=\"cluster-name-minted\"><p class=\"label\">name</p>" +
+      // No "name" caption over no field (PROD-14.1 visual pass, L5): the
+      // sentence says the server names it.
+      ? "<div class=\"field\" id=\"cluster-name-minted\">" +
         "<p class=\"help\">" + esc(CONNECTION_NAME_MINTED_SENTENCE) + "</p>" +
         line("cluster-name", "name") + "</div>"
       : "<div class=\"field\"><label for=\"cluster-name\">name</label>" +

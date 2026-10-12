@@ -1363,14 +1363,16 @@ th[aria-sort="descending"] .datagrid-sort::after {
 
 .badge-green,
 .badge-ok,
-.badge-phase-succeeded {
+.badge-phase-succeeded,
+.badge-state-succeeded {
   border-color: var(--cds-alias-status-success);
   background: var(--cds-alias-status-success-tint);
 }
 
 .badge-green::before,
 .badge-ok::before,
-.badge-phase-succeeded::before {
+.badge-phase-succeeded::before,
+.badge-state-succeeded::before {
   background: var(--cds-alias-status-success);
 }
 
@@ -1384,18 +1386,26 @@ th[aria-sort="descending"] .datagrid-sort::after {
 }
 
 .badge-flat,
-.badge-phase-pending {
+.badge-phase-pending,
+.badge-state-pending,
+.badge-state-queued {
   border-style: dashed;
 }
 
 .badge-warn,
-.badge-phase-running {
+.badge-phase-running,
+.badge-state-preparing,
+.badge-state-running,
+.badge-state-verifying {
   border-color: var(--cds-alias-status-warning-shade);
   background: var(--cds-alias-status-warning-tint);
 }
 
 .badge-warn::before,
-.badge-phase-running::before {
+.badge-phase-running::before,
+.badge-state-preparing::before,
+.badge-state-running::before,
+.badge-state-verifying::before {
   background: var(--cds-alias-status-warning-shade);
 }
 
@@ -1409,13 +1419,17 @@ th[aria-sort="descending"] .datagrid-sort::after {
 }
 
 .badge-danger,
-.badge-phase-failed {
+.badge-phase-failed,
+.badge-state-failed,
+.badge-state-refused {
   border-color: var(--cds-alias-status-danger);
   background: var(--cds-alias-status-danger-tint);
 }
 
 .badge-danger::before,
-.badge-phase-failed::before {
+.badge-phase-failed::before,
+.badge-state-failed::before,
+.badge-state-refused::before {
   background: var(--cds-alias-status-danger);
 }
 

@@ -1229,7 +1229,7 @@ export function renderScheduleForm(view) {
     (v.minted === true
       // No field for a choice the server does not honour: the console names the
       // schedule, and the draft's intent is the idempotency seed.
-      ? "<div class=\"field\" id=\"schedule-name-minted\"><p class=\"label\">name</p>" +
+      ? "<div class=\"field\" id=\"schedule-name-minted\">" +
         "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_MINTED_SENTENCE) +
         "</p>" + fieldErrorLine("schedule-name", errors.name) + "</div>"
       : "<div class=\"field\"><label for=\"schedule-name\">name</label>" +

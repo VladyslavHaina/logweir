@@ -4406,6 +4406,14 @@ export function stepStates(state, prepared) {
   const replication = replicationProblems(s);
   const held = ((s.readiness || {}).preflight) || null;
   const readinessRefused = held !== null && readinessRefusal(s, prepared) !== null;
+  // THE APPROVAL A CHECK IS OWED, IN THE NAMESPACE'S MODE (PROD-14.1 visual
+  // pass, L4): under confirm, Create is the approval and no approver is
+  // involved, so step 5 says "you confirm" and not "needs approval".
+  const policy = s.approvalPolicy;
+  const approvalWord = policy !== null && typeof policy === "object" && policy.legacy === false &&
+    policy.mode === "ordinary" && policy.ordinaryConfirmationAvailable !== false
+    ? "confirm"
+    : "approval";
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -4451,7 +4459,7 @@ export function stepStates(state, prepared) {
         ? "attention"
         : (i === 4 && held === null
           ? "unchecked"
-          : (i === 4 && readyButForDraftApproval(held) ? "approval" : "done"));
+          : (i === 4 && readyButForDraftApproval(held) ? approvalWord : "done"));
     } else {
       status = attention[i] ? "attention" : "todo";
     }
@@ -4483,6 +4491,9 @@ function stepWord(step) {
   }
   if (step.status === "approval") {
     return "needs approval";
+  }
+  if (step.status === "confirm") {
+    return "you confirm";
   }
   return step.current ? "to do next" : "to do";
 }
