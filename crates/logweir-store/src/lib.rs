@@ -692,6 +692,28 @@ pub struct ManifestFacts {
 /// widened by an adopter's configuration.
 pub const LOGWEIR_ROOT: &str = "logweir/";
 
+/// FX-51: how many times [`Store::put_create_only`] re-sends a create that got
+/// no answer (a dropped or refused connection), and the base of its doubling
+/// backoff: 200 ms, 400 ms, 800 ms.
+const EVIDENCE_PUT_RETRIES: u32 = 3;
+const EVIDENCE_PUT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// True when `e` is a transport failure with no HTTP answer: an
+/// `object_store::client::HttpError` anywhere in its source chain. An answered
+/// status (a 4xx, or a 5xx object_store already retried) carries none, and a
+/// `Decode` error means an answer did arrive.
+fn unanswered(e: &object_store::Error) -> bool {
+    use object_store::client::{HttpError, HttpErrorKind};
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(s) = source {
+        if let Some(h) = s.downcast_ref::<HttpError>() {
+            return h.kind() != HttpErrorKind::Decode;
+        }
+        source = s.source();
+    }
+    false
+}
+
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
     prefix: String,
@@ -1272,26 +1294,32 @@ impl Store {
         key: &str,
         max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        let rt = &self.rt;
-        rt.block_on(async {
-            // The one whole-body GET outside a version read (clippy.toml
-            // forbids it everywhere else): its body is taken through
-            // `read_within`'s two fences, never collected whole.
-            #[allow(clippy::disallowed_methods)]
-            let r = self
-                .inner
-                .get(&OPath::from(key))
-                .await
-                .map_err(|e| not_found_or_io(key, e))?;
-            let r = self.as_answered(r);
-            let vid = match &self.versions {
-                // The test double's version log: see `versions`.
-                Some(log) => log.current(key),
-                None => r.meta.version.clone(),
-            };
-            let bytes = read_within(key, key, r, max_bytes).await?;
-            Ok((bytes, vid))
-        })
+        self.rt.block_on(self.read_capped(key, max_bytes))
+    }
+
+    /// [`Store::get_capped`]'s body, for a caller already on `self.rt`.
+    async fn read_capped(
+        &self,
+        key: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        // The one whole-body GET outside a version read (clippy.toml
+        // forbids it everywhere else): its body is taken through
+        // `read_within`'s two fences, never collected whole.
+        #[allow(clippy::disallowed_methods)]
+        let r = self
+            .inner
+            .get(&OPath::from(key))
+            .await
+            .map_err(|e| not_found_or_io(key, e))?;
+        let r = self.as_answered(r);
+        let vid = match &self.versions {
+            // The test double's version log: see `versions`.
+            Some(log) => log.current(key),
+            None => r.meta.version.clone(),
+        };
+        let bytes = read_within(key, key, r, max_bytes).await?;
+        Ok((bytes, vid))
     }
 
     /// **What the store says about one object, without its body.**
@@ -1821,44 +1849,75 @@ impl Store {
                     create_only_enforced: true,
                 });
             }
+            // FX-51: object_store retries a failed connect itself, but not a
+            // reset, timeout or unknown transport error on a `PutMode::Create`
+            // PUT, which is not idempotent (0.14.1 `client/retry.rs:435-442`).
+            // This loop does, a bounded number of times, and only when no
+            // answer came back. Create-only still holds: a retry that meets
+            // `AlreadyExists` passes only if the object is byte-identical to
+            // `bytes`, i.e. the lost attempt itself landed it.
+            let mut retried: u32 = 0;
             if self.conditional_put {
-                let opts = PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                };
-                match self.inner.put_opts(&p, payload.clone(), opts).await {
-                    Ok(r) => {
-                        let version_id = match &self.versions {
-                            // The test double's version log: see `versions`.
-                            Some(log) => Some(log.record(key, bytes)),
-                            None => r.version,
-                        };
-                        return Ok(PutOutcome {
-                            version_id,
-                            create_only_enforced: true,
-                        });
-                    }
-                    Err(object_store::Error::AlreadyExists { .. }) => {
-                        if self.errors_on_existing_key {
-                            // The test double's fault: see `errors_on_existing_key`.
-                            return Err(StoreError::Io(format!(
-                                "{key}: injected transport error on an existing key"
-                            )));
+                loop {
+                    let opts = PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    };
+                    match self.inner.put_opts(&p, payload.clone(), opts).await {
+                        Err(e) if retried < EVIDENCE_PUT_RETRIES && unanswered(&e) => {
+                            retried += 1;
+                            tokio::time::sleep(EVIDENCE_PUT_BACKOFF * (1 << retried)).await;
+                            continue;
                         }
-                        return Err(StoreError::AlreadyExists(key.to_string()));
+                        Err(object_store::Error::AlreadyExists { .. }) if retried > 0 => {
+                            let cap = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                            return match self.read_capped(key, cap).await {
+                                Ok((found, version_id)) if found == bytes => Ok(PutOutcome {
+                                    version_id,
+                                    create_only_enforced: true,
+                                }),
+                                Ok(_) | Err(StoreError::TooLarge { .. }) => {
+                                    Err(StoreError::AlreadyExists(key.to_string()))
+                                }
+                                Err(e) => Err(StoreError::Io(format!(
+                                "{key}: a create retried after an unanswered attempt found the \
+                                 key taken, and reading it back to compare failed: {e}"
+                            ))),
+                            };
+                        }
+                        Ok(r) => {
+                            let version_id = match &self.versions {
+                                // The test double's version log: see `versions`.
+                                Some(log) => Some(log.record(key, bytes)),
+                                None => r.version,
+                            };
+                            return Ok(PutOutcome {
+                                version_id,
+                                create_only_enforced: true,
+                            });
+                        }
+                        Err(object_store::Error::AlreadyExists { .. }) => {
+                            if self.errors_on_existing_key {
+                                // The test double's fault: see `errors_on_existing_key`.
+                                return Err(StoreError::Io(format!(
+                                    "{key}: injected transport error on an existing key"
+                                )));
+                            }
+                            return Err(StoreError::AlreadyExists(key.to_string()));
+                        }
+                        // The backend does not implement conditional put. Fall
+                        // through to HEAD-then-PUT and RECORD that we did. Two
+                        // variants mean this: `NotSupported` (a backend that never
+                        // implements conditional put) and `NotImplemented`, which
+                        // `AmazonS3` returns for `PutMode::Create` when
+                        // `AWS_CONDITIONAL_PUT=disabled` (object_store 0.14.1
+                        // `aws/mod.rs:186-192`). Without the second,
+                        // `create_only_enforced: false` could never be observed
+                        // against the real backend this fallback exists for.
+                        Err(object_store::Error::NotSupported { .. })
+                        | Err(object_store::Error::NotImplemented { .. }) => break,
+                        Err(e) => return Err(StoreError::Io(e.to_string())),
                     }
-                    // The backend does not implement conditional put. Fall
-                    // through to HEAD-then-PUT and RECORD that we did. Two
-                    // variants mean this: `NotSupported` (a backend that never
-                    // implements conditional put) and `NotImplemented`, which
-                    // `AmazonS3` returns for `PutMode::Create` when
-                    // `AWS_CONDITIONAL_PUT=disabled` (object_store 0.14.1
-                    // `aws/mod.rs:186-192`). Without the second,
-                    // `create_only_enforced: false` could never be observed
-                    // against the real backend this fallback exists for.
-                    Err(object_store::Error::NotSupported { .. })
-                    | Err(object_store::Error::NotImplemented { .. }) => {}
-                    Err(e) => return Err(StoreError::Io(e.to_string())),
                 }
             }
             if self.inner.head(&p).await.is_ok() {
@@ -3923,5 +3982,204 @@ mod version_read_tests {
                 other => panic!("{what} must be Io, got {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod evidence_put_retry_tests {
+    //! FX-51: [`Store::put_create_only`] over the real `AmazonS3` client and a
+    //! scripted transport that dials nothing. A dropped connection is retried;
+    //! a retry that meets `AlreadyExists` passes only over identical bytes; an
+    //! answered 4xx is final; a FIRST `AlreadyExists` is refused unread.
+    use super::*;
+    use object_store::client::{
+        ClientOptions, HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest,
+        HttpResponse, HttpResponseBody, HttpService,
+    };
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    const KEY: &str = "logweir/backups/b1/r1.consumer-positions.json";
+
+    #[derive(Debug)]
+    enum Fault {
+        /// The connection drops before the store took the request.
+        Drop,
+        /// The store takes the request (these bytes land), then the
+        /// connection drops before its answer.
+        DropAfterLanding(Vec<u8>),
+        /// An answered status.
+        Status(u16),
+    }
+
+    #[derive(Debug, Default)]
+    struct Bucket {
+        faults: VecDeque<Fault>,
+        object: Option<Vec<u8>>,
+        puts: usize,
+        unconditional_puts: usize,
+        gets: usize,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeS3(Arc<Mutex<Bucket>>);
+
+    fn answer(status: u16, body: Vec<u8>) -> HttpResponse {
+        let mut r = HttpResponse::new(HttpResponseBody::from(body));
+        *r.status_mut() = status.try_into().unwrap();
+        let h = r.headers_mut();
+        h.insert("etag", object_store::HeaderValue::from_static("\"e1\""));
+        h.insert(
+            "last-modified",
+            object_store::HeaderValue::from_static("Sat, 10 Oct 2026 00:00:00 GMT"),
+        );
+        r
+    }
+
+    fn dropped() -> HttpError {
+        HttpError::new(
+            HttpErrorKind::Interrupted,
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        )
+    }
+
+    impl FakeS3 {
+        fn call_sync(&self, req: &HttpRequest) -> Result<HttpResponse, HttpError> {
+            let mut b = self.0.lock().unwrap();
+            if req.method().as_str() == "GET" {
+                b.gets += 1;
+                return Ok(match &b.object {
+                    Some(o) => {
+                        let mut r = answer(200, o.clone());
+                        r.headers_mut()
+                            .insert("content-length", o.len().to_string().try_into().unwrap());
+                        r
+                    }
+                    None => answer(404, Vec::new()),
+                });
+            }
+            assert_eq!(req.method().as_str(), "PUT");
+            b.puts += 1;
+            let conditional = req.headers().get("if-none-match").is_some();
+            if !conditional {
+                b.unconditional_puts += 1;
+            }
+            match b.faults.pop_front() {
+                Some(Fault::Drop) => Err(dropped()),
+                Some(Fault::DropAfterLanding(bytes)) => {
+                    b.object.get_or_insert(bytes);
+                    Err(dropped())
+                }
+                Some(Fault::Status(s)) => Ok(answer(s, Vec::new())),
+                None if conditional && b.object.is_some() => Ok(answer(412, Vec::new())),
+                None => {
+                    // The double cannot read a streamed request body; what
+                    // landed is marked, not compared.
+                    b.object.get_or_insert_with(|| b"<landed>".to_vec());
+                    Ok(answer(200, Vec::new()))
+                }
+            }
+        }
+    }
+
+    // `HttpService` is an `#[async_trait]` trait; this is its expansion, so
+    // the crate takes no `async-trait` dependency for one test double.
+    impl HttpService for FakeS3 {
+        fn call<'life0, 'async_trait>(
+            &'life0 self,
+            req: HttpRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let r = self.call_sync(&req);
+            Box::pin(async move { r })
+        }
+    }
+
+    impl HttpConnector for FakeS3 {
+        fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+            Ok(HttpClient::new(self.clone()))
+        }
+    }
+
+    fn store(faults: Vec<Fault>, object: Option<&[u8]>) -> (Store, Arc<Mutex<Bucket>>) {
+        let bucket = Arc::new(Mutex::new(Bucket {
+            faults: faults.into(),
+            object: object.map(<[u8]>::to_vec),
+            ..Bucket::default()
+        }));
+        let s3 = object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name("b")
+            .with_region("us-east-1")
+            .with_endpoint("http://fake-s3.invalid")
+            .with_allow_http(true)
+            .with_access_key_id("k")
+            .with_secret_access_key("s")
+            .with_http_connector(FakeS3(Arc::clone(&bucket)))
+            .build()
+            .unwrap();
+        let store = Store {
+            inner: Arc::new(s3),
+            ..Store::in_memory(LOGWEIR_ROOT)
+        };
+        (store, bucket)
+    }
+
+    #[test]
+    fn a_dropped_connection_is_retried_and_the_write_lands() {
+        let (s, b) = store(vec![Fault::Drop], None);
+        let out = s
+            .put_create_only(KEY, b"positions")
+            .expect("the retry lands");
+        assert!(out.create_only_enforced);
+        let b = b.lock().unwrap();
+        assert_eq!((b.puts, b.unconditional_puts), (2, 0));
+    }
+
+    #[test]
+    fn a_lost_answer_over_the_same_bytes_is_a_success() {
+        let (s, b) = store(vec![Fault::DropAfterLanding(b"positions".to_vec())], None);
+        let out = s
+            .put_create_only(KEY, b"positions")
+            .expect("the lost attempt landed exactly these bytes");
+        assert!(out.create_only_enforced);
+        let b = b.lock().unwrap();
+        assert_eq!((b.puts, b.unconditional_puts, b.gets), (2, 0, 1));
+    }
+
+    #[test]
+    fn a_lost_answer_over_different_bytes_is_still_refused() {
+        let (s, b) = store(vec![Fault::DropAfterLanding(b"another run".to_vec())], None);
+        assert!(matches!(
+            s.put_create_only(KEY, b"positions"),
+            Err(StoreError::AlreadyExists(_))
+        ));
+        let b = b.lock().unwrap();
+        assert_eq!(b.unconditional_puts, 0, "evidence is never overwritten");
+        assert_eq!(b.object.as_deref(), Some(&b"another run"[..]));
+    }
+
+    #[test]
+    fn an_answered_4xx_is_not_retried() {
+        let (s, b) = store(vec![Fault::Status(403)], None);
+        assert!(s.put_create_only(KEY, b"positions").is_err());
+        assert_eq!(b.lock().unwrap().puts, 1);
+    }
+
+    #[test]
+    fn a_first_already_exists_is_refused_without_a_readback() {
+        // The execution claim and the readiness probe put the SAME bytes twice
+        // and need the second answer to be `AlreadyExists`.
+        let (s, b) = store(Vec::new(), Some(b"positions"));
+        assert!(matches!(
+            s.put_create_only(KEY, b"positions"),
+            Err(StoreError::AlreadyExists(_))
+        ));
+        let b = b.lock().unwrap();
+        assert_eq!((b.puts, b.gets), (1, 0));
     }
 }

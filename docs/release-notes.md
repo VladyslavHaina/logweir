@@ -28,9 +28,10 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88 and 89. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89 and 90. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
-[the release checklist](tag1-checklist.md) as the next entry's does.
+[the release checklist](tag1-checklist.md) as the next entry's does. Item 90
+landed after the `v0.2.0-rc.2` tag and is not in that candidate.
 
 ### Candidate record
 
@@ -1961,6 +1962,30 @@ before and after. [UNVERIFIED — not yet seen on the PoC; the re-check after
 merge walks each page as each role.]
 **Rollback:** an older console image renders the old pages; nothing is stored.
 
+#### 90. A transient connection error no longer fails a run's evidence write (FX-51)
+
+**Changed.** Every create-only evidence write (a receipt and its signature, the
+consumer positions document, a scorecard, a catalog record) is re-sent up to
+three times, 200 ms, 400 ms and 800 ms apart, when the store gave no answer:
+a dropped or reset connection, such as a pooled connection the store had
+already closed. Before, one such drop failed a backup with exit 4 and
+`signing: storage: Generic S3 error: Error performing PUT ... - HTTP error:
+error sending request`, though the archive was written. Create-only still
+holds: a re-sent write that finds the key taken reads the object back, and
+succeeds only when it holds exactly the bytes this run wrote (the lost attempt
+landed them); any other object is refused as before and never overwritten. An
+answered refusal (a 4xx) is not re-sent. Not in `v0.2.0-rc.2`.
+**Do:** nothing.
+**Scope:** `logweir-store`'s `evidence_put_retry_tests`, over the real S3
+client and a scripted transport: a dropped connection is re-sent and lands;
+a lost answer over the same bytes succeeds; over different bytes it is
+refused; a 403 is sent once; a first `AlreadyExists` is refused without a
+read. Today's code fails the first two. Live on the compose stack: the e2e row
+that failed this way in CI (`position_evidence`) and `full_drill`'s main row,
+five times each.
+**Rollback:** an older runner image fails the run on such a drop, as before;
+nothing is stored differently.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -2097,7 +2122,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88 and 89, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89 and 90, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2164,6 +2189,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 87 | the controller and the `RetentionPolicy` CRD | the CRDs applied |
 | 88 | the console image (the API and the page) | nothing |
 | 89 | the console | nothing; a script waiting for `#/history` after Create waits for `#/operations` |
+| 90 | the runner's evidence writes | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
