@@ -1353,6 +1353,48 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     );
 }
 
+// ------------------------------------------------- ADR 0008, Amendment D
+
+/// **Amendment D names the engine's consumer-group subcommands (PROD-04.0c).**
+/// Rule 8 lands an ADR 0008 amendment only with this lint. The amendment and
+/// `scripts/check-no-oso.sh`'s secondary scan must name the same six tokens,
+/// so neither can drop one without the other.
+#[test]
+fn amendment_d_denies_the_engines_group_subcommands_by_name() {
+    let adr = read("docs/architecture.md");
+    let amendment_d = adr
+        .split_once("## Amendment D — engine command allowlist")
+        .and_then(|(_, rest)| rest.split("\n## ").next())
+        .expect("docs/architecture.md carries ADR 0008's Amendment D");
+    let flat: String = amendment_d.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("**Amendment (PROD-04.0c; after OD-3"),
+        "Amendment D carries PROD-04.0c's amendment and names OD-3"
+    );
+    let gate = read("scripts/check-no-oso.sh");
+    let secondary = gate
+        .lines()
+        .find(|l| l.contains("hits=$(grep -rnE"))
+        .expect("check-no-oso.sh's secondary token scan");
+    for token in [
+        "snapshot-groups", // engine-token-ok: names the amendment's token, not an invocation
+        "offset-reset",    // engine-token-ok: names the amendment's token, not an invocation
+        "offset-reset-bulk", // engine-token-ok: names the amendment's token, not an invocation
+        "offset-rollback", // engine-token-ok: names the amendment's token, not an invocation
+        "three-phase-restore", // engine-token-ok: names the amendment's token, not an invocation
+        "show-offset-mapping", // engine-token-ok: names the amendment's token, not an invocation
+    ] {
+        assert!(
+            flat.contains(&format!("`{token}`")),
+            "Amendment D must deny `{token}` by name"
+        );
+        assert!(
+            secondary.contains(&format!("|{token}|")) || secondary.contains(&format!("|{token})")),
+            "check-no-oso.sh's secondary scan must name `{token}`: {secondary}"
+        );
+    }
+}
+
 // --------------------------------------------------- deliberately not tag 1
 
 /// **`docs/stability.md` lists the sixteen deferred items and the four nevers.**
