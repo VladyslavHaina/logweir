@@ -42,7 +42,9 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
 fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
-main `fdb48cd8`, published by CI run 36183088296 (2026-09-25). It carries the
+main `96e601f0` (2026-10-12), and versions.env's comment records every pin
+before it. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
+2026-09-25), carried the
 fixes for the first PoC round's product defects P1–P10 (first published at
 `02dc44b6`), the second round's P11 and P12, the durable compromise
 revocation and the console fixes of the human-like pass (first published at
