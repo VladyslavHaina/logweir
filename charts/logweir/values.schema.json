@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Logweir chart values",
-  "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_helpers.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
+  "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_validate.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
   "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "checks", "runs", "engine", "evidence", "admissionPolicy", "retention", "api"],
@@ -87,7 +87,7 @@
     "checks": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field the template reads is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). ONE OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace`. `templates/policy.yaml` refuses it with a named `fail` at render time, which is the same moment and the same audience. `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` are WITHDRAWN (FX-10): accepted so an older values file still installs, read by nothing.",
+      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field the template reads is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). ONE OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace`. `templates/_validate.tpl` refuses it with a named `fail` at render time, which is the same moment and the same audience. `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` are WITHDRAWN (FX-10): accepted so an older values file still installs, read by nothing.",
       "required": ["maxActivePerNamespace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerNamespace", "discovery", "preflight"],
       "properties": {
         "maxActivePerNamespace": { "type": "integer", "minimum": 1 },
@@ -360,7 +360,7 @@
         "username": { "type": "string" },
         "secretRef": { "type": "string" },
         "secretKey": { "type": "string" },
-        "markerTopic": { "type": "string" }
+        "markerTopic": { "description": "WITHDRAWN: the source's markerTopic, which nothing read (rc.2 accepted and ignored it); a scratch target is marked by kafka.target.markerTopic. Accepted here only so templates/_validate.tpl can refuse it by name, pointing there." }
       }
     },
     "minio": {
@@ -419,7 +419,7 @@
       }
     },
     "ui": {
-      "description": "WITHDRAWN (PROD-17.1 C4, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image. Accepted here only so templates/ui/ui.yaml can refuse it by name, pointing at the console (api.console.*)."
+      "description": "WITHDRAWN (PROD-17.1 C4, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image. Accepted here only so templates/_validate.tpl can refuse it by name, pointing at the console (api.console.*)."
     },
     "retention": {
       "type": "object",
@@ -486,7 +486,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["enabled", "mode"],
-          "description": "D0 stage 7 calls this block `console.*` and the chart's values call the principal `api.*`; `api.console.*` is both names where a reader needs both. What this file types and what it CANNOT: the schema refuses a non-HTTPS publicBaseUrl, a mode outside the two named ones, a port outside 1-65535 and a session lifetime outside 60-900. It cannot express `shared mode requires oidc.issuer` or `an Ingress requires a TLS secret`, because a JSON Schema conditional there would report an anonymous failure; those are `fail` calls in templates/ui/api-config.yaml, which name the field and say why.",
+          "description": "D0 stage 7 calls this block `console.*` and the chart's values call the principal `api.*`; `api.console.*` is both names where a reader needs both. What this file types and what it CANNOT: the schema refuses a non-HTTPS publicBaseUrl, a mode outside the two named ones, a port outside 1-65535 and a session lifetime outside 60-900. It cannot express `shared mode requires oidc.issuer` or `an Ingress requires a TLS secret`, because a JSON Schema conditional there would report an anonymous failure; those are `fail` calls in templates/_validate.tpl, which name the field and say why.",
           "properties": {
             "enabled": { "type": "boolean" },
             "image": { "type": "string", "minLength": 1 },

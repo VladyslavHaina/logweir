@@ -1,14 +1,8 @@
 {{/*
-`minio.enabled` — THE BACKEND. An in-cluster MinIO for the archive and the
-evidence: a Deployment, a Service on 9000 (and the console on 9001), a
-PersistentVolumeClaim or an emptyDir, the root credential Secret, and the
-`logweir-s3` Secret the runner Jobs read — in `kubernetes.connectionsNamespace`
-(default: the release namespace; a scoped controller must watch it), minted
-from the root pair (demo-only; a production install brings its own archive and
-its own Secret and leaves `minio.enabled` false). The images are the compose
-stack's: the project's rebuild mirror of the withdrawn upstream MinIO images,
-pinned by digest (third_party/minio-mirror/README.md). Nothing in this file
-renders unless the flag is on.
+`minio.enabled`: an in-cluster MinIO for the archive and the evidence, demo
+only. A production install brings its own archive and its own `logweir-s3`.
+The images are the project's rebuild mirror of the withdrawn upstream MinIO
+images, pinned by digest (third_party/minio-mirror/README.md).
 */}}
 {{- if .Values.minio.enabled }}
 {{- $name := printf "%s-minio" .Release.Name }}
@@ -26,12 +20,10 @@ stringData:
   MINIO_ROOT_PASSWORD: {{ .Values.minio.rootPassword | quote }}
 ---
 {{/*
-THE RUNNER'S ARCHIVE CREDENTIAL. The name `logweir-s3` and the two data keys
-are the code's (`weirkeeper::controllers::backup::{ARCHIVE_ACCESS_KEY,
-ARCHIVE_SECRET_KEY}`); a `Backup`'s `spec.archive.secretRef` names it and the
-controller projects it into the runner Job as env. It is the root pair, so it
-can also DELETE — which no Logweir component ever does (Global Constraint 6),
-and which is one more reason this Secret is demo-only.
+The runner's archive credential. The name and the two keys are the code's
+(`weirkeeper::controllers::backup::{ARCHIVE_ACCESS_KEY, ARCHIVE_SECRET_KEY}`);
+a Backup's `spec.archive.secretRef` names it. It is the root pair, so it can
+delete, which no Logweir component does: another reason it is demo-only.
 */}}
 apiVersion: v1
 kind: Secret
@@ -160,13 +152,8 @@ spec:
           {{- end }}
 ---
 {{/*
-THE SEED JOB. A Helm hook that runs after the release's objects are in place
-(`post-install,post-upgrade`), creates the two buckets `kafka-backups` and
-`logweir-evidence` — the names the runner writes under and the controller
-reads from — and exits. `before-hook-creation,hook-succeeded`: a leftover
-Job from an earlier attempt is replaced, and a succeeded one is deleted, so
-its absence after `helm install` returned 0 is the record that it ran. A
-failed one stays for `kubectl logs`.
+Creates the buckets the runner writes under and the controller reads from.
+A succeeded Job is deleted, a failed one stays for `kubectl logs`.
 */}}
 apiVersion: batch/v1
 kind: Job

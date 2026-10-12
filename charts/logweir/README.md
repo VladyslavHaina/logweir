@@ -63,6 +63,10 @@ author-only install is not evidence of publication.**
 | `Role` and `RoleBinding` `<release>-api-trusted-proxy` (`list` on `endpointslices` in the ingress namespace) | `api.console.trustedProxyService` |
 | immutable `ConfigMap` `<release>-approval-policy-<digest>` | any `approvalPolicy.*` value |
 
+The demo MinIO, the demo Kafka brokers and their seed `Job`s set no
+`securityContext`, so a namespace enforcing the `restricted` Pod Security
+Standard refuses them; install a demo only into a namespace that admits them.
+
 Nothing optional is on by default. `manifest_lint.rs` holds the controller's
 role to its calls: no verb on `secrets`, no `update`, and `delete` only on
 `topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
@@ -120,7 +124,7 @@ carrying a `metadata.resourceVersion` precondition.
 
 `weirkeeper-policy` is the one place an operator cannot reach. **The chart
 refuses what the controller would refuse** (the schema pins every bound;
-`templates/policy.yaml` refuses a total below the per-namespace ceiling),
+`templates/_validate.tpl` refuses a total below the per-namespace ceiling),
 because a refused document fails closed almost silently: attestations and
 evidence locations are dropped and the ceilings revert, with one advisory
 `Preflight` row and one `WARN` line. The `runs` block renders only when a value
@@ -203,6 +207,7 @@ statement**.
 | `checks.discovery.defaultMaxTopics`, `checks.preflight.defaultTimeoutSeconds` | FX-10 | nothing: they never changed a request. Remove them |
 | `notify`, `notify.allowInsecureSinks` | v1, release-notes item 74 | refused at render: remove the block, or `--set notify=null` with `--reuse-values` |
 | `ui.*` and the `logweir-ui` image | v1, release-notes item 75 | refused at render: use `api.console.*`; the legacy page is gone |
+| `kafka.markerTopic` (the source's) | v1, after v0.2.0-rc.2 | refused at render: rc.2 accepted and ignored it; set `kafka.target.markerTopic`, which marks a scratch target, and remove it |
 
 The two FX-10 keys are accepted and ignored, and `NOTES.txt` prints `WITHDRAWN
 VALUES ARE SET AND IGNORED`. The CRDs default `maxTopics` (20 000) and

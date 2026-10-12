@@ -43,6 +43,12 @@
 # in `policyTypes` is DENY, beside the same egress rules shared mode gets. That
 # is the honest policy when there is no Service and the listener is loopback.
 # Docker Desktop will accept it and enforce neither half.
+#
+# A FIRST `helm install` with this file (Helm 3.19+, the default
+# `identity.bootstrapFeatures.consoleKey: true`) also generates the console's
+# confirmation key and, on a cluster with no trust yet, one default TrustPolicy
+# trusting the installation signer and that key, so the first restore is one
+# click and no key file. An upgrade gets none of it (docs/install.md §5f).
 api:
   enabled: true
   console:

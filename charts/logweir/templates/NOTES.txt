@@ -52,11 +52,9 @@ examples/author-only.values.yaml with local tags, pull policy Never and the
 explicit development exception; it is not evidence that anything was
 published.
 {{- /*
-FX-10: TWO WITHDRAWN VALUES, ACCEPTED BY THE SCHEMA AND SAID TO BE IGNORED.
-`hasKey` and not a truth test: `values.yaml` no longer carries either key, so
-its presence means a values file, a `--set` or a `--reuse-values` upgrade over a
-release of an older chart put it there — and a configured value that silently
-reaches nothing is the defect this row closed.
+The two withdrawn values, accepted by the schema and said to be ignored.
+`hasKey`, not a truth test: `values.yaml` carries neither, so a present key came
+from a values file, a `--set` or a `--reuse-values` upgrade.
 */}}
 {{- $withdrawnTopics := hasKey .Values.checks.discovery "defaultMaxTopics" }}
 {{- $withdrawnTimeout := hasKey .Values.checks.preflight "defaultTimeoutSeconds" }}
