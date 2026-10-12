@@ -31,7 +31,8 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 81, 82, 83, 84, 85, 86, 87, 88, 89 and 90. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
-landed after the `v0.2.0-rc.2` tag and is not in that candidate.
+landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
+`v0.2.0` release that carries it has its own record below.
 
 ### Candidate record
 
@@ -57,6 +58,45 @@ pass.
 | `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
 | Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
+
+### `v0.2.0`: the release after `v0.2.0-rc.2`
+
+The first release of Logweir v1: the v1 cut (OD-11), simplified (PROD-17.1) and
+proven on a clean docker-desktop install (PROD-14.1). It is `v0.2.0-rc.2` (the
+next entry) plus what landed on `main` after that tag:
+
+- **Item 90 (FX-51):** a transient connection reset no longer fails a run's
+  evidence write as unattested; a re-send that finds the key taken succeeds
+  only on identical bytes, and evidence is never overwritten.
+- **The Helm chart, validated and simplified:** every refusal in one place
+  (`_validate.tpl`), with the same messages and order; the NetworkPolicy reads the API server's
+  addresses from EndpointSlice; the identity bootstrap image is recorded in
+  `release.json`. The rendered manifests are otherwise unchanged.
+- **Operator action:** move a source-level `kafka.markerTopic` to
+  `kafka.target.markerTopic` before upgrading; the chart now refuses it by name
+  (see item 89's operator actions).
+
+### Candidate record, `v0.2.0`
+
+Filled as the next entry's is: before the tag from the release dry run; the
+chart and archive rows after the tag.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | `c43410dd`, the commit that added this record; it differs from the publication commit only under `docs/` |
+| Version tag | `v0.2.0`, pushed 2026-10-12 with the owner's approval; a full GitHub Release |
+| Publication commit (`release.json` `.images.publication`) | `3c2f358ccabc960638464ef2ea44fff2e9a5baa0` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [38294944730](https://github.com/VladyslavHaina/logweir/actions/runs/38294944730): `check`, the four `e2e` shards and `publish` (build amd64, build arm64, promote, sign) green |
+| Release dry run (`release.yml` dispatched on `main`) | [38302537508](https://github.com/VladyslavHaina/logweir/actions/runs/38302537508) on `03a48bf9`, every job green; `release.sh verify` on its `release-assets`: 14 assets verified |
+| Release run (`release.yml` on the tag) and release drill | [38305748419](https://github.com/VladyslavHaina/logweir/actions/runs/38305748419): every job green, including the full `ci.yml`, `drill / drill-from-artifact`, `publish-images` and `github-release`; the version tags name the dry run's three digests |
+| Runner image digest (`logweir`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:5dcd8e37b55d309cf58beb00dcbc293ca70ac1514252c8261677b30881188f34` |
+| Controller image digest (`weirkeeper`; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:c80995d7dd48ff2f5864c698436c5e75f1fbda0109ff48ce6eddfaf57b822991` |
+| Console image digest (`logweir-console`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:4e5718771c7285b82670e040ab12445a9d509315cf16767ed20a93248af7613c` |
+| Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | `docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6` (amd64 and arm64), built from `d4e32956` |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.2.0`, package sha256 `7c721d7e4531905281101144b33ecdebf40f909f486d8461ec9e62258d1d72b9`, OCI digest `sha256:8b7faae8f5754190481314dfa8ae89e5500891cf465b96d45b249f00b5de5a1a`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `371c3713aab33f81a71777b8c661bff278439db2feb2e75550436d3ffaecbc94` (glibc 2.34+); `logweir-aarch64-unknown-linux-gnu.tar.xz` `1a3f4698fcd8895eaeabcf9bcc44843696cb283910a1140f7f28b7095041d4d4` (glibc 2.34+); `logweir-aarch64-apple-darwin.tar.xz` `89f02aec0f111080cfd27f049eb323fdd3ecbfaa4b75ccd76ef6261bef241575` (macOS 11+, Homebrew `openssl@3`); `SHA256SUMS` checks every asset |
+| Kubernetes exercises run on this candidate | the PoC (docker-desktop, arm64, Kubernetes 1.34, Helm 4.0.1, shared mode with Traefik, Dex and cert-manager) upgraded from `v0.2.0-rc.2`'s publication to `3c2f358c` (Helm revisions 7 and 8): the rendered diff was only labels, image tags and comments, with the same NetworkPolicy peers; `cosign verify` of all four images; a backup with its consumer-positions block verified by both readers, and a verified restore. `v0.2.0-rc.2`'s record covers the clean install, the kit recovery and the visual pass |
+| Checks deliberately deferred, each with its reason | as `v0.2.0-rc.2`'s, plus: the demo MinIO and Kafka are not PSA-restricted (documented; hardening is v1.1's); the YAML parser replacement (RUSTSEC-2024-0370/0449) is v1.1's |
 
 ### The operator-facing changes after `v0.2.0-rc.1`
 
