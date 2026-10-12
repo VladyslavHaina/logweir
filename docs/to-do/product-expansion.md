@@ -910,6 +910,25 @@ What it fixed:
 - The candidate record is filled (`docs/release-notes.md`). The PoC pin lands after the tag (PR #40).
 - **Next:** the owner asked to "validate the helm chart and simplify it" (`chart-validate`, `chart-simplify`). Then `v0.2.0` final, with the owner's approval.
 
+**PR #41 — merged (2026-10-12) as `a4591f6c`: the Helm chart validated and simplified**, after the owner asked for it following rc.2.
+- **Validation (`chart-validate`):**
+  - lint and render pass;
+  - kubeconform is valid on 1.34; on 1.29 the four admission-policy resources are absent, as documented;
+  - no values key is dead; RBAC has no wildcards;
+  - the published `0.2.0-rc.2` chart is byte-identical to its asset;
+  - the server dry run on the PoC is clean.
+  - Fixes: the NetworkPolicy reads EndpointSlice, and the chart wording is corrected.
+- **Simplification (`chart-simplify`):**
+  - templates went from 4,505 to 3,742 lines, and comments from 1,624 to 831;
+  - the 84 refusals are in `_validate.tpl`, in the same order;
+  - the withdrawn `ui` template is gone.
+- **Follow-ups:**
+  - `kafka.markerTopic` is refused by name and pointed at `kafka.target.markerTopic`;
+  - the identity bootstrap image is recorded and verified in `release.json`;
+  - the demo pods' Pod Security limit is documented. Hardening them is v1.1's.
+- **Review:** Tier A (`chart-review`), ACCEPT-WITH-FIXES, fixed. About 11,000 render pairs across Helm 3.18, 3.19 and 4 match main.
+- **Byte identity:** 489 recorded `helm` calls are identical.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
