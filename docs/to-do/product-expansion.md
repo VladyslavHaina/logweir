@@ -865,6 +865,25 @@ What it fixed:
   - `ui-fix-b` (checklist): the other MEDIUMs and seven cheap LOWs.
 - **The other LOWs go to v1.1:** L1 timestamp formats, L3 "last -", L6 duplicate run lists, L8 the inventory search, L9 a dangling sentence, L10 the 390 px header height, L13 the norole namespace box.
 
+**PR #39 — merged (2026-10-12) as `96e601f0`, release-notes items 87 to 89: the release candidate's last fixes.**
+- **Item 87, `fx-r1` (Tier A):** D-R1. A retention refusal is persisted (`lastEnforcement.refusalCode`/`refusalVariable`) and named on the policy until the next run. D-C1 is fixed. The three held PLAT harnesses are cut.
+- **Item 88, `ui-fix-a` (Tier A) with `ui-h1-sweep`:**
+  - H1: every "Check it yourself" works as printed, with bucket, endpoint, region and the path-style note; a Pending restore prints only the reason; the Python verify line runs.
+  - H2: Rotate access keeps existing grants.
+  - H3: the Retention panel finds its policy, after a B1 regression, and names another deleting policy.
+  - M1 and M9.
+- **Item 89, `ui-fix-b` with `ui-ident`:**
+  - M2–M8, M10, M11 and seven LOWs.
+  - **Security:** a background review found that the shortened approver identity could be confused. The full `<issuer>#<subject>` is now shown wherever an approval is decided or audited.
+- **CI:** RustSec published RUSTSEC-2024-0449 (`unsafe-libyaml`, unmaintained, under `serde_yaml`) during the PR. It is tracked in `deny.toml` and the engine's policy. The YAML parser stays for v0.2, and its replacement goes to v1.1 (`docs/stability.md`).
+- **Owed to v1.1, from these reviews:**
+  - the `keep` inference with non-default key names;
+  - a row for the usage route's bounds;
+  - `contesting_policy` comparing names, not locations;
+  - the stale `RUNNER_IMAGE` default;
+  - the seven visual-pass LOWs;
+  - a safe YAML parser.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
