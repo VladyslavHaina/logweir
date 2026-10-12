@@ -348,9 +348,12 @@ fields are additive, so a rollback is unaffected
   RPO into source-relative RPO.
 - **The YAML parser is archived.** The drill spec and both rendered engine
   documents are YAML, parsed by `serde_yaml` 0.9, which resolves to
-  `0.9.34+deprecated` — an archived crate (RUSTSEC-2024-0370). It is kept for
-  v0.1 deliberately: no alternative was evaluated. **Revisit before v0.2.**
-  `deny.toml` carries the matching `ignore` entry and points here.
+  `0.9.34+deprecated` — an archived crate (RUSTSEC-2024-0370), over the
+  archived `unsafe-libyaml` (RUSTSEC-2024-0449); `kube-client` uses the same
+  pair. It is kept for v0.2 too: the drill spec sits inside signed plan bytes,
+  so a replacement parser must first be shown to parse every plan the same
+  way, and that is v1.1's work. `deny.toml` carries the matching `ignore`
+  entries and points here.
 - **No musl release target.** `rdkafka` compiles `librdkafka` from C, which
   does not cross-compile to musl without much more work
   ([ADR 0004](architecture.md#adr-0004-kafka-client)); `release.yml` does not

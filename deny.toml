@@ -28,4 +28,8 @@ ignore = [
   # documents are YAML and no alternative was evaluated. Revisit before v0.2 —
   # the same sentence appears in docs/stability.md's non-contracts section.
   { id = "RUSTSEC-2024-0370", reason = "tracked; see docs/stability.md" },
+  # unsafe-libyaml, serde_yaml 0.9's parser (and kube-client's), archived on
+  # 2024-03-25 (RUSTSEC-2024-0449, published 2026-10). The same dependency as
+  # the entry above, with no safe upgrade: replacing serde_yaml is v1.1's.
+  { id = "RUSTSEC-2024-0449", reason = "tracked with RUSTSEC-2024-0370; see docs/stability.md" },
 ]
