@@ -4,7 +4,8 @@
 // H1  the Backup detail's "Check it yourself" read the bucket off the
 //     destination sentinel URL (`s3://primary/...`); and, the class swept,
 //     every "Check it yourself" prints commands that work as printed: the
-//     Restore detail's store, a path-style store, and a run with no keys;
+//     Restore detail's store, a path-style store, a run with no keys, and
+//     the Python verifier's own grammar;
 // H2  the destination's "Rotate access" form opened with every optional grant
 //     at `absent`, so rotating one key removed the others;
 // H3  the schedule's Retention panel never found the RetentionPolicy naming
@@ -19,6 +20,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { apiClient, resetMode, selectMode } from "../client.js";
 import {
@@ -207,6 +213,7 @@ test("h1_a_run_with_no_receipt_key_yet_prints_no_fetch_of_the_bucket_root", asyn
 // that print one read `primary`: named unlike its bucket (`kafka-backups`),
 // path-style at a MinIO endpoint, in a region.
 
+const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const RESTORE = "orders-drill-20260911";
 
 /** `primary`'s storage, with the premises every row below stands on. */
@@ -331,6 +338,56 @@ test("h1_a_pending_restore_prints_no_command_and_says_why", async () => {
     "THE DEFECT (I2): `aws s3 cp s3://<bucket>/ ./scorecard.json` -- a fetch of the bucket root");
   assert.equal(check.indexOf("aws s3 cp"), -1);
   assert.ok(check.includes("id=\"restore-check-no-keys\">" + NO_EVIDENCE_KEYS_SENTENCE), check);
+});
+
+test("h1_both_verify_lines_run_as_printed", async () => {
+  // The Rust line, run by the release binary in a directory holding what the
+  // two fetches write, with the reader's key in place of `<your key>`.
+  const storage = primaryStorage();
+  await sharedConsole();
+  const destination = wire("destination.json");
+  const backup = wire("backup.json");
+  backup.item.locationDigest = destination.item.locationDigest;
+  const { html } = await backupDetail(backup, { status: 200, body: destination });
+  resetMode();
+  const lines = checkLines(section(html));
+  assert.ok(lines[0].includes(storage.bucket));
+  const directory = mkdtempSync(join(tmpdir(), "logweir-ui-h1-"));
+  const signed = join(REPO, "e2e/fixtures/signed/");
+  copyFileSync(signed + "backup-receipt.json", join(directory, "receipt.json"));
+  copyFileSync(signed + "backup-receipt.sig", join(directory, "receipt.sig"));
+  const key = join(signed, "public.pem");
+  const words = (line) => line.split(" ").map((w) => (w === "<your" ? key : w))
+    .filter((w) => w !== "key>");
+  const rust = words(lines[2]);
+  assert.equal(rust[0], "logweir");
+  const binary = process.env.LOGWEIR_BIN || join(REPO, "target/release/logweir");
+  const run = spawnSync(binary, rust.slice(1), { encoding: "utf8", cwd: directory });
+  assert.equal(run.status, 0, "the printed Rust line verifies: " + run.stdout + run.stderr);
+  assert.match(String(run.stdout), /signature: VALID/);
+
+  // The Python line, read by the script's own grammar: `--payload-type` and
+  // `--consumer-positions` take a value, and every other word is one of
+  // EXACTLY three positionals, `<document.json> <document.sig> <public.pem>`.
+  const script = readFileSync(join(REPO, "docs/verify_scorecard.py"), "utf8");
+  assert.ok(script.includes("\"<document.json> <document.sig> <public.pem>\""),
+    "the script's usage line is still three positionals");
+  const python = words(lines[3]);
+  assert.deepEqual(python.slice(0, 2), ["python3", "verify_scorecard.py"]);
+  const positionals = [];
+  let payloadType = null;
+  for (let i = 2; i < python.length; i += 1) {
+    if (python[i] === "--payload-type" || python[i] === "--consumer-positions") {
+      payloadType = python[i] === "--payload-type" ? python[i + 1] : payloadType;
+      i += 1;
+    } else {
+      positionals.push(python[i]);
+    }
+  }
+  assert.equal(payloadType, "backup-receipt");
+  assert.deepEqual(positionals, ["./receipt.json", "./receipt.sig", key],
+    "THE DEFECT: `--scorecard ./receipt.json --signature ./receipt.sig --public-key <your " +
+      "key>` is six positionals, and the script prints its usage and exits 1");
 });
 
 // H2. A ROTATION STARTS FROM WHAT THE DESTINATION HAS.

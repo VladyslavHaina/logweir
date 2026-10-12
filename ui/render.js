@@ -2353,7 +2353,12 @@ export const PATH_STYLE_SENTENCE =
  *  when given, is `{endpoint, region, pathStyle}` of the store the bucket is
  *  on: an S3-compatible endpoint is not AWS, and a fetch without it asks AWS.
  *  A path-style store at an endpoint gets [`PATH_STYLE_SENTENCE`] above the
- *  block. The caller prints the block only when [`hasEvidenceKeys`] holds. */
+ *  block. The caller prints the block only when [`hasEvidenceKeys`] holds.
+ *
+ *  `verify_scorecard.py` takes its three files as POSITIONALS and only
+ *  `--payload-type` as a flag (its own usage line); `--scorecard` and the
+ *  rest are the Rust CLI's flags, and the script answers them with its usage
+ *  and exit 1. */
 export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile,
   sidecarFile, route) {
   const r = route || {};
@@ -2367,8 +2372,8 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
       "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile + flags,
       "logweir drill verify --payload-type " + payloadType + " --scorecard ./" + documentFile +
         " --signature ./" + sidecarFile + " --public-key <your key>",
-      "python3 verify_scorecard.py --payload-type " + payloadType + " --scorecard ./" +
-        documentFile + " --signature ./" + sidecarFile + " --public-key <your key>",
+      "python3 verify_scorecard.py --payload-type " + payloadType + " ./" + documentFile +
+        " ./" + sidecarFile + " <your key>",
     ]);
 }
 
