@@ -196,6 +196,42 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("  trust/signing.pub.pem\n", listed)
         self.assertIn("  trust/trustpolicy-org.yaml\n", listed)
 
+    def commit_like_head_but(self, path: str, text: str) -> tuple:
+        """A commit whose tree is HEAD's with `path` holding `text`, written to a scratch
+        object store so the checkout's repository is never written to. Returns the commit
+        and the environment under which git (and so the kit script) can see it."""
+        objects = self.base / "objects"
+        objects.mkdir(exist_ok=True)
+        real = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=ROOT,
+                              capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        env = dict(os.environ, GIT_OBJECT_DIRECTORY=str(objects), GIT_ALTERNATE_OBJECT_DIRECTORIES=real)
+        plumbing = dict(env, GIT_INDEX_FILE=str(self.base / "index"), GIT_AUTHOR_NAME="kit test",
+                        GIT_AUTHOR_EMAIL="kit@test.invalid", GIT_COMMITTER_NAME="kit test",
+                        GIT_COMMITTER_EMAIL="kit@test.invalid")
+
+        def git(*args, stdin=None):
+            return subprocess.run(["git", *args], cwd=ROOT, env=plumbing, input=stdin, capture_output=True,
+                                  text=True, check=True, timeout=30).stdout.strip()
+        git("read-tree", "HEAD")
+        blob = git("hash-object", "-w", "--stdin", stdin=text)
+        git("update-index", "--cacheinfo", f"100644,{blob},{path}")
+        return git("commit-tree", "--no-gpg-sign", git("write-tree"), "-p", "HEAD", "-m", "the release"), env
+
+    def test_the_checkout_must_hold_the_releases_guide_and_schemas(self):
+        # RECOVERY.md and schemas/ come from this checkout but claim the release commit.
+        guide = (ROOT / "docs/install.md").read_text()
+        cases = {"docs/install.md": guide + "\nA step this release does not have.\n",
+                 "schemas/logweir-drill-scorecard-1.0.0.json": "{}\n"}
+        for path, text in cases.items():
+            with self.subTest(path):
+                shutil.rmtree(self.out, ignore_errors=True)
+                self.release["commit"], env = self.commit_like_head_but(path, text)
+                self.write_assets()
+                done = self.run_kit("--release-assets", str(self.assets), env=env)
+                self.assertEqual(done.returncode, 1, (path, done.stderr))
+                self.assertIn(f"check out {VERSION}", done.stderr)
+                self.assert_nothing_written()
+
     def test_an_asset_that_does_not_match_its_checksum_is_refused(self):
         archive = self.assets / f"logweir-{TARGETS[0]}.tar.xz"
         archive.write_bytes(archive.read_bytes() + b"tampered")

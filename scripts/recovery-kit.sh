@@ -76,7 +76,7 @@ if [[ "$mode" == release ]]; then
   [[ "$(jq -r .tag "$assets/release.json")" == "$version" ]] || die "$assets/release.json is not $version"
   commit=$(jq -er .commit "$assets/release.json")
   git cat-file -e "$commit^{commit}" 2>/dev/null || die "the release commit $commit is not in this checkout; fetch it"
-  git diff --quiet "$commit" HEAD -- schemas || die "this checkout's schemas/ differ from $version's; check out $version"
+  git diff --quiet "$commit" HEAD -- schemas "$GUIDE" || die "this checkout's schemas/ or $GUIDE differ from $version's; check out $version"
   for target in "${TARGETS[@]}"; do
     for file in "logweir-$target.tar.xz" "logweir-$target.tar.xz.sha256"; do
       awk -v f="$file" '$2 == f { n++ } END { exit n != 1 }' "$assets/SHA256SUMS" || die "$version has no $file"
