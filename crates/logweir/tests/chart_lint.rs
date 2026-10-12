@@ -843,7 +843,7 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     );
     // With the feature and a console (the fresh-install example), the whole
     // argument list.
-    let fresh = rendered("console-fresh-install");
+    let fresh = rendered("console");
     let fresh_args: Vec<&str> = container(find(&fresh, "Job", "logweir-identity-bootstrap"))
         ["args"]
         .as_sequence()
@@ -4189,8 +4189,8 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "$console_repo:$LOGWEIR_TAG",
         // The withdrawn `ui.*` block is refused by name, with
         // the same render without it as the control.
-        "console_refuses \"the withdrawn ui.* block (ui.enabled=true)\" \"ui.* is withdrawn\"",
-        "console_refuses \"the withdrawn ui.* block (ui.enabled=false)\" \"use the console, api.console.*\"",
+        "refuses \"the withdrawn ui.* block (ui.enabled=true)\" \"ui.* is withdrawn\"",
+        "refuses \"the withdrawn ui.* block (ui.enabled=false)\" \"use the console, api.console.*\"",
         "control: the same render with no ui block renders",
         // The installation policy's own schema refusals: a policy document
         // `weirkeeper::check::policy` refuses fails CLOSED and SILENTLY, so the
@@ -5713,8 +5713,8 @@ fn chart_lint_the_hook_passes_only_flags_its_pinned_image_runs() {
             .as_bool()
             .unwrap_or(feature);
         if image != pinned || its_feature != feature {
-            // Another image (author-only), or the example that documents the
-            // feature ahead of its default (console-fresh-install).
+            // Another image (author-only), or an example that sets the
+            // feature against the pinned image's default.
             continue;
         }
         let args = bootstrap_args(&rendered(render));
@@ -5753,7 +5753,7 @@ fn chart_lint_the_hook_passes_only_flags_its_pinned_image_runs() {
     // NEGATIVE CONTROL: the rule reports exactly the flags a help text lacks:
     // the feature example's arguments against a help without the console-key
     // flags (the pinned image's today).
-    let fresh = bootstrap_args(&rendered("console-fresh-install"));
+    let fresh = bootstrap_args(&rendered("console"));
     let old_help: BTreeSet<String> = flags
         .iter()
         .filter(|f| !prod_16_1.contains(&f.as_str()))
@@ -5786,7 +5786,7 @@ fn chart_lint_the_hook_passes_only_flags_its_pinned_image_runs() {
 fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_install() {
     // The fresh-install example: a console with the bootstrap image's
     // fresh-install feature (`identity.bootstrapFeatures.consoleKey`).
-    let docs = rendered("console-fresh-install");
+    let docs = rendered("console");
     for (kind, name) in [
         ("Secret", "logweir-console-confirmation"),
         ("ConfigMap", "logweir-console-trust"),
@@ -5860,7 +5860,7 @@ fn chart_lint_a_console_render_generates_the_console_key_and_marks_the_fresh_ins
         ),
         "the controller reads the marker from the public identity ConfigMap"
     );
-    let (_, config) = console_config("console-fresh-install");
+    let (_, config) = console_config("console");
     assert_eq!(
         config["installationIdentity"]["namespace"].as_str(),
         Some("logweir-system")
