@@ -224,11 +224,9 @@ kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-c
 # The OIDC client secret, the same value Dex holds, under the key clientSecret.
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-console-oidc \
   --from-file=clientSecret=poc-secrets/client-secret
-# The console's ConsoleConfirmation key (Ordinary approval), and its public half.
-openssl genpkey -algorithm ed25519 -out poc-secrets/confirmation.key
-openssl pkey -in poc-secrets/confirmation.key -pubout -out poc-secrets/confirmation.pub.pem
-kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-console-confirmation \
-  --from-file=confirmation.key=poc-secrets/confirmation.key
+# NOT the console's ConsoleConfirmation key: the install's identity hook generates
+# logweir-console-confirmation and trusts it (docs/install.md 5f); a hand-made one
+# is adopted and trusted nowhere, and step 8 would then be needed.
 # Dex's back-channel CA, PUBLIC certificate only — `api.console.oidc.caBundle`
 # names this ConfigMap and, with `systemRoots: false`, it is the console's only
 # trust anchor for its IdP (chart gap G1). NOT the browser CA in ca.crt.
@@ -352,11 +350,27 @@ kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
 
 ## 8. Trust
 
-`logweir-trust-admin` is a **cluster-scoped** role, bound once with a
-`ClusterRoleBinding` — not per namespace — because a `TrustPolicy` is
-cluster-scoped and decides whose keys may sign for the namespaces it names. As a
-holder of it (the PoC's kubeconfig is a cluster administrator), put the two
-public keys on the `TrustPolicy` that governs `logweir-poc`:
+**A fresh install needs no step here.** Its identity hook generated the signer
+and the console's confirmation key and created the default `TrustPolicy`
+`logweir-installation` with both ([docs/install.md](../../docs/install.md),
+*5f*), which governs `logweir-poc` and `logweir-pair`:
+
+```bash
+kubectl --context "$CTX" get trustpolicy logweir-installation   # DEFAULT true, KEYS 2, LOADED true
+```
+
+To verify an archive another installation signed (an old PoC's, say), copy that
+signer's `EvidenceSigning` entry, with its own `notBefore`, into
+`logweir-installation`'s `spec.keys` (install.md, *Recover onto a clean
+installation with the kit*, step 4).
+
+**Only an install that predates PROD-16.1**, or one whose console key was made
+by hand, trusts its keys itself. `logweir-trust-admin` is a **cluster-scoped**
+role, bound once with a `ClusterRoleBinding` — not per namespace — because a
+`TrustPolicy` is cluster-scoped and decides whose keys may sign for the
+namespaces it names. As a holder of it (the PoC's kubeconfig is a cluster
+administrator), put the two public keys on the `TrustPolicy` that governs
+`logweir-poc`:
 
 ```bash
 bash deploy/poc/trustpolicy.sh poc-secrets/confirmation.pub.pem > poc-secrets/trustpolicy.yaml
