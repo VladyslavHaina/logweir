@@ -772,6 +772,7 @@ What it fixed:
 - **By the proposal's plan:** tiers A and B are done. B14 goes inside PROD-14.1. The three PLAT harnesses A1 held are cut after PROD-14.1.
 - **Tier C, as decided (OD-12):** C1, C2's alert sinks, C4, C5, C6 and C7 are cut. C3 is kept.
 - **Never touched:** the signed-format readers, the frozen schemas, the invariant corpus, the verifiers and consumer positions.
+- **Published and signed:** main run 38185556834 signed `sha-984127fa`. PROD-14.1's clean install uses that publication's chart and images. The release checklist says the owner approves every tag push (`docs/tag1-checklist.md`), so `v0.2.0-rc.2` and `v0.2.0` wait for the owner.
 
 ## Carried over from the PLAT tracker
 
