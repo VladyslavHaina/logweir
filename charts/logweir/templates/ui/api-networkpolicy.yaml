@@ -35,12 +35,13 @@ console starts NotReady: the honest failure.
 {{- $mask := ternary "128" "32" (contains ":" $apiService.spec.clusterIP) }}
 {{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $apiService.spec.clusterIP $mask) }}
 {{- end }}
-{{- $apiEndpoints := lookup "v1" "Endpoints" "default" "kubernetes" }}
-{{- if $apiEndpoints }}
-{{- range $subset := $apiEndpoints.subsets }}
-{{- range $address := $subset.addresses }}
-{{- $mask := ternary "128" "32" (contains ":" $address.ip) }}
-{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address.ip $mask) }}
+{{- /* EndpointSlice, not v1 Endpoints: the latter warns on every install from 1.33. */}}
+{{- $apiSlice := lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes" }}
+{{- if $apiSlice }}
+{{- range $endpoint := $apiSlice.endpoints }}
+{{- range $address := $endpoint.addresses }}
+{{- $mask := ternary "128" "32" (contains ":" $address) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address $mask) }}
 {{- end }}
 {{- end }}
 {{- end }}

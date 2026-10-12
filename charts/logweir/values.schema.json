@@ -359,8 +359,7 @@
         },
         "username": { "type": "string" },
         "secretRef": { "type": "string" },
-        "secretKey": { "type": "string" },
-        "markerTopic": { "type": "string" }
+        "secretKey": { "type": "string" }
       }
     },
     "minio": {
