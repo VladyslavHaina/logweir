@@ -3,8 +3,9 @@
 # clusters. Task 35 (post-plan).
 #
 # `version` and `appVersion` are a checkout's. `scripts/ci-images.sh
-# chart-package` sets both when it publishes: `<version>-sha-<commit>` for a
-# `main` publication, `<semver>` for a `v<semver>` release tag. It also
+# chart-package` sets both when it publishes: `version` to
+# `<version>-sha-<commit>` for a `main` publication or `<semver>` for a
+# `v<semver>` release tag, and `appVersion` to the tag itself. It also
 # rewrites the three Logweir image defaults from `:latest` to that
 # publication's tag, and for a release to `:<tag>@sha256:…`.
 #

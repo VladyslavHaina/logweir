@@ -207,7 +207,7 @@ statement**.
 | `checks.discovery.defaultMaxTopics`, `checks.preflight.defaultTimeoutSeconds` | FX-10 | nothing: they never changed a request. Remove them |
 | `notify`, `notify.allowInsecureSinks` | v1, release-notes item 74 | refused at render: remove the block, or `--set notify=null` with `--reuse-values` |
 | `ui.*` and the `logweir-ui` image | v1, release-notes item 75 | refused at render: use `api.console.*`; the legacy page is gone |
-| `kafka.markerTopic` (the source's) | v1, after v0.2.0-rc.2 | refused at render: nothing ever read it (only `kafka.target.markerTopic` marks a scratch target), so remove it |
+| `kafka.markerTopic` (the source's) | v1, after v0.2.0-rc.2 | refused at render: rc.2 accepted and ignored it; set `kafka.target.markerTopic`, which marks a scratch target, and remove it |
 
 The two FX-10 keys are accepted and ignored, and `NOTES.txt` prints `WITHDRAWN
 VALUES ARE SET AND IGNORED`. The CRDs default `maxTopics` (20 000) and

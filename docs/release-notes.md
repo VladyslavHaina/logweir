@@ -1971,6 +1971,9 @@ In addition to the next entry's six, in its order.
   `--reuse-values`, pass `--set notify=null`.
 - **Remove any `ui` block** (item 75): the chart refuses `ui.*` by name. Use the
   console for the page.
+- **Move a source-level `kafka.markerTopic` to `kafka.target.markerTopic`**:
+  the chart never read the source's key (rc.2 accepted and ignored it) and now
+  refuses it by name. With `--reuse-values`, pass `--set kafka.markerTopic=null`.
 - **Name the trusted proxy of a shared console the chart publishes** (item 53):
   with `api.console.mode: shared` and `api.console.ingress.enabled: true`, set
   `api.console.trustedProxyService` to the ingress controller's Service (or

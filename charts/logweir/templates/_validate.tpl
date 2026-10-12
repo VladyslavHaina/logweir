@@ -23,7 +23,7 @@ deployment.yaml used to refuse it.)
 {{- fail "ui.* is withdrawn (PROD-17.1, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image are gone. Remove the ui block from your values file and use the console, api.console.* (docs/install.md §5e)." -}}
 {{- end -}}
 {{- if hasKey .Values.kafka "markerTopic" -}}
-{{- fail "kafka.markerTopic is withdrawn: nothing ever read it (only kafka.target.markerTopic marks a scratch target), so removing it changes nothing. Remove it from your values file, or on helm upgrade --reuse-values pass --set kafka.markerTopic=null" -}}
+{{- fail "kafka.markerTopic is not read by this chart; set kafka.target.markerTopic instead (rc.2 accepted and ignored it). Remove kafka.markerTopic from your values file, or on helm upgrade --reuse-values pass --set kafka.markerTopic=null" -}}
 {{- end -}}
 {{- /* The console (api.console.*). */ -}}
 {{- if .Values.api.console.enabled -}}

@@ -978,7 +978,7 @@ fi
 # it is refused by name, not by the schema's generic unknown-key error.
 # CONTROL: the target's markerTopic, the key that does mark a scratch target,
 # still renders onto the target KafkaCluster.
-refuses "the withdrawn source kafka.markerTopic" "kafka.markerTopic is withdrawn" \
+refuses "the withdrawn source kafka.markerTopic" "kafka.markerTopic is not read by this chart; set kafka.target.markerTopic instead" \
   --set kafka.enabled=true --set kafka.bootstrapServers=source:9092 \
   --set kafka.markerTopic=logweir.scratch
 if renders "the control: kafka.target.markerTopic" "$tmp/marker-target.yaml" \
