@@ -4279,7 +4279,7 @@ function submissionStatus(submission, prepared, beside, ns) {
     // where it stands is its own operation view -- not the next step the
     // submit had chosen for a plan this page is no longer showing.
     const route = elsewhere || typeof result.route !== "string" || result.route.length === 0
-      ? restoreOperationRoute(ns, shown)
+      ? restoreOperationRoute(ns, shown, meta.uid)
       : result.route;
     return (
       mutationStatus(s, { kind: "Restore", name: shown }) +
@@ -5313,7 +5313,8 @@ export async function restoreDestination(api, state, prepared, restore) {
   const meta = (restore || {}).metadata || {};
   const frozen = frozenDecision(restore);
   if (frozen !== null && frozen.state === "confirmed") {
-    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName,
+      meta.uid);
   }
   const approvalName = (((restore || {}).spec || {}).approvalRef || {}).name || p.approvalName;
   let approval = null;
@@ -5323,7 +5324,8 @@ export async function restoreDestination(api, state, prepared, restore) {
     approval = null;
   }
   if (approval !== null && approvalAuthorizes(approval, restore, p.hash)) {
-    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName,
+      meta.uid);
   }
   return approvalRoute(s, p, restore);
 }

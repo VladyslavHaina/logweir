@@ -681,7 +681,9 @@ export function renderOperation(view) {
       ["last update", cell(f.lastUpdate)],
       ["created", when(f.createdAt)],
       ["uid", "<code>" + cell(f.uid) + "</code>"],
-      ["awaiting approval", f.awaitingApproval ? "yes" : "no"],
+      ["awaiting approval", f.awaitingApproval
+        ? "yes: waiting for approval; no Job runs until weirkeeper verifies it"
+        : "no"],
       ["stage", cell(f.stage)],
       ["status too old to believe", f.console ? flagBadge(f.stale, "yes -- stale", "no") : ABSENT],
       ["object", f.name.length === 0

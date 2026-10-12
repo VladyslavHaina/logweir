@@ -92,6 +92,7 @@ import {
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
+import { operationRoute } from "./operation.js";
 
 const PLURAL = "approvals";
 const RESTORES = "restores";
@@ -175,9 +176,11 @@ export function approvalSubjectRoute(ns, subject, hash, name) {
   );
 }
 
-/** The durable operation view of one Restore: its detail page under History. */
-export function restoreOperationRoute(ns, name) {
-  return "#/history?ns=" + encodeURIComponent(ns) + "&name=" + encodeURIComponent(name);
+/** The durable operation view of one Restore, `#/operations`: the page that
+ *  follows the run as a stream until it is terminal. `uid`, when known, binds
+ *  the link to this run. */
+export function restoreOperationRoute(ns, name, uid) {
+  return operationRoute(ns, "restore", name, uid);
 }
 
 const API = apiClient();
@@ -655,6 +658,13 @@ function stateBlock(kind, words, sentence) {
   );
 }
 
+/** A Pending Restore whose approval weirkeeper has not verified yet. That is
+ *  the first state of every Restore, a confirm-mode one included for the
+ *  seconds its confirmation takes to verify, so it reads as waiting and not
+ *  as a refusal. */
+export const WAITING_FOR_APPROVAL_SENTENCE =
+  "Waiting for approval: no Job runs until weirkeeper verifies its Approval (Verified=True).";
+
 /** A Restore's own progress, as weirkeeper recorded it: the phase and reason,
  *  in words. */
 export function restoreProgressSentence(restore) {
@@ -663,7 +673,7 @@ export function restoreProgressSentence(restore) {
     return "weirkeeper has not reconciled this Restore yet.";
   }
   if (status.phase === "Pending" && status.reason === "ApprovalNotVerified") {
-    return "Pending: no Job exists, and none will until its approval is Verified=True.";
+    return WAITING_FOR_APPROVAL_SENTENCE;
   }
   if (status.phase === "Failed") {
     return "Failed, reason " + esc(status.reason) + ". Restore.spec is immutable; a refused " +
@@ -874,7 +884,7 @@ export function renderApprovalSubject(view, now) {
         esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
       : "") +
     stateBlockOrWarning +
-    "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name)) + "\">Open the " +
+    "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name, s.uid)) + "\">Open the " +
     "Restore's operation view</a></p>" +
     "</section>" +
     existing +
