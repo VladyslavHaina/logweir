@@ -64,10 +64,11 @@ docker-desktop publishes Traefik's `LoadBalancer` Service on the host's
 ## Prerequisites
 
 - docker-desktop with Kubernetes enabled (1.30 or newer; the admission policy
-  needs 1.30), ports 80 and 443 free on the host, and — on Apple silicon —
-  amd64 emulation (the runner image is `linux/amd64`).
-- `helm` 3.15+ or 4 (OCI charts), `kubectl`, `openssl`, `htpasswd` (macOS ships
-  it), `git`.
+  needs 1.30) and ports 80 and 443 free on the host. Every Logweir image runs
+  natively on Apple silicon (linux/arm64); the identity hook does from a chart
+  carrying release-notes item 84, and needs amd64 emulation before it.
+- `helm` 3.19+ or 4 (a first install with the console needs 3.19; the PoC runs
+  4.0.1), `kubectl`, `openssl`, `htpasswd` (macOS ships it), `git`.
 
 ```bash
 git clone https://github.com/VladyslavHaina/logweir && cd logweir
@@ -466,6 +467,7 @@ kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/cha
 #     not harmless: stop, or accept losing the demo topics and re-seed them
 #     afterwards.
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  --dry-run=server --kube-context "$CTX" \
   -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
   | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
 # 2. Controller, runner and console images TOGETHER. The approval bindings are
@@ -525,8 +527,10 @@ helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
 ```
 
 Keep `--dry-run=server` on `helm template`. Without it the chart's `lookup`
-sees no cluster and renders the identity Secrets and ConfigMaps that
-`helm upgrade` creates only when they are absent. The dry run then reports
+sees no cluster, and the chart refuses the render (`identity.renderedOffline`,
+[install.md](../../docs/install.md#argo-cd-and-other-offline-renders)); a chart
+from before PROD-14.1 rendered the identity Secrets and ConfigMaps that
+`helm upgrade` creates only when they are absent, and the dry run reported
 false conflicts on them (manager `ureq`, four on the PoC).
 
 Do not save that render to a file: it carries the demo MinIO's root credential

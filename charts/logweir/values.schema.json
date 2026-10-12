@@ -200,6 +200,7 @@
           "enum": ["IfNotPresent", "Never", "Always"]
         },
         "allowMutableBootstrapImageForDevelopment": { "type": "boolean" },
+        "renderedOffline": { "type": ["boolean", "null"] },
         "publicConfigMapName": { "type": "string", "minLength": 1 },
         "bootstrapFeatures": {
           "type": "object",

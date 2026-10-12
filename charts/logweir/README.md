@@ -1,5 +1,14 @@
 # The Logweir Helm chart
 
+**Before you install:** Kubernetes **1.29** or newer (`kubeVersion` in
+[`Chart.yaml`](Chart.yaml); Helm refuses an older cluster), Helm **3.19** or
+newer, or 4.x (a first install with the console needs 3.19 for its trust
+grant), and nodes on **linux/amd64 or linux/arm64**: the controller, runner
+and console images, the identity hook's included, are published for both. Brokers
+([support matrix](../../docs/support-matrix.md#brokers)): Apache Kafka 3.7.1,
+3.9.2, 4.1.2 and 4.3.1 (KRaft) and Confluent Platform 8.3.2 are supported;
+Redpanda is a backup source only; anything else is untested.
+
 ## Copy this directory and install it
 
 `charts/logweir/` is self-contained. Copy the whole directory into your own
@@ -75,9 +84,10 @@ carrying a `metadata.resourceVersion` precondition.
 | `kubernetes.connectionsNamespace` | `""` (release) | where `kafka.enabled`'s objects and MinIO's `logweir-s3` go; must be watched |
 | `kubernetes.nodeSelector`, `.tolerations`, `.affinity` | empty | every chart pod; a component's own block replaces them |
 | `identity.enabled` | `true` | the managed signer; `false` only for an external lifecycle |
-| `identity.bootstrapImage` | a reviewed runner digest (rev `2fe8d907`, amd64) | must be `@sha256`; an emptied value refuses to render |
+| `identity.bootstrapImage` | a reviewed runner digest (rev `d4e32956`, linux/amd64 and linux/arm64) | must be `@sha256`; an emptied value refuses to render |
 | `identity.bootstrapImagePullPolicy` | `IfNotPresent` | |
 | `identity.allowMutableBootstrapImageForDevelopment` | `false` | only the author-only override, with `Never` |
+| `identity.renderedOffline` | `null` | `true` for Argo CD and `helm template \| kubectl apply`: no placeholders, no trust grant (*The identity lifecycle*); `false` only for a preview; unset, such a render is refused |
 | `identity.bootstrapFeatures.consoleKey` | `true` | `false` only with a bootstrap image older than the console-key flags |
 | `identity.publicConfigMapName` | `logweir-signing-trust` | public key, key id, algorithm, trust reference |
 | `identity.authorizedRunnerNamespaces` | `[]` | existing namespaces given the same signer and runner prerequisites |
@@ -432,10 +442,9 @@ docker buildx imagetools inspect <identity.bootstrapImage from values.yaml>
 docker run --rm --platform linux/amd64 <identity.bootstrapImage from values.yaml> identity bootstrap --help
 ```
 
-**The pinned bootstrap image is amd64-only**: on arm64 without emulation the
-hook fails with `exec format error` and no identity is written (Docker Desktop
-on Apple silicon emulates it). On a mixed cluster set
-`kubernetes.nodeSelector: {kubernetes.io/arch: amd64}`.
+**The pinned bootstrap image is an index of linux/amd64 and linux/arm64**, like
+every published image since PROD-00.2: each node pulls its own variant. Re-pin
+only to such an index (`docker buildx imagetools inspect` lists both).
 
 **To pin the tags back**, resolve each with a manifest read, then set all six
 values together:
@@ -465,8 +474,14 @@ helm install logweir charts/logweir -n logweir-system --create-namespace \
 ### The identity lifecycle
 
 Managed identity needs connected `helm install`, `upgrade` and `rollback` with
-credentials for every `lookup`; never apply offline `helm template` output with
-`identity.enabled=true`. The bootstrap and distribution Jobs are
+credentials for every `lookup`. A render that cannot ask the cluster
+(`helm template`, `helm lint`, `--dry-run=client`, Argo CD) is refused, because
+it would render the empty placeholders again. For Argo CD or `helm template |
+kubectl apply` set `identity.renderedOffline: true`, which renders no placeholder
+and no fresh-install trust grant, and create the empty retained objects once
+first ([install.md, *Argo CD and other offline renders*](../../docs/install.md#argo-cd-and-other-offline-renders)).
+`identity.renderedOffline: false` renders what `helm install` would, for a
+preview that is never applied. The bootstrap and distribution Jobs are
 `post-install,post-upgrade,post-rollback` hooks, so a rollback validates only
 when its target has them. The retained Secret, ConfigMap and singleton are
 creation-only `pre-install,pre-upgrade` hooks: no rollback overwrites a live

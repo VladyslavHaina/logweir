@@ -111,8 +111,10 @@ chart_package() {
     echo "the packaged values.yaml still names a :latest image" >&2; rm -rf "$work"; return 1
   fi
   mv "$work/values.yaml" "$work/$CHART_NAME/values.yaml"
-  helm lint "$work/$CHART_NAME" >/dev/null || { rm -rf "$work"; return 1; }
-  helm template logweir "$work/$CHART_NAME" -n logweir-system >/dev/null || { rm -rf "$work"; return 1; }
+  # A preview, so `identity.renderedOffline=false`: the chart refuses an offline
+  # render that does not say what it is (PROD-14.1).
+  helm lint "$work/$CHART_NAME" --set identity.renderedOffline=false >/dev/null || { rm -rf "$work"; return 1; }
+  helm template logweir "$work/$CHART_NAME" -n logweir-system --set identity.renderedOffline=false >/dev/null || { rm -rf "$work"; return 1; }
   mkdir -p "$out"
   helm package "$work/$CHART_NAME" --version "$version" --app-version "$TAG" -d "$out" >/dev/null \
     || { rm -rf "$work"; return 1; }

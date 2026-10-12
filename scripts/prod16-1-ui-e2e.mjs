@@ -193,6 +193,7 @@ function chartIdentityRender() {
     "--set", "api.enabled=true", "--set", "api.console.enabled=true",
     "--set", "api.console.mode=localAdmin", "--set", "api.console.keySecret=unused",
     "--set", "identity.bootstrapFeatures.consoleKey=true",
+    "--set", "identity.renderedOffline=false",
     "--show-only", "templates/identity.yaml"], { encoding: "utf8", timeout: 60000 });
   check(helm.status === 0, "helm template failed: " + helm.stderr);
   const asJson = kube(["create", "--dry-run=client", "-o", "json", "-f", "-"], { input: helm.stdout });

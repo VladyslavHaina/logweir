@@ -1251,8 +1251,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         install.contains("identity.bootstrapImage")
             && install.contains("identity bootstrap --help")
             && install.contains("refuses an emptied value")
-            && install.contains("amd64-only"),
-        "install docs must state the pinned compatible bootstrap image, its re-pin check and its architecture limit"
+            && install.contains("is an index of linux/amd64 and\nlinux/arm64"),
+        "install docs must state the pinned compatible bootstrap image, its re-pin check and its \
+         architectures (PROD-14.1: an index of both)"
     );
     assert!(
         install.contains("post-rollback")
@@ -1262,12 +1263,14 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     );
     assert!(
         install.contains("connected Helm operation")
-            && install.contains("offline `helm template`")
-            && install.contains("unsupported with\n`identity.enabled=true`")
+            && install.contains("is **refused by name**")
+            && install.contains("`identity.renderedOffline: true`")
+            && install.contains("never\nfor output you apply")
             && install.contains("exact\nIPv4 `/32` or IPv6 `/128`")
             && install.contains("TCP 443\nand 6443")
             && install.contains("Other API ports are unsupported"),
-        "managed identity docs must refuse unsafe offline renders and state exact API CIDR/port requirements"
+        "managed identity docs must say an offline render is refused, name the offline answer \
+         (PROD-14.1) and state exact API CIDR/port requirements"
     );
     assert!(
         install.contains("Only the bootstrap/distributor **processes and their projected API tokens** are\nshort-lived")
@@ -2115,6 +2118,14 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "the engine is build 3",
             "0003-restore-checkpoint-interval-and-hash.patch",
+        ),
+        // PROD-14.1 (item 83): a render that cannot ask the cluster is
+        // refused; the value that answers it.
+        ("an offline render is refused", "`identity.renderedOffline`"),
+        // PROD-14.1 (item 84): the multi-platform identity hook; its pin.
+        (
+            "the identity hook runs natively on arm64",
+            "sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6",
         ),
     ];
     assert_eq!(
