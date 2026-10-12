@@ -18,9 +18,11 @@ import { NAV_ROUTES, landingRedirect, landingRoute } from "../app.js";
 import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
+import { pointRow } from "../pages/catalog.js";
 import {
   NO_TOPIC_READINESS_SENTENCE,
   initialState,
+  renderCatalogOffers,
   preparePlanOrProblem,
   recoveryPoints,
   renderPreflightStep,
@@ -231,26 +233,28 @@ test("m6_the_approvals_table_keeps_one_line_a_row_and_every_identifier_whole", (
   // THE KEY ID AND THE APPROVER are identifiers on one line, whole on hover,
   // in the copy payload and in the text.
   for (const [cellHtml, full] of [[keyId, KEY], [approver, DEX]]) {
-    assert.ok(cellHtml.startsWith("<span class=\"ident\">"),
+    assert.ok(cellHtml.startsWith("<button type=\"button\" class=\"ident\""),
       "NEGATIVE CONTROL: an unbounded <code> or text cell: " + cellHtml);
-    assert.ok(cellHtml.includes("title=\"" + full + "\""), "the full value on hover");
-    assert.ok(cellHtml.includes("data-copy=\"" + full + "\""), "and on the copy button");
+    assert.ok(cellHtml.includes("title=\"" + full + " -- click to copy\""), "the full value on hover");
+    assert.ok(cellHtml.includes("data-copy=\"" + full + "\""), "and on the clipboard");
     assert.ok(cellHtml.replace(/<[^>]*>/g, "").includes(full), "and in the text");
   }
   assert.equal(age, "30m", "and AGE is a cell like any other");
-  // THE RULE THAT HOLDS THE LINE: one line, an ellipsis, a bounded width, and
-  // the width is a token.
+  // THE RULE THAT HOLDS THE LINE: one line, cut, between two widths that are
+  // tokens -- and breakable anywhere, so a table may give it less than its
+  // whole width (M11).
   const css = CSS();
-  const rule = css.slice(css.indexOf(".ident-text {"), css.indexOf("}", css.indexOf(".ident-text {")));
-  for (const declaration of ["white-space: nowrap;", "overflow: hidden;", "text-overflow: ellipsis;",
-    "max-width: var(--lw-ident-width);"]) {
+  const start = css.indexOf("\n.ident-text {");
+  const rule = css.slice(start, css.indexOf("}", start));
+  for (const declaration of ["-webkit-line-clamp: 1;", "overflow: hidden;", "word-break: break-all;",
+    "min-width: var(--lw-ident-min-width);", "max-width: var(--lw-ident-width);"]) {
     assert.ok(rule.includes(declaration), ".ident-text carries " + declaration + "; it was:\n" + rule);
   }
-  assert.match(css, /--lw-ident-width: 14ch;/);
-  // THE COPY BUTTON IS WIRED ONCE, for every page: the full value it carries
-  // goes onto the clipboard.
+  assert.match(css, /--lw-ident-min-width: 8ch;\n {2}--lw-ident-width: 14ch;/);
+  // THE IDENTIFIER IS ITS OWN COPY BUTTON, wired once for every page: a click
+  // puts the full value on the clipboard.
   const app = readFileSync(fileURLToPath(new URL("../app.js", import.meta.url)), "utf8");
-  assert.match(app, /target\.closest\("\.ident-copy"\)/);
+  assert.match(app, /target\.closest\("button\.ident"\)/);
   assert.match(app, /navigator\.clipboard\.writeText\(String\(button\.getAttribute\("data-copy"\)/);
   // And an absent identifier is the absent mark, not an empty copy button.
   assert.equal(ident(null), "-");
@@ -290,7 +294,8 @@ test("m7_two_approvers_read_differently_at_a_glance_and_the_signed_in_one_is_you
   const mine = await signedInAs(viewer, async () =>
     renderApprovalList({ items: [pocApproval("a-3", viewer.actor.id)] }, 0));
   assert.equal(seen(firstRowCells(mine)[2]), "you (Dana Viewer)");
-  assert.ok(firstRowCells(mine)[2].includes("title=\"oidc#dana\""), "with the principal on hover");
+  assert.ok(firstRowCells(mine)[2].includes("title=\"oidc#dana -- click to copy\""),
+    "with the principal on hover");
 });
 
 // M8. On wizard step 5 with no topic ticked, Check readiness did nothing: no
@@ -345,4 +350,36 @@ test("m10_the_operation_view_labels_a_scorecard_as_a_scorecard_and_a_receipt_as_
   const theirs = renderEvidence(backup);
   assert.match(factValue(theirs, "receipt key"), /receipt\.json$/);
   assert.equal(factValue(theirs, "scorecard key"), null, "a backup has no scorecard row");
+});
+
+// M11. In the Catalog detail and the Restore point picker, point ids, backup
+// sets and signer hex wrapped over 4 to 6 lines a row, and at 1024 the picker's
+// AVAILABLE AND VERIFIED column -- the one that decides whether a point can be
+// chosen -- sat behind a sideways scroll. Measured in Chromium (the branch's
+// report): the picker's narrowest width was 1,041 px against 874 px of room,
+// set by its captions and timestamps; it is now 874 px with STATE in sight.
+
+const SIGNER = "343fa9000ec517e9cfd527c5b86504fc42c9d8a5e48c82ebd5a8a72656e85429";
+
+test("m11_catalog_and_picker_ids_are_one_line_and_the_state_column_fits_1024", () => {
+  const entry = decoded("catalog-points.json", (body) => {
+    body.items[0].signerKeyId = SIGNER;
+  }).items[0];
+  const cells = pointRow(entry, "logweir-poc", "archive", "primary", {});
+  for (const [index, full] of [[1, entry.pointId], [6, SIGNER]]) {
+    assert.ok(cells[index].startsWith("<button type=\"button\" class=\"ident\""),
+      "NEGATIVE CONTROL: a bare <code> that wrapped over 4 to 6 lines: " + cells[index]);
+    assert.ok(cells[index].includes("data-copy=\"" + full + "\""));
+  }
+
+  const html = renderCatalogOffers("logweir-poc", { offers: [{ catalog: "archive", entry: entry }],
+    notes: [] });
+  const heads = Array.from(html.matchAll(/<th scope="col">([^<]*)<\/th>/g)).map((m) => m[1]);
+  assert.deepEqual(heads, ["", "CATALOG, POINT AND SET", "RECOVERY POINT", "COVERED", "STATE"],
+    "NEGATIVE CONTROL: six columns and a 22-character caption made the table 1,041 px at least");
+  const row = firstRowCells(html);
+  assert.equal(row.length, 5);
+  assert.ok(row[1].includes("data-copy=\"" + entry.pointId + "\""), "the point id, whole on copy");
+  assert.ok(row[1].includes("data-copy=\"" + entry.backupId + "\""), "and its backup set");
+  assert.match(row[4], /badge-green">Available<\/span> <span class="badge badge-green">Verified/);
 });

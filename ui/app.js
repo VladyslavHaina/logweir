@@ -819,19 +819,19 @@ function boot() {
     });
   }
 
-  // THE COPY BUTTON BESIDE A SHORTENED IDENTIFIER (`render.js` `ident`): the
-  // full value onto the clipboard. One listener for every page, because the
-  // pages render strings and wire nothing they did not write.
+  // A SHORTENED IDENTIFIER IS ITS OWN COPY BUTTON (`render.js` `ident`): a
+  // click puts the full value on the clipboard. One listener for every page,
+  // because the pages render strings and wire nothing they did not write.
   document.addEventListener("click", (event) => {
     const target = event.target;
     const button = target !== null && typeof target.closest === "function"
-      ? target.closest(".ident-copy")
+      ? target.closest("button.ident")
       : null;
     if (button === null || !navigator.clipboard) {
       return;
     }
     navigator.clipboard.writeText(String(button.getAttribute("data-copy") || "")).then(() => {
-      button.textContent = "copied";
+      button.setAttribute("data-copied", "true");
     }, () => {});
   });
 

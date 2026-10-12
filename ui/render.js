@@ -629,13 +629,15 @@ export function cell(value) {
 }
 
 /** A LONG IDENTIFIER IN A TABLE CELL -- a key id, a point id, a backup set, a
- *  principal -- on one line, cut with an ellipsis at a fixed width
- *  (`.ident-text`), so it cannot take the table's width or wrap over ten lines
- *  and push a column out of sight. It is never hidden: the full value is the
- *  hover title, the copy button's payload, and the text a filter, a sort and a
- *  screen reader read. `shown`, when given, is a short form drawn instead of
- *  the value's head (the full value stays in the text, visually hidden).
- *  `app.js` wires every `.ident-copy` button once. */
+ *  principal -- on one line, cut with an ellipsis between `--lw-ident-min-width`
+ *  and `--lw-ident-width` (`.ident-text`), so it cannot take the table's width,
+ *  wrap over ten lines or push a column out of sight. It is never hidden: the
+ *  full value is the hover title, the text a filter, a sort and a screen reader
+ *  read, and what a click copies -- the identifier IS its copy button, because
+ *  a button beside every id cost a table its last column at 1024 px. `shown`,
+ *  when given, is a short form drawn instead of the value's head (the full
+ *  value stays in the text, visually hidden). `app.js` wires every `.ident`
+ *  once. */
 export function ident(value, shown) {
   if (value === null || value === undefined || value === "") {
     return ABSENT;
@@ -643,14 +645,14 @@ export function ident(value, shown) {
   const full = String(value);
   const short = typeof shown === "string" && shown.length > 0 && shown !== full;
   return (
-    "<span class=\"ident\"><code class=\"ident-text" + (short ? " ident-shown" : "") +
-    "\" title=\"" + esc(inert(full)) + "\">" +
+    "<button type=\"button\" class=\"ident\" data-copy=\"" + esc(full) + "\" title=\"" +
+    esc(inert(full)) + " -- click to copy\"><code class=\"ident-text" +
+    (short ? " ident-shown" : "") + "\">" +
     (short
       ? "<span aria-hidden=\"true\">" + esc(inert(shown)) + "</span>" +
         "<span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
       : esc(inert(full))) +
-    "</code><button type=\"button\" class=\"ident-copy\" data-copy=\"" + esc(full) +
-    "\" title=\"copy the full value\">copy</button></span>"
+    "</code></button>"
   );
 }
 

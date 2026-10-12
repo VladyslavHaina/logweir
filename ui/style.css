@@ -289,6 +289,7 @@
   --lw-visually-hidden-size: 1px;
   --lw-list-indent: 1.25rem;
   --lw-subset-max-height: 24rem;
+  --lw-ident-min-width: 8ch;
   --lw-ident-width: 14ch;
   --lw-ident-shown-width: 24ch;
   /* The sticky wizard footer's height where it wraps to two rows (390 px:
@@ -970,24 +971,47 @@ main > h2 + .blurb,
 }
 
 /* A LONG IDENTIFIER (PROD-14.1 visual pass, M6 and M11): one line, cut with an
- * ellipsis at a fixed width, so a key id or a point id cannot wrap over ten
- * lines or push a column out of sight. The full value stays in the text, on
- * hover and on the copy button beside it (`render.js` `ident`). */
+ * ellipsis, at least `--lw-ident-min-width` and at most `--lw-ident-width`
+ * wide, so a key id or a point id neither wraps over ten lines nor pushes a
+ * column out of sight. It may break between any two characters (not first at
+ * a hyphen, which would leave "lwp1-") and shows one line: that is what lets a
+ * table give it less than its whole width. The full value stays in the
+ * text, on hover, and on the clipboard when it is clicked (`render.js`
+ * `ident`): the button is drawn as the code chip it holds. */
 .ident {
   display: inline-flex;
-  align-items: center;
-  gap: var(--cds-global-space-3);
   max-width: 100%;
-  vertical-align: middle;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  vertical-align: baseline;
+  cursor: copy;
+}
+
+.ident:hover {
+  background: transparent;
+  color: inherit;
+}
+
+.ident:hover .ident-text {
+  border-color: var(--cds-alias-status-info);
 }
 
 .ident-text {
-  display: inline-block;
-  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  min-width: var(--lw-ident-min-width);
   max-width: var(--lw-ident-width);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-all;
 }
 
 /* A short form a page drew itself (a principal's subject) is bounded by its
@@ -996,13 +1020,12 @@ main > h2 + .blurb,
   max-width: var(--lw-ident-shown-width);
 }
 
-.ident-copy {
-  flex: none;
-  padding: 0 var(--cds-global-space-4);
-  border-color: transparent;
-  background: transparent;
-  text-transform: none;
-  letter-spacing: normal;
+.ident[data-copied="true"]::after {
+  content: "copied";
+  align-self: center;
+  margin-left: var(--cds-global-space-3);
+  color: var(--cds-alias-status-info);
+  font-size: var(--cds-global-typography-font-size-2);
 }
 
 /* The first of two stacked lines inside a cell. */

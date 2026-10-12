@@ -83,6 +83,7 @@ import {
   facts,
   fieldErrorLine,
   humanInstant,
+  ident,
   invalidAttributes,
   mutationStatus,
   prefixOf,
@@ -6215,8 +6216,14 @@ export function renderCatalogOffers(ns, offers) {
       // The action first, for the selector's reason.
       "<a class=\"button\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
         "\">Restore this point</a>",
-      cell(offer.catalog) + "<span class=\"cell-sub\"><code>" + cell(e.pointId) + "</code></span>",
-      cell(e.backupId),
+      // THE STATE STAYS IN SIGHT AT 1024 (PROD-14.1 visual pass, M11). The
+      // point id and the backup set are shortened identifiers under their
+      // catalog, and the state column's caption is one word: this table's
+      // width was its captions and timestamps, and at 1024 the column that
+      // decides whether a point can be chosen sat behind a sideways scroll.
+      cell(offer.catalog) +
+        "<span class=\"cell-sub\">" + ident(e.pointId) + "</span>" +
+        "<span class=\"cell-sub\">set " + ident(e.backupId) + "</span>",
       when(e.recoveryPointAt),
       "<span class=\"cell-sub-first\">from " + when(e.coveredFrom) + "</span>" +
         "<span class=\"cell-sub\">to " + when(e.coveredTo) + "</span>",
@@ -6229,7 +6236,7 @@ export function renderCatalogOffers(ns, offers) {
     "<h3>Recovery points from connected archives</h3>" +
     "<p class=\"blurb\">" + esc(CATALOG_OFFERS_SENTENCE) + "</p>" +
     table(
-      ["", "CATALOG AND POINT", "BACKUP SET", "RECOVERY POINT", "COVERED", "AVAILABLE AND VERIFIED"],
+      ["", "CATALOG, POINT AND SET", "RECOVERY POINT", "COVERED", "STATE"],
       rows,
       "no connected archive lists a point this page may offer",
       undefined,

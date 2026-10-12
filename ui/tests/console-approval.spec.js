@@ -216,10 +216,10 @@ test("a_two_person_namespace_shows_the_request_and_one_button_and_nothing_to_pas
   // What is being approved, as the server showed it.
   // The requester by a short form of the principal, the full one on hover
   // and in the text (PROD-14.1 visual pass, M7).
-  assert.ok(html.includes("<span id=\"request-requester\"><span class=\"ident\"><code " +
-    "class=\"ident-text ident-shown\" title=\"https://idp.example#alice\"><span " +
-    "aria-hidden=\"true\">alice</span><span class=\"visually-hidden\">https://idp.example#alice" +
-    "</span></code>"), html);
+  assert.ok(html.includes("<span id=\"request-requester\"><button type=\"button\" class=\"ident\" " +
+    "data-copy=\"https://idp.example#alice\" title=\"https://idp.example#alice -- click to copy\">" +
+    "<code class=\"ident-text ident-shown\"><span aria-hidden=\"true\">alice</span><span " +
+    "class=\"visually-hidden\">https://idp.example#alice</span></code></button></span>"), html);
   assert.ok(html.includes("<code id=\"request-plan-hash\">sha256:" + "e".repeat(64) + "</code>"));
   assert.ok(html.includes("<code>prod-pair</code>"));
   assert.ok(html.includes("sha256:" + "c".repeat(64)), "the policy digest");
@@ -344,10 +344,10 @@ test("a_request_this_console_did_not_confirm_shows_none_of_its_fields", () => {
 
 test("an_approved_request_names_the_approver_and_is_never_green", () => {
   const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: request("approved") }));
-  assert.ok(html.includes("<span id=\"request-approver\"><span class=\"ident\"><code " +
-    "class=\"ident-text ident-shown\" title=\"https://idp.example#bob\"><span " +
-    "aria-hidden=\"true\">bob</span><span class=\"visually-hidden\">https://idp.example#bob" +
-    "</span></code>"), html);
+  assert.ok(html.includes("<span id=\"request-approver\"><button type=\"button\" class=\"ident\" " +
+    "data-copy=\"https://idp.example#bob\" title=\"https://idp.example#bob -- click to copy\">" +
+    "<code class=\"ident-text ident-shown\"><span aria-hidden=\"true\">bob</span><span " +
+    "class=\"visually-hidden\">https://idp.example#bob</span></code></button></span>"), html);
   assert.ok(html.includes("2026-10-10T12:04:00Z"));
   assert.ok(!/badge-green/.test(html),
     "the console's record of an approval is not weirkeeper's verdict on it");
