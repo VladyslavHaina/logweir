@@ -2148,6 +2148,10 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the visual pass's console fixes",
             "`#/operations?...&kind=restore`",
         ),
+        (
+            "a dropped connection no longer fails an evidence write",
+            "error sending request`",
+        ),
     ];
     assert_eq!(
         items.len(),
