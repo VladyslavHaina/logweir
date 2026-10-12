@@ -7381,7 +7381,8 @@ async fn dr1_pass(
 ///
 /// KILLS: the slot-already-run arm overwriting `Enforced`; `lastEnforcement`
 /// dropping the code; the not-spent `EnforcementDegraded` dropping the
-/// refusal; the hold applied over every decision.
+/// refusal; the hold applied over every decision; `status.enforcement` held
+/// for any refusal, or for a binding one over a start decision only.
 #[tokio::test]
 async fn dr1_a_refusal_stays_on_the_policy_across_the_next_reconcile() {
     let digest = learned_digest().await;
@@ -7468,6 +7469,23 @@ async fn dr1_a_refusal_stays_on_the_policy_across_the_next_reconcile() {
             "{class}: {degraded}"
         );
         assert_eq!(next["consecutiveRunFailures"], json!(1), "{class}");
+
+        // The two fields the console reads: only a binding refusal holds
+        // "Logweir never deletes" over the slot's `NothingToDo`; after any
+        // other refusal the next slot still deletes.
+        let console = if code == "CredentialBindingMismatch" {
+            ("RecommendationOnly", "NotEnforced")
+        } else {
+            ("LogweirWorker", "LogweirEnforced")
+        };
+        assert_eq!(
+            (
+                next["enforcement"].as_str().unwrap_or_default(),
+                next["guarantees"]["ageExpiry"].as_str().unwrap_or_default(),
+            ),
+            console,
+            "{class}"
+        );
     }
 
     // CONTROL: a decision naming something to change first takes `Enforced`;
@@ -7520,7 +7538,8 @@ async fn dr1_a_refusal_stays_on_the_policy_across_the_next_reconcile() {
 ///
 /// KILLS: the spent budget's `EnforcementDegraded` reading the per-point codes
 /// only (`last_failure_detail` ignoring the record); the spent budget's
-/// `RunFailed` overwriting `Enforced`.
+/// `RunFailed` overwriting `Enforced`; the binding hold of
+/// `status.enforcement` over a start decision only.
 #[tokio::test]
 async fn dr1_three_refused_runs_stop_scheduling_and_name_the_refusal() {
     let spec = unattended_enforcing();
@@ -7567,6 +7586,14 @@ async fn dr1_three_refused_runs_stop_scheduling_and_name_the_refusal() {
         "CredentialBindingMismatch"
     );
     assert_eq!(next["consecutiveRunFailures"], json!(3));
+    assert_eq!(
+        (
+            next["enforcement"].as_str(),
+            next["guarantees"]["ageExpiry"].as_str(),
+        ),
+        (Some("RecommendationOnly"), Some("NotEnforced")),
+        "the binding refusal holds the console's two fields over the spent budget"
+    );
 }
 
 // The reaping of a finished run Job flaps nothing here
