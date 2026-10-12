@@ -692,22 +692,31 @@ pub struct ManifestFacts {
 /// widened by an adopter's configuration.
 pub const LOGWEIR_ROOT: &str = "logweir/";
 
-/// FX-51: how many times [`Store::put_create_only`] re-sends a create that got
-/// no answer (a dropped or refused connection), and the base of its doubling
-/// backoff: 200 ms, 400 ms, 800 ms.
+/// FX-51: how many times [`Store::put_create_only`] re-sends a create whose
+/// connection dropped with no answer, and the base of its doubling backoff:
+/// 200 ms, 400 ms, 800 ms.
 const EVIDENCE_PUT_RETRIES: u32 = 3;
 const EVIDENCE_PUT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+/// Only an attempt that failed faster than this is re-sent, so a re-send never
+/// costs another request timeout and the put's time bound stays within about
+/// 7 s of object_store's own. The CI drop this exists for took 936 µs.
+const EVIDENCE_PUT_FAST_FAILURE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// True when `e` is a transport failure with no HTTP answer: an
-/// `object_store::client::HttpError` anywhere in its source chain. An answered
-/// status (a 4xx, or a 5xx object_store already retried) carries none, and a
-/// `Decode` error means an answer did arrive.
-fn unanswered(e: &object_store::Error) -> bool {
+/// True when `e` is a dropped connection with no HTTP answer, of a kind
+/// object_store does NOT retry on a non-idempotent `PutMode::Create`:
+/// `Interrupted` (reset, broken pipe, EOF) or `Unknown` (0.14.1
+/// `client/retry.rs:435-442`). `Connect` and `Request` were already retried
+/// inside object_store's own window, and `Timeout` already cost a full request
+/// timeout, so neither is re-sent. An answered status carries no `HttpError`.
+fn dropped_unanswered(e: &object_store::Error) -> bool {
     use object_store::client::{HttpError, HttpErrorKind};
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(s) = source {
         if let Some(h) = s.downcast_ref::<HttpError>() {
-            return h.kind() != HttpErrorKind::Decode;
+            return matches!(
+                h.kind(),
+                HttpErrorKind::Interrupted | HttpErrorKind::Unknown
+            );
         }
         source = s.source();
     }
@@ -1849,13 +1858,14 @@ impl Store {
                     create_only_enforced: true,
                 });
             }
-            // FX-51: object_store retries a failed connect itself, but not a
-            // reset, timeout or unknown transport error on a `PutMode::Create`
-            // PUT, which is not idempotent (0.14.1 `client/retry.rs:435-442`).
-            // This loop does, a bounded number of times, and only when no
-            // answer came back. Create-only still holds: a retry that meets
-            // `AlreadyExists` passes only if the object is byte-identical to
-            // `bytes`, i.e. the lost attempt itself landed it.
+            // FX-51: object_store does not re-send a `PutMode::Create` PUT
+            // whose connection was reset (it is not idempotent). This loop
+            // does, a bounded number of times, only for a fast drop with no
+            // answer (`dropped_unanswered`, `EVIDENCE_PUT_FAST_FAILURE`).
+            // Create-only still holds: a re-send that meets `AlreadyExists`
+            // passes only if the object is byte-identical to `bytes`, i.e. the
+            // lost attempt itself landed it; a writer that may not read the
+            // key gets `Io`, as before the re-send existed.
             let mut retried: u32 = 0;
             if self.conditional_put {
                 loop {
@@ -1863,8 +1873,13 @@ impl Store {
                         mode: PutMode::Create,
                         ..Default::default()
                     };
+                    let started = std::time::Instant::now();
                     match self.inner.put_opts(&p, payload.clone(), opts).await {
-                        Err(e) if retried < EVIDENCE_PUT_RETRIES && unanswered(&e) => {
+                        Err(e)
+                            if retried < EVIDENCE_PUT_RETRIES
+                                && started.elapsed() < EVIDENCE_PUT_FAST_FAILURE
+                                && dropped_unanswered(&e) =>
+                        {
                             retried += 1;
                             tokio::time::sleep(EVIDENCE_PUT_BACKOFF * (1 << retried)).await;
                             continue;
@@ -4012,6 +4027,10 @@ mod evidence_put_retry_tests {
         DropAfterLanding(Vec<u8>),
         /// An answered status.
         Status(u16),
+        /// The request timed out with no answer.
+        Timeout,
+        /// The connection drops with no answer, but only after this long.
+        SlowDrop(std::time::Duration),
     }
 
     #[derive(Debug, Default)]
@@ -4046,7 +4065,20 @@ mod evidence_put_retry_tests {
     }
 
     impl FakeS3 {
-        fn call_sync(&self, req: &HttpRequest) -> Result<HttpResponse, HttpError> {
+        fn call_sync(
+            &self,
+            req: &HttpRequest,
+        ) -> (Option<std::time::Duration>, Result<HttpResponse, HttpError>) {
+            let mut delay = None;
+            let r = self.answer(req, &mut delay);
+            (delay, r)
+        }
+
+        fn answer(
+            &self,
+            req: &HttpRequest,
+            delay: &mut Option<std::time::Duration>,
+        ) -> Result<HttpResponse, HttpError> {
             let mut b = self.0.lock().unwrap();
             if req.method().as_str() == "GET" {
                 b.gets += 1;
@@ -4073,6 +4105,14 @@ mod evidence_put_retry_tests {
                     Err(dropped())
                 }
                 Some(Fault::Status(s)) => Ok(answer(s, Vec::new())),
+                Some(Fault::Timeout) => Err(HttpError::new(
+                    HttpErrorKind::Timeout,
+                    std::io::Error::from(std::io::ErrorKind::TimedOut),
+                )),
+                Some(Fault::SlowDrop(after)) => {
+                    *delay = Some(after);
+                    Err(dropped())
+                }
                 None if conditional && b.object.is_some() => Ok(answer(412, Vec::new())),
                 None => {
                     // The double cannot read a streamed request body; what
@@ -4095,8 +4135,13 @@ mod evidence_put_retry_tests {
             'life0: 'async_trait,
             Self: 'async_trait,
         {
-            let r = self.call_sync(&req);
-            Box::pin(async move { r })
+            let (delay, r) = self.call_sync(&req);
+            Box::pin(async move {
+                if let Some(d) = delay {
+                    tokio::time::sleep(d).await;
+                }
+                r
+            })
         }
     }
 
@@ -4166,6 +4211,22 @@ mod evidence_put_retry_tests {
     #[test]
     fn an_answered_4xx_is_not_retried() {
         let (s, b) = store(vec![Fault::Status(403)], None);
+        assert!(s.put_create_only(KEY, b"positions").is_err());
+        assert_eq!(b.lock().unwrap().puts, 1);
+    }
+
+    #[test]
+    fn a_timeout_is_not_re_sent() {
+        // It already cost a full request timeout; a re-send would cost more.
+        let (s, b) = store(vec![Fault::Timeout], None);
+        assert!(s.put_create_only(KEY, b"positions").is_err());
+        assert_eq!(b.lock().unwrap().puts, 1);
+    }
+
+    #[test]
+    fn a_slow_drop_is_not_re_sent() {
+        let slow = EVIDENCE_PUT_FAST_FAILURE + std::time::Duration::from_millis(100);
+        let (s, b) = store(vec![Fault::SlowDrop(slow)], None);
         assert!(s.put_create_only(KEY, b"positions").is_err());
         assert_eq!(b.lock().unwrap().puts, 1);
     }
