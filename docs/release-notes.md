@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85 and 86 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84, 85, 86 and 89 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1824,6 +1824,39 @@ of `v0.2.0-rc.1`'s document against this one.
 **Rollback:** an older console image serves `1.0.0-alpha.2` again; roll it
 back with the items it names.
 
+#### 89. The console's fixes from PROD-14.1's visual pass: where Create goes, who sees which form, identifiers on one line (PROD-14.1)
+
+**Changed.** The console only (`ui/`); no API document, controller, chart value
+or signed format changes. What a person sees:
+- *Create the Restore* opens the run's operation view (`#/operations`), as
+  step 6 says, and a Restore waiting for its approval reads "Waiting for
+  approval" instead of "Pending: no Job exists, and none will ...".
+- A role that cannot create a connection or a schedule (a viewer, an approver)
+  is not offered those create forms, and an approver lands on Approvals instead
+  of a refused Clusters page.
+- In a table a long identifier (a key id, a point id, a backup set, a signer, a
+  principal) is one line, cut between 8 and 14 characters wide, whole on hover,
+  and copied by a click. An approver reads as a short form of their subject, or
+  "you". The restore picker's archive points list the point and its set under
+  the catalog, so their STATE column is in sight at 1024 px.
+- With no topic ticked, step 5's Check readiness is disabled and says why;
+  under a confirm-mode namespace step 5 says "you confirm".
+- The operation view labels a restore's scorecard key as the scorecard, and
+  its state chip has the phase chip's colour.
+- At 390 px an instant stays inside its card, and COVERED keeps "from" and
+  "to" together.
+- The Protection list's "OPEN ALERTS" column is OPEN PROBLEMS: delivery is
+  withdrawn (item 74), and the ledger records problems.
+**Do:** nothing. A script that waited for `#/history` after a confirm-mode
+Create waits for `#/operations?...&kind=restore` instead (the repository's two
+journeys that did are updated).
+**Scope:** `ui/tests/console-visual-pass.spec.js`, one row per defect with its
+negative control, in the UI behaviour suite. The layouts were measured in
+Chromium at 1440, 1024 and 390 px over the page modules and the stylesheet,
+before and after. [UNVERIFIED — not yet seen on the PoC; the re-check after
+merge walks each page as each role.]
+**Rollback:** an older console image renders the old pages; nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1960,7 +1993,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85 and 86, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86 and 89, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2024,6 +2057,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 84 | the identity hook's image | nothing |
 | 85 | the chart only | nothing until `minio.persistence.keep` is set |
 | 86 | the API document's version (the console image) | nothing |
+| 89 | the console | nothing; a script waiting for `#/history` after Create waits for `#/operations` |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
