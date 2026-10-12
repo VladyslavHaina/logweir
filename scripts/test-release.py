@@ -31,8 +31,14 @@ TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-app
 COPIED = ("LICENSE", "NOTICE", "README.md", "THIRD_PARTY_NOTICES.md", "docs/verify_scorecard.py",
           "third_party/LICENSE-MIT", "scripts/release.sh", "scripts/ci-changes.sh",
           "scripts/ci-images.sh", "scripts/check-no-engine-in-binary.sh")
+# Auto-gc and auto-maintenance stay off: either may fork a detached git that is
+# still writing under .git/objects when the temporary directory is removed
+# (main dcd6e5b3's check: "Directory not empty: …/repo/.git/objects").
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+           "GIT_CONFIG_COUNT": "2",
+           "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
+           "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"}
 
 
 def sha256(data):
