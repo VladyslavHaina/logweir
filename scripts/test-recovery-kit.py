@@ -57,6 +57,22 @@ def tgz(members: dict) -> bytes:
     return buf.getvalue()
 
 
+def appledouble(archive: Path) -> list:
+    """The AppleDouble `._*` members of a tarball. macOS tar lists them merged into their
+    file, so this reads the archive itself."""
+    with tarfile.open(archive) as tar:
+        return [n for n in tar.getnames() if Path(n).name.startswith("._")]
+
+
+def helm_show_chart(archive: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["helm", "show", "chart", str(archive)], capture_output=True, text=True, timeout=60)
+
+
+def set_xattr(path: Path):
+    """An extended attribute, as macOS gives a checked-out or downloaded file."""
+    subprocess.run(["xattr", "-w", "dev.logweir.test", "1", str(path)], check=True, timeout=30)
+
+
 def manifest_mismatches(kit: Path) -> list:
     """Every file on disk that MANIFEST.sha256 does not list with its sha256, and every entry with no file."""
     listed = {}
@@ -240,7 +256,8 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("does not match SHA256SUMS", done.stderr)
         self.assert_nothing_written()
 
-    def test_a_local_build_is_a_dry_run_and_says_so(self):
+    def local_build_env(self) -> dict:
+        """A stubbed registry and a stand-in binary for `--local-build`."""
         stub = self.base / "stub"
         stub.mkdir()
         (stub / "docker").write_text(STUB_DOCKER)
@@ -248,9 +265,11 @@ class RecoveryKit(unittest.TestCase):
         binary = self.base / "logweir"
         binary.write_text("#!/bin/sh\necho logweir 0.0.0\n")
         binary.chmod(0o755)
-        env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}", STUB_DIGEST=DIGEST,
-                   LOGWEIR_BIN=str(binary), DOCKER_CONFIG=str(self.base / "docker-config"))
-        done = self.run_kit("--local-build", env=env)
+        return dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}", STUB_DIGEST=DIGEST,
+                    LOGWEIR_BIN=str(binary), DOCKER_CONFIG=str(self.base / "docker-config"))
+
+    def test_a_local_build_is_a_dry_run_and_says_so(self):
+        done = self.run_kit("--local-build", env=self.local_build_env())
         self.assertEqual(done.returncode, 0, done.stderr)
         kit = json.loads((self.kit / "kit.json").read_text())
         self.assertEqual(kit["binaries"], "local-build")
@@ -264,6 +283,38 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("logweir/values.yaml", names)
         self.assertFalse([n for n in names if "/rendered" in n])
         self.assertEqual(manifest_mismatches(self.kit), [])
+
+    def test_the_kit_chart_loads_in_helm_and_no_tarball_has_an_appledouble_member(self):
+        # poc-14-1a D1: macOS tar packed a `._*` member for every file with an extended
+        # attribute, and `helm show chart` refused the kit's chart.
+        trust = self.trust_dir({"signing.pub.pem": "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"})
+        if platform.system() == "Darwin":
+            set_xattr(trust / "signing.pub.pem")
+        done = self.run_kit("--local-build", "--trust", str(trust), env=self.local_build_env())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        chart = self.kit / "chart" / "logweir-chart-local.tgz"
+        shown = helm_show_chart(chart)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("name: logweir\n", shown.stdout)
+        self.assertEqual(appledouble(chart) + appledouble(self.out / f"logweir-recovery-kit-{VERSION}.tar.gz"), [])
+        # CONTROL: the old packing, a plain `tar -czf`, fails both checks. On Linux tar never
+        # wrote the member, so the control plants the one macOS tar wrote.
+        old = self.base / "old.tgz"
+        chart_yaml = "apiVersion: v2\nname: logweir\nversion: 0.1.0\n"
+        if platform.system() == "Darwin":
+            source = self.base / "old" / "logweir"
+            source.mkdir(parents=True)
+            (source / "Chart.yaml").write_text(chart_yaml)
+            set_xattr(source)
+            set_xattr(source / "Chart.yaml")
+            subprocess.run(["tar", "-czf", str(old), "-C", str(source.parent), "logweir"], check=True, timeout=60,
+                           env={k: v for k, v in os.environ.items() if k != "COPYFILE_DISABLE"})
+        else:
+            old.write_bytes(tgz({"._logweir": "\0\5\26\7", "logweir/Chart.yaml": chart_yaml}))
+        self.assertNotEqual(appledouble(old), [])
+        refused = helm_show_chart(old)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the base directory", refused.stderr)
 
 
 if __name__ == "__main__":

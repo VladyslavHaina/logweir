@@ -31,6 +31,13 @@ GUIDE_SECTION='## Recover onto a clean installation with the kit'
 
 die() { echo "recovery-kit: $*" >&2; exit 1; }
 usage() { sed -n '4,13p' "$0" >&2; exit 2; }
+# Every tarball goes through pack. macOS tar adds an AppleDouble `._*` member for each
+# file with an extended attribute, and Helm refuses a chart holding one ("content outside
+# the base directory"); --no-xattrs also drops the xattr headers GNU tar warns about.
+export COPYFILE_DISABLE=1
+pack() {
+  if [[ "$(tar --version)" == bsdtar* ]]; then tar --no-mac-metadata --no-xattrs -czf "$@"; else tar --no-xattrs -czf "$@"; fi
+}
 sha256_of() {
   local line
   if command -v sha256sum >/dev/null 2>&1; then line=$(sha256sum "$1"); else line=$(shasum -a 256 "$1"); fi
@@ -106,7 +113,7 @@ else
   absent=$(printf '%s\n' "${TARGETS[@]}" | grep -vx "$host" | jq -R . | jq -sc .)
   commit=$(git rev-parse HEAD)
   chart="logweir-chart-local.tgz"
-  tar -czf "$kit/chart/$chart" --exclude rendered -C charts logweir
+  pack "$kit/chart/$chart" --exclude rendered -C charts logweir
   cp docs/verify_scorecard.py "$kit/verify/"
   # Anonymous registry reads, as release.sh does: "pullable by anyone" is the claim.
   anon=$(mktemp -d "${TMPDIR:-/tmp}/logweir-kit-docker.XXXXXX")
@@ -214,7 +221,7 @@ fi
     printf '%s  %s\n' "$(sha256_of "$f")" "$f"
   done ) > "$out/.$name.manifest"
 mv "$out/.$name.manifest" "$kit/MANIFEST.sha256"
-tar -czf "$kit.tar.gz" -C "$out" "$name"
+pack "$kit.tar.gz" -C "$out" "$name"
 printf '%s  %s\n' "$(sha256_of "$kit.tar.gz")" "$name.tar.gz" > "$kit.tar.gz.sha256"
 done_ok=true
 echo "recovery-kit: $kit.tar.gz ($mode binaries, $(wc -l < "$kit/MANIFEST.sha256" | tr -d ' ') files in MANIFEST.sha256)"
