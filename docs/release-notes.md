@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83 and 84 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84 and 85 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1738,6 +1738,27 @@ cosign); the clean install runs `cosign verify` before it installs.]
 `docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968`;
 both images run the same identity steps.
 
+#### 85. The demo archive can outlive `helm uninstall`, and each restore target is listed once (PROD-14.1)
+
+**Changed.** `minio.persistence.keep: true` renders `helm.sh/resource-policy:
+keep` on the demo MinIO's PVC, so `helm uninstall` leaves it and the archive on
+it; a `keep` annotation set by hand was ignored, because Helm reads the manifest
+it stored ([install.md, *Keep the demo archive across an
+uninstall*](install.md#keep-the-demo-archive-across-an-uninstall)). The default,
+`false`, renders nothing new. The identity hook is given each id of
+`identity.installationTrust.allowedTargetClusterIds` once, so a values list
+that names the demo target `demoKafka` also adds no longer lists it twice in
+`logweir-installation`.
+**Do:** nothing. To keep a demo archive through an uninstall, set
+`minio.persistence.keep=true` with `helm upgrade` first, and mirror it too.
+**Scope:** `scripts/check-chart.sh` arms 14 (the demo target once, beside another
+id; without the de-duplication it is listed twice) and 15 (keep adds exactly the
+annotation on the PVC; a template that ignores the value, or always keeps, fails
+it), and the value's FX-10 row.
+[UNVERIFIED — no uninstall and reinstall has kept a PVC through this value yet; the next PoC reinstall runs one.]
+**Rollback:** remove `minio.persistence.keep` from the values first (an older
+schema refuses it); a PVC already kept stays until you delete it.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1874,7 +1895,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83 and 84, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84 and 85, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -1936,6 +1957,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 82 | the engine in the runner image | the controller and runner images rolled together |
 | 83 | the chart only | an offline render (Argo CD, `helm template`) sets `identity.renderedOffline` |
 | 84 | the identity hook's image | nothing |
+| 85 | the chart only | nothing until `minio.persistence.keep` is set |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
@@ -1946,9 +1968,9 @@ rollback steps:
 2. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
    document carrying `defaultMode` at start. Unbound namespaces of a fresh
    install are `legacy-governed-v1` again under the older build.
-3. **Remove `api.console.trustedProxy` from the values** (item 53), and
-   `identity.renderedOffline` (item 83), before rolling the chart back: an
-   older chart's schema refuses both keys.
+3. **Remove `api.console.trustedProxy` from the values** (item 53),
+   `identity.renderedOffline` (item 83) and `minio.persistence.keep` (item 85),
+   before rolling the chart back: an older chart's schema refuses all three.
 4. **Finish or delete any original-name `Restore`** (item 56), so none waits on
    a runner that refuses it; rolling the `Restore` CRD back prunes the field.
 5. **Before rolling the controller back past item 50, let every run whose
