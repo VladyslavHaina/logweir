@@ -156,9 +156,9 @@ api:
 
 # -------------------------------------------------------- approval policy
 # `logweir-poc` restores are authorised by the console's own confirmation of
-# the signed-in requester (Ordinary). The confirmation key is a Secret created
-# before the install, and its PUBLIC half goes on the TrustPolicy that governs
-# logweir-poc (README.md, step 7). `logweir-pair` restores need a SECOND person
+# the signed-in requester (Ordinary). On a fresh install the identity hook
+# generates the confirmation key and trusts it in the TrustPolicy
+# logweir-installation (README.md, step 8). `logweir-pair` restores need a SECOND person
 # signed in to this console (two-person, PROD-16.2): `alice` asks, `bob`
 # approves with one click; the same console key signs both, no personal key.
 approvalPolicy:
