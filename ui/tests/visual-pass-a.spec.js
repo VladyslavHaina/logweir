@@ -37,6 +37,7 @@ import {
   readRetentionPolicies,
   renderRetentionPanel,
 } from "../pages/schedules.js";
+import { NOT_PUBLISHED, renderRestoreDetail } from "../pages/history.js";
 import { ENFORCEMENT_SENTENCES, RETENTION_SENTENCE } from "../render.js";
 import { decoded, wire } from "./console-fixture.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
@@ -433,3 +434,55 @@ test("h3_a_failed_read_or_a_conflict_never_claims_no_deletion", async () => {
   assert.match(conflict, /<td>enforce-a<\/td><td>Enforce<\/td>/);
   resetMode();
 });
+
+// M9. WHAT THE API NOW PUBLISHES IS SHOWN; WHAT IT DOES NOT IS SAID ONCE.
+
+/** The `<dd>` of `label` under the `<h3>` `heading`, tags stripped. */
+function factUnder(html, heading, label) {
+  const from = html.indexOf("<h3>" + heading + "</h3>");
+  assert.notEqual(from, -1, heading + " is on the page");
+  const section = html.slice(from, html.indexOf("</dl>", from));
+  const open = "<dt>" + label + "</dt><dd>";
+  const at = section.indexOf(open);
+  assert.notEqual(at, -1, label + " is a row of " + heading);
+  return section.slice(at + open.length, section.indexOf("</dd>", at)).replace(/<[^>]*>/g, "")
+    .trim();
+}
+
+test("m9_a_verified_restore_shows_its_result_preflight_and_old_topics_and_no_unpublished_row",
+  async () => {
+    await sharedConsole();
+    const wire_ = transport((u) => {
+      const path = u.split("?")[0];
+      if (path.indexOf("/api/v1/namespaces/" + NS + "/operations/restore/") === 0) {
+        return { status: 200, body: wire("operation-restore-completed.json") };
+      }
+      if (path.indexOf("/api/v1/namespaces/" + NS + "/restores/") === 0) {
+        return { status: 200, body: wire("restore-results.json") };
+      }
+      return undefined;
+    });
+    let object;
+    try {
+      object = await apiClient().get(NS, "restores", "orders-drill-20260911");
+    } finally {
+      wire_.restore();
+      resetMode();
+    }
+    const html = decode(renderRestoreDetail(object));
+    assert.equal(factUnder(html, "Integrity", "result"), "pass",
+      "THE DEFECT: 'not published by the product API' on a verified restore");
+    assert.equal(factUnder(html, "Integrity", "partial reason"), "-",
+      "a pass records no partial reason: '-', never 'not published'");
+    assert.equal(factUnder(html, "Target topic preflight", "timestampType"), "CreateTime");
+    assert.equal(factUnder(html, "Target topic preflight", "retentionMs"), "604800000");
+    assert.equal(factUnder(html, "Target topic preflight", "timestampBound"), "1756649100000");
+    assert.equal(factUnder(html, "Topics", "old topics -- written to by nothing, in any tag"),
+      "orders, orders-dlq");
+    // The objectives and the measured values are on no route: one sentence,
+    // no row.
+    assert.equal(html.split(NOT_PUBLISHED).length - 1, 0,
+      "BEFORE: eleven rows read '" + NOT_PUBLISHED + "'");
+    assert.match(html, /id="restore-objectives-not-published"/);
+    assert.equal(html.indexOf("<dt>objectives.rtoSeconds</dt>"), -1);
+  });

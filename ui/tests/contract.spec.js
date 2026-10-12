@@ -57,8 +57,8 @@ test("console_fixtures_are_instances_of_the_published_schema", () => {
   // exists to notice.
   const documents = Object.keys(CONSOLE_FIXTURES)
     .filter((name) => CONSOLE_FIXTURES[name].schema !== null);
-  assert.equal(documents.length, 88,
-    "the console fixture set covers PLAT-17.1, D1, D2, D3 and PROD-16.2");
+  assert.equal(documents.length, 89,
+    "the console fixture set covers PLAT-17.1, D1, D2, D3, PROD-16.2 and the visual pass's M9");
   for (const name of documents) {
     const schema = CONSOLE_FIXTURES[name].schema;
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");

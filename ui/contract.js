@@ -753,6 +753,13 @@ const RESTORE_SELECTION = shapeOf(
   },
 );
 
+// What phase 0 read of the target topic's configuration.
+const TOPIC_PREFLIGHT = shapeOf(
+  "TopicPreflightView",
+  {},
+  { timestampType: str, retentionMs: int, timestampBound: int },
+);
+
 const RESTORE = shapeOf(
   "Restore",
   {
@@ -771,6 +778,8 @@ const RESTORE = shapeOf(
     queue: objectOf(RUN_QUEUE), timeBasis: objectOf(RESTORE_TIME_BASIS),
     targetTopicsAppeared: objectOf(CREATION_STOP),
     selection: objectOf(RESTORE_SELECTION),
+    integrityResult: str, integrityPartialReason: str,
+    topicPreflight: objectOf(TOPIC_PREFLIGHT), oldTopics: listOf(str),
   },
 );
 
@@ -1788,6 +1797,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   Restore: RESTORE,
   RestoreCoverageView: RESTORE_COVERAGE,
   RestoreSelectionView: RESTORE_SELECTION,
+  TopicPreflightView: TOPIC_PREFLIGHT,
   SelectedPartitionsView: SELECTED_PARTITIONS,
   SubjectRefView: SUBJECT_REF,
   VerifiedSubjectView: VERIFIED_SUBJECT,

@@ -390,8 +390,8 @@ test("every_console_fixture_is_listed_is_an_instance_and_survives_its_decoder", 
   }
   // AN EQUALITY, NOT A FLOOR: a fixture deleted with the row that used it is
   // exactly the change this arm exists to notice.
-  assert.equal(documents, 88, "the console fixture set");
-  assert.equal(files.length, 89);
+  assert.equal(documents, 89, "the console fixture set");
+  assert.equal(files.length, 90);
 });
 
 test("a_document_of_the_first_sixteen_members_alone_is_refused_by_the_operation_page", () => {
