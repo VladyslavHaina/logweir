@@ -247,7 +247,7 @@ function assertFetchesAsPrinted(check, storage, keys, files) {
     route);
   assert.equal(lines[0].indexOf(storage.prefix), -1,
     "the evidence keys are bucket-absolute under logweir/, not under the archive prefix");
-  const note = check.indexOf("data-addressing=\"path-style\"");
+  const note = check.indexOf("data-addressing=\"path\"");
   assert.ok(note !== -1 && note < check.indexOf("<pre class=\"copy\">"),
     "THE DEFECT (F8): nothing said the store is path-style");
   assert.ok(check.includes(PATH_STYLE_SENTENCE.replace(/`([^`]*)`/g, "<code>$1</code>")),

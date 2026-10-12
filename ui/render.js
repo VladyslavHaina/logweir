@@ -2334,8 +2334,8 @@ export function prefixOf(url) {
  *  `--endpoint-url` it already addresses path-style unless the profile sets
  *  `s3.addressing_style` to `virtual` (botocore's `args.py`, AWS CLI 2.34). */
 export const PATH_STYLE_SENTENCE =
-  "This store is addressed path-style. With `--endpoint-url` the AWS CLI addresses a bucket " +
-  "path-style unless your profile sets `s3.addressing_style` to `virtual`; if it does, run " +
+  "This store is addressed in path style. With `--endpoint-url` the AWS CLI uses " +
+  "path style unless your profile sets `s3.addressing_style` to `virtual`; if it does, run " +
   "`aws configure set s3.addressing_style path` before the two fetches.";
 
 /** THE INDEPENDENT CHECK, AND IT FETCHES BEFORE IT VERIFIES.
@@ -2365,7 +2365,7 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
   const flags = (r.endpoint ? " --endpoint-url " + shellWord(r.endpoint) : "") +
     (r.region ? " --region " + shellWord(r.region) : "");
   return (r.pathStyle === true && r.endpoint
-    ? "<p class=\"note\" data-addressing=\"path-style\">" + codeSpans(PATH_STYLE_SENTENCE) + "</p>"
+    ? "<p class=\"note\" data-addressing=\"path\">" + codeSpans(PATH_STYLE_SENTENCE) + "</p>"
     : "") +
     copyBlock([
       "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile + flags,
