@@ -441,10 +441,17 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
         // job that uses them can run inside a release.
         if name == "tests" {
             assert!(job["secrets"].is_null(), "tests is handed no secret");
-            let scopes = job["permissions"].as_mapping().expect("tests grants explicit scopes");
+            let scopes = job["permissions"]
+                .as_mapping()
+                .expect("tests grants explicit scopes");
             let mut granted: Vec<(String, String)> = scopes
                 .iter()
-                .map(|(k, v)| (k.as_str().unwrap().to_string(), v.as_str().unwrap().to_string()))
+                .map(|(k, v)| {
+                    (
+                        k.as_str().unwrap().to_string(),
+                        v.as_str().unwrap().to_string(),
+                    )
+                })
                 .collect();
             granted.sort();
             assert_eq!(
@@ -456,7 +463,11 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
                 ],
                 "tests grants what ci.yml's publish asks for, and nothing more"
             );
-            assert_ne!(job["if"].as_str(), Some(GATE), "tests runs on a dispatch too");
+            assert_ne!(
+                job["if"].as_str(),
+                Some(GATE),
+                "tests runs on a dispatch too"
+            );
             continue;
         }
         // A reusable workflow handed secrets (`secrets: inherit` included).
