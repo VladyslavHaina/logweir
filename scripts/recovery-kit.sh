@@ -28,6 +28,7 @@ PRODUCTS=(weirkeeper logweir logweir-console)
 ROLES=(controller runner console)
 TARGETS=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin)
 GUIDE=docs/install.md
+KEYS=docs/keys.md   # the guide's key procedures; both ride in the kit's docs/
 GUIDE_SECTION='## Recover onto a clean installation with the kit'
 
 die() { echo "recovery-kit: $*" >&2; exit 1; }
@@ -73,7 +74,7 @@ else die "'$version' is not v<semver> (or sha-<commit> with --local-build)"; fi
 name="logweir-recovery-kit-$version"
 kit="$out/$name"
 [[ ! -e "$kit" && ! -e "$kit.tar.gz" ]] || die "$kit exists; remove it or choose another --out"
-mkdir -p "$kit"/{bin,chart,images,schemas,verify}
+mkdir -p "$kit"/{bin,chart,docs,images,schemas,verify}
 done_ok=false
 trap '[[ "$done_ok" == true ]] || rm -rf "$kit" "$kit.tar.gz" "$kit.tar.gz.sha256" "$out/.$name.manifest"' EXIT
 
@@ -89,7 +90,8 @@ if [[ "$mode" == release ]]; then
   [[ "$(jq -r .tag "$assets/release.json")" == "$version" ]] || die "$assets/release.json is not $version"
   commit=$(jq -er .commit "$assets/release.json")
   git cat-file -e "$commit^{commit}" 2>/dev/null || die "the release commit $commit is not in this checkout; fetch it"
-  git diff --quiet "$commit" HEAD -- schemas "$GUIDE" || die "this checkout's schemas/ or $GUIDE differ from $version's; check out $version"
+  git diff --quiet "$commit" HEAD -- schemas "$GUIDE" "$KEYS" \
+    || die "this checkout's schemas/, $GUIDE or $KEYS differ from $version's; check out $version"
   for target in "${TARGETS[@]}"; do
     for file in "logweir-$target.tar.xz" "logweir-$target.tar.xz.sha256"; do
       awk -v f="$file" '$2 == f { n++ } END { exit n != 1 }' "$assets/SHA256SUMS" || die "$version has no $file"
@@ -162,6 +164,7 @@ EOF
 
 # ---------------------------------------------------------------- schemas, trust, instructions
 cp schemas/*.json "$kit/schemas/"
+cp "$GUIDE" "$KEYS" "$kit/docs/"
 if [[ -n "$trust" ]]; then
   mkdir -p "$kit/trust"
   cp -R "$trust"/. "$kit/trust/"
@@ -174,7 +177,8 @@ Built by \`scripts/recovery-kit.sh\` from \`$commit\` (binaries: $mode). \`kit.j
 and \`images/images.txt\` name what is here. \`MANIFEST.sha256\` holds every file's
 sha256: check it first with \`sha256sum -c MANIFEST.sha256\` (or \`shasum -a 256 -c\`).
 Below is docs/install.md's section of the same name, at that commit; a section
-named in it (*3.11*, *5e*, *5f*, …) is one of that guide's.
+named in it (*3.11*, *5e*, *5f*, …) is in this kit's \`docs/install.md\`, beside
+\`docs/keys.md\`.
 
 EOF
   awk -v h="$GUIDE_SECTION" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }' "$GUIDE"

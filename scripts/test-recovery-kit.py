@@ -137,8 +137,12 @@ class RecoveryKit(unittest.TestCase):
         listed = (self.kit / "MANIFEST.sha256").read_text()
         for name in ("RECOVERY.md", "kit.json", "values-offline.yaml", "images/images.txt",
                      "chart/logweir-chart-9.9.9.tgz", "verify/verify_scorecard.py", "release.json",
-                     "schemas/logweir-drill-scorecard-1.0.0.json", "bin/logweir-aarch64-apple-darwin.tar.xz"):
+                     "schemas/logweir-drill-scorecard-1.0.0.json", "bin/logweir-aarch64-apple-darwin.tar.xz",
+                     "docs/install.md", "docs/keys.md"):
             self.assertIn(f"  {name}\n", listed)
+        # poc-14-1a D5: the sections RECOVERY.md cites can be read offline.
+        for guide in ("docs/install.md", "docs/keys.md"):
+            self.assertEqual((self.kit / guide).read_bytes(), (ROOT / guide).read_bytes())
         tarball = self.out / f"logweir-recovery-kit-{VERSION}.tar.gz"
         self.assertEqual((self.out / (tarball.name + ".sha256")).read_text(),
                          f"{sha256(tarball.read_bytes())}  {tarball.name}\n")
@@ -162,7 +166,10 @@ class RecoveryKit(unittest.TestCase):
         recovery = (self.kit / "RECOVERY.md").read_text()
         self.assertIn("\n## Recover onto a clean installation with the kit\n", recovery)
         flat = " ".join(recovery.split())
-        for step in ("Connect an existing archive", "verify_scorecard.py", "Trust the archive's signer"):
+        # poc-14-1a D2-D6: the console key first, the three grants, the target, the store, the receipt.
+        for step in ("Connect an existing archive", "verify_scorecard.py", "Trust the archive's signer",
+                     "create secret generic logweir-console-keys", "`archiveWrite`, `archiveRead` and `evidenceRead`",
+                     "**Connect the target:**", "mc mirror ./archive/<bucket>", "--payload-type backup-receipt"):
             self.assertIn(step, flat)
         self.assertNotIn("## Upgrade CRDs", recovery)
 
@@ -235,8 +242,8 @@ class RecoveryKit(unittest.TestCase):
 
     def test_the_checkout_must_hold_the_releases_guide_and_schemas(self):
         # RECOVERY.md and schemas/ come from this checkout but claim the release commit.
-        guide = (ROOT / "docs/install.md").read_text()
-        cases = {"docs/install.md": guide + "\nA step this release does not have.\n",
+        cases = {"docs/install.md": (ROOT / "docs/install.md").read_text() + "\nA step this release does not have.\n",
+                 "docs/keys.md": (ROOT / "docs/keys.md").read_text() + "\nA key step this release does not have.\n",
                  "schemas/logweir-drill-scorecard-1.0.0.json": "{}\n"}
         for path, text in cases.items():
             with self.subTest(path):
