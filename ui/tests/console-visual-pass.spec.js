@@ -23,10 +23,12 @@ import { renderClusterForm } from "../pages/clusters.js";
 import { renderScheduleForm } from "../pages/schedules.js";
 import { identityPresented, renderBackupDetail } from "../pages/backups.js";
 import { replayWizard } from "../workflow.js";
+import { renderAlerts, renderProtectionList } from "../pages/protection.js";
 import {
   NO_TOPIC_READINESS_SENTENCE,
   initialState,
   preparePlan,
+  renderArchiveCredentialField,
   renderCatalogOffers,
   renderPreparedWizard,
   stepStates,
@@ -502,4 +504,30 @@ test("l12_a_cells_second_line_stays_in_the_value_column_on_a_phone", () => {
   const html = renderCatalogOffers("logweir-poc", { offers: [{ catalog: "archive", entry: wire }],
     notes: [] });
   assert.match(firstRowCells(html)[4], /^<span><span class="badge badge-green">Available<\/span> <span class="badge badge-green">Verified<\/span><\/span>$/);
+});
+
+// L14. Wave residue in the text. The Protection list's "OPEN ALERTS" counts the
+// open entries of a ledger whose delivery is withdrawn (item 74): it is
+// renamed to what it counts. "legacy Secret override" stays: the inline-archive
+// shim is live through v1 (OD-12 (2)), so the sentence is true. The plan's
+// `webhooks: []` stays too: it is signed plan grammar.
+
+test("l14_the_protection_column_names_what_it_counts_and_the_shim_sentence_stays_true", () => {
+  const list = renderProtectionList({ items: [] }, "team-a");
+  assert.match(list, /<th scope="col">OPEN PROBLEMS<\/th>/);
+  assert.doesNotMatch(list, /OPEN ALERTS/, "NEGATIVE CONTROL: the column named alerts nobody is sent");
+  const ledger = renderAlerts({ status: { alerts: [] } });
+  assert.match(ledger, /<h3>Problems<\/h3>/);
+  assert.match(ledger, /This policy has recorded no problem\./);
+
+  // THE SHIM IS LIVE: a point with no saved destination still offers the
+  // archive's Secret, so a saved-destination point's "no legacy Secret
+  // override" is a true sentence.
+  const inline = renderArchiveCredentialField(wizardState());
+  assert.match(inline, /id="archive-secret"/, "the inline-archive shim is offered");
+  const saved = wizardState();
+  saved.point = { spec: { destinationRef: { name: "primary" } } };
+  const owned = renderArchiveCredentialField(saved);
+  assert.match(owned, /there is no legacy Secret override on this recovery point/);
+  assert.doesNotMatch(owned, /id="archive-secret"/);
 });
