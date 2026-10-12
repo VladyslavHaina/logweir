@@ -5,7 +5,8 @@
 #   recovery-kit.sh <version> --release-assets <dir> [options]   a release's assets (gh release download)
 #   recovery-kit.sh <version> --local-build [options]            a DRY RUN: this host's logweir build
 #
-#   <version>              v<semver>, or sha-<commit> for a main publication (--local-build only)
+#   <version>              v<semver>, or sha-<commit> for a main publication (--local-build only;
+#                          a short commit is resolved in this checkout)
 #   --trust <dir>          public material you exported (docs/install.md), copied into trust/
 #   --save-images <os/arch>  also `docker save` the four images for that platform
 #   --out <dir>            where the kit goes (default target/recovery-kit)
@@ -61,6 +62,11 @@ done
 [[ -n "$mode" ]] || die "name the binaries' source: --release-assets <dir> or --local-build"
 if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then :
 elif [[ "$version" =~ ^sha-[0-9a-f]{40}$ && "$mode" == local-build ]]; then :
+elif [[ "$version" =~ ^sha-[0-9a-f]{4,39}$ && "$mode" == local-build ]]; then
+  # The images are tagged with the full commit. git names it, or lists an ambiguous one's candidates.
+  full=$(git rev-parse --verify "${version#sha-}^{commit}") \
+    || die "'$version' names no single commit in this checkout; give more of it, or fetch it"
+  version="sha-$full"
 else die "'$version' is not v<semver> (or sha-<commit> with --local-build)"; fi
 [[ -z "$trust" || -d "$trust" ]] || die "--trust $trust is not a directory"
 

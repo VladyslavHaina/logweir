@@ -115,8 +115,8 @@ class RecoveryKit(unittest.TestCase):
             (self.assets / name).write_bytes(data)
         (self.assets / "SHA256SUMS").write_text("".join(f"{sha256(d)}  {n}\n" for n, d in sorted(files.items())))
 
-    def run_kit(self, *args, env=None):
-        return subprocess.run(["bash", str(SCRIPT), VERSION, *args, "--out", str(self.out)], cwd=ROOT,
+    def run_kit(self, *args, env=None, version=VERSION):
+        return subprocess.run(["bash", str(SCRIPT), version, *args, "--out", str(self.out)], cwd=ROOT,
                               capture_output=True, text=True, timeout=300, env=env)
 
     def trust_dir(self, files: dict, name: str = "trust") -> Path:
@@ -283,6 +283,44 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("logweir/values.yaml", names)
         self.assertFalse([n for n in names if "/rendered" in n])
         self.assertEqual(manifest_mismatches(self.kit), [])
+
+    def test_a_short_commit_names_the_full_one_and_an_ambiguous_one_is_refused(self):
+        # poc-14-1a B2: `just recovery-kit sha-22dc6147` was refused for want of 40 hex.
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+                              check=True, timeout=30).stdout.strip()
+        env = self.local_build_env()
+        done = self.run_kit("--local-build", env=env, version=f"sha-{head[:8]}")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        kit = json.loads((self.out / f"logweir-recovery-kit-sha-{head}" / "kit.json").read_text())
+        self.assertEqual(kit["version"], f"sha-{head}")
+        self.assertEqual(kit["images"]["runner"], f"docker.io/vladyslavhaina/logweir:sha-{head}@{DIGEST}")
+        # Two commits sharing a 4-hex prefix (a birthday search over commit bodies), written to
+        # a scratch object store so the checkout's repository is never written to.
+        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, capture_output=True, text=True,
+                              check=True, timeout=30).stdout.strip()
+        seen = {}
+        for i in range(1_000_000):
+            body = (f"tree {tree}\nparent {head}\nauthor kit test <kit@test.invalid> 0 +0000\n"
+                    f"committer kit test <kit@test.invalid> 0 +0000\n\nambiguous {i}\n").encode()
+            prefix = hashlib.sha1(b"commit %d\0" % len(body) + body).hexdigest()[:4]
+            if prefix in seen:
+                break
+            seen[prefix] = body
+        objects = self.base / "objects"
+        objects.mkdir()
+        real = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=ROOT,
+                              capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        env.update(GIT_OBJECT_DIRECTORY=str(objects), GIT_ALTERNATE_OBJECT_DIRECTORIES=real)
+        for commit in (seen[prefix], body):
+            written = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=ROOT, env=env,
+                                     input=commit, capture_output=True, check=True, timeout=30).stdout
+            self.assertTrue(written.decode().startswith(prefix))
+        shutil.rmtree(self.out)
+        done = self.run_kit("--local-build", env=env, version=f"sha-{prefix}")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(f"short object ID {prefix} is ambiguous", done.stderr)
+        self.assertIn(f"'sha-{prefix}' names no single commit in this checkout", done.stderr)
+        self.assert_nothing_written()
 
     def test_the_kit_chart_loads_in_helm_and_no_tarball_has_an_appledouble_member(self):
         # poc-14-1a D1: macOS tar packed a `._*` member for every file with an extended
