@@ -4930,9 +4930,7 @@ fn chart_lint_kafka_maps_every_supported_mechanism_and_refuses_the_rest() {
         .find(r#"{{- else if and (eq $protocol "SASL_PLAINTEXT") (eq $mechanism "SCRAM-SHA-512") -}}"#)
         .expect("_helpers.tpl must map SASL_PLAINTEXT + SCRAM-SHA-512 onto scramSha512");
     let after = &helpers[sasl_plaintext..];
-    let arm_end = after
-        .find("{{- end -}}")
-        .expect("the mapping ends");
+    let arm_end = after.find("{{- end -}}").expect("the mapping ends");
     assert!(
         !after[..arm_end].contains("$tls = true"),
         "the SASL_PLAINTEXT arm must NOT set tls — SASL_PLAINTEXT is SASL over a cleartext \
