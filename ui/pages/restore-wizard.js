@@ -83,6 +83,7 @@ import {
   facts,
   fieldErrorLine,
   humanInstant,
+  ident,
   invalidAttributes,
   mutationStatus,
   prefixOf,
@@ -3718,6 +3719,12 @@ export function readinessSourceSentence(point) {
     "itself will use. Only a point with no destinationRef uses legacySourceArchive.";
 }
 
+/** Why Check readiness is disabled while no topic is ticked. */
+export const NO_TOPIC_READINESS_SENTENCE =
+  "Select at least one topic in step 4 (Target, topic subset and naming) first. A readiness " +
+  "check is about this plan, and a plan with no topic cannot be made, so there is nothing to " +
+  "check yet.";
+
 /** Why a readiness result is not a promise about the run. */
 export const READINESS_CAVEAT_SENTENCE =
   "A ready verdict says these checks passed when they ran. It is not a promise about the run: a " +
@@ -3754,6 +3761,14 @@ export function renderPreflightStep(state, prepared) {
   const edited = result !== null && currentHash.length > 0 &&
     ((boundHash.length > 0 && boundHash !== currentHash) ||
       (typeof serverHash === "string" && serverHash.length > 0 && serverHash !== currentHash));
+  // A PLAN THAT CANNOT BE RENDERED HAS NOTHING TO CHECK, and the button says
+  // so instead of doing nothing on a click: no topic ticked is the usual case.
+  const unchecked = typeof p.problem !== "string"
+    ? null
+    : (topics.length === 0
+      ? NO_TOPIC_READINESS_SENTENCE
+      : "The plan cannot be rendered from these values, so there is nothing to check: " +
+        p.problem);
   return (
     "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Operation readiness</h3>" +
     "<p class=\"blurb\">A readiness check for THIS plan, plus the target cluster's own most " +
@@ -3766,12 +3781,19 @@ export function renderPreflightStep(state, prepared) {
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
         "<div class=\"actions\">" +
-        "<button type=\"submit\" id=\"restore-readiness-start\">" +
+        "<button type=\"submit\" id=\"restore-readiness-start\"" +
+        (unchecked === null
+          ? ""
+          : " disabled aria-describedby=\"restore-readiness-blocked\"") + ">" +
         (result === null ? "Check readiness" : "Check this plan again") + "</button>" +
         (result !== null && result.terminal === false
           ? "<button type=\"button\" id=\"restore-readiness-cancel\">Cancel</button>"
           : "") +
         "</div></fieldset>" +
+        (unchecked === null
+          ? ""
+          : "<p class=\"complaint\" id=\"restore-readiness-blocked\">" + messageText(unchecked) +
+            "</p>") +
         "<div class=\"form-status\" id=\"restore-readiness-status\" tabindex=\"-1\">" +
         mutationStatus(record, { kind: "Preflight", name: (result || {}).id || "" }, null) +
         "</div></form>") +
@@ -4279,7 +4301,7 @@ function submissionStatus(submission, prepared, beside, ns) {
     // where it stands is its own operation view -- not the next step the
     // submit had chosen for a plan this page is no longer showing.
     const route = elsewhere || typeof result.route !== "string" || result.route.length === 0
-      ? restoreOperationRoute(ns, shown)
+      ? restoreOperationRoute(ns, shown, meta.uid)
       : result.route;
     return (
       mutationStatus(s, { kind: "Restore", name: shown }) +
@@ -4384,6 +4406,14 @@ export function stepStates(state, prepared) {
   const replication = replicationProblems(s);
   const held = ((s.readiness || {}).preflight) || null;
   const readinessRefused = held !== null && readinessRefusal(s, prepared) !== null;
+  // THE APPROVAL A CHECK IS OWED, IN THE NAMESPACE'S MODE (PROD-14.1 visual
+  // pass, L4): under confirm, Create is the approval and no approver is
+  // involved, so step 5 says "you confirm" and not "needs approval".
+  const policy = s.approvalPolicy;
+  const approvalWord = policy !== null && typeof policy === "object" && policy.legacy === false &&
+    policy.mode === "ordinary" && policy.ordinaryConfirmationAvailable !== false
+    ? "confirm"
+    : "approval";
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -4429,7 +4459,7 @@ export function stepStates(state, prepared) {
         ? "attention"
         : (i === 4 && held === null
           ? "unchecked"
-          : (i === 4 && readyButForDraftApproval(held) ? "approval" : "done"));
+          : (i === 4 && readyButForDraftApproval(held) ? approvalWord : "done"));
     } else {
       status = attention[i] ? "attention" : "todo";
     }
@@ -4461,6 +4491,9 @@ function stepWord(step) {
   }
   if (step.status === "approval") {
     return "needs approval";
+  }
+  if (step.status === "confirm") {
+    return "you confirm";
   }
   return step.current ? "to do next" : "to do";
 }
@@ -5313,7 +5346,8 @@ export async function restoreDestination(api, state, prepared, restore) {
   const meta = (restore || {}).metadata || {};
   const frozen = frozenDecision(restore);
   if (frozen !== null && frozen.state === "confirmed") {
-    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName,
+      meta.uid);
   }
   const approvalName = (((restore || {}).spec || {}).approvalRef || {}).name || p.approvalName;
   let approval = null;
@@ -5323,7 +5357,8 @@ export async function restoreDestination(api, state, prepared, restore) {
     approval = null;
   }
   if (approval !== null && approvalAuthorizes(approval, restore, p.hash)) {
-    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName,
+      meta.uid);
   }
   return approvalRoute(s, p, restore);
 }
@@ -6192,13 +6227,21 @@ export function renderCatalogOffers(ns, offers) {
       // The action first, for the selector's reason.
       "<a class=\"button\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
         "\">Restore this point</a>",
-      cell(offer.catalog) + "<span class=\"cell-sub\"><code>" + cell(e.pointId) + "</code></span>",
-      cell(e.backupId),
+      // THE STATE STAYS IN SIGHT AT 1024 (PROD-14.1 visual pass, M11). The
+      // point id and the backup set are shortened identifiers under their
+      // catalog, and the state column's caption is one word: this table's
+      // width was its captions and timestamps, and at 1024 the column that
+      // decides whether a point can be chosen sat behind a sideways scroll.
+      cell(offer.catalog) +
+        "<span class=\"cell-sub\">" + ident(e.pointId) + "</span>" +
+        "<span class=\"cell-sub\">set " + ident(e.backupId) + "</span>",
       when(e.recoveryPointAt),
       "<span class=\"cell-sub-first\">from " + when(e.coveredFrom) + "</span>" +
         "<span class=\"cell-sub\">to " + when(e.coveredTo) + "</span>",
-      badge("green", String(e.availability || "")) + " " +
-        badge("green", String(e.verification || "")),
+      // One item, so a phone's stacked card keeps both badges beside their
+      // caption (L12's class).
+      "<span>" + badge("green", String(e.availability || "")) + " " +
+        badge("green", String(e.verification || "")) + "</span>",
     ];
   });
   return (
@@ -6206,7 +6249,7 @@ export function renderCatalogOffers(ns, offers) {
     "<h3>Recovery points from connected archives</h3>" +
     "<p class=\"blurb\">" + esc(CATALOG_OFFERS_SENTENCE) + "</p>" +
     table(
-      ["", "CATALOG AND POINT", "BACKUP SET", "RECOVERY POINT", "COVERED", "AVAILABLE AND VERIFIED"],
+      ["", "CATALOG, POINT AND SET", "RECOVERY POINT", "COVERED", "STATE"],
       rows,
       "no connected archive lists a point this page may offer",
       undefined,

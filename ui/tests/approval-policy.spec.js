@@ -320,7 +320,9 @@ function created(authorization) {
 test("an_ordinary_confirmation_routes_straight_to_execution", async () => {
   const api = readsOnly({});
   const route = await restoreDestination(api, STATE, PREPARED, created(ORDINARY));
-  assert.equal(route, "#/history?ns=team-a&name=restore-x");
+  // THE OPERATION VIEW STEP 6 PROMISES (PROD-14.1 visual pass, M2), bound to
+  // this run's uid. It opened the History detail.
+  assert.equal(route, "#/operations?ns=team-a&kind=restore&name=restore-x&uid=uid-x");
   assert.deepEqual(api.reads, [], "the frozen answer decides; nothing is read");
 });
 

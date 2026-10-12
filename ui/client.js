@@ -379,6 +379,9 @@ export function sessionIdentity(ns) {
   return Object.freeze({
     displayName: display,
     subject: String(actor.subject || ""),
+    // The `<issuer>#<subject>` an Approval names its approver by, so a page
+    // can say "you" for the signed-in actor's own principal.
+    actorId: String(actor.id || ""),
     authenticationMode: String(decided.session.authenticationMode || ""),
     roles: Object.freeze(rolesFor(ns)),
     // NO ROLE ANYWHERE: the header says what the no-role card says, instead

@@ -579,7 +579,7 @@ async function main() {
   "confirmed, as the local administrator, under default-confirm-v1: " + JSON.stringify(created.authorization));
   for (let i = 0; i < 40; i += 1) {
     const hash = await page.evaluate(() => window.location.hash);
-    if (hash.startsWith("#/history")) {
+    if (hash.startsWith("#/operations")) {
       break;
     }
     await pause(500);

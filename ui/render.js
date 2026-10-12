@@ -628,6 +628,38 @@ export function cell(value) {
   return esc(inert(value));
 }
 
+/** A LONG IDENTIFIER IN A TABLE CELL -- a key id, a point id, a backup set, a
+ *  principal -- on one line, cut with an ellipsis between `--lw-ident-min-width`
+ *  and `--lw-ident-width` (`.ident-text`), so it cannot take the table's width,
+ *  wrap over ten lines or push a column out of sight. It is never hidden: the
+ *  full value is the hover title, the text a filter, a sort and a screen reader
+ *  read, and what a click copies -- the identifier IS its copy button, because
+ *  a button beside every id cost a table its last column at 1024 px. `shown`,
+ *  when given, is a short form drawn instead of the value's head (the full
+ *  value stays in the text, visually hidden): a string, or the parts left
+ *  between the places it was cut, each cut drawn as an ellipsis whose hover
+ *  title is `cutNote`. `app.js` wires every `.ident` once. */
+export function ident(value, shown, cutNote) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const full = String(value);
+  const parts = Array.isArray(shown) ? shown.map(String)
+    : (typeof shown === "string" && shown.length > 0 ? [shown] : []);
+  const short = parts.length > 0 && !(parts.length === 1 && parts[0] === full);
+  return (
+    "<button type=\"button\" class=\"ident\" data-copy=\"" + esc(full) + "\" title=\"" +
+    esc(inert(full)) + " -- click to copy\"><code class=\"ident-text" +
+    (short ? " ident-shown" : "") + "\">" +
+    (short
+      ? "<span aria-hidden=\"true\">" + parts.map((part) => esc(inert(part))).join(
+        "<span class=\"ident-cut\" title=\"" + esc(String(cutNote || "")) + "\">\u2026</span>") +
+        "</span><span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
+      : esc(inert(full))) +
+    "</code></button>"
+  );
+}
+
 /** WHAT A CELL SAYS FOR A VALUE THE PRODUCT API SERVING THIS CONSOLE DOES NOT
  *  PUBLISH. Not [`ABSENT`]: "-" says the object carries none, and a page that
  *  is never sent a member cannot say that of it. */

@@ -140,8 +140,9 @@ test("r2_12_the_stepper_and_the_create_gate_read_the_same_rule_as_the_headline",
   }
   assert.equal(readyButForDraftApproval(pocRestoreCheck()), true);
   const wizard = readFileSync(UI + "pages/restore-wizard.js", "utf8");
-  assert.match(wizard, /readyButForDraftApproval\(held\) \? "approval" : "done"/,
-    "step 5's status for that check is `approval`");
+  assert.match(wizard, /readyButForDraftApproval\(held\) \? approvalWord : "done"/,
+    "step 5's status for that check is `approval` (`confirm` under a confirm-mode namespace)");
+  assert.match(wizard, /\? "confirm"\n {4}: "approval";/);
   assert.match(wizard, /if \(step\.status === "approval"\) \{\n {4}return "needs approval";/);
 });
 

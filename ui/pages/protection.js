@@ -135,7 +135,7 @@ export function renderProtectionList(collection, ns) {
     "states and the newest recovery point that actually satisfies it.</p>" +
     "<p class=\"note\">" + esc(TWO_HEALTHS_SENTENCE) + "</p>" +
     table(
-      ["NAME", "PROTECTION", "OBJECTIVE", "POINT AGE (s)", "FAILED RUNS", "SCHEDULES", "OPEN ALERTS"],
+      ["NAME", "PROTECTION", "OBJECTIVE", "POINT AGE (s)", "FAILED RUNS", "SCHEDULES", "OPEN PROBLEMS"],
       rows,
       NO_POLICY_SENTENCE,
       undefined,
@@ -229,7 +229,10 @@ export function renderScheduleHealth(object, ns) {
   );
 }
 
-/** THE ALERT LEDGER: each alert's kind, state and instants. */
+/** THE PROBLEM LEDGER (`status.alerts`): each entry's kind, state and
+ *  instants. Alert delivery is withdrawn (release-notes item 74), so the page
+ *  names what the ledger records -- a problem, open until it clears -- and not
+ *  an alert nobody is sent (PROD-14.1 visual pass, L14). */
 export function renderAlerts(object) {
   const alerts = Array.isArray(statusOf(object).alerts) ? statusOf(object).alerts : [];
   const rows = alerts.map((a) => {
@@ -242,11 +245,11 @@ export function renderAlerts(object) {
     ];
   });
   return (
-    "<section class=\"alerts\"><h3>Alerts</h3>" +
+    "<section class=\"alerts\"><h3>Problems</h3>" +
     table(
       ["KIND", "STATE", "OPENED", "RESOLVED"],
       rows,
-      "This policy has opened no alert.",
+      "This policy has recorded no problem.",
     ) +
     "</section>"
   );

@@ -1329,7 +1329,7 @@ export function renderScheduleForm(view) {
     (v.minted === true
       // No field for a choice the server does not honour: the console names the
       // schedule, and the draft's intent is the idempotency seed.
-      ? "<div class=\"field\" id=\"schedule-name-minted\"><p class=\"label\">name</p>" +
+      ? "<div class=\"field\" id=\"schedule-name-minted\">" +
         "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_MINTED_SENTENCE) +
         "</p>" + fieldErrorLine("schedule-name", errors.name) + "</div>"
       : "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
@@ -2251,6 +2251,12 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
   }
 }
 
+/** What a role that may not create a schedule (a viewer, an approver) reads
+ *  where the create form was. */
+export const SCHEDULES_READ_ONLY_SENTENCE =
+  "This login may read the schedules in this namespace and not create one: that needs the " +
+  "operator or administrator role.";
+
 export async function mountSchedules(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
   try {
@@ -2322,13 +2328,20 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
       preview: null,
       readiness: null,
     };
+    // A role that cannot create a schedule is not offered the form, as
+    // Destinations does: it was the whole editable form with a disabled Create
+    // at its end.
+    const mayCreate = extra.mayOperate;
     replace(
       node,
       parse(
         renderScheduleList(collection, readiness.destinations, readiness.unavailable === true) + panels +
-          "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
-          renderScheduleForm(scheduleFormView(ns, clusters, undefined, undefined, creating)) +
-          "</div>" +
+          (mayCreate
+            ? "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
+              renderScheduleForm(scheduleFormView(ns, clusters, undefined, undefined, creating)) +
+              "</div>"
+            : "<p class=\"note\" id=\"schedules-read-only\">" +
+              esc(SCHEDULES_READ_ONLY_SENTENCE) + "</p>") +
           "<div class=\"readiness-slot\" id=\"readiness-slot\">" +
           renderReadinessPanel(readinessView(ns, readiness)) + "</div>",
       ),

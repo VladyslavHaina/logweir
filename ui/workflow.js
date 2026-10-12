@@ -240,9 +240,10 @@ export function replayWizard(steps) {
     // checked it) and not a block either, because the check is advisory and the
     // plan may be created without one, with a warning. `approval` is step 5 owed
     // only its draft's approval: the same passable state, since Create is what
-    // requests the approval.
+    // requests the approval -- `confirm` under a confirm-mode namespace, where
+    // Create is the approval itself.
     const done = step.status === "done" || step.status === "ready" ||
-      step.status === "unchecked" || step.status === "approval";
+      step.status === "unchecked" || step.status === "approval" || step.status === "confirm";
     if (!done) {
       blocked = i;
       break;

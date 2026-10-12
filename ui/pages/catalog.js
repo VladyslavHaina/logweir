@@ -52,6 +52,7 @@ import {
   esc,
   facts,
   fieldErrorLine,
+  ident,
   invalidAttributes,
   listFooter,
   messageText,
@@ -424,7 +425,9 @@ export function pointRow(entry, ns, catalog, destination, page) {
           " data-restore-point=\"" + esc(e.pointId) + "\"")
         : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
           messageText(offer.reason) + "</span>"),
-    "<code>" + cell(e.pointId) + "</code>",
+    // The point id and the signer are shortened identifiers (PROD-14.1 visual
+    // pass, M11): whole on hover and on the copy button, one line in the row.
+    ident(e.pointId),
     when(e.recoveryPointAt) + consumerPositionsNote(e),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
@@ -437,7 +440,7 @@ export function pointRow(entry, ns, catalog, destination, page) {
         ? " " + badge("unverified", "Backup verdict " + e.backupVerdict)
         : ""),
     location === null ? ABSENT : cell(location.locationId),
-    "<code>" + cell(e.signerKeyId) + "</code>",
+    ident(e.signerKeyId),
     cell(e.remedy),
   ];
 }

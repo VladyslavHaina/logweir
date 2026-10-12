@@ -278,6 +278,15 @@ export const NO_EVIDENCE_KEYS_SENTENCE =
   "This run has recorded no evidence keys yet, so there is nothing to fetch. The commands " +
   "appear here once it records them.";
 
+/** The identity a run presented to the brokers, from `status.auth`: its mode
+ *  and username, as many of them as were recorded, or "not recorded" (it read
+ *  "- -"; PROD-14.1 visual pass, L7). */
+export function identityPresented(auth) {
+  const a = auth || {};
+  const parts = [a.mode, a.username].filter((v) => typeof v === "string" && v.length > 0);
+  return parts.length === 0 ? "not recorded" : parts.map((v) => cell(v)).join(" ");
+}
+
 /** One Backup, in full: the run, the covered window as two RFC 3339 instants,
  *  the evidence block, and the four-line independent check, against the
  *  bucket [`evidenceRoute`] names. */
@@ -306,7 +315,7 @@ export function renderBackupDetail(object, where) {
       ["schedule", cell((spec.scheduleRef || {}).name)],
       ["schedule revision", revisionLine(spec.scheduleRef)],
       ["archive", cell(archive.url)],
-      ["identity presented", cell(auth.mode) + " " + cell(auth.username)],
+      ["identity presented", identityPresented(auth)],
       ["operation", operationCell(object, (object.metadata || {}).namespace)],
     ]) +
     // WHAT THIS RUN COVERED, from its own `status.selection` alone.

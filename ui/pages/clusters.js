@@ -990,7 +990,9 @@ export function renderClusterForm(view) {
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     (v.minted === true
       // NO FIELD FOR A CHOICE THE SERVER DOES NOT HONOUR.
-      ? "<div class=\"field\" id=\"cluster-name-minted\"><p class=\"label\">name</p>" +
+      // No "name" caption over no field (PROD-14.1 visual pass, L5): the
+      // sentence says the server names it.
+      ? "<div class=\"field\" id=\"cluster-name-minted\">" +
         "<p class=\"help\">" + esc(CONNECTION_NAME_MINTED_SENTENCE) + "</p>" +
         line("cluster-name", "name") + "</div>"
       : "<div class=\"field\"><label for=\"cluster-name\">name</label>" +
@@ -1241,6 +1243,12 @@ export function clusterFormView(ns) {
  *  from the viewer's own RBAC included -- the API server's OWN reason and
  *  message are rendered verbatim, because the page made no authorisation
  *  decision and must not narrate one. */
+/** What a role that may not create a connection (a viewer, an approver) reads
+ *  where the create form was. */
+export const CLUSTERS_READ_ONLY_SENTENCE =
+  "This login may read the connections in this namespace and not create one: that needs the " +
+  "operator or administrator role.";
+
 export async function mountClusters(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
   try {
@@ -1248,17 +1256,26 @@ export async function mountClusters(node, ns, parse, lifecycle, deps) {
     if (!active(lifecycle)) {
       return;
     }
+    // A role that cannot create a connection is not offered the form, as
+    // Destinations does: the API would refuse it 403, after the credential had
+    // been typed.
+    const may = mayOperate(ns);
     replace(
       node,
       parse(
         renderClusterList(collection, ns) +
-          "<div class=\"form-slot\" id=\"cluster-form-slot\">" +
-          renderClusterForm(clusterFormView(ns)) +
-          "</div>",
+          (may
+            ? "<div class=\"form-slot\" id=\"cluster-form-slot\">" +
+              renderClusterForm(clusterFormView(ns)) +
+              "</div>"
+            : "<p class=\"note\" id=\"clusters-read-only\">" + esc(CLUSTERS_READ_ONLY_SENTENCE) +
+              "</p>"),
       ),
     );
     wireProbeTests(node, ns, parse, lifecycle, api);
-    wireForm(node, ns, parse, lifecycle, api);
+    if (may) {
+      wireForm(node, ns, parse, lifecycle, api);
+    }
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
