@@ -28,9 +28,33 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88 and 89 so far. Items continue the next entry's numbering. No candidate is
-cut from this entry yet, so it carries no candidate record; when one is, its
-record follows [the release checklist](tag1-checklist.md) as the next entry's does.
+81, 82, 83, 84, 85, 86, 87, 88 and 89. Items continue the next entry's numbering. The candidate
+cut from this entry is `v0.2.0-rc.2`; its record follows
+[the release checklist](tag1-checklist.md) as the next entry's does.
+
+### Candidate record
+
+Filled as the next entry's is: the publication commit and image digests from
+the release dry run, before the tag; the chart and archive rows from the tag
+run's `release.json`, after it. A row left as `—` is an unrecorded fact, not a
+pass.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | `f9ed98ff`, the commit that added this record; it differs from the publication commit only under `docs/` |
+| Version tag | `v0.2.0-rc.2`, pushed 2026-10-12 with the owner's approval; a GitHub pre-release |
+| Publication commit (`release.json` `.images.publication`) | `96e601f04bd8a2993742400689353d74df3e7b8c` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [38256093754](https://github.com/VladyslavHaina/logweir/actions/runs/38256093754): `check`, the four `e2e` shards and `publish` (build amd64, build arm64, promote, sign) green |
+| Release dry run (`release.yml` dispatched on `main`) | [38267445281](https://github.com/VladyslavHaina/logweir/actions/runs/38267445281) on `0605455a`, every job green, including the full `ci.yml`, three builds and `drill / drill-from-artifact`; `release.sh verify` on its `release-assets`: 14 assets verified |
+| Release run (`release.yml` on the tag) and release drill | [38272680382](https://github.com/VladyslavHaina/logweir/actions/runs/38272680382): every job green, including the full `ci.yml`, `drill / drill-from-artifact`, `publish-images` and `github-release`; the version tags name the dry run's three digests |
+| Runner image digest (`logweir`; manifest list, amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:f2eb50861baec026286863aadb0d80d780841092a733ab8a03cf07ed7aadb2ba` |
+| Controller image digest (`weirkeeper`; manifest list, amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:4f666786af4dbdc9a155ae63908566796675f8a5662b256e373fd03c089c6653` |
+| Console image digest (`logweir-console`; manifest list, amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:932b1f0f259a3530dd1cb73c8a1b80cb865e58ac6093f9a505ab72b57021507b` |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.2.0-rc.2`, package sha256 `96608096061b2eac286d11dbaea2bf476495a0f35f3d34c3b03ecb8eb68dbc99`, OCI digest `sha256:9bcfe65776cd5772ff0777f037c6d4ba1cd2fad2d246f7a56d971bbab43232ac`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `11b63939f32060d97fbc4e60662c9c3f1714e041ddcb010f5f694462218fc797` (glibc 2.34+); `logweir-aarch64-unknown-linux-gnu.tar.xz` `7c4489a3e4ada0199052b1609c622fc52f948a4039f1c942fcbc106200f5269a` (glibc 2.34+); `logweir-aarch64-apple-darwin.tar.xz` `f607015421447029c7b0766796621df342f4e539c522c5606170bacd334a5e13` (macOS 11+, Homebrew `openssl@3`); `SHA256SUMS` checks every asset |
+| `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
+| Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
+| Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
 
 ### The operator-facing changes after `v0.2.0-rc.1`
 
