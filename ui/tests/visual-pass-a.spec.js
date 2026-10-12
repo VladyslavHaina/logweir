@@ -23,6 +23,15 @@ import {
   NO_EVIDENCE_KEYS_SENTENCE,
   mountBackupDetail,
 } from "../pages/backups.js";
+import {
+  ABSENT_REMOVES,
+  ROTATE_DEFAULTS,
+  keptGrant,
+  renderRotateForm,
+  rotationBody,
+  submitRotation,
+  validateGrants,
+} from "../pages/destinations.js";
 import { decoded, wire } from "./console-fixture.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
 
@@ -182,4 +191,125 @@ test("h1_a_run_with_no_receipt_key_yet_prints_no_fetch_of_the_bucket_root", asyn
   assert.equal(checkLines(html).length, 0,
     "THE DEFECT: `aws s3 cp s3://primary/ ./receipt.json` while the run was pending");
   resetMode();
+});
+
+// H2. A ROTATION STARTS FROM WHAT THE DESTINATION HAS.
+
+/** `primary` as the API projects it, with all three optional grants held:
+ *  the PoC destination's shape. */
+function fullyGranted() {
+  const item = decoded("destination.json").item;
+  return Object.assign({}, item, {
+    access: Object.assign({}, item.access, {
+      evidenceWrite: { mode: "secretKeys", secretName: "lwd-primary-evidence-write",
+        keys: ["access-key-id", "secret-access-key"], serviceAccountName: null },
+      evidenceRead: { mode: "secretKeys", secretName: "lwd-primary-evidence-read",
+        keys: ["access-key-id", "secret-access-key"], serviceAccountName: null },
+    }),
+  });
+}
+
+/** The option a role's selector starts on. */
+function selected(html, role) {
+  const start = html.indexOf("id=\"rotate-" + role + "-source\"");
+  const end = html.indexOf("</select>", start);
+  const option = /<option value="([^"]+)" selected>/.exec(html.slice(start, end));
+  return option === null ? null : option[1];
+}
+
+test("h2_the_rotation_form_opens_with_every_grant_on_keep", () => {
+  const item = fullyGranted();
+  const html = decode(renderRotateForm(item, { mayOperate: true }));
+  for (const role of ["archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead"]) {
+    assert.equal(selected(html, role), "keep",
+      role + ": THE DEFECT: the form opened on `absent` (or `new` for archiveWrite)");
+  }
+  assert.match(html, /keep \(as it is: secretKeys lwd-primary-evidence-read\)/);
+  assert.equal(ROTATE_DEFAULTS.evidenceReadSource, "keep");
+});
+
+/** The four sources the rendered form starts on, as its selectors carry them. */
+function startingSources(html) {
+  const out = {};
+  for (const role of ["archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead"]) {
+    out[role + "Source"] = selected(html, role);
+  }
+  return out;
+}
+
+test("h2_rotating_one_key_keeps_the_others_exactly_as_the_destination_has_them", async () => {
+  const item = fullyGranted();
+  // The reader opens the form, rotates archiveWrite to a new key and touches
+  // nothing else: every other grant is what the form started on.
+  const html = renderRotateForm(item, { mayOperate: true });
+  const values = Object.assign(startingSources(html), {
+    archiveWriteSource: "new", archiveWriteAccessKeyId: "id-2", archiveWriteSecretAccessKey: "k-2",
+  });
+  let sent = null;
+  await submitRotation(NS, "primary", values, item.generation, {
+    updateDestinationAccess: (ns, name, body) => {
+      sent = body;
+      return Promise.resolve({ item: item });
+    },
+  }, item.access);
+  assert.equal(sent.expectedGeneration, item.generation);
+  assert.deepEqual(sent.access.archiveWrite,
+    { mode: "secretKeys", secret: { new: { accessKeyId: "id-2", secretAccessKey: "k-2" } } });
+  assert.deepEqual(sent.access.archiveRead,
+    { mode: "secretKeys", secret: { existing: { name: "lwd-primary-archive-read" } } },
+    "THE DEFECT: archiveRead was omitted, which the API reads as REMOVE");
+  assert.deepEqual(sent.access.evidenceWrite,
+    { mode: "secretKeys", secret: { existing: { name: "lwd-primary-evidence-write" } } });
+  assert.deepEqual(sent.access.evidenceRead,
+    { mode: "secretKeys", secret: { existing: { name: "lwd-primary-evidence-read" } } },
+    "THE DEFECT: evidenceRead was omitted, so verification would stop");
+  // Every other held mode is kept as itself, and an absent grant stays absent.
+  assert.deepEqual(keptGrant({ mode: "archiveReadGrant", keys: [] }), { mode: "archiveReadGrant" });
+  assert.deepEqual(keptGrant({ mode: "workloadIdentity", keys: [], serviceAccountName: "sa-1" }),
+    { mode: "workloadIdentity", workloadIdentity: { serviceAccountName: "sa-1" } });
+  assert.equal(keptGrant({ mode: "inheritsArchiveWrite", keys: [] }), null);
+  assert.equal(keptGrant({ mode: "notConfigured", keys: [] }), null);
+  assert.deepEqual(keptGrant({ mode: "secretKeys", secretName: "s",
+    keys: ["access-key-id", "secret-access-key", "session-token"] }),
+  { mode: "secretKeys", secret: { existing: { name: "s", sessionTokenKey: "session-token" } } });
+});
+
+test("h2_keep_is_refused_rather_than_guessed_when_the_key_names_are_not_the_defaults", async () => {
+  const item = fullyGranted();
+  item.access = Object.assign({}, item.access, {
+    archiveRead: { mode: "secretKeys", secretName: "hand-made", keys: ["AWS_ID", "AWS_KEY"],
+      serviceAccountName: null },
+  });
+  const problems = validateGrants(ROTATE_DEFAULTS, item.access);
+  assert.match(problems.archiveReadSource, /keep cannot be sent for this grant/);
+  assert.match(problems.archiveReadSource, /\(AWS_ID, AWS_KEY\)/);
+  let sent = false;
+  await assert.rejects(submitRotation(NS, "primary", ROTATE_DEFAULTS, 2, {
+    updateDestinationAccess: () => { sent = true; return Promise.resolve({}); },
+  }, item.access), (error) => error.kind === "invalid");
+  assert.equal(sent, false, "nothing is sent that would point the grant at the wrong keys");
+});
+
+test("h2_choosing_absent_warns_what_turns_off_and_sends_exactly_that", () => {
+  const item = fullyGranted();
+  const html = decode(renderRotateForm(item, {
+    mayOperate: true,
+    rotate: { draft: Object.assign({}, ROTATE_DEFAULTS, { evidenceReadSource: "absent" }) },
+  }));
+  const warning = /<p class="caveat" data-grant-inputs="removes" id="rotate-evidenceRead-removes">([^<]*)<\/p>/
+    .exec(html);
+  assert.ok(warning !== null, "the warning is shown while absent is chosen");
+  assert.equal(warning[1], ABSENT_REMOVES.evidenceRead);
+  assert.match(warning[1], /evidence verification stops/);
+  // A grant still on keep carries its warning hidden.
+  assert.match(html, /id="rotate-archiveRead-removes" hidden>/);
+  const body = rotationBody(Object.assign({}, ROTATE_DEFAULTS, { evidenceReadSource: "absent" }),
+    item.generation, item.access);
+  assert.equal(Object.prototype.hasOwnProperty.call(body.access, "evidenceRead"), false,
+    "absent is sent as absent: the one grant the reader removed");
+  assert.deepEqual(Object.keys(body.access).sort(),
+    ["archiveRead", "archiveWrite", "evidenceWrite"]);
+  // A grant the destination does not hold carries no warning: absent removes nothing.
+  const unheld = decode(renderRotateForm(decoded("destination.json").item, { mayOperate: true }));
+  assert.equal(unheld.indexOf("id=\"rotate-evidenceWrite-removes\""), -1);
 });

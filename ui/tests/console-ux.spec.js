@@ -718,7 +718,8 @@ test("mcp_10_the_destination_form_opens_from_a_button_and_shows_only_the_chosen_
   assert.equal(sourceShows("workloadIdentity", "sa"), true);
   assert.equal(sourceShows("absent", "secret"), false);
   assert.deepEqual(Object.keys(SOURCE_INPUTS).sort(),
-    ["absent", "archiveReadGrant", "controllerIdentity", "existing", "new", "workloadIdentity"]);
+    ["absent", "archiveReadGrant", "controllerIdentity", "existing", "keep", "new",
+      "workloadIdentity"]);
   // A draft or a refusal keeps the form OPEN, so no outcome is hidden.
   assert.match(renderDestinationForm({ draft: { name: "primary" }, state: { phase: "idle" } }),
     /^<details class="create-disclosure" id="destination-create-disclosure" open>/);
