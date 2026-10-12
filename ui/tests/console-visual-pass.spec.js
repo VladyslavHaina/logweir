@@ -7,8 +7,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { decoded } from "./console-fixture.js";
+import { LIFE, fakeView, parse } from "./fake-view.js";
+
+import { resetMode, selectMode } from "../client.js";
+import { mountClusters } from "../pages/clusters.js";
 
 import { restoreDestination } from "../pages/restore-wizard.js";
 import { restoreProgressSentence } from "../pages/approvals.js";
@@ -55,4 +61,56 @@ test("m2_a_restore_waiting_for_its_approval_says_so_and_not_none_will", () => {
     document: item, console: true, meta: { transport: "stream", attempt: 0 },
   });
   assert.match(html, /<dt>awaiting approval<\/dt><dd>yes: waiting for approval/);
+});
+
+// M3. A viewer got the whole Create a KafkaCluster form with an enabled CREATE,
+// password and key fields included. Destinations hides its form for such a
+// role.
+
+const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
+const session = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
+
+/** Runs `body` under the session document `doc`, with every network call
+ *  refused: a mount's own reads go to the stub it is handed, and the one read
+ *  through the default client (the retention list) fails, as its panel allows. */
+async function signedInAs(doc, body) {
+  const original = globalThis.fetch;
+  globalThis.fetch = () => Promise.reject(new Error("this suite never dials"));
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: doc }) });
+  try {
+    return await body();
+  } finally {
+    resetMode();
+    globalThis.fetch = original;
+  }
+}
+
+const listsNothing = {
+  list() { return Promise.resolve({ items: [] }); },
+  destinations() { return Promise.resolve({ items: [] }); },
+};
+
+test("m3_a_role_that_cannot_create_a_connection_is_not_offered_the_form", async () => {
+  const viewer = session("session-viewer.json");
+  assert.equal(viewer.namespaces[0].capabilities.connectionCreate, false);
+  const read = await signedInAs(viewer, async () => {
+    const view = fakeView();
+    await mountClusters(view.root, "team-a", parse, LIFE(), listsNothing);
+    return view.html();
+  });
+  assert.doesNotMatch(read, /id="cluster-form"/,
+    "NEGATIVE CONTROL: a viewer got the create form, CREATE enabled");
+  assert.doesNotMatch(read, /type="password"|private key/);
+  assert.match(read, /id="clusters-read-only"/);
+  // A role that may create still gets it.
+  const operator = session("session.json");
+  assert.equal(operator.namespaces[0].capabilities.connectionCreate, true);
+  const full = await signedInAs(operator, async () => {
+    const view = fakeView();
+    await mountClusters(view.root, "team-a", parse, LIFE(), listsNothing);
+    return view.html();
+  });
+  assert.match(full, /id="cluster-form"/);
+  assert.doesNotMatch(full, /id="clusters-read-only"/);
 });
