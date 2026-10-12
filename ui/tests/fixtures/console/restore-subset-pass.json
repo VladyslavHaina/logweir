@@ -54,6 +54,16 @@
       ],
       "engineRuns": 2
     },
+    "integrityResult": "pass",
+    "topicPreflight": {
+      "timestampType": "CreateTime",
+      "retentionMs": 604800000,
+      "timestampBound": 1756649100000
+    },
+    "oldTopics": [
+      "orders",
+      "orders-dlq"
+    ],
     "operation": {
       "state": "succeeded",
       "stateReason": "Ok",
