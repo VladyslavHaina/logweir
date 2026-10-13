@@ -11,13 +11,12 @@ import {
 } from "@tanstack/react-router";
 import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
-import { Backups } from "./pages/backups/BackupList";
-import { BackupDetail } from "./pages/backups/BackupDetail";
 import { Restores } from "./pages/Restores";
 import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
 import { Cutover } from "./pages/Cutover";
 import { NotInPrototype } from "./pages/NotInPrototype";
+import { backupRoutes } from "./pages/backups/routes";
 
 const root = createRootRoute({ component: Outlet });
 
@@ -32,8 +31,6 @@ const home = createRoute({
 export const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
 
 const overview = createRoute({ getParentRoute: () => nsRoute, path: "/", component: Overview });
-const backups = createRoute({ getParentRoute: () => nsRoute, path: "backups", component: Backups });
-const backup = createRoute({ getParentRoute: () => nsRoute, path: "backups/$name", component: BackupDetail });
 const restores = createRoute({ getParentRoute: () => nsRoute, path: "restores", component: Restores });
 const restoreNew = createRoute({
   getParentRoute: () => nsRoute,
@@ -48,7 +45,7 @@ const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", c
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, planned]),
+  nsRoute.addChildren([overview, ...backupRoutes(nsRoute), restores, restoreNew, restore, cutover, planned]),
 ]);
 
 export const router = createRouter({

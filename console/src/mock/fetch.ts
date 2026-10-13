@@ -17,6 +17,7 @@ import {
   withPoint,
 } from "./data";
 import { declareRestore } from "./themeA";
+import { backupsMock } from "./backups";
 
 const LATENCY_MS = 350;
 
@@ -162,6 +163,7 @@ function newestVerified(ns: string, source: string): Backup | undefined {
 let restoreSerial = 0;
 
 async function route(request: Request): Promise<Response> {
+  { const evidence = await backupsMock(request, route); if (evidence) return evidence; }
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;
