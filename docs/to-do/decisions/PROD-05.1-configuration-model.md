@@ -150,8 +150,12 @@ Measured facts the table does not carry, and PROD-05.2 must:
   clock. Recorded as `inherited` with its value, so PROD-05.2 can name the difference.
 - **4.x sets a cluster-wide dynamic default for `min.insync.replicas`** (source
   `dynamicDefaultBrokerConfig` on a fresh 4.3.1 topic, `defaultConfig` on 3.9.2).
-- **`CreateTopics` accepts `min.insync.replicas` above the replication factor** on both lines (the
-  topic then refuses `acks=all` writes). A valid create is not a writable topic.
+- **`CreateTopics` accepts `min.insync.replicas` above the replication factor** on both lines.
+  Corrected 2026-10-13 (PROD-05.2, row C21, measured on 3.9.2 and 4.3.1): the topic then still
+  accepts `acks=all` writes, because both brokers bound the effective minimum by the replication
+  factor. The earlier text said such writes are refused; that was not measured. PROD-05.2 still
+  caps the value at the target's factor and states the cap, so the restored topic says what it
+  enforces.
 
 ## 3. The classes
 
