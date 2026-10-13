@@ -1,9 +1,7 @@
 # Verifying a Logweir drill scorecard
 
 How to authenticate a scorecard, check it, and read its limits, with Logweir or
-with the independent Python verifier. What the evidence supports against the
-backup and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and
-HIPAA is the [control-evidence mapping](control-evidence.md).
+with the independent Python verifier.
 
 ## What the artifact is
 
@@ -318,9 +316,8 @@ to a change record: the table cannot be verified.
 
 ## What the scorecard does **not** claim
 
-A signature authenticates the bytes; judge the claims' scope separately. The
-[control-evidence mapping](control-evidence.md#what-the-evidence-does-not-show)
-states these limits against each clause.
+A signature authenticates the bytes; judge the claims' scope separately. Each
+section below states one limit.
 
 ### A pass compares the restored topic with the archive, not with the source
 

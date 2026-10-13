@@ -28,11 +28,11 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95 and 96. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below. Items 91 to 96
+`v0.2.0` release that carries it has its own record below. Items 91 to 97
 landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
@@ -2258,6 +2258,20 @@ controller reads this runner as before: FX-34's `--line-token` gets FX-34's
 output, and the plain lines are still printed last. Runs created by an older
 controller are read as that controller read them.
 
+#### 97. The control-evidence mapping page is removed (owner's decision)
+
+**Changed.** `docs/control-evidence.md` was removed, together with the test
+that held it to the evidence fields. That page mapped Logweir's evidence onto
+the backup and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and
+HIPAA. The scorecard's limits are stated in
+[docs/verify-a-scorecard.md](verify-a-scorecard.md#what-the-scorecard-does-not-claim),
+which no longer links to the mapping, and the README's documentation table no
+longer lists it. No product behaviour, format or evidence changes.
+**Do:** nothing. A bookmark to the old page finds nothing; read the auditor
+guide instead.
+**Scope:** `just links` and doc_lint over the tree without the page.
+**Rollback:** an older release's documentation still carries the page.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -2397,7 +2411,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95 and 96, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2471,6 +2485,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 94 | the runner's restore selection and one controller refusal code | the two rolled together |
 | 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
 | 96 | the controller and every runner image (a new flag on every runner Job), the `KafkaCluster` CRD (a pattern) | `controllerImage` and `runnerImage` rolled together |
+| 97 | the documentation only | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

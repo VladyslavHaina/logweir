@@ -2224,6 +2224,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "every runner line a controller acts on is sealed",
             "`--runner-line-token <hex>`",
         ),
+        // Item 97: the control-evidence page removed; where the limits are.
+        (
+            "the control-evidence mapping page is removed",
+            "verify-a-scorecard.md#what-the-scorecard-does-not-claim",
+        ),
     ];
     assert_eq!(
         items.len(),
