@@ -680,6 +680,12 @@ struct Restore {
 
 /// `logweir restore run` over `spec_text`, under an ordinary approval.
 fn restore(spec_text: &str, label: &str) -> Restore {
+    restore_with(spec_text, label, &[])
+}
+
+/// [`restore`], with `env` over the engine's (a wrapper in front of the
+/// real engine, as `replay_selection.rs`'s widening engine).
+fn restore_with(spec_text: &str, label: &str, env: &[(String, String)]) -> Restore {
     let spec = demo_dir().join(format!("p042-{label}-restore.yaml"));
     std::fs::write(&spec, spec_text).expect("written");
     let approval = approve(&spec, "Restore", &format!("{label}-restore"));
@@ -712,6 +718,9 @@ fn restore(spec_text: &str, label: &str) -> Restore {
         .arg("--evidence-keys")
         .arg(evidence_keyring());
     engine_env(&mut c);
+    for (k, v) in env {
+        c.env(k, v);
+    }
     let out = output_within(c, 900);
     let scorecard_bytes = std::fs::read(&out_json).unwrap_or_default();
     let scorecard: Value = serde_json::from_slice(&scorecard_bytes).unwrap_or(Value::Null);
@@ -1450,25 +1459,66 @@ fn only_a_passing_complete_restore_maps_positions() {
     );
     // A complete restore with a record planted in the target before phase 7:
     // `fail-integrity` and no mapping; the switchover names `unexpected`.
-    // (The plant is staged by producing into the restored topic while the
-    // runner waits at phase 7 is not needed: a planted record any time
-    // before the verification is enough, so it is produced as soon as the
-    // topic appears.)
+    // DETERMINISTIC, never a race with the runner: the engine wrapper
+    // (`engine-hold-after-restore.sh`) holds once its restore has written
+    // every record and before the runner's phase 7 can start; the record is
+    // planted in that window and the wrapper then lets the runner go on.
     let planted_spec = restore_spec(&b, &topic, &format!("c11p-{n}-"), true, "");
     let planted_target = format!("c11p-{n}-{topic}");
-    let plant = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(300);
-        while Instant::now() < deadline {
-            if harness::topic_exists(&planted_target) {
-                produce(&planted_target, 0, 9000, 1);
-                return true;
+    let hold = demo_dir().join(format!("p042-c11-hold-{n}"));
+    let _ = std::fs::remove_dir_all(&hold);
+    std::fs::create_dir_all(&hold).expect("the hold directory");
+    let hold_engine = vec![
+        (
+            "LOGWEIR_ENGINE_BIN".to_string(),
+            root()
+                .join("e2e/fixtures/engine-hold-after-restore.sh")
+                .display()
+                .to_string(),
+        ),
+        (
+            "LOGWEIR_E2E_REAL_ENGINE".to_string(),
+            engine_bin().display().to_string(),
+        ),
+        (
+            "LOGWEIR_E2E_HOLD_DIR".to_string(),
+            hold.display().to_string(),
+        ),
+    ];
+    let plant = {
+        let (hold, target) = (hold.clone(), planted_target.clone());
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(600);
+            while !hold.join("restored").exists() {
+                if Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        false
-    });
-    let planted = restore(&planted_spec, "c11p");
-    assert!(plant.join().unwrap(), "the plant found the topic");
+            produce(&target, 0, 9000, 1);
+            std::fs::write(hold.join("planted"), b"planted").is_ok()
+        })
+    };
+    let planted = restore_with(&planted_spec, "c11p", &hold_engine);
+    assert!(
+        plant.join().unwrap(),
+        "the record was planted while the engine held"
+    );
+    assert_eq!(
+        planted.scorecard["outcome"],
+        "fail-integrity",
+        "C11: a record the archive does not explain fails the complete restore: {}",
+        text(&planted.out)
+    );
+    assert!(
+        planted
+            .scorecard
+            .pointer("/integrity/verification/complete/replay/unexpected")
+            .and_then(Value::as_u64)
+            .is_some_and(|u| u > 0),
+        "C11: replay.unexpected counts the planted record: {}",
+        planted.scorecard["integrity"]["verification"]
+    );
     assert!(
         planted.mapping.is_none(),
         "C11: no mapping over a failing restore"
