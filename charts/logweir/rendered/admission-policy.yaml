@@ -247,6 +247,11 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create", "patch"]
+  # PROD-11.1a: `patch` adds and removes the `logweir.dev/clone-cleanup`
+  # finalizer on a TTL clone's `Restore`. No `update`, no `delete`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["restores"]
+    verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals/status

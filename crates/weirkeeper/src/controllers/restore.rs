@@ -92,6 +92,11 @@ use super::backup::{
 };
 use super::Context;
 use crate::check;
+
+/// PROD-11.1a: a TTL clone's lifetime, cleanup Job and finalizer
+/// (`controllers/restore_clone.rs`).
+#[path = "restore_clone.rs"]
+pub mod restore_clone;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
@@ -6042,18 +6047,29 @@ async fn reconcile_restore_run(
     // admission record is this pass's first write, and seam S7 preconditions
     // every later write on where it left the object.
     let mut written: Option<Restore> = None;
-    let result = reconcile_restore_inner(
+    // PROD-11.1a: a TTL clone's admission, lifetime and cleanup wrap the
+    // reconcile (`restore_clone::around`); every other `Restore` is the
+    // reconcile, unchanged.
+    let result = restore_clone::around(
         restore,
         client,
-        scorecard,
-        verify,
         now,
-        runner,
-        policies,
-        archive_url,
-        pool,
-        memory,
-        &mut written,
+        runner.image.as_deref(),
+        // Boxed: the reconcile's future is large, and holding it by value in
+        // the wrapper's would double what one poll puts on the stack.
+        Box::pin(reconcile_restore_inner(
+            restore,
+            client,
+            scorecard,
+            verify,
+            now,
+            runner,
+            policies,
+            archive_url,
+            pool,
+            memory,
+            &mut written,
+        )),
     )
     .await;
     let restore = written.as_ref().unwrap_or(restore);

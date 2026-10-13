@@ -1042,6 +1042,11 @@ pub struct RestoreStatus {
     /// What phase 9 removed, and what it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<Teardown>,
+    /// PROD-11.1a: a TTL clone (`target.teardown: {ttlSeconds}` in a scratch
+    /// plan) — when it expires and how its cleanup went. Absent on every
+    /// other `Restore`, and on anything an older controller reconciled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone: Option<CloneStatus>,
     /// The condition set. `RunnerReady` joins `Verified` as a condition every
     /// terminal builder carries forward, because a JSON merge patch replaces
     /// the whole list.
@@ -1106,6 +1111,42 @@ pub struct RestoreCompletion {
     pub sample_window: Option<SampleWindow>,
 }
 
+/// **PROD-11.1a: a TTL clone's lifetime and cleanup.**
+///
+/// A passing clone keeps its topics until `expiresAt` (`Active`); then, or at
+/// once when the `Restore` is deleted (finalizer `logweir.dev/clone-cleanup`),
+/// one cleanup Job runs `logweir restore cleanup` (`Removing`), which deletes
+/// only the topics the run's signed scorecard records, while each topic's ID
+/// is the recorded one. `Removed` copies what it deleted to
+/// `status.teardown`. At most three attempts, five minutes apart; then
+/// `RemovalFailed`, and the finalizer stays until an operator removes it. A
+/// clone whose run did not pass was torn down at once by its own run
+/// (`NotKept`).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneStatus {
+    /// The plan's `target.teardown.ttl_seconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    /// When the cleanup is due: the run's success, as the controller recorded
+    /// it, plus `ttlSeconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Time>,
+    /// `Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// How many cleanup Jobs have been started (at most 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// The current cleanup Job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ref: Option<LocalRef>,
+    /// Why the cleanup failed or refused, when it did; bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub reason: Option<String>,
+}
+
 /// One topic teardown could not remove.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1123,8 +1164,9 @@ pub struct TeardownFailure {
 /// exact names it created, through a deleter that refuses any name outside the
 /// run's prefix. The controller writes `failed` from the runner's
 /// `teardown-failed=` line (FX-44), on a run that passed and on one that
-/// failed after its creation step; it writes neither `deleted` nor
-/// `attestationKey`.
+/// failed after its creation step. For a TTL clone (PROD-11.1a) it also
+/// copies `deleted`, `failed` and `attestationKey` from its cleanup Job's
+/// `clone-cleanup=` line.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Teardown {

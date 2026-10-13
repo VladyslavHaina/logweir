@@ -304,6 +304,45 @@ spec:
             description: '`Restore.status`.'
             nullable: true
             properties:
+              clone:
+                description: 'PROD-11.1a: a TTL clone (`target.teardown: {ttlSeconds}` in a scratch plan) — when it expires and how its cleanup went. Absent on every other `Restore`, and on anything an older controller reconciled.'
+                nullable: true
+                properties:
+                  attempts:
+                    description: How many cleanup Jobs have been started (at most 3).
+                    format: int64
+                    nullable: true
+                    type: integer
+                  expiresAt:
+                    description: 'When the cleanup is due: the run''s success, as the controller recorded it, plus `ttlSeconds`.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  jobRef:
+                    description: The current cleanup Job.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  phase:
+                    description: '`Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.'
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Why the cleanup failed or refused, when it did; bounded.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  ttlSeconds:
+                    description: The plan's `target.teardown.ttl_seconds`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
               completion:
                 description: 'What the run actually restored, copied by JSON pointer from the SIGNED scorecard. Written ONLY beside a `Valid` evidence verdict (basis `Current` or `Historical`) over that same scorecard, in the write that records the verdict: it is absent while verification is pending or `NotAttempted`, and it is never written from a scorecard whose verdict is `Invalid` or `Untrusted`.'
                 nullable: true

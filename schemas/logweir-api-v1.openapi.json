@@ -7083,6 +7083,40 @@
           }
         ]
       },
+      "CloneView": {
+        "description": "PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`.",
+        "type": "object",
+        "properties": {
+          "attempts": {
+            "description": "Cleanup Jobs started so far (at most 3).",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When the cleanup is due.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "phase": {
+            "description": "`Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Why the cleanup failed or refused, bounded.",
+            "type": "string",
+            "nullable": true
+          },
+          "ttlSeconds": {
+            "description": "The plan's lifetime in seconds.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
       "CompleteVerificationView": {
         "description": "**PROD-08.1a.** A complete verification's result, copied from `Restore.status.integrity.complete` (itself copied from the signed scorecard) and never recomputed.",
         "type": "object",
@@ -10018,6 +10052,11 @@
           "capture": {
             "description": "A Backup's capture window.",
             "$ref": "#/components/schemas/CaptureView",
+            "nullable": true
+          },
+          "clone": {
+            "description": "PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`; absent for every other run.",
+            "$ref": "#/components/schemas/CloneView",
             "nullable": true
           },
           "completion": {
