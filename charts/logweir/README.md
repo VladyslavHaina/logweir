@@ -585,12 +585,12 @@ evidence object.
 ## The checks that hold the chart to the tree
 
 `just crds-check` holds `crds/` to the Rust emitter. `scripts/check-chart.sh`
-(`just chart-check`) refuses a copy of `ui/` in the chart, checks the bootstrap
+(`just chart-check`) refuses a copy of the page in the chart, checks the bootstrap
 pin, lints every example, regenerates `rendered/` with no drift, requires a
 digest on every image but the three Logweir images at `:latest`, refuses `ui.*`,
 and holds the console's grants to the adapter. `scripts/check-image-api.sh`
-(`just smoke-console`) compares the twenty-six files the console image serves
-with `ui/`. `chart_lint.rs` checks what each flag renders, and
+(`just smoke-console`) compares the files the console image serves with this
+tree's console build. `chart_lint.rs` checks what each flag renders, and
 `scripts/helm-demo.sh` (`just helm-demo`) walks a real cluster.
 
 Documentation is licensed [CC-BY-4.0](../../docs/LICENSE-docs).

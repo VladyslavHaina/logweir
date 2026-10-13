@@ -47,7 +47,7 @@ none is refused rather than read as the more permissive one.
 mode: localAdmin                       # the only accepted value
 listen: "127.0.0.1:8484"               # a loopback IP literal; a hostname is refused
 publicOrigin: "http://127.0.0.1:8484"  # the exact Origin unsafe requests must carry
-uiDirectory: ./ui
+uiDirectory: console/dist              # `npx vite build` in console/ writes it
 localAdmin:
   subject: admin
   displayName: Local administrator     # never used for authorization
@@ -90,7 +90,7 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | Route | Action | What it does |
 |---|---|---|
 | `GET /healthz`, `GET /readyz` | public | liveness, readiness |
-| `GET /ui/…` | public | the page (*The static UI*) |
+| `GET /ui/…` | public | the console (*The console's files*) |
 | `GET /auth/login`, `GET /auth/callback` | public | shared-mode sign-in (*Sign-in*) |
 | `GET /api/v1/session` | signed in | the actor, roles, grants, CSRF token, capability flags |
 | `POST /api/v1/session/logout` | signed in | clears the session cookie (shared mode) |
@@ -582,14 +582,16 @@ reaches a Pod, log, exec stream, Job or core `Namespace`. There is no delete.
 - Every call has a 10-second deadline (`504 upstream_timeout`). Kubernetes
   messages are redacted before they are logged and never returned.
 
-## The static UI
+## The console's files
 
-`/ui/` serves an allowlist built at startup: the top-level `*.html`, `*.js` and
-`*.css` files of `uiDirectory` and the same directly inside `pages/`.
-`README.md`, `tests/`, other files, dotfiles and symbolic links are never
-served. Paths are matched exactly, so `/ui/../Cargo.toml` is `404`. The
-service adds `favicon.svg` and its own `runtime.js` (`CONSOLE_RUNTIME_JS`),
-which sets `window.LOGWEIR_CONSOLE = {servedBy: "logweir-api"}`.
+`/ui/` serves an allowlist built at startup from `uiDirectory`, the console's
+build (`console/dist`): the top-level `*.html`, `*.js` and `*.css` files and,
+in `assets/`, the hashed scripts, styles, `woff2` fonts and `svg` images.
+Other files and directories, dotfiles and symbolic links are never served.
+Paths are matched exactly, so `/ui/../Cargo.toml` is `404`. `/ui/` is
+`index.html`, `no-cache`; a file in `assets/` is
+`Cache-Control: public, max-age=31536000, immutable`. The service adds
+`favicon.svg`. The page learns its state from `GET /api/v1/session`.
 
 ## Shared mode
 
@@ -824,9 +826,9 @@ peer (audit `loginRateKey`). `Forwarded` is never read. IPv6 clients count by
 ## Deployment
 
 The image is `logweir-console` (`Dockerfile.console`): `logweir-api` and the
-twenty-six files of `ui/` at `/ui`, as `USER 65532:65532` with no `CMD`.
-`scripts/check-image-api.sh` holds the served files to `ui/` and refuses a
-key-shaped path. The chart renders the principal under `api.enabled` (a
+console's build at `/ui`, as `USER 65532:65532` with no `CMD`.
+`scripts/check-image-api.sh` holds the served files to this tree's
+`console/dist` and refuses a key-shaped path. The chart renders the principal under `api.enabled` (a
 ServiceAccount, three ClusterRoles, a RoleBinding per namespace) and the
 workload under `api.console.enabled`, which needs the first; its chart README
 lists every object. A Service, an Ingress (TLS required, host

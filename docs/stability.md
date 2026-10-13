@@ -612,13 +612,12 @@ an Apple M4), with harnesses that re-run:
 cargo test --release -p logweir-api  --test scale -- --ignored --nocapture --test-threads=1
 cargo test --release -p weirkeeper   --test scale -- --ignored --nocapture --test-threads=1
 cargo test --release -p logweir-kafka --test scale -- --ignored --nocapture --test-threads=1
-MEASURE_ROWS=5000 MEASURE_TOPICS=5000 node scripts/plat18-2-measure.mjs
 ```
 
 At the largest sizes the product pages, nothing was near a budget: discovery
 steps took at most 18 ms for 50,000 topics against a 300-second Job deadline,
-API pages stayed in tens of milliseconds, and the console rendered 5,000 rows
-in under 30 ms. A catalog point page re-reads its view from the first page
+and API pages stayed in tens of milliseconds. (The console's 5,000-row render
+was measured on the console PROD-18.1 replaced, and is not re-measured.) A catalog point page re-reads its view from the first page
 (the cursor is a row offset), bounded at eight pages a request. Live on
 docker-desktop (2026-09-24, 258 real points), a `Full` catalog sync took 58.5 s;
 on that build a hundred accepted "Back up now" requests became a hundred runner

@@ -1280,14 +1280,14 @@ storage. This path reads no `Backup`, `BackupSchedule` or source `KafkaCluster`.
    trust does not list is `UntrustedSigner` and never offered. Compare the key id
    out of band ([keys.md](keys.md)), add the key to the `TrustPolicy` with
    `kubectl apply`, then set `spec.syncRequest`.
-4. **Choose a point.** The wizard (`#/restore?ns=<ns>&catalog=<name>&point=<pointId>`)
+4. **Choose a point.** The wizard (`#/<ns>/restores/new?catalog=<name>&point=<pointId>`)
    re-reads the row from the API and offers it only when it is `selectable`, the
    verdict join is complete and the row names its set id, receipt key and both
    digests. A catalog synced by a runner up to v0.2.0-rc.1 redacted scheduled
    runs' set ids; upgrade the runner and sync again. The view lists each topic's
-   partitions and replication factor, and its schema dependency: the wizard
-   names schema-dependent topics under "Registry not captured: applications may
-   not read these records after restore."
+   partitions and replication factor, and its schema dependency: the catalog
+   page names schema-dependent topics under "Registry not captured: applications
+   may not read these records after restore."
 5. **The plan is bound to the point**: `source.backup: <backupId>` and
    `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`. The
    point in time defaults to `coveredTo − 1 ms` and must be in
@@ -2169,18 +2169,19 @@ authorised for the session's own identity and namespace grants. The legacy
 (release-notes item 75); the chart refuses `ui.*` by name. The console's
 `shared` mode is the one component that may have an Ingress.
 
+The console is at `/ui/`; every page's address is `#/<namespace>/<page>`
+([console/README.md](../console/README.md), *Routes*). The navigation shows
+only what the session's role may read in the namespace.
+
 | Page | What it does |
 |---|---|
-| `#/destinations` | Create and edit destinations, test them (`:test`), see their usage. Enter an access key once; the console creates a bound Secret and never shows it again |
-| `#/clusters` | Saved connections and their topic discoveries |
-| `#/schedules` | Schedules, the future-policy panel, next-run previews, "Back up now" |
-| `#/backups`, `#/history` | Runs, their exit, records and verification |
-| `#/restore` | The restore wizard and its readiness check |
-| `#/operations?ns=&kind=&name=&uid=` | One run, live over a server-sent-event stream; cancels nothing |
-| `#/catalog` | Connected archives and their points; connect an existing archive |
-| `#/protection` | Protection health, read-only |
-| `#/keys` | Trust policies and keys (Administrator only) |
-| approvals | Confirm, approve, or record an out-of-band approval |
+| Overview (`#/<ns>`) | Policies against their objective, the newest point's age, the last 24 hours' runs and what needs attention, with Restore and Back up now |
+| Backups, Schedules, Protection | Runs, their exit, records and verification, and "Restore this point"; schedules with the guided create, the future-policy edit, next-run previews, suspend, "Back up now" and the retention panel; protection health, read-only |
+| Restores | Restores, each followed live over a server-sent-event stream (it cancels nothing); the five-step wizard (recovery point, topics and time, target, readiness check, review and create); *Retry to a fresh target* |
+| Switchovers | Review a verified restore's consumer positions, confirm, and follow the `Switchover`; its rollback steps are shown, never started |
+| Approvals | Confirm, approve a two-person request, or record an out-of-band approval |
+| Recovery catalog, Trust | Connected archives and their points, and connecting an existing archive; trust policies and keys (Administrator only) |
+| Connections, Destinations | Saved connections, their checks and topic discoveries; destinations, their access tests, rotation and usage. A credential is typed once; the console creates a bound Secret and never shows it again |
 
 What the console will and will not say:
 
@@ -2198,13 +2199,10 @@ What the console will and will not say:
 - **The browser evaluates no cron.** `GET /api/v1/cadence-previews` compiles a
   preset against the controller's own time-zone database. The page reads
   staleness from `nextRuns[0].at` in the past.
-- **A manual run is one run per intent.** The intent key is
-  `logweir-ui.manual.` plus 32 random hex characters, held in the form's draft:
-  a double click or a retry returns the same run (`replayed: true`); a reload
-  loses the draft, so a click after it is a new run. "Back up again" mints a new
-  intent. A suspended schedule or a `notReady` preflight needs a second
-  confirmation; confirming a red verdict is recorded as the annotation
-  `logweir.dev/readiness-ack`.
+- **A manual run is one run per intent.** "Back up now" holds one
+  idempotency key per click (`logweir-console.manual.` plus 32 random hex
+  characters): a double click or a retry returns the same run
+  (`replayed: true`), and "Back up again" sends a new key.
 - **Protection health and schedule health are two columns**, never collapsed.
 - **The catalog keeps availability and verification apart.** Whether a point may
   be restored is the API's `selectable`, read and never recomputed. **There is no
@@ -2228,10 +2226,11 @@ What the console will and will not say:
 - The API publishes no Job, pod or `ConfigMap` names and no frozen
   `locationDigest` on a catalog point; open vocabularies are rendered verbatim.
 
-`just lint` runs `scripts/check-ui-offline.sh`, which fails on any external
-resource, credential, browser-storage write or non-relative module specifier
-under `ui/`. The page ships inside the console image (`Dockerfile.console`);
-`just smoke-console` compares its served assets with `ui/`.
+The console's lint refuses markup from data, browser storage and any request
+outside its one client, and `console/scripts/check-dist.mjs` refuses a build
+that carries the mock or names a file outside `./assets/`. The page ships inside
+the console image (`Dockerfile.console`); `just smoke-console` compares its
+served files with this tree's `console/dist`.
 
 ### Recording an out-of-band approval (strict, v1)
 
@@ -2431,7 +2430,7 @@ is its newest record.
 - Bounds: 16 ledger entries (8 recoveries), 16 schedules, 64 topics on
   `lastAvailablePoint` (`topicsTruncated: true` beyond), and the newest 50 runs
   over at most 5 API pages of 200.
-- The console's `#/protection` page shows this read-only.
+- The console's Protection page shows this read-only.
 
 ## The installation policy and roles
 

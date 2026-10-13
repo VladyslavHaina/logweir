@@ -2031,6 +2031,34 @@ a read. Live on the compose stack: the e2e row that failed this way in CI
 **Rollback:** an older runner image fails the run on such a drop, as before;
 nothing is stored differently.
 
+<!-- PROD-18.1 R8: one item, unnumbered on purpose. The orchestrator numbers it
+at integration: a `#### N.` heading, its doc_lint token row, and the entry's two
+item lists. -->
+**The console is rebuilt, and `logweir-api` serves it at `/ui/` (PROD-18.1).**
+
+**Changed.** The console is new: React, TypeScript and PatternFly, built from
+`console/` into the `logweir-console` image. It keeps every flow the old page
+had, under grouped navigation (Overview; Protect: Backups, Schedules,
+Protection; Recover: Restores, Switchovers, Approvals; Evidence: Recovery
+catalog, Trust; Settings: Connections, Destinations), with a five-step restore
+wizard in place of six, a live restore page, theme A's switchover review, and
+light and dark themes. Addresses are `/ui/#/<namespace>/<page>`; an old
+address such as `#/backups?ns=team-a` reaches no page (it reads as a namespace
+named `backups`). The image serves
+the build's page and its hashed files under `assets/` (`immutable`), and
+nothing else: the old page's files, its served `runtime.js` and the
+`/ui/next/` preview are gone. The API, the CSP, the session and the sign-in
+round trip are unchanged. The release no longer attaches `ui-files.sha256`:
+the console is the `logweir-console` image, by digest, and
+`scripts/check-image-api.sh` holds its `/ui` to the tagged commit's build.
+**Do:** nothing; update bookmarks to the new addresses.
+**Scope:** the console's Vitest rows (every flow, its refusals and the plan
+goldens, which `console_plan.rs` also parses into `RestoreSpec`), its
+Playwright rows against `logweir-api` on the host, and the image check; the
+journeys on a cluster are the PoC pass's.
+**Rollback:** an older `logweir-console` image serves the old page again;
+nothing is stored differently.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -3184,7 +3212,7 @@ policy or roster ([keys.md](keys.md)).
   its check until the longest time a check may take (12 minutes; a discovery 7)
   and then says "did not finish", with *Run the check again*. P16 (`fdb48cd8`):
   a repaint of a running check keeps the reader's scroll and focus
-  ([ui/README.md](../ui/README.md)).
+  (`ui/README.md`, in the console PROD-18.1 replaced).
 - **A followed check stops at the ingress's own `503` (P17, console, open).**
   When no console pod is ready the ingress answers `503` with a plain-text body,
   and the page stops following ("could not be read again") though the check

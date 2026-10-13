@@ -13,8 +13,8 @@ Report privately through this repository's GitHub Security Advisories
 
 ## Scope
 
-In scope — the `logweir` binary, the `weirkeeper` controller, the static `ui/`
-bundle and the `logweir-*` crates in this repository, and in particular
+In scope — the `logweir` binary, the `weirkeeper` controller, the console
+(`console/`) and the `logweir-*` crates in this repository, and in particular
 anything that lets: a drill scorecard or a backup receipt be forged or its
 signature cover less than a reader would assume; an approval be accepted that
 one of the approval checks should have refused; a lock proof be bypassed; a
@@ -171,11 +171,10 @@ treated as high severity.
 
 ## Key material in this repository
 
-`e2e/fixtures/signed/signing.pem` and `public.pem`, and
-`ui/tests/fixtures/approver.pem` and `approver.pub.pem`, are **throwaway test
-fixtures**. They exercise signature verification and CLI/UI approval parity;
-never use them for real backups, drills or approvals. The fixture READMEs
-explain their regeneration and intended scope.
+`e2e/fixtures/signed/signing.pem` and `public.pem` are **throwaway test
+fixtures**. They exercise signature verification; never use them for real
+backups, drills or approvals. The fixture README explains their regeneration
+and intended scope.
 
 `.gitignore` excludes other private key files. The separately tracked
 `third_party/org-root.pub.pem` is a public anchor, not a private signing key.
