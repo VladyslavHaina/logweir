@@ -22,7 +22,6 @@ import {
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { mayStart, useFollowedPreflight, useGrant, useIntentKey } from "../../api/connections";
 import {
-  ABSENT_GRANT_MEANING,
   DESTINATION_TEST_SENTENCE,
   GRANT_ROLES,
   NOT_JUDGED_SENTENCE,
@@ -59,7 +58,7 @@ function Location({ d }: { d: Destination }) {
         <CardTitle component="h2">Location</CardTitle>
       </CardHeader>
       <CardBody>
-        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "18ch" }}>
+        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "10ch", md: "18ch" }}>
           <Term term="Archive root">
             <code className="lw-break">{d.canonicalUrl}</code>
           </Term>
@@ -128,8 +127,8 @@ function Access({ d }: { d: Destination }) {
             items={GRANT_ROLES.map((role) => ({
               key: role,
               title: ROLE_WORDS[role],
-              meta: [reference(role), d.access[role].keys.join(", ")].filter(Boolean).join(" · ") || ABSENT_GRANT_MEANING[role],
-              status: <span className="lw-small">{MODE_WORDS[d.access[role].mode] ?? d.access[role].mode}</span>,
+              meta: [MODE_WORDS[d.access[role].mode] ?? d.access[role].mode, reference(role), d.access[role].keys.join(", ")].filter(Boolean).join(" · "),
+              status: null,
             }))}
           />
         ) : (
@@ -296,6 +295,11 @@ function Usage({ ns, name }: { ns: string; name: string }) {
 
 export function DestinationDetail() {
   const { ns, name } = useParams({ from: "/$ns/destinations/$name" });
+  // One page per destination: a test started or a rotation shown here never carries over to another.
+  return <DestinationPage key={`${ns}/${name}`} ns={ns} name={name} />;
+}
+
+function DestinationPage({ ns, name }: { ns: string; name: string }) {
   const grant = useGrant(ns);
   const readable = grant.can?.destinations !== false;
   const destination = useDestination(ns, name, readable);

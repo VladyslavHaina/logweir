@@ -120,7 +120,7 @@ function Slot({ d, heading, stopped, onRunAgain }: { d: TopicDiscovery; heading:
       {empty && (
         <Alert isInline isPlain variant="info" title={EMPTY_INVENTORY_SENTENCE} />
       )}
-      <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "16ch" }}>
+      <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "10ch", md: "16ch" }}>
         <Term term="Observed">
           <Instant value={d.observedAt} exact />
         </Term>

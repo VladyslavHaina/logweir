@@ -55,7 +55,7 @@ function Probe({ c, onReRead, reading }: { c: Connection; onReRead: () => void; 
       </CardHeader>
       <CardBody>
         <ProbeLabels state={p} />
-        <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "14ch" }}>
+        <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "10ch", md: "14ch" }}>
           <Term term={p.verdict === "probing" ? "Previously observed" : "Observed"}>
             {p.observedAt ? <Instant value={p.observedAt} exact /> : "No observation recorded"}
           </Term>
@@ -94,7 +94,7 @@ function Settings({ c }: { c: Connection }) {
         <CardTitle component="h2">Settings</CardTitle>
       </CardHeader>
       <CardBody>
-        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "16ch" }}>
+        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "10ch", md: "16ch" }}>
           <Term term="Role">{c.role}</Term>
           <Term term="Bootstrap servers">
             <span className="lw-break">{c.bootstrapServers.join(", ")}</span>
@@ -211,6 +211,11 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
 
 export function ConnectionDetail() {
   const { ns, name } = useParams({ from: "/$ns/connections/$name" });
+  // One page per connection: a check started here never carries over to another.
+  return <ConnectionPage key={`${ns}/${name}`} ns={ns} name={name} />;
+}
+
+function ConnectionPage({ ns, name }: { ns: string; name: string }) {
   const grant = useGrant(ns);
   const readable = grant.can?.connectionsRead !== false;
   const connection = useConnection(ns, name, readable);

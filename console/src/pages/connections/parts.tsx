@@ -404,7 +404,7 @@ export function CheckResult({
           </span>
         </Flex>
       )}
-      <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "12ch" }}>
+      <DescriptionList isCompact isHorizontal className="lw-gap-top" horizontalTermWidthModifier={{ default: "10ch", md: "12ch" }}>
         <Term term="Observed">
           <Instant value={p.observedAt} exact />
         </Term>
