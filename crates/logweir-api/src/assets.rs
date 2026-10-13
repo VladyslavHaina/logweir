@@ -2,8 +2,8 @@
 //!
 //! THE SAME SELECTION `Dockerfile.console` COPIES, AND NOTHING ELSE. The top-level
 //! `*.html`, `*.js` and `*.css` files of the configured directory and the same
-//! three extensions directly inside `pages/`. `README.md`, `tests/` (which
-//! carries a throwaway keypair and fixtures), any other subdirectory, any
+//! three extensions directly inside `pages/` (and the preview below). `README.md`,
+//! `tests/` (which carries a throwaway keypair and fixtures), any other subdirectory, any
 //! other extension, dotfiles and symbolic links are never in the allowlist, so
 //! no request path can reach them: a request path is looked up EXACTLY, with
 //! no decoding, normalisation or directory index, and anything not in the map
@@ -17,8 +17,19 @@
 //! its XML namespace URI. A `data:,` icon would be refused by this server's
 //! Content-Security-Policy (`img-src` falls back to `default-src 'self'`) and
 //! log a CSP violation on every page load; served from `'self'`, the icon
-//! needs no widening of the policy. A `.svg` FILE under `ui/` is still never
-//! selected: the extension list below is `Dockerfile.console`'s.
+//! needs no widening of the policy. A `.svg` FILE at the top level or in
+//! `pages/` is still never selected: the extension list below is
+//! `Dockerfile.console`'s.
+//!
+//! THE REBUILT CONSOLE'S PREVIEW, `/ui/next/` (PROD-18.1 R1). When the directory
+//! holds a `next/` directory, the same three extensions directly inside it and,
+//! one level deeper, the build's hashed files in `next/assets/` are served too,
+//! under the same exact-path lookup. Only there may a file also be a `woff2` font
+//! or an `svg` image (the design system's), and only there is a response cached
+//! as `immutable`: those names carry a content hash. `/ui/next/` is
+//! `next/index.html`. Nothing at `/ui/` changes; step R8 moves the new console
+//! to `/ui/` and retires the old one
+//! (`docs/to-do/decisions/PROD-18.1-console.md`).
 //!
 //! READ ONCE, INTO MEMORY. The bytes a browser receives are the bytes this
 //! process read at startup; nothing on disk can swap a file under a running
@@ -34,6 +45,15 @@ use http::header::{self, HeaderValue};
 
 use crate::app::AppState;
 use crate::problem::ApiError;
+
+/// The preview console's directory under the UI directory, and its path under `/ui/`.
+pub const NEXT_DIR: &str = "next/";
+
+/// Its hashed build output: the one place fonts, images and `immutable` caching are allowed.
+pub const NEXT_ASSETS_DIR: &str = "next/assets/";
+
+/// `Cache-Control` for a hashed file: its name changes whenever its bytes do.
+pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 /// The largest single asset accepted, 8 MiB.
 pub const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
@@ -102,6 +122,22 @@ fn content_type_for(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The preview console's hashed files: scripts, styles and the design system's
+/// fonts and images. No page: its one page is `next/index.html`.
+fn hashed_content_type_for(name: &str) -> Option<&'static str> {
+    let extension = name.rsplit_once('.').map(|(_, e)| e)?;
+    match extension {
+        "js" | "css" => content_type_for(name),
+        "woff2" => Some("font/woff2"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn is_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
 fn safe_name(name: &str) -> bool {
     !name.starts_with('.')
         && name
@@ -118,11 +154,23 @@ impl StaticAssets {
     /// selected file exceeds [`MAX_ASSET_BYTES`].
     pub fn load(dir: &Path) -> Result<StaticAssets, String> {
         let mut files = BTreeMap::new();
-        collect(dir, "", &mut files)?;
+        collect(dir, "", content_type_for, &mut files)?;
         let pages = dir.join("pages");
-        match std::fs::symlink_metadata(&pages) {
-            Ok(meta) if meta.file_type().is_dir() => collect(&pages, "pages/", &mut files)?,
-            _ => {}
+        if is_dir(&pages) {
+            collect(&pages, "pages/", content_type_for, &mut files)?;
+        }
+        let next = dir.join(NEXT_DIR);
+        if is_dir(&next) {
+            collect(&next, NEXT_DIR, content_type_for, &mut files)?;
+            let hashed = dir.join(NEXT_ASSETS_DIR);
+            if is_dir(&hashed) {
+                collect(
+                    &hashed,
+                    NEXT_ASSETS_DIR,
+                    hashed_content_type_for,
+                    &mut files,
+                )?;
+            }
         }
         if !files.contains_key("index.html") {
             return Err(format!(
@@ -139,7 +187,7 @@ impl StaticAssets {
                 content_type: "text/javascript; charset=utf-8",
             },
         );
-        // No file can collide with it: `.svg` is not a selected extension.
+        // No file can collide with it: `.svg` is selected only under `next/assets/`.
         files.insert(
             ICON_PATH.to_string(),
             Asset {
@@ -163,7 +211,12 @@ impl StaticAssets {
     }
 }
 
-fn collect(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Asset>) -> Result<(), String> {
+fn collect(
+    dir: &Path,
+    prefix: &str,
+    content_type_for: fn(&str) -> Option<&'static str>,
+    files: &mut BTreeMap<String, Asset>,
+) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -215,7 +268,19 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
     let Some(rest) = path.strip_prefix("/ui/") else {
         return ApiError::not_found().into_response();
     };
-    let key = if rest.is_empty() { "index.html" } else { rest };
+    // The preview's page loads `./assets/…`, which needs the trailing slash.
+    if rest == "next" && state.assets().get("next/index.html").is_some() {
+        return (
+            http::StatusCode::PERMANENT_REDIRECT,
+            [(header::LOCATION, "/ui/next/")],
+        )
+            .into_response();
+    }
+    let key = match rest {
+        "" => "index.html",
+        NEXT_DIR => "next/index.html",
+        _ => rest,
+    };
     let Some(asset) = state.assets().get(key) else {
         return ApiError::not_found().into_response();
     };
@@ -225,7 +290,12 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static(asset.content_type),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let cache = if key.starts_with(NEXT_ASSETS_DIR) {
+        IMMUTABLE
+    } else {
+        "no-cache"
+    };
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     response
 }
 
@@ -246,7 +316,14 @@ mod tests {
         assert!(!safe_name("sp ace.js"));
         assert!(safe_name("restore-wizard.js"));
         // The icon is compiled in, and a file of its extension is never
-        // selected — so no `ui/` file can shadow it.
+        // selected at the top level — so no `ui/` file can shadow it.
         assert_eq!(content_type_for(ICON_PATH), None);
+        // Fonts and images only among the preview's hashed files, and no page there.
+        assert_eq!(content_type_for("a.woff2"), None);
+        assert_eq!(hashed_content_type_for("a.woff2"), Some("font/woff2"));
+        assert_eq!(hashed_content_type_for("a.svg"), Some("image/svg+xml"));
+        assert_eq!(hashed_content_type_for("a.html"), None);
+        assert_eq!(hashed_content_type_for("a.js.map"), None);
+        assert_eq!(hashed_content_type_for("a.woff"), None);
     }
 }

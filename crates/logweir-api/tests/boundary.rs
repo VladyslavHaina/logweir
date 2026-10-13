@@ -549,6 +549,143 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
     );
 }
 
+/// THE REBUILT CONSOLE'S PREVIEW (PROD-18.1 R1) SITS BESIDE THE OLD ONE AND
+/// CHANGES NOTHING AT `/ui/`. The UI directory is laid out as the image lays it
+/// out: the shipped `ui/` files plus the console's build at `next/`. Every old
+/// file is still served byte for byte with `no-cache`, and the old path set is
+/// exactly what the plain `ui/` directory gives; the preview's page is
+/// `/ui/next/`, its hashed files are `immutable`, and fonts and images are
+/// selected only among them.
+#[tokio::test]
+async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
+    let root = support::repo_root();
+    let dir = std::env::temp_dir().join(format!(
+        "logweir-api-ui-next-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for rel in shipped_ui_files() {
+        let to = dir.join(rel.strip_prefix("ui/").unwrap());
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(root.join(&rel), to).unwrap();
+    }
+    let next = dir.join("next");
+    std::fs::create_dir_all(next.join("assets/deeper")).unwrap();
+    std::fs::create_dir_all(next.join(".vite")).unwrap();
+    let page =
+        b"<!doctype html><script type=\"module\" src=\"./assets/index-AbC_1-x.js\"></script>";
+    let write = |rel: &str, bytes: &[u8]| std::fs::write(next.join(rel), bytes).unwrap();
+    write("index.html", page);
+    write("assets/index-AbC_1-x.js", b"console.log(1)");
+    write("assets/index-DeF.css", b"a{}");
+    write("assets/RedHatTextVF-Gh_i.woff2", b"wOF2");
+    write("assets/PF-Bkg-Jk.svg", b"<svg/>");
+    // Never selected: a page among the hashed files, a source map, an older font
+    // format, a font outside assets/, a deeper directory, Markdown, a dot-directory.
+    write("assets/stray.html", b"x");
+    write("assets/index-AbC_1-x.js.map", b"{}");
+    write("assets/old.woff", b"x");
+    write("font.woff2", b"x");
+    write("assets/deeper/x.js", b"x");
+    write("README.md", b"x");
+    write(".vite/license.md", b"x");
+
+    let plain = TestApp::new();
+    let app = TestApp::with(
+        support::FakeKube::new(),
+        support::Options {
+            ui_dir: dir.clone(),
+            ..Default::default()
+        },
+    );
+    let old: Vec<String> = app
+        .state
+        .assets()
+        .paths()
+        .into_iter()
+        .filter(|p| !p.starts_with(logweir_api::assets::NEXT_DIR))
+        .collect();
+    assert_eq!(
+        old,
+        plain.state.assets().paths(),
+        "/ui/ serves the same paths"
+    );
+    for rel in shipped_ui_files() {
+        let url = format!("/{rel}");
+        let (before, after) = (plain.get(&url).await, app.get(&url).await);
+        assert_eq!(after.status, 200, "{url}");
+        assert_eq!(after.body, before.body, "{url} bytes differ");
+        assert_eq!(after.header("content-type"), before.header("content-type"));
+        assert_eq!(after.header("cache-control").as_deref(), Some("no-cache"));
+    }
+    assert_eq!(
+        app.get("/ui/").await.body,
+        std::fs::read(root.join("ui/index.html")).unwrap()
+    );
+
+    let index = app.get("/ui/next/").await;
+    assert_eq!(index.status, 200);
+    assert_eq!(index.body, page);
+    assert_eq!(
+        index.header("content-type").as_deref(),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(index.header("cache-control").as_deref(), Some("no-cache"));
+    assert_eq!(
+        index.header("content-security-policy").as_deref(),
+        Some(CSP)
+    );
+    for (path, kind) in [
+        (
+            "/ui/next/assets/index-AbC_1-x.js",
+            "text/javascript; charset=utf-8",
+        ),
+        ("/ui/next/assets/index-DeF.css", "text/css; charset=utf-8"),
+        ("/ui/next/assets/RedHatTextVF-Gh_i.woff2", "font/woff2"),
+        ("/ui/next/assets/PF-Bkg-Jk.svg", "image/svg+xml"),
+    ] {
+        let response = app.get(path).await;
+        assert_eq!(response.status, 200, "{path}");
+        assert_eq!(response.header("content-type").as_deref(), Some(kind));
+        assert_eq!(
+            response.header("cache-control").as_deref(),
+            Some(logweir_api::assets::IMMUTABLE),
+            "{path}"
+        );
+        assert_eq!(
+            response.header("content-security-policy").as_deref(),
+            Some(CSP)
+        );
+    }
+    let moved = app.get("/ui/next").await;
+    assert_eq!(moved.status, 308);
+    assert_eq!(moved.header("location").as_deref(), Some("/ui/next/"));
+    for path in [
+        "/ui/next/assets/stray.html",
+        "/ui/next/assets/index-AbC_1-x.js.map",
+        "/ui/next/assets/old.woff",
+        "/ui/next/font.woff2",
+        "/ui/next/assets/deeper/x.js",
+        "/ui/next/README.md",
+        "/ui/next/.vite/license.md",
+        "/ui/next/assets/",
+        "/ui/next/index.html/",
+        "/ui/next/assets/../index.html",
+        "/ui/next//index.html",
+    ] {
+        app.get(path).await.assert_problem(404, "not_found");
+    }
+    // Without a `next/` directory there is no preview, and no redirect to one.
+    for path in ["/ui/next/", "/ui/next"] {
+        plain.get(path).await.assert_problem(404, "not_found");
+    }
+    assert!(app.fake.requests().is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// The served policy as `directive -> sources`, and the sources a fetch of
 /// `directive` is actually held to (CSP3 §6.8.3: an absent fetch directive
 /// falls back to `default-src`).
