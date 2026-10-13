@@ -149,12 +149,11 @@ fn reader() -> logweir_kafka::rdkafka_reader::RdKafkaReader {
     harness::reader()
 }
 
-fn create_topic(topic: &str, partitions: i32, configs: &[(&str, &str)]) {
-    if configs.is_empty() {
-        harness::create_topic(topic, partitions);
-    } else {
-        harness::create_topic_with_configs(topic, partitions, configs);
-    }
+/// Every topic this file creates keeps its records (`retention.ms=-1`): C6
+/// stamps a fixed past instant, and `fixture_retention` holds the whole file
+/// to the helper that keeps them (PROD-00.1 4.4).
+fn make_topic(topic: &str, partitions: i32, configs: &[(&str, &str)]) {
+    harness::create_topic_for_fixed_timestamps(topic, partitions, configs);
 }
 
 fn producer() -> BaseProducer {
@@ -901,7 +900,7 @@ fn the_headline_a_paused_consumer_resumes_at_its_record() {
         format!("caught-{n}"),
         format!("drained-{n}"),
     );
-    create_topic(&topic, 3, &[]);
+    make_topic(&topic, 3, &[]);
     produce(&topic, 0, 0, 100);
     produce(&topic, 1, 0, 100);
     produce(&topic, 2, 0, 5);
@@ -1077,7 +1076,7 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
         .iter()
         .map(|g| format!("{g}-{n}"))
         .collect();
-    create_topic(&topic, 2, &[]);
+    make_topic(&topic, 2, &[]);
     produce(&topic, 0, 0, 30);
     produce(&topic, 1, 0, 30);
     for g in &gs {
@@ -1246,7 +1245,7 @@ fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
     let n = nonce();
     let topic = format!("sw-rb-{n}");
     let g = format!("rb-{n}");
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     produce(&topic, 0, 0, 60);
     commit(&g, &[(&topic, 0, 40)]);
     let b = backup(&format!("p042-c15-{n}"), &topic, &[&g]);
@@ -1357,7 +1356,7 @@ fn a_recreated_target_topic_is_refused() {
     let n = nonce();
     let topic = format!("sw-gen-{n}");
     let g = format!("gen-{n}");
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     produce(&topic, 0, 0, 20);
     commit(&g, &[(&topic, 0, 10)]);
     let b = backup(&format!("p042-c10-{n}"), &topic, &[&g]);
@@ -1379,7 +1378,7 @@ fn a_recreated_target_topic_is_refused() {
         &target,
     ]);
     std::thread::sleep(Duration::from_secs(3));
-    create_topic(&target, 1, &[]);
+    make_topic(&target, 1, &[]);
     produce(&target, 0, 0, 20);
     let refused = switchover(&r, &sc_key, &p, &approval);
     assert_eq!(refused.out.status.code(), Some(3), "{}", text(&refused.out));
@@ -1414,7 +1413,7 @@ fn only_a_passing_complete_restore_maps_positions() {
     let n = nonce();
     let topic = format!("sw-cov-{n}");
     let g = format!("cov-{n}");
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     produce(&topic, 0, 0, 20);
     commit(&g, &[(&topic, 0, 10)]);
     let b = backup(&format!("p042-c11-{n}"), &topic, &[&g]);
@@ -1634,7 +1633,7 @@ fn a_compaction_hole_maps_to_the_next_record() {
     let n = nonce();
     let topic = format!("sw-cmp-{n}");
     let g = format!("cmp-{n}");
-    create_topic(
+    make_topic(
         &topic,
         1,
         &[
@@ -1761,7 +1760,7 @@ fn an_empty_streams_group_is_refused_by_type() {
     let n = nonce();
     let topic = format!("sw-str-{n}");
     let g = format!("str-{n}");
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     produce(&topic, 0, 0, 10);
     commit(&g, &[(&topic, 0, 5)]);
     let b = backup(&format!("p042-c12-{n}"), &topic, &[&g]);
@@ -1848,7 +1847,7 @@ fn a_transactional_archive_maps_nothing() {
     let n = nonce();
     let topic = format!("sw-txn-{n}");
     let g = format!("txn-{n}");
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     let p: BaseProducer = rdkafka::config::ClientConfig::new()
         .set("bootstrap.servers", harness::bootstrap())
         .set("transactional.id", format!("p042-{n}"))
@@ -1904,7 +1903,7 @@ fn an_absent_group_is_created_on_3_9() {
     let n = nonce();
     let topic = format!("sw-39-{n}");
     let (g, live) = (format!("g39-{n}"), format!("live39-{n}"));
-    create_topic(&topic, 1, &[]);
+    make_topic(&topic, 1, &[]);
     produce(&topic, 0, 0, 20);
     commit(&g, &[(&topic, 0, 10)]);
     commit(&live, &[(&topic, 0, 10)]);
@@ -2044,7 +2043,7 @@ fn the_review_reads_every_position_before_the_switchover() {
     let n = nonce();
     let topic = format!("sw-review-{n}");
     let app = format!("review-{n}");
-    create_topic(&topic, 3, &[]);
+    make_topic(&topic, 3, &[]);
     for p in 0..3 {
         produce(&topic, p, 0, 50);
     }
