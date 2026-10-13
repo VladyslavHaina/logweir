@@ -473,6 +473,9 @@ fn backup(
     kafka_topics: Option<&Path>,
 ) -> Backup {
     let s = stack();
+    if let Archive::Fs(root) = &archive {
+        std::fs::create_dir_all(root).expect("the archive directory");
+    }
     let (bootstrap, auth) = if scram {
         (
             s.acl_sasl.clone(),
@@ -841,6 +844,7 @@ fn not_applied<'a>(block: &'a Value, topic: &str, key: &str) -> &'a Value {
 }
 
 fn handoff_path() -> PathBuf {
+    std::fs::create_dir_all(evidence_dir()).expect("the evidence directory");
     evidence_dir().join("handoff-3.9.json")
 }
 
@@ -1089,24 +1093,33 @@ fn c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync() {
     // The restored topic takes `acks=all` writes.
     assert_eq!(produce_one_acks_all(&s.broker, &target), Ok(()));
 
-    // THE CONTROL: `min.insync.replicas=2` at factor 1 refuses `acks=all`.
+    // THE CONTROL, measured per line: on 3.x, `min.insync.replicas=2` at
+    // factor 1 refuses `acks=all` (`NOT_ENOUGH_REPLICAS`), which the cap
+    // prevents; on 4.x (KIP-966) the broker bounds the effective minimum by
+    // the factor itself, so the uncapped topic takes the write too (measured
+    // on 4.3.1, 2026-10-13) and the cap only states the truth.
     let control = format!("tc{n}-mis2");
     create_topic(&s.broker, &control, 1, 1, &[("min.insync.replicas", "2")]);
-    let refused_text = match produce_one_acks_all(&s.broker, &control) {
-        Ok(()) => String::new(),
-        Err(e) => e,
-    };
-    assert!(
-        refused_text.contains("NotEnoughReplicas") || refused_text.contains("NOT_ENOUGH_REPLICAS"),
-        "acks=all into min.insync.replicas=2 at factor 1 must be refused: {refused_text:?}"
-    );
+    let control_answer = produce_one_acks_all(&s.broker, &control);
+    let refused_text = control_answer.clone().err().unwrap_or_default();
+    if line() == "3.9" {
+        assert!(
+            refused_text.contains("NotEnoughReplicas")
+                || refused_text.contains("NOT_ENOUGH_REPLICAS"),
+            "acks=all into min.insync.replicas=2 at factor 1 must be refused on 3.x: \
+             {refused_text:?}"
+        );
+    } else {
+        assert_eq!(control_answer, Ok(()), "4.x bounds min ISR by the factor");
+    }
     write_evidence(
         "c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync",
         &json!({
             "signed_topic": t,
             "target_replication_factor": replication_factor(&s.broker, &target),
             "target_overrides": overrides(&s.broker, &target),
-            "control_refusal": refused_text,
+            "control_line": line(),
+            "control_answer": format!("{control_answer:?}"),
         }),
     );
 }
