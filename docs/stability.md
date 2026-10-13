@@ -186,28 +186,38 @@ into one Deployment). These are the rules for the times they differ.
 
 ### The runner image must be at least as new as the controller
 
-The controller passes `--line-token` to every `Restore` and `Backup` Job it
-creates ([refusal detail](reference.md#refusal-detail)). **A runner that does
-not know the flag is not supported under this controller.** It stops while
-parsing its arguments, before any work: exit 1, stdout empty, and stderr
-opening with `error: unexpected argument '--line-token' found`. The object says
-`exitCode: 1`, `exitReason: operational` and names no cause. This is EVERY
-runner image published before this change, the images published from `main`
-since `v0.2.0-rc.1` included, and not only an older release. No tagged
-release's runner loses a working run to it: since PROD-00.2 (release-notes
-item 35) a runner image published before that change declares no engine, the
-controller gives it none, and its runs already stop at exit 1 before the engine
-starts. The execution-contract version is not what refuses anything here: it is
-`"2"` in `v0.2.0-rc.1` and now. To roll back, move both together or the
-controller first. (A Job a controller had created before the upgrade has no
-token and its run is unaffected.) What it looks like and what to do are in
+**FX-43 makes this the contract, and names the pair when it is broken.** The
+controller passes `--runner-line-token` to every `Restore`, `Backup` and
+`KafkaCluster` probe Job it creates, and reads only the lines the runner seals
+with that token ([sealed lines](reference.md#sealed-lines-fx-43)). A runner
+that does not know the flag (every runner image published before this change,
+the released `v0.2.0` included) stops while parsing its arguments, before any
+work: exit 1, stdout empty, stderr opening with `error: unexpected argument
+'--runner-line-token' found`. The object says so: `exitReason:
+RunnerOlderThanController` on a `Restore` or `Backup` (a schedule does not
+retry it), reason `RunnerOlderThanController` and `reachable` cleared on a
+`KafkaCluster`. The same name is given to any run whose runner exited 0 to 4
+and printed no sealed `runner-exit=` line. Upgrade the runner image to the
+controller's version; to roll back, move both together or the controller
+first. What it looks like and what to do are in
 [the guide](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
 
-The other directions: a new runner under an older controller prints the line
-without a token, and the older controller ignores it; a code the controller
-does not know is not shown, while the state on `refusal-reason=` and the exit
-code are recorded as always; a Job with no token, read by this controller,
-has no line read as a reason, and its message is byte for byte what it was.
+The other directions degrade to what they did before, never to trusting more:
+
+- *A newer runner under an older controller.* An FX-34 controller passes
+  `--line-token`, and this runner then prints exactly what an FX-34 runner
+  printed. A controller older still passes no token and reads the plain
+  lines, which this runner prints after the sealed ones, in their old order
+  and place.
+- *A Job an older controller created, read by this one* (an upgrade with runs
+  in flight): with `--line-token`, only `refusal-detail=` is read by its
+  token, as FX-34 did; with no token, every reader keeps its own rules. Such
+  a run is never called `RunnerOlderThanController`.
+- *An older controller reading a Job this one created* (a rollback with runs
+  in flight): it finds no flag it knows, reads the Job as untokened, and
+  reads the plain lines.
+- A code the controller does not know is not shown, while the state on
+  `refusal-reason=` and the exit code are recorded as always.
 
 ### Interface I8 is amended: exit 2 prints the signed failure's keys too
 

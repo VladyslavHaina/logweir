@@ -2643,27 +2643,29 @@ the runner exited 3 (guard-refused); the code was read from status.containerStat
 `status.progress.message` carries the same text. `status.exitReason` stays the
 state off the `refusal-reason=` line (or `GuardRefusedUnknownReason`).
 
-- The reason is shown only from a `refusal-detail=` line that carries this Job's
-  line token: a fresh 160-bit value the controller passes as `--line-token
-  <hex>`, which no plan can contain. The token is never shown on any status,
-  event, API answer or log line of the controller. Its code must be on the
-  kind's closed list ([reference.md](reference.md#refusal-detail)).
+- The reason is shown only from a `refusal-detail=` line the runner sealed
+  with this Job's line token: a fresh 160-bit value the controller passes as
+  `--runner-line-token <hex>`, which no plan can contain. Every line the
+  controller reads off a runner (the evidence keys, the states, the probe's
+  two lines, the progress lines) is held to the same token
+  ([sealed lines](reference.md#sealed-lines-fx-43)). The token is never shown
+  on any status, event, API answer or log line of the controller. The code
+  must be on the kind's closed list ([reference.md](reference.md#refusal-detail)).
 - The sentence is cleaned: printable ASCII and `§ – — … →` kept, URLs lose query
   and userinfo, credential shapes become `[redacted]`, cut to 760 bytes. It is
   partly written by whoever wrote the plan; read it as a description of that
   object.
-- The controller reads the `runner` container's last 32 lines, at most 512 KiB,
-  once. When nothing is shown, the message says why: no line with the token, a
-  line that did not validate, `the pod is gone`, a refused read (`HTTP 403`), or
-  a log over 512 KiB.
+- The controller reads the `runner` container's last 256 lines, at most 4 MiB,
+  once, at every exit code. When nothing is shown, the message says why: no
+  line with the token, a line that did not validate, `the pod is gone`, a
+  refused read (`HTTP 403`), or a log over 4 MiB.
 
 #### The runner image must be at least as new as the controller
 
-The controller passes `--line-token` to every `Restore` and `Backup` Job, and
-every runner image published before this change stops while parsing its
-arguments, the images published from `main` since `v0.2.0-rc.1` included. (Since
-release-notes item 35, a runner image published before PROD-00.2 declares no
-engine and already stops at exit 1, so no tagged release loses a working run.)
+The controller passes `--runner-line-token` to every `Restore`, `Backup` and
+`KafkaCluster` probe Job, and every runner image published before FX-43 (the
+released `v0.2.0` included) stops while parsing its arguments, before any
+work.
 
 One `helm upgrade` of the packaged chart moves `controllerImage` and
 `runnerImage` together. The mixed pair comes from two pinned tags with one
@@ -2672,16 +2674,21 @@ mirror that copies the controller first, a node holding an old `logweir:latest`
 under `IfNotPresent`), or from a `runnerImage` pinned apart.
 
 **What it looks like:** every run ends `Failed`, `exitCode: 1`,
-`exitReason: operational`, with nothing on the object naming the cause. The
-runner pod's log starts with
+`exitReason: RunnerOlderThanController`, and the message names the flag and
+the chart value; a `BackupSchedule` does not retry it. A `KafkaCluster` says
+`Reachable=Unknown`, reason `RunnerOlderThanController`, with `reachable`
+cleared. The runner pod's log starts with
 
 ```
-error: unexpected argument '--line-token' found
+error: unexpected argument '--runner-line-token' found
 ```
 
 **What to do:** set `runnerImage` to the image from the same build as
-`controllerImage`, in one `helm upgrade`. **Rolling back: both together, or the
-controller first.** An older controller passes no token.
+`controllerImage`, in one `helm upgrade`, and create the run again. **Rolling
+back: both together, or the controller first.** An older controller passes
+`--line-token` or no token, and this runner then prints what that controller
+reads. Runs created before an upgrade are read as the controller that created
+them read them.
 
 ### A run that is stuck or failed with no exit code
 

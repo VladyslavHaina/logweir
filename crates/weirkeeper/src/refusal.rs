@@ -171,8 +171,8 @@ impl RunnerReason {
 ///    end of the log.
 /// 3. **No such line**: [`RunnerReason::NotStated`]. (A runner that does not
 ///    know the Job's flag never gets this far: it stops on the flag at exit
-///    1. Under FX-43's flag a runner that prints no sealed end line is named
-///    before this function is asked ([`interpret`]).)
+///    one. Under FX-43's flag a runner that prints no sealed end line is
+///    named before this function is asked ([`interpret`]).)
 /// 4. The runner's line is then held to what a line always was: a code of
 ///    `run`'s closed set and a cleaned, bounded sentence, and the
 ///    `refusal-reason=` line the runner wrote WITH it (the next one after it

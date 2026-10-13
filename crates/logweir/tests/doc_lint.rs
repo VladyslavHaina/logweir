@@ -2673,10 +2673,34 @@ fn the_line_token_skew_is_documented_with_real_chart_keys_and_the_safe_rollback_
         !values.lines().any(|l| l.starts_with("image:")),
         "the chart has no top-level `image` key, and the docs must not name one"
     );
-    for doc in [
-        "docs/kubernetes.md",
-        "docs/stability.md",
-        "docs/release-notes.md",
+    // FX-34's release-notes item keeps what that release did; the guide and
+    // the stability page now carry FX-43's contract: the pair is named.
+    let fx34: &[&str] = &[
+        // The keys an operator sets, as the chart spells them.
+        "`controllerimage`",
+        "`runnerimage`",
+        // Which images: not "older than this release".
+        "every runner image published before this change",
+        // What it looked like, on the object and in the pod log.
+        "`exitcode: 1`",
+        "`exitreason: operational`",
+        "error: unexpected argument '--line-token' found",
+        // The single safe step of a two-step rollback.
+        "or the controller first",
+        // Why a tagged release's runner already needed the roll.
+        "item 35",
+    ];
+    let fx43: &[&str] = &[
+        "`runnerimage`",
+        "every runner image published before",
+        "runnerolderthancontroller",
+        "error: unexpected argument '--runner-line-token' found",
+        "or the controller first",
+    ];
+    for (doc, owed_list) in [
+        ("docs/kubernetes.md", fx43),
+        ("docs/stability.md", fx43),
+        ("docs/release-notes.md", fx34),
     ] {
         // One line, lower case, emphasis marks aside: the three documents
         // wrap and stress the same sentences differently.
@@ -2686,25 +2710,11 @@ fn the_line_token_skew_is_documented_with_real_chart_keys_and_the_safe_rollback_
             .collect::<Vec<_>>()
             .join(" ")
             .to_lowercase();
-        for owed in [
-            // The keys an operator sets, as the chart spells them.
-            "`controllerimage`",
-            "`runnerimage`",
-            // Which images: not "older than this release".
-            "every runner image published before this change",
-            // What it looks like, on the object and in the pod log.
-            "`exitcode: 1`",
-            "`exitreason: operational`",
-            "error: unexpected argument '--line-token' found",
-            // The single safe step of a two-step rollback.
-            "or the controller first",
-            // Why a tagged release's runner already needed the roll.
-            "item 35",
-        ] {
+        for owed in owed_list {
             assert!(
                 text.contains(owed),
                 "{doc} no longer says `{owed}` about a runner image that does not know \
-                 `--line-token`"
+                 the controller's line-token flag"
             );
         }
         for wrong in [

@@ -2395,6 +2395,17 @@ fn kafka_cluster_bootstrap_servers_refuse_control_characters_at_admission() {
         weirkeeper::crds::kafka_cluster::BOOTSTRAP_SERVER_PATTERN
     );
     assert_eq!(pattern, r"^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$");
+    // And the schema the type derives, which `emit_crds` renders from (the
+    // committed file above could lag it until `just crds-check`).
+    let derived = serde_json::to_value(
+        <weirkeeper::crds::kafka_cluster::KafkaCluster as kube::CustomResourceExt>::crd(),
+    )
+    .expect("the CRD serialises");
+    assert_eq!(
+        derived["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["bootstrapServers"]["items"]["pattern"],
+        weirkeeper::crds::kafka_cluster::BOOTSTRAP_SERVER_PATTERN
+    );
     // The same set the runner refuses: every C0 and C1 control, DEL, and the
     // two separators, and nothing printable.
     for c in [
