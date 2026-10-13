@@ -412,11 +412,21 @@ const NS = "team-a";
 /** The routes the document publishes and this console never reads, with why.
  *  Anything else the document publishes with a JSON answer must be driven
  *  below. */
+const SWITCHOVER_ROUTE_NOT_READ =
+  "PROD-04.2 (v2 theme A): the API ships the Switchover routes; this console has no page " +
+    "for them, and the rebuilt console (OD-16, PROD-18.1) reads them";
 const ROUTES_NOT_READ = Object.freeze({
   "GET /healthz": "a probe endpoint for the kubelet, not a console read",
   "GET /readyz": "a probe endpoint for the kubelet, not a console read",
   "GET /api/v1/namespaces":
     "the console takes its namespaces from the session document's grants and lists none",
+  // Theme A ships the API only (OD-16): no page of this console reads these.
+  "GET /api/v1/namespaces/{ns}/switchovers": SWITCHOVER_ROUTE_NOT_READ,
+  "POST /api/v1/namespaces/{ns}/switchovers": SWITCHOVER_ROUTE_NOT_READ,
+  "GET /api/v1/namespaces/{ns}/switchovers/{name}": SWITCHOVER_ROUTE_NOT_READ,
+  "POST /api/v1/namespaces/{ns}/switchovers/{name}/approval": SWITCHOVER_ROUTE_NOT_READ,
+  "GET /api/v1/namespaces/{ns}/switchovers/{name}/approval-request": SWITCHOVER_ROUTE_NOT_READ,
+  "POST /api/v1/namespaces/{ns}/switchovers/{name}/console-approval": SWITCHOVER_ROUTE_NOT_READ,
 });
 
 /** TWO ROUTES ANSWER A SECOND DOCUMENT THE PATH'S ONE `200` SCHEMA CANNOT
@@ -919,7 +929,13 @@ const SUMMARY_REPLACED_ON_A_DETAIL =
   "`BackupResponse` is only ever a DETAIL's answer, and on a detail the operation route's own " +
   "state replaces the list summary's; a list row is handed the summary's, as a Restore " +
   "create's answer is (both are held to that here)";
+const THEME_A_NOT_HANDED =
+  "v2 theme A (OD-16) ships the API only: the member is declared so the decoder keeps it, " +
+    "and no page of this console reads it; the rebuilt console (PROD-18.1) hands it on";
 const NOT_HANDED_ON = Object.freeze({
+  "OperationViewResponse: item.clone": THEME_A_NOT_HANDED,
+  "RestoreList: items[].topicConfiguration": THEME_A_NOT_HANDED,
+  "RestoreResponse: item.topicConfiguration": THEME_A_NOT_HANDED,
   "ApprovalPacketResponse: item.name": "the packet route is read for its two byte members; " +
     "the identity beside them is the Approval's own, already on the object from its own read",
   "ApprovalPacketResponse: item.namespace": "as item.name: the identity is the Approval's own",

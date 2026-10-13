@@ -780,6 +780,9 @@ const RESTORE = shapeOf(
     selection: objectOf(RESTORE_SELECTION),
     integrityResult: str, integrityPartialReason: str,
     topicPreflight: objectOf(TOPIC_PREFLIGHT), oldTopics: listOf(str),
+    // PROD-05.2: declared so the decoder keeps it; no page reads it until the
+    // console is rebuilt (OD-16).
+    topicConfiguration: opaque,
   },
 );
 
@@ -883,10 +886,15 @@ const SCOPE_TARGET = shapeOf(
   {
     bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str,
     replicationFactor: int, teardown: str,
+    // PROD-11.1a: always `kept`.
+    lineageHeaders: str,
   },
   {
     authUsername: str, ownerStatement: objectOf(SCOPE_OWNER_STATEMENT),
     allowTransactionMarkers: bool,
+    // Theme A (PROD-11.1a, PROD-05.2): declared so the decoder keeps them; no
+    // page reads them until the console is rebuilt (OD-16).
+    teardownAfterSeconds: int, topicConfiguration: opaque,
   },
 );
 const SCOPE_TOPIC = shapeOf(
@@ -1334,7 +1342,7 @@ export const PREFLIGHT_STATES = Object.freeze([
  *  one of those in order to find out whether a broker answers would be a
  *  different question wearing the same label. */
 export const PREFLIGHT_OPERATIONS = Object.freeze([
-  "backup", "restore", "destinationAccess", "sourceConnection",
+  "backup", "restore", "destinationAccess", "sourceConnection", "switchover",
 ]);
 
 /** One check's verdict. `skipped` never counts as a pass. */
@@ -1720,6 +1728,8 @@ const CREATE_PREFLIGHT_REQUEST = shapeOf(
     restore: objectOf(RESTORE_PREFLIGHT_REQUEST),
     destinationAccess: objectOf(DESTINATION_ACCESS_PREFLIGHT_REQUEST),
     sourceConnection: objectOf(SOURCE_CONNECTION_PREFLIGHT_REQUEST),
+    // PROD-04.2's review: declared, never built by this console (OD-16).
+    switchover: opaque,
     skipChecks: listOf(str), timeoutSeconds: int,
   },
 );
@@ -2460,6 +2470,9 @@ const D3_OPERATION = shapeOf(
     completion: objectOf(D3_COMPLETION),
     teardown: objectOf(D3_TEARDOWN),
     targetMode: str,
+    // PROD-11.1a: a TTL clone's lifetime and cleanup; declared so the decoder
+    // keeps it, read by no page until the console is rebuilt (OD-16).
+    clone: opaque,
   },
 );
 
