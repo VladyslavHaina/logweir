@@ -944,6 +944,15 @@ What it fixed:
   - optionally, Amendment D (PROD-04.0c).
 - **What follows** is v1.1 (8 fixes, plus the review and visual-pass leftovers recorded above) and v2 (32 rows), both only when the owner starts them.
 
+**Cleanup after v1 (2026-10-12), at the owner's request.**
+- **Repo:** PR #45 (`c3b3dbde`) removed 55 files (about 49,300 lines): the retired shared-lab harnesses (`e2e/journeys/`, `e2e/k8s/d2/`, `e2e/k8s/d3/`, `scripts/live/`), plus orphan scripts and fixtures. Each removal has `git grep` evidence. The two checks the removed folders also held moved to `scripts/`, and `.gitignore` now ignores local caches.
+- **Machine:**
+  - 127 worktrees and an old session's scratch space removed;
+  - 42 old Logweir images removed and the build cache pruned;
+  - every merged `claude/*` branch deleted, local and remote. Eleven old unmerged September branches went to a git bundle first, at `~/.logweir-roadmap-run/archive/`;
+  - free disk went from 236 to 411 GiB.
+- **Kept:** the PoC, the owner's `~/.logweir-poc`, `docs/to-do/diagrams/` (untracked) and the `codex/*` and `backup/*` branches.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
