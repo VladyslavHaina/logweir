@@ -496,6 +496,9 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 timestamp_bound: p.timestamp_bound,
             }
         }),
+        topic_configuration: status
+            .and_then(|s| s.topic_configuration.as_ref())
+            .map(topic_configuration_view),
         old_topics: status
             .and_then(|s| s.old_topics.clone())
             .unwrap_or_default()
@@ -503,6 +506,53 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .take(MAX_LIST_ENTRIES)
             .collect(),
         operation: summary(&operation),
+    }
+}
+
+/// PROD-05.2: `Restore.topicConfiguration` from `status.topicConfiguration`,
+/// each list bounded.
+#[must_use]
+pub fn topic_configuration_view(
+    status: &weirkeeper::crds::restore::RestoreTopicConfiguration,
+) -> crate::contract::TopicConfigurationView {
+    let names = |list: &Option<Vec<String>>| -> Vec<String> {
+        list.iter()
+            .flatten()
+            .take(MAX_LIST_ENTRIES)
+            .cloned()
+            .collect()
+    };
+    crate::contract::TopicConfigurationView {
+        transition: status.transition.as_deref().map(|t| bounded(t, 64)),
+        applied: names(&status.applied),
+        failed: status
+            .failed
+            .iter()
+            .flatten()
+            .take(MAX_LIST_ENTRIES)
+            .map(|f| crate::contract::TopicConfigurationFailureView {
+                topic: f.topic.clone(),
+                error: bounded(&f.error, 256),
+                desired: f.desired.clone(),
+            })
+            .collect(),
+        exported: names(&status.exported),
+        desired_state_key: status.desired_state_key.clone(),
+        topics: status
+            .topics
+            .iter()
+            .flatten()
+            .take(MAX_LIST_ENTRIES)
+            .map(|t| crate::contract::TopicConfigurationTopicView {
+                topic: t.topic.clone(),
+                route: t.route.clone(),
+                source_replication_factor: t.replication_factor.as_ref().and_then(|r| r.source),
+                replication_factor: t.replication_factor.as_ref().map(|r| r.target),
+                replication_factor_reason: t.replication_factor.as_ref().map(|r| r.reason.clone()),
+                before: t.before.clone(),
+                after: t.after.clone(),
+            })
+            .collect(),
     }
 }
 

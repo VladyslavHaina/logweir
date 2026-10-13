@@ -946,6 +946,10 @@ fn every_call_site_has_a_grant() {
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
+            // PROD-05.1a: the ONE untyped handle, `strimzi_topics.rs`'s list of
+            // Strimzi `KafkaTopic`s. Its grant is opt-in
+            // (`strimzi.readKafkaTopics`); see the loop below.
+            "DynamicObject" => (STRIMZI_GROUP, "kafkatopics"),
             other => panic!(
                 "crates/weirkeeper/src/ calls the Kubernetes API through `Api<{other}>`, and \
                  this test cannot map that type to an (apiGroup, resource). Add the mapping — \
@@ -1025,8 +1029,18 @@ fn every_call_site_has_a_grant() {
     let mut checked = 0usize;
     for file in &files {
         let rules = rules_of(file, "weirkeeper");
+        let grants_strimzi = rules
+            .iter()
+            .any(|(groups, _, _)| groups.iter().any(|g| g == STRIMZI_GROUP));
         for (ty, methods) in &callers {
             let (group, resource) = resource_of(ty);
+            // The opt-in grant: a render without `strimzi.readKafkaTopics`
+            // grants nothing on `kafkatopics`, and the list then fails the
+            // backup closed (`OwnerDetectionFailed`); a render with it must
+            // grant the call like any other.
+            if group == STRIMZI_GROUP && !grants_strimzi {
+                continue;
+            }
             for method in methods {
                 for (needed_resource, verb) in needs(resource, method) {
                     let granted = rules.iter().any(|(groups, resources, verbs)| {
@@ -1054,6 +1068,36 @@ fn every_call_site_has_a_grant() {
         "only {checked} (call site, grant) pairs were checked across {} files; the scan has \
          gone quiet",
         files.len()
+    );
+}
+
+/// Strimzi's API group, read by PROD-05.1a.
+const STRIMZI_GROUP: &str = "kafka.strimzi.io";
+
+/// **PROD-05.1a's grant is `list` on `kafkatopics` and nothing else, and only
+/// when asked.** The default render names no Strimzi group; the `tuned`
+/// render (`strimzi.readKafkaTopics: true`) grants exactly that one verb on
+/// that one resource. KILLS: the rule rendered by default; a wider verb set
+/// (`get`, `watch`, a write); a second resource.
+#[test]
+fn the_strimzi_grant_is_list_on_kafkatopics_and_only_when_asked() {
+    let strimzi = |file: &str| -> Vec<(Vec<String>, Vec<String>, Vec<String>)> {
+        rules_of(file, "weirkeeper")
+            .into_iter()
+            .filter(|(groups, _, _)| groups.iter().any(|g| g == STRIMZI_GROUP))
+            .collect()
+    };
+    assert!(
+        strimzi(DEFAULT_RENDER).is_empty(),
+        "the default render grants nothing on {STRIMZI_GROUP}"
+    );
+    assert_eq!(
+        strimzi("charts/logweir/rendered/tuned.yaml"),
+        vec![(
+            vec![STRIMZI_GROUP.to_string()],
+            vec!["kafkatopics".to_string()],
+            vec!["list".to_string()], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        )]
     );
 }
 

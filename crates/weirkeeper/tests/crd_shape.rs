@@ -337,13 +337,24 @@ fn no_vendor_crd_group_is_named_anywhere() {
         root.join("crates/weirkeeper/examples"),
         root.join("charts/logweir/crds"),
     ];
-    let needles = ["kafka.oso.sh", "kafkabackup.com", "osodevops/"];
+    let needles = [
+        "kafka.oso.sh",
+        "kafkabackup.com",
+        "osodevops/",
+        "kafka.strimzi.io",
+    ];
+    // PROD-05.1a, Amendment K (4): ONE file may name Strimzi's group, the
+    // read-only list of its `KafkaTopic`s (`get`/`list` only, chart-gated).
+    let exempt = root.join("crates/weirkeeper/src/strimzi_topics.rs");
     let mut hits = Vec::new();
     let mut scanned_files = 0usize;
     for dir in &scanned {
         for (path, text) in files_under(dir) {
             scanned_files += 1;
             for needle in needles {
+                if needle == "kafka.strimzi.io" && path == exempt {
+                    continue;
+                }
                 if text.contains(needle) {
                     hits.push(format!("{} names `{needle}`", path.display()));
                 }

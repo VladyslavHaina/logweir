@@ -277,6 +277,23 @@ pub fn target_default<'a>(key: &str, broker: &'a BTreeMap<String, String>) -> Op
     broker.get(synonym)
 }
 
+/// The `retention.ms` a topic has once the transition has run: the source's
+/// deferred value when it set one, else the target broker's default
+/// (`log.retention.ms`) when the broker reported it, else `None` (not known).
+/// `-1` (unlimited) is `None` too: nothing is deleted by age.
+#[must_use]
+pub fn retention_after_transition(
+    desired: &TopicDesired,
+    broker: &BTreeMap<String, String>,
+) -> Option<i64> {
+    desired
+        .deferred
+        .get("retention.ms")
+        .or_else(|| target_default("retention.ms", broker))
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|ms| *ms >= 0)
+}
+
 /// The replication factor a topic is created with, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReplicationChoice {
@@ -973,8 +990,31 @@ pub fn status_line_value(
         })
         .collect();
     o.insert("topics".into(), per_topic.into());
-    serde_json::Value::Object(o).to_string()
+    // One pod-log line, kept whole: under the 16 KiB a container runtime
+    // splits a line at. Per-topic detail goes first, then the desired sets;
+    // the names and the outcome always fit (256 names of 249 characters do
+    // not, so the lists are cut too, last).
+    let mut line = serde_json::Value::Object(o.clone()).to_string();
+    while line.len() > STATUS_LINE_MAX_BYTES {
+        let cut = ["topics", "failed", "applied", "exported"]
+            .iter()
+            .find_map(|k| match o.get_mut(*k) {
+                Some(serde_json::Value::Array(a)) if !a.is_empty() => {
+                    a.pop();
+                    Some(())
+                }
+                _ => None,
+            });
+        if cut.is_none() {
+            break;
+        }
+        line = serde_json::Value::Object(o.clone()).to_string();
+    }
+    line
 }
+
+/// The longest `topic-configuration=` value, in bytes.
+pub const STATUS_LINE_MAX_BYTES: usize = 12 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -1647,6 +1687,42 @@ mod tests {
             serde_json::from_str(&status_line_value(&partial, &topics)).unwrap();
         assert_eq!(line["transition"], "partial");
         assert_eq!(line["failed"][0]["topic"], "r-orders");
+        // Many topics: the line stays whole, the outcome first to stay.
+        let many: BTreeMap<String, TopicDesired> = (0..300)
+            .map(|i| (format!("r-orders-{i:03}"), topics["r-orders"].clone()))
+            .collect();
+        let value = status_line_value(&partial, &many);
+        assert!(value.len() <= STATUS_LINE_MAX_BYTES, "{}", value.len());
+        let line: serde_json::Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(line["transition"], "partial");
+        assert_eq!(line["failed"][0]["topic"], "r-orders");
+    }
+
+    #[test]
+    fn the_retention_after_the_transition_is_the_sources_or_the_targets_default() {
+        let model = BTreeMap::from([("orders".to_string(), compacted())]);
+        let p = plan(Transition::AfterVerification, Some(Vec::new()));
+        let m = mapping();
+        let broker = BTreeMap::from([("log.retention.ms".to_string(), "86400000".to_string())]);
+        let topics = plan_topics(&inputs(
+            &p,
+            Some(&model),
+            &[],
+            &m,
+            TargetLine::Kafka4,
+            Some(1),
+            &broker,
+        ))
+        .unwrap();
+        let mut t = topics["r-orders"].clone();
+        // The source inherited 7 days; the target's own default decides.
+        assert_eq!(retention_after_transition(&t, &broker), Some(86_400_000));
+        t.deferred.insert("retention.ms".into(), "3600000".into());
+        assert_eq!(retention_after_transition(&t, &broker), Some(3_600_000));
+        t.deferred.insert("retention.ms".into(), "-1".into());
+        assert_eq!(retention_after_transition(&t, &broker), None);
+        t.deferred.remove("retention.ms");
+        assert_eq!(retention_after_transition(&t, &BTreeMap::new()), None);
     }
 
     #[test]

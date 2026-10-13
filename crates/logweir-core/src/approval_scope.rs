@@ -160,6 +160,22 @@ pub struct ScopeTarget {
     /// archive's transaction markers, and the records of aborted
     /// transactions, as ordinary data instead of being refused.
     pub allow_transaction_markers: bool,
+    /// **PROD-05.2.** `target.topic_configuration`: the topics are created
+    /// from the bound point's configuration model and, with
+    /// `afterVerification`, the source's compaction, retention and timestamp
+    /// settings are applied after a passing verdict. Absent: created as
+    /// always.
+    pub topic_configuration: Option<ScopeTopicConfiguration>,
+}
+
+/// The plan's configuration choice, as a second person approves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeTopicConfiguration {
+    /// `afterVerification` or `none`.
+    pub transition: &'static str,
+    /// The requester's owner statement, keyed by SOURCE topic: `None` when
+    /// the plan states none (the point's own detection decides).
+    pub owners: Option<Vec<ScopeOwner>>,
 }
 
 /// One declarative owner the requester states (`{topic, kind, reference}`).
@@ -557,6 +573,34 @@ fn owner_statement(
     })
 }
 
+/// The plan's `target.topic_configuration` as a scope shows it: every owner
+/// it states, each value showable, no more owners than topics.
+fn topic_configuration_scope(
+    block: &crate::topic_transition::TopicConfigurationPlan,
+    topics: usize,
+) -> Result<ScopeTopicConfiguration, ScopeIncomplete> {
+    let owners = match &block.owners {
+        None => None,
+        Some(owners) if owners.len() > topics => return Err(ScopeIncomplete::OwnersNotShowable),
+        Some(owners) => Some(
+            owners
+                .iter()
+                .map(|o| {
+                    Ok(ScopeOwner {
+                        topic: shown(&o.topic, "a declared owner")?,
+                        kind: shown(&o.kind, "a declared owner")?,
+                        reference: shown(&o.reference, "a declared owner")?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ScopeIncomplete>>()?,
+        ),
+    };
+    Ok(ScopeTopicConfiguration {
+        transition: block.transition.wire_name(),
+        owners,
+    })
+}
+
 /// **The part of the scope a plan decides**, from the plan bytes alone — or
 /// why it cannot be shown in full.
 ///
@@ -697,6 +741,12 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
             },
             topic_prefix: prefix,
             allow_transaction_markers: plan.restore.allow_transaction_markers,
+            topic_configuration: plan
+                .target
+                .topic_configuration
+                .as_ref()
+                .map(|block| topic_configuration_scope(block, count))
+                .transpose()?,
         },
         topics,
         verification: ScopeVerification {
@@ -945,6 +995,44 @@ mod tests {
         let plain = plan(&["orders"]);
         let scope = approval_scope(&request(&plain, None), plain.as_bytes()).expect("complete");
         assert!(!scope.target.allow_transaction_markers);
+    }
+
+    /// **PROD-05.2: the plan's configuration choice is in its scope**, the
+    /// transition and every owner it states; a plan without the block shows
+    /// none, and more owners than topics is not showable. KILLS: the field
+    /// dropped from the scope.
+    #[test]
+    fn the_topic_configuration_choice_is_shown_as_signed() {
+        let topics: Vec<String> = vec!["orders".into()];
+        let target = format!(
+            "{PREFIXED}  topic_configuration:\n    transition: afterVerification\n    owners:\n      - {{topic: orders, kind: external, reference: tf-orders}}\n"
+        );
+        let text = plan_with(&topics, &target, AT, "kafka-backups");
+        let scope = approval_scope(&request(&text, None), text.as_bytes()).expect("complete");
+        let shown = scope
+            .target
+            .topic_configuration
+            .expect("the block is shown");
+        assert_eq!(shown.transition, "afterVerification");
+        assert_eq!(
+            shown.owners,
+            Some(vec![ScopeOwner {
+                topic: "orders".into(),
+                kind: "external".into(),
+                reference: "tf-orders".into(),
+            }])
+        );
+        let plain = plan(&["orders"]);
+        let scope = approval_scope(&request(&plain, None), plain.as_bytes()).expect("complete");
+        assert_eq!(scope.target.topic_configuration, None);
+        let two = format!(
+            "{PREFIXED}  topic_configuration:\n    transition: none\n    owners:\n      - {{topic: orders, kind: external, reference: a}}\n      - {{topic: orders, kind: external, reference: b}}\n"
+        );
+        let text = plan_with(&topics, &two, AT, "kafka-backups");
+        assert_eq!(
+            approval_scope(&request(&text, None), text.as_bytes()),
+            Err(ScopeIncomplete::OwnersNotShowable)
+        );
     }
 
     /// **A plan that is not the request's has no scope.** The function holds

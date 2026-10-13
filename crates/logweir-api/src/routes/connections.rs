@@ -495,6 +495,9 @@ pub fn build(
                 ConnectionRole::Target => "target".to_string(),
             },
             marker_topic: request.marker_topic.clone(),
+            // PROD-05.1a's Strimzi reference is set on the object, never by
+            // this route.
+            strimzi: None,
             unrecognized_fields: UnrecognizedFields::default(),
         },
         status: None,

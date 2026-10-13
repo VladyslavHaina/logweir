@@ -152,6 +152,14 @@
         }
       }
     },
+    "strimzi": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "PROD-05.1a. `readKafkaTopics: true` grants the controller `list` on Strimzi `kafkatopics` in `kafka.strimzi.io` and nothing else, so a Backup of a KafkaCluster that sets `spec.strimzi` records each topic's Strimzi owner. Off by default; with it off such a Backup fails closed (`OwnerDetectionFailed`).",
+      "properties": {
+        "readKafkaTopics": { "type": "boolean" }
+      }
+    },
     "notify": {
       "description": "WITHDRAWN (release notes, item 74): alert sinks are gone, so this block configures nothing. Accepted here only so the render can refuse it by name; remove it from your values."
     },

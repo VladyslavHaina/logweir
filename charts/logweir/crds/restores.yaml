@@ -1188,6 +1188,109 @@ spec:
                     maxItems: 256
                     type: array
                 type: object
+              topicConfiguration:
+                description: '**PROD-05.2.** For a plan carrying `target.topic_configuration`: each target topic''s replication factor with its reason, its overrides before (Logweir''s during-restore settings and the source''s at-creation set) and after (the whole desired set), and what phase 9''s transition did. Read off the runner''s `topic-configuration=` line and held to this Restore''s mapped target names: a CLAIM, like `topicPreflight`; the signed scorecard''s `target.topic_configuration` and the phase-9 attestation are the evidence. Absent on every other run.'
+                nullable: true
+                properties:
+                  applied:
+                    description: Topics whose desired set was applied and read back.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  desiredStateKey:
+                    description: The desired-state document's evidence key.
+                    nullable: true
+                    type: string
+                  exported:
+                    description: Owned topics, whose configuration is the desired-state document.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  failed:
+                    description: 'Topics not transitioned, each with its whole desired set: the remaining step, which the operator applies. Logweir never retries.'
+                    items:
+                      description: One topic the transition did not apply.
+                      properties:
+                        desired:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The topic's whole desired override set.
+                          type: object
+                        error:
+                          description: Why (`ConfigChangedSinceCreation`, or the failure), bounded.
+                          maxLength: 256
+                          type: string
+                        topic:
+                          description: The target topic.
+                          type: string
+                      required:
+                      - error
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  topics:
+                    description: 'Per target topic: the replication factor and the overrides before and after.'
+                    items:
+                      description: One target topic's configuration, before and after.
+                      properties:
+                        after:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The whole desired override set.
+                          type: object
+                        before:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The overrides it was created with.
+                          type: object
+                        replicationFactor:
+                          description: The replication factor it was created with, and why.
+                          nullable: true
+                          properties:
+                            reason:
+                              description: '`sourceFactor`, `targetBrokers` or `notRecorded`.'
+                              type: string
+                            source:
+                              description: The source's, when recorded.
+                              format: int64
+                              nullable: true
+                              type: integer
+                            target:
+                              description: The factor the topic was created with.
+                              format: int64
+                              type: integer
+                          required:
+                          - reason
+                          - target
+                          type: object
+                        route:
+                          description: '`adminApi` or `desiredStateExport`.'
+                          nullable: true
+                          type: string
+                        topic:
+                          description: The target topic.
+                          type: string
+                      required:
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  transition:
+                    description: '`applied`, `partial`, or `notRun: <reason>` (`transitionNone`, `verdictNotPass`, `topicsNotKept`).'
+                    maxLength: 64
+                    nullable: true
+                    type: string
+                type: object
               topicPreflight:
                 description: |-
                   What phase 0 found out about the target topics (guard **G-TS**).

@@ -156,6 +156,9 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     };
 
     // 2 — the archive, through the source destination's `archiveRead` grant.
+    // The bound point's receipt, once the binding's judgement accepted it,
+    // serves the topic configuration preview below (PROD-05.2).
+    let mut bound_receipt = None;
     archive_checks(
         req,
         &spec,
@@ -165,6 +168,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
         &want,
         &mut checks,
         &mut details,
+        &mut bound_receipt,
     );
 
     // 3 — the target broker.
@@ -177,6 +181,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
         &want,
         &mut checks,
         &mut details,
+        bound_receipt.as_ref(),
     );
 
     // 4 — the evidence destination.
@@ -428,7 +433,7 @@ fn judge_bound_point(
     manifest: &[u8],
     answered_version: Option<&str>,
     access: &dyn ObjectAccess,
-) -> Result<Option<String>, PointRefusal> {
+) -> Result<(Option<String>, BackupReceipt), PointRefusal> {
     let id = &point.point_id;
     let receipt_key = &point.receipt_key;
     let not_held = || {
@@ -533,7 +538,7 @@ fn judge_bound_point(
                 .unwrap_or_default()
         )));
     }
-    Ok(note)
+    Ok((note, receipt))
 }
 
 /// The `archive.backupSet` row a [`PointRefusal`] becomes, with the two rows
@@ -576,6 +581,7 @@ fn archive_checks(
     want: &dyn Fn(CheckId) -> bool,
     checks: &mut Vec<CheckOutcome>,
     details: &mut Vec<String>,
+    bound_receipt: &mut Option<BackupReceipt>,
 ) {
     let dest = &req.source_destination;
     let scope = catalogue::scope("BackupDestination", &dest.name, Some(&dest.uid));
@@ -695,7 +701,10 @@ fn archive_checks(
             answered_version.as_deref(),
             access.as_ref(),
         ) {
-            Ok(note) => note,
+            Ok((note, receipt)) => {
+                *bound_receipt = Some(receipt);
+                note
+            }
             Err(refusal) => {
                 refuse_bound_point(&refusal, scope, want, now, checks);
                 return;
@@ -1033,6 +1042,7 @@ fn target_checks(
     want: &dyn Fn(CheckId) -> bool,
     checks: &mut Vec<CheckOutcome>,
     details: &mut Vec<String>,
+    bound_receipt: Option<&BackupReceipt>,
 ) {
     let scope = catalogue::scope("RestoreTarget", &req.target.principal, None);
     let budget = deadline.slice(2);
@@ -1147,6 +1157,12 @@ fn target_checks(
                 .with_scope(scope.clone()),
         );
     }
+    // PROD-05.2's preview: the same pure function phase 0 runs, over the
+    // verified receipt and the target's line and brokers, into the details
+    // stream. Advisory: phase 0 recomputes and fails closed.
+    if spec.target.topic_configuration.is_some() {
+        topic_configuration_preview(probe.as_ref(), spec, bound_receipt, &mapped, now, details);
+    }
     if want(CheckId::TargetLogAppendTime) {
         checks.push(
             execution_only(
@@ -1159,6 +1175,130 @@ fn target_checks(
                  to exist, and a preflight creates none",
             )
             .with_scope(scope),
+        );
+    }
+}
+
+/// The `check` every topic configuration preview line carries.
+pub const TOPIC_CONFIGURATION_PREVIEW: &str = "target.topicConfiguration";
+
+/// **PROD-05.2's preview**: one details line per mapped topic with its diff —
+/// the replication change and its reason, the during-restore, at-creation,
+/// after-verification and never sets, the inherited differences against the
+/// target's defaults, the owner route — and the target's `validate_only`
+/// verdict on the set it is created with and the set the transition applies;
+/// or one line naming the refusal phase 0 would make. It decides nothing.
+fn topic_configuration_preview(
+    probe: &dyn InventoryProbe,
+    spec: &DrillSpec,
+    bound_receipt: Option<&BackupReceipt>,
+    mapped: &[String],
+    now: DateTime<Utc>,
+    details: &mut Vec<String>,
+) {
+    use logweir_core::topic_transition::{
+        plan_topics, retention_after_transition, target_line_of, PlanInputs,
+    };
+    let Some(plan) = spec.target.topic_configuration.as_ref() else {
+        return;
+    };
+    let coverage = bound_receipt
+        .map(logweir_core::backup_receipt::SourceConfigCoverage::from_receipt)
+        .unwrap_or_default();
+    let broker = probe.broker_configs().unwrap_or_default();
+    let line = target_line_of(&broker);
+    let brokers = probe.list_topics().ok().map(|l| l.broker_count);
+    let mapping: std::collections::BTreeMap<String, String> = spec
+        .source
+        .topics
+        .iter()
+        .cloned()
+        .zip(mapped.iter().cloned())
+        .collect();
+    let topics = match plan_topics(&PlanInputs {
+        plan,
+        model: coverage.model(),
+        owner_detection: coverage.owner_detection(),
+        mapping: &mapping,
+        line,
+        brokers,
+        default_replication_factor: spec.target.default_replication_factor,
+        broker: &broker,
+    }) {
+        Ok(topics) => topics,
+        Err(refusal) => {
+            details.push(
+                serde_json::json!({
+                    "check": TOPIC_CONFIGURATION_PREVIEW,
+                    "refusal": logweir_core::check_contract::redact(&refusal),
+                })
+                .to_string(),
+            );
+            return;
+        }
+    };
+    let verdicts = |sets: Vec<NewTopicSpec>| -> std::collections::BTreeMap<String, String> {
+        match probe.validate_create_topics(&sets) {
+            Ok(outcomes) => outcomes
+                .into_iter()
+                .map(|o| (o.name, o.code.to_string()))
+                .collect(),
+            Err(f) => sets
+                .iter()
+                .map(|t| (t.name.clone(), f.code.to_string()))
+                .collect(),
+        }
+    };
+    let creation = verdicts(
+        topics
+            .iter()
+            .map(|(name, d)| {
+                crate::drill::phase0_admit::validation_spec(
+                    name,
+                    d,
+                    crate::drill::phase0_admit::creation_configs(d),
+                )
+            })
+            .collect(),
+    );
+    let after = verdicts(
+        topics
+            .iter()
+            .filter(|(_, d)| d.route == logweir_core::topic_transition::ROUTE_ADMIN_API)
+            .map(|(name, d)| {
+                crate::drill::phase0_admit::validation_spec(
+                    name,
+                    d,
+                    d.final_overrides().into_iter().collect(),
+                )
+            })
+            .collect(),
+    );
+    let recovery_point = recovery_point(spec);
+    for (name, desired) in &topics {
+        // What the transition's retention deletes: every restored record
+        // stamped before `now - retention.ms`; all of them when that instant
+        // is after the recovery point.
+        let retention = retention_after_transition(desired, &broker).map(|ms| {
+            let cutoff = now - chrono::Duration::milliseconds(ms);
+            serde_json::json!({
+                "retentionMs": ms,
+                "deletesRecordsBefore": cutoff.to_rfc3339(),
+                "deletesEveryRestoredRecord": cutoff > recovery_point,
+            })
+        });
+        details.push(
+            serde_json::json!({
+                "check": TOPIC_CONFIGURATION_PREVIEW,
+                "topic": name,
+                "transition": plan.transition.wire_name(),
+                "targetLine": line.wire_name(),
+                "diff": desired,
+                "atCreation": creation.get(name),
+                "afterVerification": after.get(name),
+                "retentionAfterTransition": retention,
+            })
+            .to_string(),
         );
     }
 }

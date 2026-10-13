@@ -1292,7 +1292,10 @@ pub fn admit_topic_configuration(
     }))
 }
 
-fn validation_spec(
+/// The spec a `validate_only` judges for one topic: its partitions (1 when
+/// the model records none), its bounded factor and `configs`.
+#[must_use]
+pub fn validation_spec(
     name: &str,
     desired: &logweir_core::topic_transition::TopicDesired,
     configs: Vec<(String, String)>,

@@ -181,6 +181,26 @@ spec:
               role:
                 description: 'What this cluster is to Logweir — `source` or `target`. A free-form string rather than an enum: the value is a label the adopter picks and the controller reports, and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what actually authorises a target, never a role written next to the address it authorises.'
                 type: string
+              strimzi:
+                description: '**PROD-05.1a.** The Strimzi cluster that manages this Kafka cluster''s topics. Set, a `Backup` of this cluster lists the `KafkaTopic` resources of that namespace labelled `strimzi.io/cluster=<cluster>` (read only: `get`, `list`, granted by the chart value `strimzi.readKafkaTopics`), and its receipt records each named topic''s Strimzi owner, so a restore exports desired state for it. A refused list, or a `KafkaTopic` resource the API server does not serve, fails the backup closed (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing is listed, as before.'
+                nullable: true
+                properties:
+                  cluster:
+                    description: 'The `Kafka` resource''s name: the `strimzi.io/cluster` label value.'
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  namespace:
+                    description: The namespace of the `Kafka` resource and its `KafkaTopic`s.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - cluster
+                - namespace
+                type: object
             required:
             - auth
             - bootstrapServers
