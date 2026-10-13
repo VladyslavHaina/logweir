@@ -138,28 +138,32 @@ fn each_opt_in_arrives_under_the_key_the_runner_reads() {
     }
 }
 
-/// THEME A'S CLONE (`target.teardown: {ttl_seconds}`), WHICH THIS TREE'S RUNNER
-/// REFUSES. `teardown` is a string here, so the clone golden does not parse:
-/// the documented behaviour of a runner from before theme A, which restores
-/// nothing rather than keep a clone forever (decisions/PROD-04.2-cutover.md
-/// section 5). When theme A's `RestoreSpec` lands, this row fails; it then
-/// becomes the positive parse (`Teardown::Ttl(86400)`, `AfterVerification`,
-/// `owners: []`), which a scratch build of theme A's `logweir-core` already
-/// gives (prod-18-1-r8's report).
+/// THEME A'S CLONE WITH THE SOURCE'S CONFIGURATION (`plan-clone.golden.yaml`):
+/// the runner reads the lifetime as the clone form, in scratch mode, and the
+/// configuration choice with the requester's owner statement. A runner from
+/// before theme A refuses the map form at parse rather than keep a clone forever
+/// (decisions/PROD-04.2-cutover.md section 5); the string form is the control.
 #[test]
-fn a_runner_before_theme_a_refuses_the_console_clone_plan() {
-    let golden = read("plan-clone.golden.yaml");
-    assert!(golden.contains("  teardown:\n    ttl_seconds: 86400\n"));
-    assert!(golden.contains("  topic_configuration:\n    transition: \"afterVerification\"\n"));
-    let refused = serde_yaml::from_str::<RestoreSpec>(&golden)
-        .expect_err("this tree's RestoreSpec refuses the clone form; see this row's comment");
-    assert!(refused.to_string().contains("teardown"), "{refused}");
-    // Control: the same plan with the string policy parses.
-    let plain = golden.replace(
-        "  teardown:\n    ttl_seconds: 86400\n",
-        "  teardown: \"delete\"\n",
+fn the_console_clone_plan_is_one_the_runner_reads_as_a_clone() {
+    let s = spec("plan-clone.golden.yaml");
+    assert_eq!(s.target.mode.to_string(), "scratch");
+    assert_eq!(s.target.teardown.ttl_seconds(), Some(86_400));
+    let tc = s
+        .target
+        .topic_configuration
+        .as_ref()
+        .expect("the golden states target.topic_configuration");
+    assert_eq!(
+        tc.transition,
+        logweir_core::topic_transition::Transition::AfterVerification
     );
-    serde_yaml::from_str::<RestoreSpec>(&plain).expect("the string teardown parses");
+    assert_eq!(tc.owners.as_deref().map(<[_]>::len), Some(0), "owners: []");
+    // Controls: the plain goldens carry neither, and the string policy is no clone.
+    for name in GOLDENS {
+        let plain = spec(name);
+        assert_eq!(plain.target.teardown.ttl_seconds(), None, "{name}");
+        assert!(plain.target.topic_configuration.is_none(), "{name}");
+    }
 }
 
 /// THE PREFIX THE WIZARD PREFILLS IS THE ONE THE RUNNER COMPUTES, for the

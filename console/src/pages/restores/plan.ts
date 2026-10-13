@@ -7,7 +7,7 @@
 // verbatim into the runner's plan ConfigMap and the runner parses it, so an invented
 // shape would pass every approval check and fail only inside the runner pod. The
 // goldens under console/fixtures/plan*.golden.yaml are deserialised into RestoreSpec
-// by crates/logweir/tests/ui_lint.rs; plan.test.ts holds this module to the same files.
+// by crates/logweir/tests/console_plan.rs; plan.test.ts holds this module to the same files.
 //
 // Nothing here parses the document it emits, reads a clock or makes a request:
 // crypto.subtle is the only platform API it touches.

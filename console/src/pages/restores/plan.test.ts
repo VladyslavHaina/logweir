@@ -1,6 +1,6 @@
 // @vitest-environment node
 // The plan goldens, the most important rows of R5: the plan hash is what an approver
-// signs. These read the SAME files crates/logweir/tests/ui_lint.rs deserialises into
+// signs. These read the SAME files crates/logweir/tests/console_plan.rs deserialises into
 // the runner's RestoreSpec (console/fixtures/plan*.golden.yaml), so "Rust parses the
 // golden" and "the new console emits the golden" together say the runner parses what
 // the new console emits. A differential row holds the port to what the retired
