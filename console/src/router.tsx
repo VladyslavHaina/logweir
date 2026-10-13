@@ -14,9 +14,9 @@ import { landingNamespace } from "./api/session";
 import type { Session } from "./api/types";
 import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
-import { Restores } from "./pages/Restores";
-import { RestoreWizard } from "./pages/RestoreWizard";
-import { RestoreDetail } from "./pages/RestoreDetail";
+import { Restores } from "./pages/restores/RestoreList";
+import { RestoreWizard, restoreSearch } from "./pages/restores/RestoreWizard";
+import { RestoreDetail } from "./pages/restores/RestoreDetail";
 import { Cutover } from "./pages/Cutover";
 import { Planned } from "./pages/Planned";
 import { connectionRoutes } from "./pages/connections/routes";
@@ -27,8 +27,8 @@ import { approvalRoutes } from "./pages/approvals/routes";
 
 export type RouterContext = { session: Session };
 
-/** Pages still drawn on the mock: shown in the mock builds; in a live build each waits
- *  for its rebuild run (R2-R7), which drops its `PROTOTYPE ?` and makes it real. The test
+/** Pages still drawn on the mock (the cutover review, theme A's R7): shown in the mock
+ *  builds; in a live build each waits for its run, which drops its `PROTOTYPE ?`. The test
  *  is inline (not a helper) so a live build drops the page and the mock it reads. */
 const PROTOTYPE = import.meta.env.VITE_LOGWEIR_API !== "live";
 
@@ -45,15 +45,14 @@ const home = createRoute({
 export const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
 
 const overview = createRoute({ getParentRoute: () => nsRoute, path: "/", component: Overview });
-const restores = createRoute({ getParentRoute: () => nsRoute, path: "restores", component: PROTOTYPE ? Restores : Planned });
+const restores = createRoute({ getParentRoute: () => nsRoute, path: "restores", component: Restores });
 const restoreNew = createRoute({
   getParentRoute: () => nsRoute,
   path: "restores/new",
-  component: PROTOTYPE ? RestoreWizard : Planned,
-  validateSearch: (search: Record<string, unknown>): { backup?: string } =>
-    typeof search.backup === "string" ? { backup: search.backup } : {},
+  component: RestoreWizard,
+  validateSearch: restoreSearch,
 });
-const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: PROTOTYPE ? RestoreDetail : Planned });
+const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
 const cutover = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name/cutover", component: PROTOTYPE ? Cutover : Planned });
 const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: Planned });
 

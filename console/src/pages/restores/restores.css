@@ -1,0 +1,40 @@
+/* The Restores pages' few layout rules (PROD-18.1 R5); theme values stay in styles.css. */
+.lw-short-input {
+  max-width: 12rem;
+}
+.lw-instant-input,
+.lw-ticket-input {
+  max-width: 24rem;
+}
+.lw-gap-bottom {
+  margin-bottom: var(--pf-t--global--spacer--md);
+}
+.lw-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pf-t--global--spacer--md);
+}
+.lw-stack:empty {
+  display: none;
+}
+.lw-point-search {
+  max-width: 32rem;
+  margin-top: var(--pf-t--global--spacer--md);
+}
+.lw-mapping li + li {
+  margin-top: var(--pf-t--global--spacer--xs);
+}
+.lw-mapping .lw-mono,
+.lw-checks .lw-mono {
+  overflow-wrap: anywhere;
+}
+.lw-commands .pf-v6-c-code-block__code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lw-restore-inset {
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  background: var(--lw-inset);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--medium);
+}

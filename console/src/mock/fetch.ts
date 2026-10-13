@@ -22,6 +22,7 @@ import { destinationsMock } from "./destinations";
 import { schedulesMock } from "./schedules";
 import { backupsMock } from "./backups";
 import { approvalsMock } from "./approvals";
+import { restoresFallback, restoresMock } from "./restores";
 
 const LATENCY_MS = 350;
 
@@ -177,6 +178,8 @@ async function route(request: Request): Promise<Response> {
 
   if (method === "GET" && path === "/session") return json(200, session);
   { const approvals = await approvalsMock(request, method, path); if (approvals) return approvals; }
+  // After the approvals demo namespaces (R6), before R2's preflight mock, which refuses a restore check.
+  { const r5 = await restoresMock(request); if (r5) return r5; }
   { const settings = (await connectionsMock(request, method, path)) ?? (await destinationsMock(request, method, path)); if (settings) return settings; }
 
   if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
@@ -272,7 +275,7 @@ async function route(request: Request): Promise<Response> {
     return json(200, { ...page(points), truncated: false, viewExpired: false });
   }
 
-  return problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
+  return (await restoresFallback(request)) ?? problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
 }
 
 /** The `fetch` the typed client is given in the prototype. */
