@@ -900,7 +900,7 @@ spec:
                     type: integer
                 type: object
               oldTopics:
-                description: 'The source topics the new ones were restored from. Nothing here was written to, in any tag: retiring an old topic is tag 2''s `Switchover` and is validated against this list.'
+                description: The source topics the new ones were restored from. Nothing here was written to, in any tag; a `Switchover` moves consumer groups onto the new topics and retires or deletes no topic.
                 items:
                   type: string
                 nullable: true

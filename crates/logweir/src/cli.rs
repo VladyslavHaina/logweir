@@ -883,6 +883,12 @@ pub enum SwitchoverCmd {
         uid: String,
         #[arg(long)]
         store_contract_version: Option<String>,
+        /// For an authorization document v2: the bound policy's snapshot and
+        /// the console's confirmation key.
+        #[arg(long)]
+        approval_policy: Option<PathBuf>,
+        #[arg(long)]
+        confirmation_key: Option<PathBuf>,
     },
 }
 

@@ -375,6 +375,15 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies/status"]
     verbs: ["patch"]
+  # PROD-04.2: the `Switchover` reconciler's watch, its namespace-wide `list`
+  # (one switchover per restore at a time), the `Approval` reconciler's `get`
+  # of a switchover subject, and `patch_status`. No `update`, no `delete`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers/status"]
+    verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -405,6 +414,7 @@ rules:
       - protectionpolicies
       - recoverycatalogs
       - retentionpolicies
+      - switchovers
       - topicdiscoveries
       - trustpolicies
     verbs: ["get", "list", "watch"]
@@ -463,6 +473,11 @@ rules:
     resources:
       - recoverycatalogs
     verbs: ["patch"]
+  # PROD-04.2: request a switchover. It runs only under its own Approval
+  # (subject kind `Switchover`), which `logweir-approver` creates.
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers"]
+    verbs: ["create"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1

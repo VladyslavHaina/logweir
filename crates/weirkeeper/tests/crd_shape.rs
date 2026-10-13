@@ -29,7 +29,7 @@ fn crd_dir() -> PathBuf {
 }
 
 /// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
-const FILES: [&str; 13] = [
+const FILES: [&str; 14] = [
     "kafkaclusters.yaml",
     "backupschedules.yaml",
     "backups.yaml",
@@ -43,6 +43,7 @@ const FILES: [&str; 13] = [
     "protectionpolicies.yaml",
     "recoverycatalogs.yaml",
     "retentionpolicies.yaml",
+    "switchovers.yaml",
 ];
 
 /// One checked-in CRD, parsed.
@@ -248,12 +249,13 @@ fn the_kind_list_is_exactly_the_adr() {
     );
     assert_eq!(
         weirkeeper::crds::KINDS.len(),
-        13,
-        "ADR 0008 records thirteen kinds — Amendment A's six, Amendment F's \
-         BackupDestination, TopicDiscovery and Preflight, and Amendment G's TrustPolicy, \
+        14,
+        "ADR 0008 records fourteen kinds — Amendment A's six, Amendment F's \
+         BackupDestination, TopicDiscovery and Preflight, Amendment G's TrustPolicy, \
          ProtectionPolicy, RecoveryCatalog and RetentionPolicy (its RehearsalSchedule is \
-         withdrawn in v1, OD-12). A fourteenth needs its own amendment in \
-         docs/architecture.md, and this line is where that decision becomes a diff."
+         withdrawn in v1, OD-12), and Amendment K's Switchover (Amendment A's reserved \
+         kind, PROD-04.2). A fifteenth needs its own amendment in docs/architecture.md, and \
+         this line is where that decision becomes a diff."
     );
 
     // AND NO KIND IS REMOVED. `TrustRoster` stays served and reconciled,
@@ -285,11 +287,10 @@ fn the_kind_list_is_exactly_the_adr() {
          Amendment A's six plus Amendment F's three"
     );
 
-    // The four names that must NOT be kinds, each for its own reason: a drill
+    // The three names that must NOT be kinds, each for its own reason: a drill
     // is a `Restore` with `spec.target.mode: scratch` (`Drill`,
-    // `RestoreDrill`), `Switchover` is tag 2, and `MetadataSnapshot` is
-    // reserved and unbuilt.
-    for forbidden in ["Drill", "RestoreDrill", "Switchover", "MetadataSnapshot"] {
+    // `RestoreDrill`), and `MetadataSnapshot` is reserved and unbuilt.
+    for forbidden in ["Drill", "RestoreDrill", "MetadataSnapshot"] {
         assert!(
             !kinds.iter().any(|k| k == forbidden),
             "`{forbidden}` is not a kind of this group; the emitted set was {kinds:?}"
@@ -423,7 +424,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// `exitReason` is written from an exit code, and a refusal the CONTROLLER
 /// makes before any `POST` has none, so every admission refusal would print
 /// `operational`. `Backup` has no `REASON` column.
-const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
+const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
     (
         "KafkaCluster",
         &[
@@ -589,6 +590,17 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
             ("AGE", ".metadata.creationTimestamp", "date"),
         ],
     ),
+    (
+        "Switchover",
+        &[
+            ("RESTORE", ".spec.restoreRef.name", "string"),
+            ("PHASE", ".status.phase", "string"),
+            ("APPLIED", ".status.counts.applied", "integer"),
+            ("REFUSED", ".status.counts.refused", "integer"),
+            ("REASON", ".status.reason", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
 ];
 
 /// The scope of each kind: the trust kinds Cluster, every other kind
@@ -601,7 +613,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
 /// namespace and a cross-namespace reference is a privilege-escalation
 /// surface. A kind that became Cluster-scoped would move its objects out of
 /// every namespaced RBAC rule.
-const SCOPES: [(&str, &str); 13] = [
+const SCOPES: [(&str, &str); 14] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
     ("Backup", "Namespaced"),
@@ -615,6 +627,7 @@ const SCOPES: [(&str, &str); 13] = [
     ("ProtectionPolicy", "Namespaced"),
     ("RecoveryCatalog", "Namespaced"),
     ("RetentionPolicy", "Namespaced"),
+    ("Switchover", "Namespaced"),
 ];
 
 /// Every kind's printer columns are exactly the table: name, `jsonPath` and
@@ -832,6 +845,7 @@ fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
         "backupdestinations.yaml" => &crds::backup_destination::SPEC_RULES,
         "topicdiscoveries.yaml" => &crds::topic_discovery::SPEC_RULES,
         "preflights.yaml" => &crds::preflight::SPEC_RULES,
+        "switchovers.yaml" => &crds::switchover::SPEC_RULES,
         other => panic!("no `.spec` rule list is declared for {other} — add one beside its kind"),
     };
     rules
@@ -2314,7 +2328,7 @@ fn approval_status_subject_provenance_is_complete() {
     );
     assert_eq!(
         enum_values(at(subject, &["properties", "kind"])),
-        vec!["Restore", "Backup", "RehearsalSchedule"]
+        vec!["Restore", "Backup", "RehearsalSchedule", "Switchover"]
     );
 }
 
@@ -2325,7 +2339,7 @@ fn approval_status_subject_provenance_is_complete() {
 /// kind is part of the bytes the approval binds, so an approval that matches
 /// a `Restore`'s plan hash is not accepted for a schedule.
 #[test]
-fn the_subject_kind_enum_has_no_switchover() {
+fn the_subject_kind_enum_names_the_switchover_last() {
     let doc = crd("approvals.yaml");
     let node = at(
         spec_schema(&doc),
@@ -2333,14 +2347,11 @@ fn the_subject_kind_enum_has_no_switchover() {
     );
     assert_eq!(
         enum_values(node),
-        vec!["Restore", "Backup", "RehearsalSchedule"],
-        "the subject kind enum is exactly these three — the subject kind is part of the bytes \
-         the approval binds, so an `Approval` whose planHash matches a `Restore` is never \
-         accepted for a `Switchover`"
-    );
-    assert!(
-        !enum_values(node).iter().any(|v| v == "Switchover"),
-        "`Switchover` is tag 2 and appears in no enum of this group"
+        vec!["Restore", "Backup", "RehearsalSchedule", "Switchover"],
+        "the subject kind enum is exactly these four, `Switchover` appended (PROD-04.2) so no \
+         existing spelling moved — the subject kind is part of the bytes the approval binds, \
+         so an `Approval` whose planHash matches a `Restore` is never accepted for a \
+         `Switchover`"
     );
 }
 
@@ -2850,6 +2861,7 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
         "protectionpolicies.yaml",
         "recoverycatalogs.yaml",
         "retentionpolicies.yaml",
+        "switchovers.yaml",
     ] {
         let doc = crd(file);
         let mut stack = vec![

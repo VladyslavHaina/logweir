@@ -115,3 +115,12 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies/status"]
     verbs: ["patch"]
+  # PROD-04.2: the `Switchover` reconciler's watch, its namespace-wide `list`
+  # (one switchover per restore at a time), the `Approval` reconciler's `get`
+  # of a switchover subject, and `patch_status`. No `update`, no `delete`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers/status"]
+    verbs: ["patch"]

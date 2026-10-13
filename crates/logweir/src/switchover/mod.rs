@@ -76,6 +76,9 @@ pub struct RunArgs {
     pub uid: String,
     /// D2 §3.5's store contract, as `restore run` takes it.
     pub store_contract_version: Option<String>,
+    /// An authorization document v2's policy snapshot and console key.
+    pub approval_policy: Option<PathBuf>,
+    pub confirmation_key: Option<PathBuf>,
 }
 
 fn refusal(code: &str, message: impl std::fmt::Display) -> String {
@@ -186,14 +189,51 @@ pub fn created_topic_ids(scorecard_bytes: &[u8]) -> BTreeMap<String, Option<Stri
         .unwrap_or_default()
 }
 
-/// Steps 2's approval check: the v1 document's signature under the approver
+/// Step 2's approval check. A v1 document: its signature under the approver
 /// key, its `plan_hash` over the switchover plan's bytes, and its subject
-/// kind.
-fn verify_approval(
-    plan_bytes: &[u8],
-    approval: &Path,
-    approver_key: &Path,
-) -> Result<so::ApprovalSummary, Refused> {
+/// kind. An authorization document v2 (a namespace bound to an approval
+/// policy): the runner's own v2 verification, for subject kind `Switchover`
+/// and this object.
+fn verify_approval(args: &RunArgs, plan_bytes: &[u8]) -> Result<so::ApprovalSummary, Refused> {
+    let (approval, approver_key) = (&args.approval, &args.approver_key);
+    if let (Some(policy), Some(confirmation)) = (&args.approval_policy, &args.confirmation_key) {
+        let read = |p: &Path| {
+            std::fs::read(p).map_err(|e| {
+                Refused(refusal(
+                    "ApprovalUnreadable",
+                    format!("{}: {e}", p.display()),
+                ))
+            })
+        };
+        let signer_pub = logweir_evidence::keys::SigningKey::from_pem_file(&args.signing_key)
+            .map(|k| k.verifying_key())
+            .map_err(|e| Refused(refusal("ApprovalUnreadable", e.to_string())))?;
+        let approved = crate::drill::phase1_approval::verify_authorization_v2_bytes_for(
+            logweir_core::spec::SUBJECT_KIND_SWITCHOVER,
+            std::str::from_utf8(plan_bytes).unwrap_or_default(),
+            &read(approval)?,
+            &read(&approval.with_extension("sig"))?,
+            &read(approver_key)?,
+            &read(confirmation)?,
+            &read(policy)?,
+            &crate::drill::phase1_approval::ContractSubject {
+                namespace: args.namespace.clone(),
+                name: args.name.clone(),
+                uid: args.uid.clone(),
+            },
+            &signer_pub,
+        )
+        .map_err(|e| Refused(refusal("ApprovalRefused", e)))?;
+        return Ok(so::ApprovalSummary {
+            mode: approved.approval_mode.to_string(),
+            approver: approved.approval.approver,
+            requester: approved
+                .approval
+                .console
+                .map(|c| c.requester.principal_id()),
+            key_id: approved.approval.key_id,
+        });
+    }
     let read = |p: &Path| {
         std::fs::read(p).map_err(|e| {
             Refused(refusal(
@@ -294,7 +334,7 @@ fn verify_inputs(
                 format!("the restore plan does not parse: {e}"),
             ))
         })?;
-    let approval = verify_approval(plan_bytes, &args.approval, &args.approver_key)?;
+    let approval = verify_approval(args, plan_bytes)?;
 
     // 3. The restore's evidence.
     let sidecar_key = args

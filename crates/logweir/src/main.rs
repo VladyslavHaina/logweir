@@ -255,6 +255,8 @@ fn main() -> std::process::ExitCode {
             name,
             uid,
             store_contract_version,
+            approval_policy,
+            confirmation_key,
         }) => logweir::switchover::run(&logweir::switchover::RunArgs {
             plan,
             restore_plan,
@@ -267,6 +269,8 @@ fn main() -> std::process::ExitCode {
             name,
             uid,
             store_contract_version,
+            approval_policy,
+            confirmation_key,
         }),
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error

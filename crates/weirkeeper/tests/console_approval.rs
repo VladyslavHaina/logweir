@@ -109,6 +109,7 @@ impl Fixture {
 
     fn expected(&self, plan: &str) -> ExpectedSubject {
         ExpectedSubject {
+            kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
             namespace: self.text("namespace"),
             name: self.text("restore"),
             uid: self.text("restoreUid"),

@@ -351,6 +351,33 @@ pub fn verify_authorization_v2_bytes(
     subject: &ContractSubject,
     signing_key: &VerifyingKey,
 ) -> Result<Approved, DrillError> {
+    verify_authorization_v2_bytes_for(
+        logweir_core::approval_policy::SUBJECT_KIND_RESTORE,
+        spec_text,
+        bytes,
+        sidecar_bytes,
+        approver_key_bytes,
+        confirmation_key_bytes,
+        snapshot_bytes,
+        subject,
+        signing_key,
+    )
+}
+
+/// [`verify_authorization_v2_bytes`] for a subject of `kind`: `Restore`, or
+/// `Switchover` (PROD-04.2), whose document must name that kind.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_authorization_v2_bytes_for(
+    kind: &str,
+    spec_text: &str,
+    bytes: &[u8],
+    sidecar_bytes: &[u8],
+    approver_key_bytes: &[u8],
+    confirmation_key_bytes: &[u8],
+    snapshot_bytes: &[u8],
+    subject: &ContractSubject,
+    signing_key: &VerifyingKey,
+) -> Result<Approved, DrillError> {
     let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|_| {
         DrillError::Operational("authorization DSSE sidecar does not parse".to_string())
     })?;
@@ -370,6 +397,7 @@ pub fn verify_authorization_v2_bytes(
         DrillError::Guard(GuardRefusal(format!("{e}; no data operation was started")))
     })?;
     let expected = ExpectedSubject {
+        kind: kind.to_string(),
         namespace: subject.namespace.clone(),
         name: subject.name.clone(),
         uid: subject.uid.clone(),

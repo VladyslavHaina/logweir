@@ -189,6 +189,7 @@ fn trust(keys: Vec<SpecKey>) -> weirkeeper::trust::ResolvedTrust {
 
 fn expected() -> ExpectedSubject {
     ExpectedSubject {
+        kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace: NS.to_string(),
         name: "r1".to_string(),
         uid: RESTORE_UID.to_string(),

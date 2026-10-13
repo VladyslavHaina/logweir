@@ -141,6 +141,7 @@ enum Loaded {
 /// What a Restore expects an authorization to bind, from the object itself.
 fn expected_subject(ns: &str, restore: &Restore) -> ExpectedSubject {
     ExpectedSubject {
+        kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace: ns.to_string(),
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),
