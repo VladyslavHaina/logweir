@@ -141,7 +141,11 @@ for (const p of protectionPolicies) {
   p.generation ??= 1;
   p.observedGeneration ??= 1;
   p.availabilityBasis ??= "Catalog";
-  for (const a of p.alerts ?? []) if (a.state === "open") a.state = "Open";
+  // The controller's spellings (AlertKind, Open/Resolved), which the prototype's data predates.
+  for (const a of p.alerts ?? []) {
+    if (a.state === "open") a.state = "Open";
+    if (a.kind === "ConsecutiveFailedRuns") a.kind = "BackupFailure";
+  }
   const healthy = p.health === "Healthy";
   p.conditions ??= [
     { type: "Ready", status: "True", reason: "Evaluated", message: "the objective was evaluated", lastTransitionTime: iso(NOW - MINUTE) },

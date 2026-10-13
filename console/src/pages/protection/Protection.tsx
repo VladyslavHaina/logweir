@@ -37,6 +37,23 @@ import { When, duration } from "../../components/When";
 import { Term } from "../schedules/parts";
 import "../schedules/schedules.css";
 
+/** The controller's alert kinds (crds/protection_policy.rs AlertKind), in words; a newer kind is shown as written. */
+const PROBLEM_WORDS: Record<string, string> = {
+  BackupFailure: "A run failed",
+  Staleness: "The newest point is older than the objective",
+  ArchiveUnavailable: "The catalog cannot find the point in storage",
+  RehearsalFailure: "A rehearsal failed, or has not run for too long",
+  RecoveryCompleted: "A recovery finished",
+};
+
+const EVIDENCE_WORDS: Record<string, string> = {
+  Valid: "Verified",
+  ValidHistorical: "Verified, under a key since retired",
+  Invalid: "Did not verify",
+  Untrusted: "Signed by a key this installation does not trust",
+  NotAttempted: "Not verified",
+};
+
 /** Open problems in the policy's ledger. */
 export function openProblems(p: ProtectionPolicy): number {
   return (p.alerts ?? []).filter((a) => a.state === "Open").length;
@@ -254,7 +271,9 @@ export function ProtectionDetail() {
                         <When value={point.newestRecordAt} exact />
                       </Term>
                       <Term term="Age when evaluated">{typeof point.ageSeconds === "number" ? duration(point.ageSeconds) : "Not recorded"}</Term>
-                      <Term term="Evidence">{point.evidence ?? "Not recorded"}</Term>
+                      <Term term="Evidence">
+                        {point.evidence ? <span title={point.evidence}>{EVIDENCE_WORDS[point.evidence] ?? point.evidence}</span> : "Not recorded"}
+                      </Term>
                       <Term term="Backup">
                         {point.backupRef ? (
                           <Link to="/$ns/backups/$name" params={{ ns, name: point.backupRef.name }}>
@@ -364,7 +383,10 @@ export function ProtectionDetail() {
                       <Tbody>
                         {alerts.map((a) => (
                           <Tr key={a.key}>
-                            <Td dataLabel="Problem">{a.kind}</Td>
+                            <Td dataLabel="Problem">
+                              {PROBLEM_WORDS[a.kind] ?? a.kind}
+                              <div className="lw-reason lw-small">{a.kind}</div>
+                            </Td>
                             <Td dataLabel="State">
                               <StatusLabel tone={a.state === "Open" ? "warning" : a.state === "Resolved" ? "success" : "neutral"} text={a.state} />
                             </Td>

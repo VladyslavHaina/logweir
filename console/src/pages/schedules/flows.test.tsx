@@ -322,7 +322,7 @@ describe("the schedules list, by grant", () => {
 describe("suspend and resume", () => {
   it("sends the value and the revision it was read at; a stale one is re-read and said", async () => {
     let read = 0;
-    formNetwork((r, path) => {
+    formNetwork((_r, path) => {
       if (path === "/namespaces/team-a/schedules/nightly") {
         read += 1;
         return json(200, { item: schedule({ resourceVersion: String(100 + read) }), requestId: "r" });
