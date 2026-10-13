@@ -25,7 +25,7 @@ import {
 } from "@patternfly/react-core";
 import { useRestore, useSession } from "../../api/queries";
 import { ApiError } from "../../api/client";
-import { isTerminal, reasonWords, useApprovalPolicy, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
+import { fileName, isTerminal, reasonWords, shellArg, useApprovalPolicy, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
@@ -81,7 +81,7 @@ function ApprovalCard({ ns, sw }: { ns: string; sw: Switchover }) {
               :
             </Content>
             <CodeBlock>
-              <CodeBlockCode>{`logweir drill approve --subject-kind Switchover --spec ${sw.name}.switchover-plan.yaml`}</CodeBlockCode>
+              <CodeBlockCode>{`logweir drill approve --subject-kind Switchover --spec ${shellArg(fileName(sw.name, ".switchover-plan.yaml", ""), "key", "<the downloaded plan>")}`}</CodeBlockCode>
             </CodeBlock>
           </>
         ) : (

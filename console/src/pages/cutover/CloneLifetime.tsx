@@ -11,7 +11,7 @@ import { Alert, Content, DescriptionList, DescriptionListDescription, Descriptio
 import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-icon";
 import InfoIcon from "@patternfly/react-icons/dist/esm/icons/info-circle-icon";
 import type { components } from "../../api/schema";
-import type { Clone } from "../../api/switchovers";
+import { shellArg, type Clone } from "../../api/switchovers";
 import { StatusLabel } from "../../components/Status";
 import { When, duration, relative } from "../../components/When";
 
@@ -221,7 +221,7 @@ export function CloneStatus({ clone: c, teardown, restoreName }: { clone: Clone;
             Check the target for topics with the clone's prefix, delete those this run created (the scorecard's target.creation and the
             teardown's failed list name them), then remove the finalizer:
           </Content>
-          <code className="lw-mono lw-break">{`kubectl -n <ns> patch restore ${restoreName} --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`}</code>
+          <code className="lw-mono lw-break">{`kubectl -n <ns> patch restore ${shellArg(restoreName, "name", "<restore>")} --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`}</code>
         </Alert>
       )}
     </>

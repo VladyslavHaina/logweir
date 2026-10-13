@@ -191,11 +191,18 @@ export function kubernetesName(topic: string, digest: string): string {
 
 /** The owned topic's exported settings, in the shape of the restore's desired-state document. */
 export function desiredStateYaml(target: string, d: TopicDesired, digest: string): string {
-  const config = Object.entries(d.deferred).sort(([a], [b]) => a.localeCompare(b));
+  // Every string through yamlString, every number held to an integer: nothing the
+  // service sends can add a line to the document.
+  const n = (v: unknown) => (Number.isInteger(v) ? String(v) : null);
+  const partitions = n(d.partitions);
+  const replicas = n(d.replication_factor?.target) ?? "null";
+  const config = Object.entries(d.deferred ?? {})
+    .map(([k, v]) => [String(k), String(v)] as const)
+    .sort(([a], [b]) => a.localeCompare(b));
   const configBlock = (indent: string) =>
     config.length ? [`${indent}config:`, ...config.map(([k, v]) => `${indent}  ${yamlString(k)}: ${yamlString(v)}`)] : [`${indent}config: {}`];
   if (d.owner?.kind === "strimzi") {
-    const ns = d.owner.reference.includes("/") ? d.owner.reference.split("/")[0] : undefined;
+    const ns = String(d.owner.reference).includes("/") ? String(d.owner.reference).split("/")[0] : undefined;
     return [
       "apiVersion: kafka.strimzi.io/v1beta2",
       "kind: KafkaTopic",
@@ -203,12 +210,12 @@ export function desiredStateYaml(target: string, d: TopicDesired, digest: string
       `  name: ${yamlString(kubernetesName(target, digest))}`,
       ...(ns ? [`  namespace: ${yamlString(ns)}`] : []),
       "  annotations:",
-      `    logweir.dev/restored-from: ${yamlString(d.source_topic)}`,
-      `    logweir.dev/source-owner: ${yamlString(d.owner.reference)}`,
+      `    logweir.dev/restored-from: ${yamlString(String(d.source_topic))}`,
+      `    logweir.dev/source-owner: ${yamlString(String(d.owner.reference))}`,
       "spec:",
       `  topicName: ${yamlString(target)}`,
-      ...(d.partitions !== undefined ? [`  partitions: ${d.partitions}`] : []),
-      `  replicas: ${d.replication_factor.target}`,
+      ...(partitions !== null ? [`  partitions: ${partitions}`] : []),
+      `  replicas: ${replicas}`,
       ...configBlock("  "),
       "",
     ].join("\n");
@@ -217,10 +224,10 @@ export function desiredStateYaml(target: string, d: TopicDesired, digest: string
     "apiVersion: logweir.dev/desired-state/v1",
     "kind: TopicDesiredState",
     `topic: ${yamlString(target)}`,
-    `restoredFrom: ${yamlString(d.source_topic)}`,
-    ...(d.owner ? ["owner:", `  kind: ${yamlString(d.owner.kind)}`, `  reference: ${yamlString(d.owner.reference)}`] : []),
-    ...(d.partitions !== undefined ? [`partitions: ${d.partitions}`] : []),
-    `replicationFactor: ${d.replication_factor.target}`,
+    `restoredFrom: ${yamlString(String(d.source_topic))}`,
+    ...(d.owner ? ["owner:", `  kind: ${yamlString(String(d.owner.kind))}`, `  reference: ${yamlString(String(d.owner.reference))}`] : []),
+    ...(partitions !== null ? [`partitions: ${partitions}`] : []),
+    `replicationFactor: ${replicas}`,
     ...configBlock(""),
     "",
   ].join("\n");

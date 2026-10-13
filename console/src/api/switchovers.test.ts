@@ -4,6 +4,7 @@
 // Every row has a negative control: the input that must NOT pass.
 import { describe, expect, it } from "vitest";
 import goldenPlan from "../pages/cutover/fixtures/switchover-plan.golden.yaml?raw";
+import namesPlan from "../pages/cutover/fixtures/switchover-plan-names.golden.yaml?raw";
 import { ApiError } from "./client";
 import {
   chosenByDefault,
@@ -16,6 +17,7 @@ import {
   reviewGroups,
   reviewState,
   rollbackPlan,
+  shellArg,
   verdictOf,
   yamlString,
   type CheckEntry,
@@ -174,6 +176,13 @@ describe("the plan document", () => {
     const doc = planDocument(RESTORE, groups);
     expect(doc).toEqual({ bytes: golden });
   });
+  it("writes a group id with a quote, a line separator and an astral character as the runner reads it back", () => {
+    // The runner's own parse of this fixture gives back the id unchanged (scratch check, R7 report).
+    const id = 'we"ird\u2028gr\u{1f600}up';
+    const g = reviewGroups([line(id, {}, [{ partition: 0, class: "exact", committed: null, offset: 5 }])]).groups;
+    expect(planDocument(RESTORE, g)).toEqual({ bytes: namesPlan });
+    expect(parseOwnPlan(namesPlan)!.groups[0]!.source).toBe(id);
+  });
   it("quotes every name, so none reads as a number, a boolean or YAML syntax", () => {
     expect(yamlString("1e3")).toBe('"1e3"');
     expect(yamlString('a"b\\c')).toBe('"a\\"b\\\\c"');
@@ -215,13 +224,13 @@ describe("the rollback", () => {
     const rb = rollbackPlan(sw([
       { source: "orders-app", target: "orders-app", outcome: "applied", created: false, partitions: 3 },
       { source: "1e3", target: "1e3", outcome: "refused", reason: "GroupActive", created: false, partitions: 1 },
-    ]), plan, "b:9092");
+    ]), plan);
     expect(rb.restorable).toEqual([]);
     expect(rb.notRestorable.map((r) => `${r.target} ${r.topic}:${r.partition}`)).toEqual(["orders-app orders:0", "orders-app orders:1", "orders-app payments:2"]);
-    expect(rb.text).toContain("kafka-consumer-groups.sh --bootstrap-server b:9092 --group orders-app --topic orders:0 --delete-offsets");
-    expect(rb.text).toContain("logweir switchover rollback-plan --record <a local copy of logweir/switchovers/RUN.record.json>");
+    expect(rb.text).toContain("kafka-consumer-groups.sh --bootstrap-server <bootstrap> --group 'orders-app' --topic 'orders:0' --delete-offsets");
+    expect(rb.text).toContain("logweir switchover rollback-plan --record <a local copy of the switchover record> --out rollback.yaml");
     // Negative control: the refused group is not in it.
-    expect(rb.text).not.toContain("--group 1e3");
+    expect(rb.text).not.toContain("'1e3'");
   });
   it("commits back a stated prior, and says when a group failed part-way", () => {
     const golden = goldenPlan;
@@ -238,6 +247,91 @@ describe("the rollback", () => {
     expect(rb.stuck).toEqual(["1e3"]);
     // Negative control: a plan the console did not write yields no partitions to guess from.
     expect(rollbackPlan(sw([{ source: "orders-app", target: "orders-app", outcome: "applied", created: false, partitions: 3 }]), null).notRestorable).toEqual([]);
+  });
+});
+
+describe("no server-supplied string reaches a command or a plan unguarded", () => {
+  const HOSTILE = ["a\nrm -rf ~", "$(curl evil)", "`id`", "x; reboot", "-rf", "a b", "it's", ""];
+
+  it("shellArg quotes what its allowlist accepts and puts a placeholder for anything else", () => {
+    for (const v of HOSTILE) {
+      for (const kind of ["name", "key", "kafka"] as const) expect(shellArg(v, kind, "<p>")).toBe("<p>");
+    }
+    expect(shellArg(undefined, "name", "<p>")).toBe("<p>");
+    expect(shellArg("Orders", "name", "<p>")).toBe("<p>"); // not a DNS-1123 name
+    expect(shellArg("../x", "kafka", "<p>")).toBe("<p>");
+    // Negative controls: plain values pass, single-quoted.
+    expect(shellArg("orders-clone-k3v9d", "name", "<p>")).toBe("'orders-clone-k3v9d'");
+    expect(shellArg("logweir/switchovers/01M3.record.json", "key", "<p>")).toBe("'logweir/switchovers/01M3.record.json'");
+    expect(shellArg("orders_EU.v2:3", "kafka", "<p>")).toBe("'orders_EU.v2:3'");
+  });
+
+  it("the rollback text carries no server string in a comment, and none unguarded in a command", () => {
+    const bad = "$(curl evil); `id`";
+    const doc = planDocument(RESTORE, reviewGroups([line(bad, { topic: "t;rm" }), line("good"), line("nl")]).groups);
+    // A plan from the service may still name a group with an escaped line break.
+    const bytes = ("bytes" in doc ? doc.bytes : "").replaceAll('"nl"', '"n\\u000al"');
+    const parsed = parseOwnPlan(bytes);
+    expect(parsed!.groups.map((g) => g.target)).toEqual([bad, "good", "n\nl"]);
+    const rb = rollbackPlan(
+      {
+        name: "swo-\n# injected",
+        namespace: "team-a",
+        uid: "u",
+        approvalName: "a",
+        planHash: sha("d"),
+        restore: { name: "r\n--force", uid: "u" },
+        recordKey: "k\nlogweir switchover run",
+        phase: "Succeeded",
+        groups: [
+          { source: bad, target: bad, outcome: "applied", created: true, partitions: 2 },
+          { source: "good", target: "good", outcome: "applied", created: true, partitions: 2 },
+          { source: "n\nl", target: "n\nl", outcome: "applied", created: true, partitions: 2 },
+          { source: "z", target: "z", outcome: "failed", reason: "CommitFailed", created: false, partitions: 1 },
+        ],
+      },
+      parsed,
+    );
+    for (const l of rb.text.split("\n")) {
+      // Every line is one of the text's own comments, or a command whose names are quoted or placeholders.
+      expect(l === "" || l === "#" || (l.startsWith("# ") && !/curl|injected|--force|switchover run|`/.test(l)) || /^kafka-consumer-groups\.sh --bootstrap-server <bootstrap> --group ('[A-Za-z0-9._-]+'|<group>) --topic ('[A-Za-z0-9._-]+:\d+'|<topic>:<partition>) --delete-offsets$/.test(l)).toBe(true);
+    }
+    for (const x of ["injected", "--force", "logweir switchover run", "curl", "t;rm", "`id`", "'z'"]) expect(rb.text).not.toContain(x);
+    expect(rb.text).toContain("--group <group> --topic <topic>:<partition>");
+    expect(rb.text).toContain("--group <group> --topic 'orders:0'");
+    // Negative control: the clean group's command is there, quoted.
+    expect(rb.text).toContain("--group 'good' --topic 'orders:0' --delete-offsets");
+  });
+
+  it("the plan bytes hold a server string only inside a quoted scalar", () => {
+    const inject = 'app": {}, "evil\\ ] # x';
+    const doc = planDocument({ ...RESTORE, name: "r\nrestore: {}" }, reviewGroups([line(inject, { topic: "o\nexpected: none" })]).groups);
+    const bytes = "bytes" in doc ? doc.bytes : "";
+    const q = '"([^"\\\\]|\\\\.)*"';
+    const shapes = [
+      /^format_version: "1\.0\.0"$/,
+      /^restore:$/,
+      new RegExp(`^ {2}(name|uid|plan_hash|scorecard_sha256|mapping_sha256): ${q}$`),
+      /^groups:$/,
+      new RegExp(`^ {2}- source: ${q}$`),
+      new RegExp(`^ {4}target: ${q}$`),
+      /^ {4}topics:$/,
+      new RegExp(`^ {6}${q}:$`),
+      /^ {8}offsets: \{\d+: \d+(, \d+: \d+)*\}$/,
+      /^ {8}approximate: \[\d+(, \d+)*\]$/,
+      /^ {8}expected: none$/,
+      /^$/,
+    ];
+    expect(bytes).not.toBe("");
+    for (const l of bytes.split("\n")) expect(shapes.some((r) => r.test(l))).toBe(true);
+    const back = parseOwnPlan(bytes)!;
+    expect(back.groups.map((g) => g.source)).toEqual([inject]);
+    expect(back.restore.name).toBe("r\nrestore: {}");
+    expect(back.groups[0]!.partitions.map((p) => p.topic)).toEqual(["o\nexpected: none", "o\nexpected: none"]);
+    // Negative controls: a group id with a control character is refused, as the grammar refuses
+    // it; and the same strings pasted in raw would break the layout.
+    expect("refused" in planDocument(RESTORE, reviewGroups([line("a\nb")]).groups)).toBe(true);
+    expect(`      o\nexpected: none:`.split("\n").every((l) => shapes.some((r) => r.test(l)))).toBe(false);
   });
 });
 

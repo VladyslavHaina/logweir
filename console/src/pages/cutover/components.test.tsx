@@ -221,7 +221,12 @@ describe("CloneLifetime and CloneStatus (R5's wizard and restore page)", () => {
     expect(screen.getByText("Removal failed")).toBeTruthy();
     expect(screen.getByText("CloneTargetClusterChanged")).toBeTruthy();
     expect(screen.getByText("CloneTargetReplaced")).toBeTruthy();
-    expect(screen.getByText(/patch restore orders-clone/)).toBeTruthy();
+    expect(screen.getByText(/patch restore 'orders-clone' --type=json/)).toBeTruthy();
+    cleanup();
+    // A name that is not a Kubernetes name never reaches the command.
+    render(<CloneStatus clone={{ phase: "RemovalFailed", attempts: 3 }} restoreName={"x; kubectl delete ns prod\n"} />);
+    expect(screen.getByText(/patch restore <restore> --type=json/)).toBeTruthy();
+    expect(screen.queryByText(/delete ns prod/)).toBeNull();
     cleanup();
     // Negative control: a clone that is kept does not tell anyone to patch a finalizer.
     render(<CloneStatus clone={{ phase: "Active", expiresAt: expires, ttlSeconds: 86400, attempts: 0 }} restoreName="orders-clone" />);

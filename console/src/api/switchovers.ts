@@ -502,8 +502,11 @@ export interface RollbackPlan {
  * Switchover with its own approval, and its signed plan comes from the record
  * (`logweir switchover rollback-plan --record`). Only groups the switchover APPLIED are
  * reversed; a prior that was absent is listed with the broker's own command.
+ *
+ * The downloaded text carries no server-supplied string in a comment, and every one in
+ * a command goes through `shellArg`: a name it does not allow becomes a placeholder.
  */
-export function rollbackPlan(sw: Switchover, plan: ParsedPlan | null, bootstrap = "<bootstrap>"): RollbackPlan {
+export function rollbackPlan(sw: Switchover, plan: ParsedPlan | null): RollbackPlan {
   const restorable: RollbackPlan["restorable"] = [];
   const notRestorable: RollbackPlan["notRestorable"] = [];
   const stuck = sw.groups.filter((g) => g.outcome === "failed" && reasonWord(g.reason) === "CommitFailed").map((g) => g.target);
@@ -514,25 +517,25 @@ export function rollbackPlan(sw: Switchover, plan: ParsedPlan | null, bootstrap 
       else restorable.push({ target: g.target, topic: p.topic, partition: p.partition, prior: p.expected, applied: p.offset });
     }
   }
-  const record = sw.recordKey ?? `logweir/switchovers/<run id>.record.json`;
   const text = [
-    `# Rollback of switchover ${sw.name} (restore ${sw.restore.name}), for review only.`,
-    "# A rollback is a NEW Switchover, approved like this one. Its signed plan is built from the record:",
-    `#   logweir switchover rollback-plan --record <a local copy of ${record}> --out rollback.yaml`,
+    "# The rollback of a Logweir switchover, for review only.",
+    "# A rollback is a NEW Switchover, approved like this one. Its signed plan is built from the switchover's record:",
+    "#   logweir switchover rollback-plan --record <a local copy of the switchover record> --out rollback.yaml",
     "# It is refused for a group whose consumers committed since (TargetPositionsChanged, naming the records read).",
-    ...(restorable.length
-      ? ["#", "# Positions a rollback commits back (prior, expecting the applied one):", ...restorable.map((r) => `#   ${r.target} ${r.topic}:${r.partition}  ${r.applied} -> ${r.prior}`)]
-      : []),
+    ...(restorable.length ? ["#", `# ${restorable.length} position(s) a rollback commits back to the prior one; the console's table lists them.`] : []),
     ...(notRestorable.length
       ? [
           "#",
           "# These had no committed position before the switchover. A commit cannot remove one; with the group",
-          "# stopped, remove each with the broker's own tool:",
-          ...notRestorable.map((r) => `kafka-consumer-groups.sh --bootstrap-server ${bootstrap} --group ${shellWord(r.target)} --topic ${shellWord(`${r.topic}:${r.partition}`)} --delete-offsets`),
+          "# stopped, remove each with the broker's own tool (a <placeholder> marks a name to fill in by hand):",
+          ...notRestorable.map(
+            (r) =>
+              `kafka-consumer-groups.sh --bootstrap-server <bootstrap> --group ${shellArg(r.target, "kafka", "<group>")} --topic ${shellArg(topicPartition(r.topic, r.partition), "kafka", "<topic>:<partition>")} --delete-offsets`,
+          ),
         ]
       : []),
     ...(stuck.length
-      ? ["#", `# Left failed (CommitFailed), neither re-run nor rolled back: ${stuck.join(", ")}. The record's per-partition`, "# `applied` says which positions to remove before a new Switchover with the same plan."]
+      ? ["#", `# ${stuck.length} group(s) failed part-way (CommitFailed): neither re-run nor rolled back. The record's per-partition`, "# \"applied\" says which positions to remove before a new Switchover with the same plan."]
       : []),
     ...(!plan && sw.groups.some((g) => g.outcome === "applied") ? ["#", "# The plan was not written by the console: the record names each applied partition and its prior position."] : []),
     "",
@@ -540,8 +543,34 @@ export function rollbackPlan(sw: Switchover, plan: ParsedPlan | null, bootstrap 
   return { restorable, notRestorable, stuck, text };
 }
 
-function shellWord(s: string): string {
-  return /^[A-Za-z0-9._:/=-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+function topicPartition(topic: string, partition: number): string {
+  return Number.isInteger(partition) && partition >= 0 ? `${topic}:${partition}` : "";
+}
+
+/** What `shellArg` lets into a copyable command, by the kind of value. */
+const SHELL_ALLOW = {
+  /** A Kubernetes object name (DNS-1123 subdomain). */
+  name: (v: string) => v.length <= 253 && /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(v),
+  /** An object-storage key or a file name. */
+  key: (v: string) => v.length <= 1024 && /^[A-Za-z0-9._/-]+$/.test(v) && !v.startsWith("-"),
+  /** A Kafka topic or group id, optionally `topic:partition`. */
+  kafka: (v: string) => v.length <= 260 && /^[A-Za-z0-9._-]+(:\d+)?$/.test(v) && !v.startsWith("-"),
+} as const;
+
+/**
+ * **One argument of a command the operator copies.** A value the kind's allowlist
+ * accepts is single-quoted (`'\''` for a quote, which the allowlists exclude anyway);
+ * anything else, a line break, `$(…)`, a backtick, a `;` or a leading `-` included,
+ * becomes the placeholder, so no server-supplied string can add to the command.
+ */
+export function shellArg(value: string | null | undefined, kind: keyof typeof SHELL_ALLOW, placeholder: string): string {
+  if (typeof value !== "string" || !SHELL_ALLOW[kind](value)) return placeholder;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** A file name for a download: the server-supplied stem only when it is a plain name. */
+export function fileName(stem: string, suffix: string, fallback: string): string {
+  return SHELL_ALLOW.name(stem) ? `${stem}${suffix}` : fallback;
 }
 
 // ------------------------------------------------------- errors and outcomes

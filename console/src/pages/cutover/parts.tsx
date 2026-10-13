@@ -26,6 +26,7 @@ import DownloadIcon from "@patternfly/react-icons/dist/esm/icons/download-icon";
 import {
   UNAVAILABLE_WORDS,
   classCounts,
+  fileName,
   offered,
   plannedPositions,
   reasonWord,
@@ -408,7 +409,7 @@ export function PlanBlock({ bytes, name }: { bytes: string; name: string }) {
     <ExpandableSection toggleText={open ? "Hide the plan" : "Show the plan"} isExpanded={open} onToggle={(_e, o) => setOpen(o)}>
       <CodeBlock
         actions={
-          <Button variant="link" icon={<DownloadIcon />} onClick={() => download(`${name}.switchover-plan.yaml`, bytes, "application/yaml")}>
+          <Button variant="link" icon={<DownloadIcon />} onClick={() => download(fileName(name, ".switchover-plan.yaml", "switchover-plan.yaml"), bytes, "application/yaml")}>
             Download
           </Button>
         }
@@ -483,13 +484,13 @@ export function RollbackCard({ sw, plan }: { sw: Switchover; plan: ParsedPlan | 
         )}
         <Flex className="lw-gap-top" gap={{ default: "gapMd" }}>
           <FlexItem>
-            <Button variant="secondary" icon={<DownloadIcon />} onClick={() => download(`${sw.name}.rollback.txt`, rb.text)}>
+            <Button variant="secondary" icon={<DownloadIcon />} onClick={() => download(fileName(sw.name, ".rollback.txt", "switchover.rollback.txt"), rb.text)}>
               Download the rollback steps
             </Button>
           </FlexItem>
         </Flex>
         <CodeBlock className="lw-gap-top">
-          <CodeBlockCode>{`logweir switchover rollback-plan --record <a local copy of ${sw.recordKey ?? "the record"}> --out rollback.yaml`}</CodeBlockCode>
+          <CodeBlockCode>{"logweir switchover rollback-plan --record <a local copy of the switchover record> --out rollback.yaml"}</CodeBlockCode>
         </CodeBlock>
       </CardBody>
     </Card>
