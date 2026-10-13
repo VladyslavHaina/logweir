@@ -2219,6 +2219,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "consumer positions follow a restore",
             "`logweir/switchovers/<run_id>.record.json`",
         ),
+        // FX-43 (item 96): sealed runner lines; the flag every runner Job takes.
+        (
+            "every runner line a controller acts on is sealed",
+            "`--runner-line-token <hex>`",
+        ),
     ];
     assert_eq!(
         items.len(),

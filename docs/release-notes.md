@@ -28,11 +28,11 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94 and 95. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95 and 96. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below. Items 91 to 95
+`v0.2.0` release that carries it has its own record below. Items 91 to 96
 landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
@@ -2207,6 +2207,57 @@ verifier ignores the mapping block and refuses the `switchover-record` payload
 type. Positions already committed stay committed: a switchover record's
 `rollback-plan` reverses them.
 
+#### 96. Every runner line a controller acts on is sealed with the Job's token, and a runner older than the controller is named (FX-43)
+
+**Changed.** The controller gives every runner Job `--runner-line-token <hex>`
+and reads only the lines the runner prints sealed with it
+(`@<token> <line>`). That covers `Restore`, `Backup`, the `KafkaCluster`
+probe, the check Jobs of `Preflight`, evidence fetch, `TopicDiscovery`, a
+dynamic `Backup`'s discovery and the `RecoveryCatalog` sync, the
+`RetentionPolicy` Job, the `Switchover` Job (item 95) and a clone's cleanup
+Job (item 91). A check seals its end frame, which binds every other frame by
+digest. The lines read this way are:
+- the evidence keys;
+- the `failure-reason=`/`refusal-reason=` states and the stopped creation
+  step's lists;
+- `topic-preflight=` and `topic-configuration=` (item 92);
+- the teardown lines and the progress lines;
+- the switchover's and the cleanup's lines;
+- the probe's two lines.
+
+A line a plan string, a broker or the Kafka client got into the pod log is
+no longer read. The Kafka client's own log lines are printed by the runner
+on one line each. A bootstrap entry or a storage location holding a control
+character or a line break is refused before any client exists, by the
+runner, by `cluster-probe` and by a pattern on
+`KafkaCluster.spec.bootstrapServers`. The terminal log read is one bound at
+every exit code: 256 lines, 4 MiB.
+
+**Do:** roll `controllerImage` and `runnerImage` together. A runner image
+published before this change (v0.2.0 included) stops at the new flag, and the
+object says so:
+- a `Restore` or `Backup`: `exitReason: RunnerOlderThanController`, and a
+  schedule does not retry it;
+- a `KafkaCluster`: reason `RunnerOlderThanController`;
+- a check: `CheckContractMismatch` naming it;
+- a retention run: `refusalCode: RunnerOlderThanController`, with nothing
+  deleted;
+- a `Switchover` or a clone's cleanup: failed or `RemovalFailed` naming it.
+
+Set `runnerImage` to the controller's build.
+
+**Scope:** unit and controller rows over fake pod logs, including the
+released runner's real refusal of the flag (Restore, Backup, probe, check,
+retention), and the binary's sealed block. 32 mutants were killed. The
+Switchover and cleanup Jobs' wiring is compile-checked and covered by their
+existing rows only.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs FX-43's K-rows.]
+
+**Rollback:** roll both together, or the controller first. An older
+controller reads this runner as before: FX-34's `--line-token` gets FX-34's
+output, and the plain lines are still printed last. Runs created by an older
+controller are read as that controller read them.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -2346,7 +2397,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94 and 95, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95 and 96, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2419,6 +2470,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 93 | the `KafkaCluster` CRD (`spec.strimzi`), the controller, the chart (`strimzi.*`) | nothing until `strimzi.readKafkaTopics` is set |
 | 94 | the runner's restore selection and one controller refusal code | the two rolled together |
 | 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
+| 96 | the controller and every runner image (a new flag on every runner Job), the `KafkaCluster` CRD (a pattern) | `controllerImage` and `runnerImage` rolled together |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
