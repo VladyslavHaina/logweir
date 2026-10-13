@@ -593,10 +593,15 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `archive.segments` | blocking | The sampled segments exist |
 | `approval.state` | blocking | The `Approval`'s own verdict |
 | `approval.keyValidity` | advisory | The approver key outlives the restore's deadline |
+| `switchover.restore` | blocking | A `Switchover` review's `Restore` exists with the named UID, is not scratch, `Succeeded` with a `Valid` verdict and a scorecard key, writes evidence to a saved destination, and the namespace has evidence keys (`RestoreNotFound`, `RestoreNotSucceeded`, `ArchiveUrlUnreadable`, `TrustRosterNotLoaded`) |
+| `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word) |
+| `switchover.target` | blocking | The target answers the restore's cluster id and each restored topic its recorded ID (`TargetNotTheRestores`) |
+| `switchover.groups` | blocking | Each requested target group admits a commit and holds no other committed position (`GroupNotAdmissible`); every position is in the details |
 
 A row expires after 15 minutes, except `connection.topicsDescribable` and
 `connection.topicConfigsReadable` (10 minutes), the `archive.*` rows (30
-minutes), `target.mappedTopics` and `target.topicCreate` (5 minutes), the two
+minutes), `target.mappedTopics`, `target.topicCreate`, `switchover.target` and
+`switchover.groups` (5 minutes), the two
 `approval.*` rows (`min(10 m, notAfter)`), and `plan.parse`, `plan.names` and
 every execution-only row (never).
 

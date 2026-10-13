@@ -113,22 +113,22 @@ fn evidence_store(spec: &logweir_core::spec::DrillSpec, contract: bool) -> Resul
     }
 }
 
+/// One capped read of an evidence object, by key: the bytes, or why not in
+/// words. A closure, so `switchover run` reads its `Store` and the
+/// `switchoverReadiness` check its read-only evidence handle.
+pub type EvidenceRead<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
+
 /// The document at `key` and its sidecar, verified under `keyring` for
 /// `payload_type` and judged for `EvidenceSigning` by the installation's
 /// trust.
 fn verified_evidence(
-    store: &Store,
+    read: &EvidenceRead<'_>,
     key: &str,
     sidecar_key: &str,
     payload_type: &str,
     keyring: &logweir_core::execution_contract::EvidenceKeyring,
 ) -> Result<Vec<u8>, String> {
     use logweir_core::trust::{decide, EvidenceClaim, IndependentObservation, KeyUsage};
-    let read = |k: &str, cap: u64| match store.get_capped(k, cap) {
-        Ok((bytes, _)) => Ok(bytes),
-        Err(StoreError::NotFound(_)) => Err(format!("{k} is not in the evidence store")),
-        Err(e) => Err(format!("{k} could not be read: {e}")),
-    };
     let bytes = read(key, caps::SIGNED_DOCUMENT)?;
     let sidecar: logweir_evidence::Sidecar =
         serde_json::from_slice(&read(sidecar_key, caps::SIDECAR)?)
@@ -163,6 +163,149 @@ fn verified_evidence(
         ));
     }
     Ok(bytes)
+}
+
+/// One capped read from the evidence store, its failure in words.
+fn store_read(store: &Store, key: &str, cap: u64) -> Result<Vec<u8>, String> {
+    match store.get_capped(key, cap) {
+        Ok((bytes, _)) => Ok(bytes),
+        Err(StoreError::NotFound(_)) => Err(format!("{key} is not in the evidence store")),
+        Err(e) => Err(format!("{key} could not be read: {e}")),
+    }
+}
+
+/// What step 3 verified: the restore's signed scorecard and the positions
+/// mapping it binds.
+#[derive(Debug)]
+pub struct RestoreEvidence {
+    pub scorecard: Scorecard,
+    /// The scorecard's signed bytes.
+    pub scorecard_bytes: Vec<u8>,
+    pub scorecard_sha256: String,
+    pub mapping: MappingDocument,
+    pub mapping_sha256: String,
+}
+
+/// **Step 3: the restore's evidence**, shared by `switchover run` and the
+/// `switchoverReadiness` check (PROD-04.2 §3.8), so the review verifies
+/// exactly what the switchover will: the scorecard at `scorecard_key` and its
+/// sidecar under `keyring` and the installation's trust, its invariants, its
+/// `approval.plan_hash` (`restore_plan_hash`), a complete verification, the
+/// mapping block, and the mapping document by its digest and its arms.
+/// `bound` is a plan's `(scorecard_sha256, mapping_sha256)`, held as soon as
+/// each is known; the review has none.
+///
+/// # Errors
+///
+/// `"<Word>: sentence"`, the word one of the switchover's own
+/// (`MappingDigestMismatch`, `NoPositionsMapping`, `VerificationNotComplete`).
+pub fn restore_evidence(
+    read: &EvidenceRead<'_>,
+    keyring: &logweir_core::execution_contract::EvidenceKeyring,
+    scorecard_key: &str,
+    restore_plan_hash: &str,
+    bound: Option<(&str, &str)>,
+) -> Result<RestoreEvidence, String> {
+    let sidecar_key = scorecard_key
+        .strip_suffix(".json")
+        .map(|stem| format!("{stem}.sig"))
+        .unwrap_or_else(|| format!("{scorecard_key}.sig"));
+    let sc_bytes = verified_evidence(
+        read,
+        scorecard_key,
+        &sidecar_key,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        keyring,
+    )
+    .map_err(|e| refusal(so::MAPPING_DIGEST_MISMATCH, e))?;
+    let sc_digest = logweir_core::ids::sha256_prefixed(&sc_bytes);
+    if let Some((scorecard_sha256, _)) = bound {
+        if sc_digest != scorecard_sha256 {
+            return Err(refusal(
+                so::MAPPING_DIGEST_MISMATCH,
+                format!(
+                    "the restore's scorecard hashes to {sc_digest}, and the plan binds \
+                     {scorecard_sha256}"
+                ),
+            ));
+        }
+    }
+    let scorecard: Scorecard = serde_json::from_slice(&sc_bytes).map_err(|e| {
+        refusal(
+            so::MAPPING_DIGEST_MISMATCH,
+            format!("the scorecard does not parse: {e}"),
+        )
+    })?;
+    scorecard
+        .validate_invariants()
+        .map_err(|e| refusal(so::MAPPING_DIGEST_MISMATCH, e))?;
+    if scorecard.approval.plan_hash != restore_plan_hash {
+        return Err(refusal(
+            so::MAPPING_DIGEST_MISMATCH,
+            "the scorecard is not the restore plan's: its approval names another plan hash",
+        ));
+    }
+    if let Some(why) = so::verification_refusal(&scorecard) {
+        return Err(why);
+    }
+    let v = scorecard.integrity.verification.as_ref();
+    let block = v.and_then(|v| v.positions_mapping.as_ref());
+    let Some(document) = block.and_then(|b| b.document.as_ref()) else {
+        return Err(refusal(
+            so::NO_POSITIONS_MAPPING,
+            match block.and_then(|b| b.omitted.as_deref()) {
+                Some(o) => format!("the restore wrote no positions mapping ({o})"),
+                None => "the restore's scorecard binds no positions mapping: its point captured \
+                         no consumer group, or the restore was not bound to a point"
+                    .to_string(),
+            },
+        ));
+    };
+    if let Some((_, mapping_sha256)) = bound {
+        if document.sha256 != mapping_sha256 {
+            return Err(refusal(
+                so::MAPPING_DIGEST_MISMATCH,
+                format!(
+                    "the scorecard binds mapping {}, and the plan binds {mapping_sha256}",
+                    document.sha256
+                ),
+            ));
+        }
+    }
+    let mapping_bytes = read(&document.key, pm::MAX_DOCUMENT_BYTES)
+        .map_err(|e| refusal(so::NO_POSITIONS_MAPPING, e))?;
+    let mapping: MappingDocument = serde_json::from_slice(&mapping_bytes).map_err(|e| {
+        refusal(
+            so::MAPPING_DIGEST_MISMATCH,
+            format!("the mapping does not parse: {e}"),
+        )
+    })?;
+    let verified: pm::VerifiedPartitions = v
+        .and_then(|v| v.complete.as_ref())
+        .map(|c| {
+            c.partitions
+                .iter()
+                .map(|p| {
+                    (
+                        (p.topic.clone(), i64::from(p.partition)),
+                        p.target_topic.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(b) = block {
+        pm::validate_document(b, &scorecard.run_id, &verified, &mapping_bytes, &mapping)
+            .map_err(|e| refusal(so::MAPPING_DIGEST_MISMATCH, e))?;
+    }
+    let mapping_sha256 = document.sha256.clone();
+    Ok(RestoreEvidence {
+        scorecard,
+        scorecard_bytes: sc_bytes,
+        scorecard_sha256: sc_digest,
+        mapping,
+        mapping_sha256,
+    })
 }
 
 /// `target.creation.topics[]` from the scorecard's signed bytes: PROD-11.1a's
@@ -336,103 +479,21 @@ fn verify_inputs(
         })?;
     let approval = verify_approval(args, plan_bytes)?;
 
-    // 3. The restore's evidence.
-    let sidecar_key = args
-        .scorecard_key
-        .strip_suffix(".json")
-        .map(|stem| format!("{stem}.sig"))
-        .unwrap_or_else(|| format!("{}.sig", args.scorecard_key));
-    let sc_bytes = verified_evidence(
-        store,
-        &args.scorecard_key,
-        &sidecar_key,
-        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+    // 3. The restore's evidence (shared with the `switchoverReadiness` check).
+    let read = |k: &str, cap: u64| store_read(store, k, cap);
+    let RestoreEvidence {
+        scorecard,
+        scorecard_bytes: sc_bytes,
+        mapping,
+        ..
+    } = restore_evidence(
+        &read,
         keyring,
+        &args.scorecard_key,
+        &plan.restore.plan_hash,
+        Some((&plan.restore.scorecard_sha256, &plan.restore.mapping_sha256)),
     )
-    .map_err(|e| Refused(refusal(so::MAPPING_DIGEST_MISMATCH, e)))?;
-    let sc_digest = logweir_core::ids::sha256_prefixed(&sc_bytes);
-    if sc_digest != plan.restore.scorecard_sha256 {
-        return Err(Refused(refusal(
-            so::MAPPING_DIGEST_MISMATCH,
-            format!(
-                "the restore's scorecard hashes to {sc_digest}, and the plan binds {}",
-                plan.restore.scorecard_sha256
-            ),
-        )));
-    }
-    let scorecard: Scorecard = serde_json::from_slice(&sc_bytes).map_err(|e| {
-        Refused(refusal(
-            so::MAPPING_DIGEST_MISMATCH,
-            format!("the scorecard does not parse: {e}"),
-        ))
-    })?;
-    scorecard
-        .validate_invariants()
-        .map_err(|e| Refused(refusal(so::MAPPING_DIGEST_MISMATCH, e)))?;
-    if scorecard.approval.plan_hash != plan.restore.plan_hash {
-        return Err(Refused(refusal(
-            so::MAPPING_DIGEST_MISMATCH,
-            "the scorecard is not the restore plan's: its approval names another plan hash",
-        )));
-    }
-    if let Some(why) = so::verification_refusal(&scorecard) {
-        return Err(Refused(why));
-    }
-    let v = scorecard.integrity.verification.as_ref();
-    let block = v.and_then(|v| v.positions_mapping.as_ref());
-    let Some(document) = block.and_then(|b| b.document.as_ref()) else {
-        return Err(Refused(refusal(
-            so::NO_POSITIONS_MAPPING,
-            match block.and_then(|b| b.omitted.as_deref()) {
-                Some(o) => format!("the restore wrote no positions mapping ({o})"),
-                None => "the restore's scorecard binds no positions mapping: its point captured \
-                         no consumer group, or the restore was not bound to a point"
-                    .to_string(),
-            },
-        )));
-    };
-    if document.sha256 != plan.restore.mapping_sha256 {
-        return Err(Refused(refusal(
-            so::MAPPING_DIGEST_MISMATCH,
-            format!(
-                "the scorecard binds mapping {}, and the plan binds {}",
-                document.sha256, plan.restore.mapping_sha256
-            ),
-        )));
-    }
-    let mapping_bytes = store
-        .get_capped(&document.key, pm::MAX_DOCUMENT_BYTES)
-        .map(|(b, _)| b)
-        .map_err(|e| {
-            Refused(refusal(
-                so::NO_POSITIONS_MAPPING,
-                format!("{}: {e}", document.key),
-            ))
-        })?;
-    let mapping: MappingDocument = serde_json::from_slice(&mapping_bytes).map_err(|e| {
-        Refused(refusal(
-            so::MAPPING_DIGEST_MISMATCH,
-            format!("the mapping does not parse: {e}"),
-        ))
-    })?;
-    let verified: pm::VerifiedPartitions = v
-        .and_then(|v| v.complete.as_ref())
-        .map(|c| {
-            c.partitions
-                .iter()
-                .map(|p| {
-                    (
-                        (p.topic.clone(), i64::from(p.partition)),
-                        p.target_topic.clone(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(b) = block {
-        pm::validate_document(b, &scorecard.run_id, &verified, &mapping_bytes, &mapping)
-            .map_err(|e| Refused(refusal(so::MAPPING_DIGEST_MISMATCH, e)))?;
-    }
+    .map_err(Refused)?;
 
     // 4. The plan against the mapping, or a rollback plan against its record.
     match &plan.rollback_of {
@@ -445,7 +506,7 @@ fn verify_inputs(
                 .map(|s| format!("{s}.record.sig"))
                 .unwrap_or_default();
             let bytes = verified_evidence(
-                store,
+                &read,
                 &r.key,
                 &sidecar,
                 logweir_evidence::PAYLOAD_TYPE_SWITCHOVER_RECORD,
@@ -485,36 +546,13 @@ fn verify_inputs(
 }
 
 /// What step 5 read: the cluster id and each planned topic's identities.
-type TargetRead = (String, Vec<TopicChecked>);
+pub type TargetRead = (String, Vec<TopicChecked>);
 
 /// Step 5: the target's cluster and every planned topic's generation.
 fn check_target(
     target: &dyn target::SwitchoverTarget,
     v: &Verified,
 ) -> Result<TargetRead, (Refused, String, Vec<TopicChecked>)> {
-    let cluster = target.cluster_id().map_err(|e| {
-        (
-            Refused(refusal(
-                so::TARGET_CLUSTER_CHANGED,
-                format!("the target's cluster id could not be read: {e}"),
-            )),
-            String::new(),
-            Vec::new(),
-        )
-    })?;
-    if cluster != v.scorecard.target.cluster_id {
-        return Err((
-            Refused(refusal(
-                so::TARGET_CLUSTER_CHANGED,
-                format!(
-                    "the target answers cluster id {cluster}, and the restore wrote to {}",
-                    v.scorecard.target.cluster_id
-                ),
-            )),
-            cluster,
-            Vec::new(),
-        ));
-    }
     let topics: Vec<String> = v
         .plan
         .groups
@@ -523,26 +561,72 @@ fn check_target(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let current = target.topic_ids(&topics).unwrap_or_default();
+    target_is_the_restores(
+        target,
+        &v.scorecard.target.cluster_id,
+        &v.created_ids,
+        &topics,
+    )
+    .map_err(|(why, cluster, checked)| (Refused(why), cluster, checked))
+}
+
+/// **Step 5: the target is the restore's**: its cluster id is the scorecard's
+/// (`TargetClusterChanged`), and every topic in `topics` still carries the ID
+/// recorded at creation (`TargetGenerationChanged`, `TargetIdentityUnknown`).
+/// Shared with the `switchoverReadiness` check (PROD-04.2 §3.8).
+///
+/// # Errors
+///
+/// `("<Word>: sentence", the cluster id read, the topics checked)`.
+pub fn target_is_the_restores(
+    target: &dyn target::SwitchoverTarget,
+    restored_cluster: &str,
+    created_ids: &BTreeMap<String, Option<String>>,
+    topics: &[String],
+) -> Result<TargetRead, (String, String, Vec<TopicChecked>)> {
+    let cluster = target.cluster_id().map_err(|e| {
+        (
+            refusal(
+                so::TARGET_CLUSTER_CHANGED,
+                format!("the target's cluster id could not be read: {e}"),
+            ),
+            String::new(),
+            Vec::new(),
+        )
+    })?;
+    if cluster != restored_cluster {
+        return Err((
+            refusal(
+                so::TARGET_CLUSTER_CHANGED,
+                format!(
+                    "the target answers cluster id {cluster}, and the restore wrote to {}",
+                    restored_cluster
+                ),
+            ),
+            cluster,
+            Vec::new(),
+        ));
+    }
+    let current = target.topic_ids(topics).unwrap_or_default();
     let checked: Vec<TopicChecked> = topics
         .iter()
         .map(|t| TopicChecked {
             name: t.clone(),
-            created_id: v.created_ids.get(t).cloned().flatten(),
+            created_id: created_ids.get(t).cloned().flatten(),
             current_id: current.get(t).and_then(|r| r.clone().ok()),
         })
         .collect();
     for c in &checked {
         let (Some(created), Some(now)) = (&c.created_id, current.get(&c.name)) else {
             return Err((
-                Refused(refusal(
+                refusal(
                     so::TARGET_IDENTITY_UNKNOWN,
                     format!(
                         "{}: the restore recorded no topic ID at creation (target.creation), so \
                          a recreated topic could not be told from the restored one",
                         c.name
                     ),
-                )),
+                ),
                 cluster,
                 checked,
             ));
@@ -551,34 +635,34 @@ fn check_target(
             Ok(id) if id == created => {}
             Ok(id) => {
                 return Err((
-                    Refused(refusal(
+                    refusal(
                         so::TARGET_GENERATION_CHANGED,
                         format!(
                             "{} was created as {created} and is {id} now: it was deleted and \
                              recreated since the restore",
                             c.name
                         ),
-                    )),
+                    ),
                     cluster,
                     checked,
                 ))
             }
             Err(why) if why == "NotFound" => {
                 return Err((
-                    Refused(refusal(
+                    refusal(
                         so::TARGET_GENERATION_CHANGED,
                         format!("{} no longer exists on the target", c.name),
-                    )),
+                    ),
                     cluster,
                     checked,
                 ))
             }
             Err(why) => {
                 return Err((
-                    Refused(refusal(
+                    refusal(
                         so::TARGET_IDENTITY_UNKNOWN,
                         format!("{}: its topic ID could not be read now ({why})", c.name),
-                    )),
+                    ),
                     cluster,
                     checked,
                 ))

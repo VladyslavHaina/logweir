@@ -2644,6 +2644,11 @@ pub enum PreflightOperationDto {
     /// plan and no topic, which is what lets the console's "Test connection"
     /// start one with nothing but the cluster the reader is looking at.
     SourceConnection,
+    /// PROD-04.2 §3.8: the review before a `Switchover` — a verified
+    /// restore's signed mapping, its target, and each group's type, state,
+    /// members and committed positions (every position in the details).
+    /// Authorises nothing.
+    Switchover,
 }
 
 /// The aggregate a preflight reports.
@@ -3027,6 +3032,31 @@ pub struct SourceConnectionPreflightRequest {
     pub connection_ref: String,
 }
 
+/// One group a switchover review reads.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SwitchoverPreflightGroup {
+    /// The captured (source) group, as the restore's mapping names it.
+    pub source: String,
+    /// The target group a switchover would commit for; absent: the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// The switchover half of a preflight request (PROD-04.2 §3.8).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SwitchoverPreflightRequest {
+    /// The verified `Restore`, in this namespace.
+    pub restore_name: String,
+    /// Its UID, when the caller knows it: a replaced restore is then refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_uid: Option<String>,
+    /// At most 100 groups; absent: every group the restore's mapping maps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<SwitchoverPreflightGroup>>,
+}
+
 /// `POST .../preflights`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -3045,6 +3075,9 @@ pub struct CreatePreflightRequest {
     /// The source-connection block.
     #[serde(default)]
     pub source_connection: Option<SourceConnectionPreflightRequest>,
+    /// The switchover block (PROD-04.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchover: Option<SwitchoverPreflightRequest>,
     /// Blocking checks to skip, at most 32. A skipped blocking check keeps the
     /// aggregate `unknown`.
     #[serde(default)]

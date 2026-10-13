@@ -1344,6 +1344,7 @@ kubectl --context docker-desktop get preflight -n team-a
 | `Restore` | A draft plan or an existing `Restore`, a target, the source and evidence destinations (or `legacySourceArchive`), the recovery point (`recoveryPointRef` or `catalogPointRef`, at most one) | The target, plan, archive and approval rows, and the target's capability row |
 | `DestinationAccess` | A `BackupDestination` and 1–4 roles | The `destination.*` rows for those roles, and `destination.credentialBound` over every declared `SecretKeys` grant |
 | `SourceConnection` | One `connectionRef` and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy`, `configuration.egress`. No destination credential, CA or signing key is mounted |
+| `Switchover` | `switchover.restoreRef` (name, optional UID) and at most 100 `groups` (`source`, optional `target`; none: every mapped group) | The review before a `Switchover` (*Switching consumer groups over*): `switchover.restore`, `target.resolved`, `destination.resolved`, then the Job's `switchover.evidence`, `switchover.target`, `switchover.groups`. The pod gets the restore's target credential and its evidence destination's `evidenceRead` grant; no signing key |
 
 **A `ready` verdict authorises nothing.** Every execution-time guard still runs,
 and none reads a `Preflight` (a source-scan test,
@@ -2400,13 +2401,29 @@ restore's target. Nothing commits a position automatically after a restore.
    `unavailable` with a reason (`ArchiveGap`, `PartitionNotRestored`,
    `TransactionalArchive`, `BeforeLogStart`, `NotCaptured: …`, …). A sampled
    or failing restore writes no mapping.
-3. **Plan.** `logweir switchover plan --scorecard S --positions-mapping M
+3. **Review** (optional, advisory). A `Preflight` with `operation: Switchover`
+   (`POST …/preflights` `{"operation": "switchover", "switchover":
+   {"restoreName": R, "restoreUid": U, "groups": [{"source": "app"}]}}`) reads
+   what the switchover would, and changes nothing: `switchover.restore` (the
+   `Restore` exists with that UID, is not scratch, `Succeeded` with a `Valid`
+   verdict, writes evidence to a saved destination, and the namespace has
+   evidence keys), `switchover.evidence` (the signed scorecard and the mapping
+   it binds verify, as the run's step 3), `switchover.target` (the restore's
+   cluster id and topic IDs, as step 5) and `switchover.groups` (each target
+   group's type, state and members admit a commit, and its committed
+   positions are none or already the mapped ones). The details
+   (`GET …/preflights/{id}/details`) carry one line per group and restored
+   topic, every partition with its mapped offset, class and committed
+   position. A `ready` review authorises nothing; the run repeats every check.
+   An inline-archive restore is not reviewed (`ArchiveUrlUnreadable`); create
+   the `Switchover`, which checks it.
+4. **Plan.** `logweir switchover plan --scorecard S --positions-mapping M
    --restore-name R --restore-uid U [--group src[=target]]… --out plan.yaml`
    plans every mapped entry (unavailable ones are listed, never planned) with
    `expected: none`. An operator may replace `expected` with the positions a
    target group already holds (an earlier attempt's); the approver sees it and
    the run holds the group to it.
-4. **Approve and create** a `Switchover` (operators create, approvers approve):
+5. **Approve and create** a `Switchover` (operators create, approvers approve):
 
    ```yaml
    apiVersion: logweir.dev/v1alpha1
@@ -2425,13 +2442,13 @@ restore's target. Nothing commits a position automatically after a restore.
    document, and a namespace bound to an approval policy takes its normal mode
    (confirm, two-person or strict). An approval for the `Restore` cannot
    authorise it (`SubjectKindMismatch`).
-5. **Admission.** The controller refuses a plan that is not its
+6. **Admission.** The controller refuses a plan that is not its
    `restoreRef`'s, a `Restore` that did not succeed with a `Valid` verdict
    (`RestoreNotSucceeded`), a scratch restore (`RestoreIsScratch`) and a second
    switchover of the same restore while one runs (`SwitchoverInProgress`), then
    creates one Job (`logweir switchover run`) with the restore's target
    connection and evidence grant.
-6. **The run** verifies the approval, the scorecard's signature and plan hash,
+7. **The run** verifies the approval, the scorecard's signature and plan hash,
    a passing complete verification (`VerificationNotComplete`, naming the
    field), the mapping's digest, every plan entry against the mapping
    (`PlanDisagreesWithMapping`), the target's cluster id
@@ -2445,7 +2462,7 @@ restore's target. Nothing commits a position automatically after a restore.
    `alreadyApplied` when they are the plan's, `TargetPositionsChanged`
    otherwise — and the commit is Logweir's own non-member commit, which the
    broker refuses while the group has a member. Each group is read back.
-7. **The result.** `status.phase` is `Succeeded`, `PartiallyApplied`, `Failed`
+8. **The result.** `status.phase` is `Succeeded`, `PartiallyApplied`, `Failed`
    or `Refused`; `status.groups[]` one outcome per group;
    `status.evidence.recordKey` the signed record
    `logweir/switchovers/<run_id>.record.json` (+ `.sig`; verify it with
@@ -2950,8 +2967,9 @@ back:
 - **Set every `RetentionPolicy` to `mode: Report`**, wait for `status.lease` to
   clear and enforcement Jobs to finish. An older worker records delete markers
   as deletions on a versioned bucket and refuses a plan with `co_point_ids`.
-- **Delete `SourceConnection` preflights.** An older controller cannot decode
-  them, and then reconciles no `Preflight` in any namespace:
+- **Delete `SourceConnection` and `Switchover` preflights.** An older
+  controller cannot decode them, and then reconciles no `Preflight` in any
+  namespace (repeat the query below with `"Switchover"`):
 
   ```bash
   kubectl --context docker-desktop get preflights -A \

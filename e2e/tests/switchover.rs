@@ -24,6 +24,7 @@
 //! | `a_hidden_target_group_is_not_visible_and_never_created` | C13 | the classification answers `NotVisible` (never absent) |
 //! | `a_transactional_archive_maps_nothing` | C16 | every position `TransactionalArchive` |
 //! | `an_absent_group_is_created_on_3_9` | C14, C2 (3.9) | absent target group created; a live classic group refused |
+//! | `the_review_reads_every_position_before_the_switchover` | §3.8 (K1's preview) | `logweir check run` over a `switchoverReadiness` plan: the restore's evidence and mapping verify, the target is the restore's, every group admissible, and the details list every partition `exact` at its mapped offset with no committed position; with a live member the groups row is `GroupActive`; over the scorecard without `target.creation` the target row is `TargetIdentityUnknown`; nothing is committed |
 //!
 //! # `target.creation` until PROD-11.1a joins
 //!
@@ -1921,4 +1922,221 @@ fn an_absent_group_is_created_on_3_9() {
         "C2 on 3.9"
     );
     write_evidence("c14_c2_39", &json!({"record": rec}));
+}
+
+// ============================================================ §3.8: the review
+
+/// The `switchoverReadiness` plan over `r`'s evidence at `scorecard_key`.
+fn review_plan(r: &Restore, scorecard_key: &str) -> logweir_core::check_contract::CheckPlan {
+    use logweir_core::check_contract as cc;
+    use logweir_core::destination as d;
+    let location = d::DestinationLocation {
+        provider: d::StorageProvider::S3,
+        bucket: harness::EVIDENCE_BUCKET.to_string(),
+        prefix: String::new(),
+        region: Some("us-east-1".to_string()),
+        endpoint: Some(harness::s3_endpoint()),
+        addressing: d::Addressing::PathStyle,
+        transport: d::TransportSecurity::InsecureHttp,
+    };
+    let keyring: logweir_core::execution_contract::EvidenceKeyring =
+        serde_json::from_slice(&std::fs::read(evidence_keyring()).expect("the keyring"))
+            .expect("a keyring");
+    cc::CheckPlan {
+        contract: cc::CHECK_PLAN_CONTRACT.to_string(),
+        contract_version: cc::CHECK_CONTRACT_VERSION,
+        subject_uid: "pf-review".to_string(),
+        timeout_seconds: 120,
+        policy_digest: None,
+        request: cc::CheckRequest::SwitchoverReadiness(Box::new(cc::SwitchoverReadinessRequest {
+            restore_name: "cli-restore".to_string(),
+            restore_uid: "cli-uid".to_string(),
+            restore_plan_sha256: logweir_core::ids::sha256_prefixed(
+                &std::fs::read(&r.spec).expect("the restore plan"),
+            ),
+            scorecard_key: scorecard_key.to_string(),
+            target: cc::ConnectionPlan {
+                bootstrap_servers: vec![harness::bootstrap()],
+                auth_mode: "plaintext".to_string(),
+                username: None,
+                password_env: None,
+                tls: Some(false),
+                ca_file: None,
+                client_cert_file: None,
+                client_key_file: None,
+                principal: "User:ANONYMOUS".to_string(),
+            },
+            evidence: cc::DestinationPlan {
+                location_digest: location.location_digest(),
+                location,
+                name: "compose-evidence".to_string(),
+                uid: "dest-uid".to_string(),
+                ca_file: None,
+                credentials: cc::CredentialMode::Static,
+                grant_bindings: Vec::new(),
+            },
+            keyring,
+            groups: Vec::new(),
+        })),
+    }
+}
+
+/// `logweir check run` over `plan`, decoded with the controller's decoder.
+fn review(
+    plan: &logweir_core::check_contract::CheckPlan,
+    label: &str,
+) -> (Output, logweir_core::check_contract::CheckRelay) {
+    use logweir_core::check_contract as cc;
+    let bytes = serde_json::to_vec(plan).expect("serialises");
+    let sha = logweir_core::ids::sha256_prefixed(&bytes);
+    let path = demo_dir().join(format!("p042-{label}-check-plan.json"));
+    std::fs::write(&path, &bytes).expect("written");
+    let mut c = Command::new(bin());
+    c.args(["check", "run", "--plan"])
+        .arg(&path)
+        .args(["--check-contract-version", "1"])
+        .env("LOGWEIR_CHECK_CONTRACT_VERSION", "1")
+        .env("LOGWEIR_CHECK_PLAN_SHA256", &sha)
+        .env("LOGWEIR_CHECK_SUBJECT_UID", "pf-review");
+    s3_env(&mut c);
+    let o = output_within(c, 180);
+    let mut d = cc::frames::Decoder::new();
+    for l in String::from_utf8_lossy(&o.stdout).lines() {
+        d.push_line(l)
+            .unwrap_or_else(|e| panic!("a frame does not decode ({e}):\n{}", text(&o)));
+    }
+    let relay = d
+        .finish(&cc::FrameExpectations {
+            plan_sha256: sha,
+            subject_uid: "pf-review".to_string(),
+        })
+        .unwrap_or_else(|e| panic!("the relay does not finish ({e}):\n{}", text(&o)));
+    (o, relay)
+}
+
+fn review_row(
+    relay: &logweir_core::check_contract::CheckRelay,
+    id: logweir_core::check_contract::CheckId,
+) -> logweir_core::check_contract::CheckOutcome {
+    relay
+        .result()
+        .and_then(Result::ok)
+        .and_then(|r| r.checks.into_iter().find(|c| c.id == id))
+        .unwrap_or_else(|| panic!("no {id} row"))
+}
+
+/// **§3.8 (K1's preview): the review reads every position before the
+/// switchover, and changes nothing.**
+#[test]
+#[ignore = "needs the compose stack (4.3)"]
+fn the_review_reads_every_position_before_the_switchover() {
+    use logweir_core::check_contract::{CheckCode, CheckId, CheckState, Stream};
+    let n = nonce();
+    let topic = format!("sw-review-{n}");
+    let app = format!("review-{n}");
+    create_topic(&topic, 3, &[]);
+    for p in 0..3 {
+        produce(&topic, p, 0, 50);
+    }
+    commit(&app, &[(&topic, 0, 10), (&topic, 1, 20), (&topic, 2, 30)]);
+    let b = backup(&format!("p042-review-{n}"), &topic, &[&app]);
+    let r = restore(
+        &restore_spec(&b, &topic, &format!("rv-{n}-"), true, ""),
+        "review",
+    );
+    assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
+    let target = restored_topic(&r, &topic);
+    let (_, mapping) = r.mapping.as_ref().expect("a mapping");
+    let (sc_key, _) = creation_shim(&r);
+
+    // 1. Every position, exact, nothing committed; the target is the restore's.
+    let (out, relay) = review(&review_plan(&r, &sc_key), "review-ready");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let ev = review_row(&relay, CheckId::SwitchoverEvidence);
+    assert_eq!(
+        (ev.state, ev.code),
+        (CheckState::Ready, CheckCode::RestoreEvidenceVerified),
+        "{}",
+        ev.message
+    );
+    let tg = review_row(&relay, CheckId::SwitchoverTarget);
+    assert_eq!(
+        (tg.state, tg.code),
+        (CheckState::Ready, CheckCode::TargetIsTheRestores),
+        "{}",
+        tg.message
+    );
+    let gr = review_row(&relay, CheckId::SwitchoverGroups);
+    assert_eq!(
+        (gr.state, gr.code),
+        (CheckState::Ready, CheckCode::GroupsAdmissible),
+        "{}",
+        gr.message
+    );
+    assert_eq!(gr.facts.get("exact").map(String::as_str), Some("3"));
+    let details =
+        String::from_utf8(relay.stream(Stream::Details).expect("details").to_vec()).expect("utf-8");
+    let lines: Vec<Value> = details
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{details}");
+    assert_eq!(lines[0]["group"], app.as_str());
+    assert_eq!(lines[0]["topic"], target.as_str());
+    let mapped: Vec<Value> = mapping.groups[&app]
+        .entries
+        .iter()
+        .map(|e| {
+            json!({"partition": e.partition, "class": "exact", "committed": null,
+                        "offset": e.target_offset})
+        })
+        .collect();
+    assert_eq!(lines[0]["positions"], Value::Array(mapped), "{details}");
+    assert_eq!(
+        committed(&app, &target, 3),
+        vec![None, None, None],
+        "the review commits nothing"
+    );
+
+    // 2. A live member on the target group: `GroupActive`, by name.
+    start_member(&app, &target, false);
+    let (_, relay) = review(&review_plan(&r, &sc_key), "review-active");
+    let gr = review_row(&relay, CheckId::SwitchoverGroups);
+    stop_member(&app);
+    assert_eq!(
+        (gr.state, gr.code),
+        (CheckState::NotReady, CheckCode::GroupNotAdmissible),
+        "{}",
+        gr.message
+    );
+    assert!(gr.message.starts_with("GroupActive"), "{}", gr.message);
+
+    // 3. The scorecard as the restore signed it, without `target.creation`.
+    let (_, relay) = review(&review_plan(&r, &r.scorecard_key), "review-no-creation");
+    let tg = review_row(&relay, CheckId::SwitchoverTarget);
+    let no_creation = r.scorecard.pointer("/target/creation").is_none();
+    if no_creation {
+        assert_eq!(
+            (tg.state, tg.code),
+            (CheckState::NotReady, CheckCode::TargetNotTheRestores),
+            "{}",
+            tg.message
+        );
+        assert!(
+            tg.message.starts_with("TargetIdentityUnknown"),
+            "{}",
+            tg.message
+        );
+    }
+    write_evidence(
+        "review",
+        &json!({
+            "restoreScorecardKey": sc_key,
+            "rows": {"evidence": ev.message, "target": "ready", "groupsReady": "every group",
+                     "groupsActive": gr.message},
+            "details": lines,
+            "committedAfter": committed(&app, &target, 3),
+            "withoutCreation": if no_creation { tg.message } else { "n/a".to_string() },
+        }),
+    );
 }

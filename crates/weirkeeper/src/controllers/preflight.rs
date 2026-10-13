@@ -387,6 +387,45 @@ pub const SOURCE_CONNECTION_CONTROLLER_ROWS: &[Row] = &[
     ),
 ];
 
+/// The **C** and **E** rows of a `Switchover` review (PROD-04.2 §3.8): the
+/// `Restore` it is about, the restore's target connection, its evidence
+/// destination, and `configuration.*`. No signer (a review signs nothing) and
+/// no cluster-identity row: the Job's `switchover.target` holds the target to
+/// the cluster id the restore's signed scorecard names, which is the stricter
+/// question.
+pub const SWITCHOVER_CONTROLLER_ROWS: &[Row] = &[
+    row(
+        CheckId::SwitchoverRestore,
+        Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::TargetResolved,
+        Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::DestinationResolved,
+        Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::ConfigurationPolicy,
+        Gating::Advisory,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::ConfigurationEgress,
+        Gating::ExecutionOnly,
+        Authority::Controller,
+        None,
+    ),
+];
+
 /// The **P** rows — answered from pod status by `check::waiting`, never by a
 /// process inside the pod.
 #[must_use]
@@ -423,7 +462,7 @@ pub fn pod_rows(operation: PreflightOperation) -> Vec<Row> {
             Authority::PodStatus,
             Some(EXPIRY_DEFAULT),
         )),
-        PreflightOperation::Restore => out.push(row(
+        PreflightOperation::Restore | PreflightOperation::Switchover => out.push(row(
             CheckId::TargetCredentialProjected,
             Gating::Blocking,
             Authority::PodStatus,
@@ -444,6 +483,7 @@ pub fn controller_rows(operation: PreflightOperation) -> Vec<Row> {
         PreflightOperation::Restore => RESTORE_CONTROLLER_ROWS,
         PreflightOperation::DestinationAccess => DESTINATION_ACCESS_CONTROLLER_ROWS,
         PreflightOperation::SourceConnection => SOURCE_CONNECTION_CONTROLLER_ROWS,
+        PreflightOperation::Switchover => SWITCHOVER_CONTROLLER_ROWS,
     };
     let mut out = base.to_vec();
     out.extend(pod_rows(operation));
@@ -479,7 +519,9 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             // `readiness.rs` applies `skip` to `runner.contract` too.
             push(CheckId::RunnerContract);
             match r.operation {
-                CheckOperation::Restore => push(CheckId::TargetAuthenticated),
+                CheckOperation::Restore | CheckOperation::Switchover => {
+                    push(CheckId::TargetAuthenticated);
+                }
                 // `readiness::connection_ids`' own table, mirrored: a
                 // source-connection operation has no topic row.
                 CheckOperation::SourceConnection => push(CheckId::ConnectionAuthenticated),
@@ -525,6 +567,11 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
         CheckRequest::SourceConnection(_) => {
             out.insert(CheckId::RunnerContract);
             out.insert(CheckId::ConnectionAuthenticated);
+        }
+        // `kinds::switchover::run` emits exactly these four, on every path
+        // (a row it could not ask is `unknown`, blocked, never absent).
+        CheckRequest::SwitchoverReadiness(_) => {
+            out.extend(SWITCHOVER_JOB_ROWS);
         }
         CheckRequest::RestorePreflight(r) => {
             let wanted: BTreeSet<CheckId> = r.checks.iter().copied().collect();
@@ -607,6 +654,14 @@ pub fn destination_row_for(role: DestinationRole) -> CheckId {
 
 /// The rows to report `unknown` for when NO plan could be rendered at all.
 ///
+/// The rows a `switchoverReadiness` Job answers.
+pub const SWITCHOVER_JOB_ROWS: [CheckId; 4] = [
+    CheckId::RunnerContract,
+    CheckId::SwitchoverEvidence,
+    CheckId::SwitchoverTarget,
+    CheckId::SwitchoverGroups,
+];
+
 /// Used only when a blocking controller row refused before a `CheckRequest`
 /// existed. Every row is `unknown` either way; listing them makes the verdict
 /// name the unanswered questions instead of looking short and green.
@@ -635,6 +690,7 @@ pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
                 .into_iter()
                 .collect()
         }
+        PreflightOperation::Switchover => SWITCHOVER_JOB_ROWS.into_iter().collect(),
         PreflightOperation::Restore => [
             CheckId::RunnerContract,
             // `plan.parse` is absent: the controller answers it (it holds the
@@ -660,6 +716,7 @@ pub fn plan_kind(operation: PreflightOperation) -> CheckPlanKind {
         PreflightOperation::Restore => CheckPlanKind::RestorePreflight,
         PreflightOperation::DestinationAccess => CheckPlanKind::DestinationAccess,
         PreflightOperation::SourceConnection => CheckPlanKind::SourceConnection,
+        PreflightOperation::Switchover => CheckPlanKind::SwitchoverReadiness,
     }
 }
 
@@ -671,6 +728,7 @@ pub fn check_operation(operation: PreflightOperation) -> CheckOperation {
         PreflightOperation::Restore => CheckOperation::Restore,
         PreflightOperation::DestinationAccess => CheckOperation::DestinationAccess,
         PreflightOperation::SourceConnection => CheckOperation::SourceConnection,
+        PreflightOperation::Switchover => CheckOperation::Switchover,
     }
 }
 
@@ -735,7 +793,7 @@ pub fn connection_row(
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let id = match operation {
-        PreflightOperation::Restore => CheckId::TargetResolved,
+        PreflightOperation::Restore | PreflightOperation::Switchover => CheckId::TargetResolved,
         _ => CheckId::ConnectionResolved,
     };
     let scope = CheckScope {
@@ -2166,6 +2224,224 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
     }
 }
 
+/// What a `Switchover` review read (PROD-04.2 §3.8): the `Restore` it names,
+/// the namespace's evidence keys, and the groups it asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwitchoverFacts {
+    /// `restoreRef.name`.
+    pub requested: String,
+    /// `restoreRef.uid`, when the request named one.
+    pub requested_uid: Option<String>,
+    /// The `Restore` by that name, when one exists.
+    pub restore: Option<SwitchoverRestoreFacts>,
+    /// The evidence-signing keyring of the namespace's trust, or why there is
+    /// none.
+    pub keyring: Result<logweir_core::execution_contract::EvidenceKeyring, String>,
+    /// The groups to read (empty: every group the mapping maps).
+    pub groups: Vec<logweir_core::check_contract::SwitchoverReadinessGroup>,
+}
+
+/// The `Restore` a review names, in the facts the review is admitted on —
+/// the `Switchover` controller's own admission (`switchover::admit`, step 2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SwitchoverRestoreFacts {
+    pub name: String,
+    pub uid: String,
+    /// `sha256:` of its plan bytes.
+    pub plan_hash: String,
+    pub phase: Option<String>,
+    /// `status.evidence.verification.result`.
+    pub verdict: Option<String>,
+    pub scorecard_key: Option<String>,
+    pub scratch: bool,
+    /// Whether it names a saved evidence destination (an inline-archive
+    /// restore does not).
+    pub evidence_destination: bool,
+}
+
+impl SwitchoverFacts {
+    /// The facts of one review, from the request, the object and the trust.
+    #[must_use]
+    pub fn of(
+        request: &crate::crds::preflight::SwitchoverPreflightRequest,
+        restore: Option<&Restore>,
+        trust: Result<&crate::trust::Resolution, &kube::Error>,
+    ) -> Self {
+        let keyring = match trust {
+            Ok(crate::trust::Resolution::Trust(t)) => super::restore::evidence_keyring_bytes(t)
+                .map_err(|e| e.to_string())
+                .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string())),
+            Ok(_) => Err(
+                "the namespace resolves to no single trust (no TrustPolicy and no \
+                          roster, or two policies claim it)"
+                    .to_string(),
+            ),
+            Err(e) => Err(format!("the namespace's trust could not be read: {e}")),
+        };
+        Self {
+            requested: request.restore_ref.name.clone(),
+            requested_uid: request.restore_ref.uid.clone(),
+            restore: restore.map(|r| {
+                let st = r.status.as_ref();
+                let evidence = st.and_then(|s| s.evidence.as_ref());
+                SwitchoverRestoreFacts {
+                    name: r.name_any(),
+                    uid: r.uid().unwrap_or_default(),
+                    plan_hash: logweir_core::ids::sha256_prefixed(r.spec.plan_bytes.as_bytes()),
+                    phase: st.and_then(|s| s.phase.clone()),
+                    verdict: evidence
+                        .and_then(|e| e.verification.as_ref())
+                        .and_then(|v| v.result.clone()),
+                    scorecard_key: evidence.and_then(|e| e.scorecard_key.clone()),
+                    scratch: r.spec.target.mode == crate::crds::restore::TargetMode::Scratch,
+                    evidence_destination: r.spec.evidence_destination_ref.is_some(),
+                }
+            }),
+            keyring,
+            groups: request
+                .groups
+                .iter()
+                .flatten()
+                .map(|g| logweir_core::check_contract::SwitchoverReadinessGroup {
+                    source: g.source.clone(),
+                    target: g.target.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `switchover.restore` (PROD-04.2 §3.8): the `Restore` a review names
+/// exists with the requested UID, is not a scratch drill, `Succeeded` with a
+/// `Valid` evidence verdict and a recorded scorecard key, writes its evidence
+/// to a saved destination, and the namespace has evidence keys to verify it
+/// under — the `Switchover` controller's admission, read-only. Anything else
+/// is `notReady` and no Job is rendered.
+#[must_use]
+pub fn switchover_restore_row(facts: Option<&SwitchoverFacts>, now: DateTime<Utc>) -> CheckOutcome {
+    let op = PreflightOperation::Switchover;
+    let not_ready = |code: CheckCode, message: String, remedy: &str| {
+        outcome(
+            op,
+            CheckId::SwitchoverRestore,
+            CheckState::NotReady,
+            code,
+            now,
+        )
+        .with_message(&message)
+        .with_remedy(remedy)
+    };
+    let Some(f) = facts else {
+        return not_ready(
+            CheckCode::RestoreNotFound,
+            "the review names no Restore".to_string(),
+            "Name the verified Restore whose consumer positions a switchover would apply.",
+        );
+    };
+    let scope = CheckScope {
+        kind: "Restore".to_string(),
+        name: f.requested.clone(),
+        uid: f.restore.as_ref().map(|r| r.uid.clone()),
+    };
+    let Some(r) = f.restore.as_ref() else {
+        return not_ready(
+            CheckCode::RestoreNotFound,
+            format!(
+                "no Restore named `{}` exists in this namespace",
+                f.requested
+            ),
+            "Name a Restore of this namespace; a switchover applies only a restore that \
+             succeeded here.",
+        )
+        .with_scope(scope);
+    };
+    if f.requested_uid.as_deref().is_some_and(|u| u != r.uid) {
+        return not_ready(
+            CheckCode::RestoreNotFound,
+            format!(
+                "Restore `{}` is UID {}, not the UID {} this review names: it was replaced",
+                r.name,
+                r.uid,
+                f.requested_uid.as_deref().unwrap_or_default()
+            ),
+            "Review the current Restore by its current UID.",
+        )
+        .with_scope(scope);
+    }
+    if r.scratch {
+        return not_ready(
+            CheckCode::RestoreNotSucceeded,
+            format!(
+                "{}: Restore `{}` is a scratch drill; its topics are torn down, so no group is \
+                 moved onto them",
+                logweir_core::switchover::RESTORE_IS_SCRATCH,
+                r.name
+            ),
+            "Switch groups over onto a restore into new topics, not a scratch drill.",
+        )
+        .with_scope(scope);
+    }
+    let phase = r.phase.as_deref().unwrap_or("not started");
+    if phase != "Succeeded" || r.verdict.as_deref() != Some("Valid") {
+        return not_ready(
+            CheckCode::RestoreNotSucceeded,
+            format!(
+                "{}: Restore `{}` is {phase} and its evidence verdict is {}; a switchover \
+                 applies only a succeeded restore whose signed scorecard verified",
+                logweir_core::switchover::RESTORE_NOT_SUCCEEDED,
+                r.name,
+                r.verdict.as_deref().unwrap_or("not recorded")
+            ),
+            "Wait for the restore to finish and its evidence to verify, or restore again.",
+        )
+        .with_scope(scope);
+    }
+    if r.scorecard_key.is_none() {
+        return not_ready(
+            CheckCode::RestoreNotSucceeded,
+            format!("Restore `{}` records no scorecard key", r.name),
+            "Wait for the restore's evidence to be recorded.",
+        )
+        .with_scope(scope);
+    }
+    if !r.evidence_destination {
+        return not_ready(
+            CheckCode::ArchiveUrlUnreadable,
+            format!(
+                "Restore `{}` writes its evidence through an inline archive; this build reviews \
+                 restores whose evidence is a saved BackupDestination, and the Switchover \
+                 itself still checks this one when it runs",
+                r.name
+            ),
+            "Create the Switchover directly (it repeats every check), or restore with \
+             evidenceDestinationRef.",
+        )
+        .with_scope(scope);
+    }
+    if let Err(why) = &f.keyring {
+        return not_ready(
+            CheckCode::TrustRosterNotLoaded,
+            format!("no evidence key to verify the restore's scorecard under: {why}"),
+            "Give the namespace one TrustPolicy (or the default roster) that lists its \
+             evidence-signing key.",
+        )
+        .with_scope(scope);
+    }
+    outcome(
+        op,
+        CheckId::SwitchoverRestore,
+        CheckState::Ready,
+        CheckCode::RestoreSucceeded,
+        now,
+    )
+    .with_message(&format!(
+        "Restore `{}` succeeded and its evidence verdict is Valid; the Job verifies its signed \
+         scorecard and positions mapping",
+        r.name
+    ))
+    .with_scope(scope)
+}
+
 /// How many `Backup`s one list page reads for the catalog point's verdict join.
 pub const CATALOG_POINT_BACKUP_PAGE: u32 = 500;
 /// How many such pages one check reads. A namespace holding more `Backup`s than
@@ -3054,9 +3330,10 @@ pub fn attribute_for(
 ) -> Option<CheckId> {
     let id = check::attribute(waiting, projections)?;
     Some(match (operation, id) {
-        (PreflightOperation::Restore, CheckId::ConnectionCredentialProjected) => {
-            CheckId::TargetCredentialProjected
-        }
+        (
+            PreflightOperation::Restore | PreflightOperation::Switchover,
+            CheckId::ConnectionCredentialProjected,
+        ) => CheckId::TargetCredentialProjected,
         (_, other) => other,
     })
 }
@@ -3531,6 +3808,7 @@ pub fn binding_status(inputs: &BindingInputs) -> PreflightBinding {
                 CheckOperation::Restore => "Restore",
                 CheckOperation::DestinationAccess => "DestinationAccess",
                 CheckOperation::SourceConnection => "SourceConnection",
+                CheckOperation::Switchover => "Switchover",
             }
             .to_string(),
         ),
@@ -4234,6 +4512,8 @@ pub struct Inputs {
     /// The controller's archive handle location, `LOGWEIR_ARCHIVE_URL`, which
     /// [`legacy_evidence_row`] compares a legacy plan's evidence with.
     pub legacy_evidence_handle: Option<String>,
+    /// A `Switchover` review's `Restore` and keys (PROD-04.2 §3.8).
+    pub switchover: Option<SwitchoverFacts>,
 }
 
 impl Default for Inputs {
@@ -4279,6 +4559,7 @@ impl Default for Inputs {
             legacy_archive: None,
             legacy_source: None,
             legacy_evidence_handle: None,
+            switchover: None,
         }
     }
 }
@@ -4719,15 +5000,23 @@ impl Inputs {
                 self.cluster_name.as_deref().unwrap_or_default(),
                 now,
             ));
-            out.push(cluster_identity_under_trust(
-                op,
-                facts.cluster_id.as_deref(),
-                self.cluster_recorded_id.as_deref(),
-                &self.roster,
-                self.source_cluster_id.as_deref(),
-                self.plan.as_ref().is_some_and(PlanFacts::scratch),
-                now,
-            ));
+            // A switchover review holds the target to the cluster id the
+            // restore's signed scorecard names (`switchover.target`, the
+            // Job's), the stricter question; it has no row of its own here.
+            if op != PreflightOperation::Switchover {
+                out.push(cluster_identity_under_trust(
+                    op,
+                    facts.cluster_id.as_deref(),
+                    self.cluster_recorded_id.as_deref(),
+                    &self.roster,
+                    self.source_cluster_id.as_deref(),
+                    self.plan.as_ref().is_some_and(PlanFacts::scratch),
+                    now,
+                ));
+            }
+        }
+        if op == PreflightOperation::Switchover {
+            out.push(switchover_restore_row(self.switchover.as_ref(), now));
         }
         if self.signs() {
             out.push(signer_rostered_row(
@@ -4839,6 +5128,7 @@ impl Inputs {
                             | CheckId::TargetResolved
                             | CheckId::DestinationResolved
                             | CheckId::PlanParse
+                            | CheckId::SwitchoverRestore
                     )
             })
             .collect()
@@ -5047,6 +5337,31 @@ pub fn build_job_shape(
                     evidence_read: evidence_read_grant.clone(),
                 },
             )
+        }
+        PreflightOperation::Switchover => {
+            let c = connection.ok_or("the target connection did not resolve")?;
+            let d = archive.ok_or("the evidence destination did not resolve")?;
+            let f = inputs
+                .switchover
+                .as_ref()
+                .ok_or("there is no switchover request")?;
+            let r = f.restore.as_ref().ok_or("the Restore does not exist")?;
+            let keyring = f.keyring.clone()?;
+            CheckRequest::SwitchoverReadiness(Box::new(
+                logweir_core::check_contract::SwitchoverReadinessRequest {
+                    restore_name: r.name.clone(),
+                    restore_uid: r.uid.clone(),
+                    restore_plan_sha256: r.plan_hash.clone(),
+                    scorecard_key: r
+                        .scorecard_key
+                        .clone()
+                        .ok_or("the Restore records no scorecard key")?,
+                    target: connection_plan(c),
+                    evidence: destination_plan(d, Some(ARCHIVE_CA_PATH), Vec::new()),
+                    keyring,
+                    groups: f.groups.clone(),
+                },
+            ))
         }
         PreflightOperation::Restore => {
             let c = connection.ok_or("the target connection did not resolve")?;
@@ -5520,7 +5835,10 @@ pub fn grant_bindings_of(
             ]
         }
         PreflightOperation::Restore => vec![DestinationRole::ArchiveRead],
-        PreflightOperation::SourceConnection => Vec::new(),
+        // A switchover review compares no binding: its plan carries none
+        // (`validate_grant_bindings`), and the evidence grant it reads with
+        // refuses a mis-bound Secret before any read.
+        PreflightOperation::SourceConnection | PreflightOperation::Switchover => Vec::new(),
     };
     roles
         .into_iter()
@@ -5590,7 +5908,9 @@ pub fn destination_spec_facts(
     let reads_evidence = match operation {
         PreflightOperation::Backup => request_evidence_read,
         PreflightOperation::DestinationAccess => roles.contains(&DestinationRole::EvidenceRead),
-        PreflightOperation::Restore | PreflightOperation::SourceConnection => false,
+        PreflightOperation::Restore
+        | PreflightOperation::SourceConnection
+        | PreflightOperation::Switchover => false,
     };
     let writes_evidence = matches!(
         operation,
@@ -5719,7 +6039,8 @@ pub async fn resolve(
             .source_connection
             .as_ref()
             .map(|c| c.connection_ref.name.clone()),
-        PreflightOperation::DestinationAccess => None,
+        // Derived from the `Restore` below, as a `restoreRef` restore check's.
+        PreflightOperation::DestinationAccess | PreflightOperation::Switchover => None,
     };
 
     // The Restore, for a restore bound to an existing subject.
@@ -5729,6 +6050,15 @@ pub async fn resolve(
             let api: Api<Restore> = Api::namespaced(client.clone(), namespace);
             restore_object = api.get_opt(&ref_.name).await.map_err(ReconcileError::Api)?;
         }
+    }
+    // A switchover review's `Restore` (PROD-04.2 §3.8): its target and its
+    // evidence destination are the review's.
+    if let Some(sw) = request.switchover.as_ref() {
+        let api: Api<Restore> = Api::namespaced(client.clone(), namespace);
+        restore_object = api
+            .get_opt(&sw.restore_ref.name)
+            .await
+            .map_err(ReconcileError::Api)?;
     }
 
     let cluster_name = cluster_name.or_else(|| {
@@ -5804,6 +6134,17 @@ pub async fn resolve(
         // No destination and no role: nothing is resolved, nothing is
         // projected and no `destination.*` row is expected of the Job.
         PreflightOperation::SourceConnection => (None, None, Vec::new(), None),
+        // The restore's evidence destination, read with its `evidenceRead`
+        // grant (as an `evidenceFetch` reads evidence) and nothing else.
+        PreflightOperation::Switchover => (
+            restore_object
+                .as_ref()
+                .and_then(|r| r.spec.evidence_destination_ref.as_ref())
+                .map(|d| d.name.clone()),
+            None,
+            vec![DestinationRole::EvidenceRead],
+            None,
+        ),
     };
     inputs.roles = roles;
     inputs.legacy_archive = legacy;
@@ -5815,6 +6156,7 @@ pub async fn resolve(
         // wildcarded so an operation added later cannot inherit a grant by
         // falling through.
         PreflightOperation::SourceConnection => DestinationRole::ArchiveRead,
+        PreflightOperation::Switchover => DestinationRole::EvidenceRead,
     };
     if let Some(name) = archive_ref {
         let resolved = resolve_destination(client, namespace, &name, archive_role, &policy)
@@ -6150,6 +6492,29 @@ pub async fn resolve(
         // Neither names a plan or a topic set: a destination-access check is
         // about grants and a source-connection check is about one dial.
         PreflightOperation::DestinationAccess | PreflightOperation::SourceConnection => {}
+        PreflightOperation::Switchover => {
+            if let Some(sw) = request.switchover.as_ref() {
+                inputs.switchover = Some(SwitchoverFacts::of(
+                    sw,
+                    restore_object.as_ref(),
+                    resolution.as_ref(),
+                ));
+            }
+            if let Some(obj) = restore_object.as_ref() {
+                inputs.restore_name = Some(obj.name_any());
+                // The review is stale once the Restore changes (its status
+                // included: a new verdict is a new object generation only for
+                // spec, so the UID and generation pin the object, and the
+                // Job re-reads its evidence).
+                inputs.referents.push(referent(
+                    "Restore",
+                    namespace,
+                    &obj.name_any(),
+                    &obj.uid().unwrap_or_default(),
+                    obj.metadata.generation,
+                ));
+            }
+        }
     }
     Ok(inputs)
 }

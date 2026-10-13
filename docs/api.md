@@ -551,8 +551,11 @@ complete: `attestedComplete` without an `attestation` is served as `unknown`,
 with `attestationMissing` in `basis`.
 
 **Readiness checks.** A body names one `operation` (`backup`, `restore`,
-`destinationAccess`, `sourceConnection`) and that block only, else `422`
-naming both. A restore check names `recoveryPoint` or `catalogPoint`, not both
+`destinationAccess`, `sourceConnection`, `switchover`) and that block only,
+else `422` naming both. A `switchover` block names `restoreName` (and
+`restoreUid` when known) and at most 100 `groups` (`source`, optional
+`target`; a blank or control-character id is `invalid_group`, a target named
+twice `duplicate_target`); an approver may read it, as a restore check. A restore check names `recoveryPoint` or `catalogPoint`, not both
 (`422 exactly_one`); a `pointId` that is not `lwp1-` plus 32 lowercase hex is
 `422 invalid_point_id`. `applicable`, `stale` and `staleReasons` are recomputed
 on every read against the `?planHash=` you send; the verdict is advisory.

@@ -8308,6 +8308,11 @@
             "$ref": "#/components/schemas/SourceConnectionPreflightRequest",
             "nullable": true
           },
+          "switchover": {
+            "description": "The switchover block (PROD-04.2).",
+            "$ref": "#/components/schemas/SwitchoverPreflightRequest",
+            "nullable": true
+          },
           "timeoutSeconds": {
             "description": "The check budget in seconds, 30 to 600.",
             "default": null,
@@ -11502,6 +11507,13 @@
             "enum": [
               "sourceConnection"
             ]
+          },
+          {
+            "description": "PROD-04.2 §3.8: the review before a `Switchover` — a verified restore's signed mapping, its target, and each group's type, state, members and committed positions (every position in the details). Authorises nothing.",
+            "type": "string",
+            "enum": [
+              "switchover"
+            ]
           }
         ]
       },
@@ -14677,6 +14689,52 @@
             "type": "string"
           }
         }
+      },
+      "SwitchoverPreflightGroup": {
+        "description": "One group a switchover review reads.",
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "description": "The captured (source) group, as the restore's mapping names it.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The target group a switchover would commit for; absent: the same id.",
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SwitchoverPreflightRequest": {
+        "description": "The switchover half of a preflight request (PROD-04.2 §3.8).",
+        "type": "object",
+        "required": [
+          "restoreName"
+        ],
+        "properties": {
+          "groups": {
+            "description": "At most 100 groups; absent: every group the restore's mapping maps.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverPreflightGroup"
+            },
+            "nullable": true
+          },
+          "restoreName": {
+            "description": "The verified `Restore`, in this namespace.",
+            "type": "string"
+          },
+          "restoreUid": {
+            "description": "Its UID, when the caller knows it: a replaced restore is then refused.",
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
       },
       "SwitchoverResponse": {
         "description": "`GET .../switchovers/{name}` and `POST .../switchovers`.",

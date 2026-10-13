@@ -3169,8 +3169,14 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
     let request = at(spec_schema(&doc), &["properties", "request"]);
     assert_eq!(
         enum_values(at(request, &["properties", "operation"])),
-        vec!["Backup", "Restore", "DestinationAccess", "SourceConnection"],
-        "four operations, and P3 ties the block to the value"
+        vec![
+            "Backup",
+            "Restore",
+            "DestinationAccess",
+            "SourceConnection",
+            "Switchover"
+        ],
+        "five operations (PROD-04.2 adds Switchover), and P3 ties the block to the value"
     );
     assert_eq!(
         required(request),
@@ -3228,6 +3234,33 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
         (
             "DestinationAccess with sourceConnection",
             req("DestinationAccess", "sourceConnection"),
+            false,
+        ),
+        // PROD-04.2's fifth operation, by the same pair: its own block is
+        // admitted, any other refused, and no other operation may carry it.
+        (
+            "Switchover with switchover",
+            req("Switchover", "switchover"),
+            true,
+        ),
+        (
+            "Switchover with restore",
+            req("Switchover", "restore"),
+            false,
+        ),
+        (
+            "Switchover with no block at all",
+            yaml("operation: Switchover\n"),
+            false,
+        ),
+        (
+            "SourceConnection with switchover",
+            req("SourceConnection", "switchover"),
+            false,
+        ),
+        (
+            "Restore with switchover",
+            req("Restore", "switchover"),
             false,
         ),
     ] {
