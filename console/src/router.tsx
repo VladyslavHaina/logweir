@@ -18,6 +18,7 @@ import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
 import { Cutover } from "./pages/Cutover";
 import { NotInPrototype } from "./pages/NotInPrototype";
+import { scheduleRoutes } from "./pages/schedules/routes";
 
 const root = createRootRoute({ component: Outlet });
 
@@ -48,7 +49,7 @@ const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", c
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, planned]),
+  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, ...scheduleRoutes(nsRoute), planned]),
 ]);
 
 export const router = createRouter({
