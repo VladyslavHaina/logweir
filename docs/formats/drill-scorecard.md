@@ -3,13 +3,13 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.1.0.json`](../../schemas/logweir-drill-scorecard-2.1.0.json)
+[`schemas/logweir-drill-scorecard-2.4.0.json`](../../schemas/logweir-drill-scorecard-2.4.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json)
+[`schemas/logweir-drill-scorecard-1.12.0.json`](../../schemas/logweir-drill-scorecard-1.12.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.8.0.json` and `-2.0.0.json`, is frozen beside
-them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
+schema file, `-1.0.0.json` to `-1.11.0.json` and `-2.0.0.json` to `-2.3.0.json`,
+is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
@@ -65,6 +65,9 @@ chose.
 | 2.0.0 | PROD-11.1b | [a partition subset](#format-200-a-partition-subset-prod-111b-od-9-a): `source.selection` required, with `partitions` and `engine_runs`; arms PS-1 to PS-5 | a partition-subset restore, and only it | **MAJOR**, the owner's decision OD-9 (a), 2026-10-09: two existing fields then name the selection, not the topic |
 | 1.8.0 | PROD-15.1 | [`target.original_name`](#targetoriginal_name-format-180), arms ON-1 to ON-14 | a restore under the original topic names; format 1 only | MINOR, OD-7 (a) |
 | 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
+| 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
+| 1.11.0, 2.3.0 | PROD-05.2 | [`target.topic_configuration`](#targettopic_configuration-format-1110-and-230), arms TC-1 to TC-5 | a restore whose plan carries `target.topic_configuration` (2.3.0 for a subset) | MINOR, OD-7 (a) |
+| 1.12.0, 2.4.0 | PROD-04.2 | [`integrity.verification.positions_mapping`](#integrityverificationpositions_mapping-format-1120-and-240), arms PM-1 to PM-5 | a passing complete restore of a point that captured consumer groups (2.4.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -81,6 +84,9 @@ chose.
 | 2.0.0 | **Every older reader refuses it**, never prints it `VALID`: `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1 as a newer major; a `logweir` between PROD-11.1 and PROD-11.1b as a newer major, or (a subset from the floor, with no start) at deserialisation. Upgrade the verifier before verifying subset restores. Older runners refuse a subset plan ([the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b)) | 2.0.0 documents stay verifiable with readers from PROD-11.1b on |
 | 1.8.0 | A verifier older than 1.28.0 and a `logweir` built before PROD-15.1 accept it, ignore the block and print no `original name:` line. An older runner refuses an original-name plan at phase 0 (its empty prefix maps every topic onto itself) | Documents stay valid; no older runner restores under the original names |
 | 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
+| 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
+| 1.11.0, 2.3.0 | A verifier older than 1.32.0 and an older `logweir drill verify` accept it and ignore the block; readers before 1.27.0 refuse a 2.3.0 document by its major. An older runner ignores the plan block, creates its topics as before and claims nothing | Documents stay valid |
+| 1.12.0, 2.4.0 | Accepts it, ignores the block and prints no `mapping:` line; `verify_scorecard.py` before 1.33.0 and an older `logweir drill verify` have no `--positions-mapping` | An older `logweir` writes no mapping (a `Switchover` over such a restore is refused `NoPositionsMapping`); documents stay valid |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -94,6 +100,9 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 1.7.0 | `scorecard::FORMAT_VERSION_WITH_SELECTION` and `SELECTION_SINCE_MINOR`; the frozen schema's name; `SCORECARD_SELECTION_SINCE_MINOR`; `SCORECARD_SELECTION_VERSION`; `selection_*.json` |
 | 2.0.0 | `scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR`; the justfile's `scorecard_schema_version` and the current schema's name; `SCORECARD_PARTITION_SUBSETS_VERSION` and `SCORECARD_PARTITION_SUBSETS_MAJOR`; `SCORECARD_SUBSET_VERSION`; `subsets_*.json` |
 | 1.8.0 | `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; the justfile's `scorecard_format_1_schema_version` and the schema's name; `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`; `SCORECARD_ORIGINAL_NAME_VERSION`; `original_name_*.json` |
+| 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
+| 1.11.0, 2.3.0 | `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`, `FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`, `TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; `topic_configuration_1_11_*.json`, `topic_configuration_under_format_1_10_0.json` |
+| 1.12.0, 2.4.0 | `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING`, `FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`, `POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the `format_version` of every `positions_mapping_*.json` case in `positions-mapping-index.json` (the parity script reads them) |
 
 ---
 
@@ -101,7 +110,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format: `1.0.0` to `1.9.0` (major 1) or `2.0.0` and `2.1.0` (major 2, a partition subset only). See [Versions](#versions). |
+| `format_version` | string | Semver of this format: `1.0.0` to `1.12.0` (major 1) or `2.0.0` to `2.4.0` (major 2, a partition subset only). See [Versions](#versions). |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -199,6 +208,7 @@ is added, `format_version` stays `1.0.0`, and the accepted set only narrows.
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
 | `target.original_name` | object, **optional** (1.8.0) | The restore wrote under the source's **original topic names**, into topics phase 0 proved absent and the run created itself. See [below](#targetoriginal_name-format-180). ABSENT means it did not: every mapped name differed from its source. |
+| `target.topic_configuration` | object, **optional** (1.11.0, 2.3.0) | The plan carried `target.topic_configuration`: each target topic was created from the bound point's configuration model, and its deferred settings are applied after a passing verdict. See [below](#targettopic_configuration-format-1110-and-230). ABSENT: the topics were created as before. |
 | `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.5.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
 
 ### `source.time_basis` (format 1.3.0)
@@ -237,8 +247,10 @@ or with an unrecorded type **as far as the archive manifest's segment bounds
 show**. A plan with no point in time whose `sample.window_end` is at or after
 every segment's first and last timestamp is not counted as a selection; with
 out-of-order timestamps inside a segment the restore can still leave out a
-record later than both of its segment's ends, which is PROD-01.1b's
-([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+record later than both of its segment's ends. A runner since PROD-01.1b
+decides over each restored segment's newest record and counts that case as a
+selection; the document does not say which runner signed it
+([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)).
 
 Four arms, enforced by both readers in the same position (after `target.auth`,
 before `redactions`) and words, fire only on a document carrying the block:
@@ -295,10 +307,10 @@ window.
 `replay selection: every partition of every restored topic, from epoch-ms S
 (the plan's stated window start, inclusive) to epoch-ms E (inclusive); no
 record before the start was expected`, and under the sampled lane goes on
-`; a sampled check does not prove that none was restored` and names the one
-limit a start adds (an in-window record held in a segment whose last record
-is before the start is not found by a sampled check; `sample.coverage:
-complete` finds it). The note is written before phase 7 judges anything, so
+`; a sampled check does not prove that none was restored`. Before PROD-01.1b
+it also named the one limit a start added (an in-window record held in a
+segment whose last record is before the start, which the engine skips); a
+runner since refuses that window before it writes anything. The note is written before phase 7 judges anything, so
 it never says that no record before the start was RESTORED. A complete
 block's `window.start_ms` is the stated start, and `sample.window_start` is
 never earlier than it (for a sampled document that is the sample window,
@@ -505,6 +517,42 @@ meant for subset restores too says so, and moves 2.x with it. The schema file
 block, itself frozen since PROD-16.2; format 1's newest, generated file is
 `-1.9.0.json` (`logweir_core::schema::scorecard_format_1_schema`).
 
+### `target.creation` (format 1.10.0 and 2.2.0)
+
+PROD-11.1a: present exactly when the run created topics, written right after
+its creation step from Logweir's own DescribeTopics read. A clone's cleanup
+deletes only these names, and only while each one's ID is the one recorded
+here; a switchover refuses a target whose ID changed since.
+
+```json
+"creation": {
+  "topics": [
+    {"name": "clone-orders", "partitions": 3, "topic_id": "Cf6zT_mcTNCoxuPmv1Ztxw"},
+    {"name": "clone-payments", "partitions": 1, "topic_id": null, "topic_id_reason": "notAuthorized"}
+  ],
+  "lineage_headers": "kept",
+  "teardown_after_seconds": 300
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `topics[].name`, `.partitions` | each topic the run created, with the partition count it was created with |
+| `topics[].topic_id` | its topic ID in Kafka's text, or `null` with `topic_id_reason` from the receipt's closed set (`noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`) |
+| `lineage_headers` | always `kept`: every restored record carries `x-original-offset` and `x-original-timestamp` |
+| `teardown_after_seconds` | a TTL clone's lifetime (`target.teardown: {ttl_seconds}`); absent on every other run |
+
+Both readers refuse (arms TCR-1 to TCR-5, the same words): the block under a
+version before 1.10.0 of format 1 or 2.2.0 of format 2; `lineage_headers` other
+than `kept`; an empty list, a name twice, a blank name or zero partitions; an ID
+that is not a topic ID (a reserved one included) or a reason outside the closed
+set, both, or neither; a lifetime outside scratch mode or outside 300 to
+2,592,000 seconds. Both print one line:
+
+```text
+target creation: this run created 2 topics: clone-orders (3 partitions, topic ID Cf6zT_mcTNCoxuPmv1Ztxw), clone-payments (1 partition, no topic ID (notAuthorized)); restored records keep their lineage headers (kept); a clone, deleted 300 seconds after the run, each topic only while its ID is the one recorded here
+```
+
 ## `approval`
 
 | Field | Type | Meaning |
@@ -568,6 +616,68 @@ judged in the same words as before. Both readers print one line:
 ```text
 console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key c0c0… signed the request and the approval, which is expected in this mode: no personal key is involved
 ```
+
+### `target.topic_configuration` (format 1.11.0 and 2.3.0)
+
+PROD-05.2: present exactly when the restore plan carried
+`target.topic_configuration` ([the plan field](drill-spec.md)). Phase 0 decided
+it from the bound point's configuration model before creating anything, and
+phase 8 signed it before phase 9's transition ran.
+
+```json
+"topic_configuration": {
+  "transition": "afterVerification",
+  "target_line": "4.x",
+  "topics": {
+    "restore-orders": {
+      "source_topic": "orders",
+      "partitions": 6,
+      "replication_factor": {"source": 3, "target": 1, "reason": "targetBrokers"},
+      "during_restore": {"cleanup.policy": "delete", "retention.ms": "-1", "…": "…"},
+      "at_creation": {"min.insync.replicas": "1", "segment.bytes": "104857600"},
+      "deferred": {"cleanup.policy": "compact"},
+      "not_applied": [
+        {"key": "retention.ms", "value": "604800000", "portability": "inherited",
+         "reason": "inherited", "target_default": "86400000"}
+      ],
+      "capped": {"min.insync.replicas": {"source": "2", "applied": "1"}},
+      "route": "adminApi"
+    }
+  },
+  "desired_state": {"key": "logweir/drills/<run_id>.desired-state.yaml", "sha256": "sha256:…", "bytes": 412}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `transition` | `afterVerification` (phase 9 applies `deferred` after a passing verdict) or `none` |
+| `target_line` | `3.x`, `4.x` or `unknown`, from the target broker's configuration keys |
+| `topics.<target>.replication_factor` | the source's factor, the one the topic was created with, and why: `sourceFactor`, `targetBrokers` (bounded by the target's broker count) or `notRecorded` (the plan's `default_replication_factor`) |
+| `during_restore` | Logweir's settings while the restore runs: nothing restored is deleted, compacted, rejected or re-stamped before the verdict |
+| `at_creation` | the source's overrides applied with the create (`min.insync.replicas` capped at the factor, stated in `capped`) |
+| `deferred` | the source's settings phase 9 applies (compaction, retention, the timestamp type and bounds); for an owned topic, every source setting, exported instead |
+| `not_applied` | what is never applied, with the source's value (never a secret's) and the target's own default where its broker reported one: `inherited`, `clusterBound`, `providerOnly`, `secret`, and `removedInKafka4` to a target not on 3.x |
+| `route` | `adminApi`, or `desiredStateExport` for a topic a declarative owner manages: created with Logweir's settings only and never altered; its configuration is the `desired_state` document (`KafkaTopic` YAML for Strimzi) |
+| `not_recorded` | `true` when the point did not record the topic's configuration: created with Logweir's settings only, and phase 9 leaves it on them |
+
+A Strimzi `KafkaTopic` in the `desired_state` document keeps the source
+owner's namespace and has no `strimzi.io/cluster` label. Set the target
+cluster's namespace and label before applying it: as exported, no operator
+reconciles it.
+
+Both readers refuse (arms TC-1 to TC-5, the same words): the block under a
+version before 1.11.0 of format 1 or 2.3.0 of format 2; a `transition` outside
+the two; a route, factor reason or factor of 0 outside the sets; a
+`desired_state` without an exported topic, or an exported topic without one, or
+a digest that is not `sha256:` and 64 lowercase hex; and a `secret` with a value
+or another entry without one.
+
+**What the transition did** is the phase-9 teardown attestation's
+`topic_configuration` (signed; readers check it signature-only): `applied`
+(each read back as its desired set), `failed` and `skipped`
+(`ConfigChangedSinceCreation`, `ConfigurationNotRecorded`), each with its whole
+desired set, `exported`, `not_run` (`transitionNone`, `verdictNotPass`,
+`topicsNotKept`), and the desired-state key.
 
 ## `phases`
 
@@ -682,9 +792,9 @@ Since FX-23 a sampled verification makes three checks more:
   record's timestamp is inside the window. A correct restore of an archive
   whose record timestamps do not run backwards within a segment cannot fail
   it. When they do run backwards, a record older than every segment's first
-  record is dropped by every restore of that archive
-  ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)),
-  and the per-partition bound now fails that restore; so does a duplicate from
+  record was dropped by every restore of that archive until PROD-01.1b
+  ([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)),
+  and the per-partition bound failed that restore; so does a duplicate from
   the engine's non-idempotent producer. Failing is the safer verdict.
 - **Phase 7 reads the engine's offset report** — streaming, keeping only its
   partition entries — and fails a restore whose report has no entry for a
@@ -715,15 +825,17 @@ Both readers print one `sample coverage:` line naming the topics; nothing is
 printed when the field is absent.
 
 **The version marks the build (review M2).** Only a build with FX-23's checks
-writes 1.6.0, and it writes 1.6.0 for EVERY sampled-lane scorecard it signs,
-whether or not it names an unsampled topic (the orchestrator's decision,
+writes 1.6.0, and it writes at least 1.6.0 for EVERY sampled-lane scorecard it
+signs (1.10.0 once the run created topics, PROD-11.1a), whether or not it names
+an unsampled topic (the orchestrator's decision,
 2026-10-08; `scorecard::format_version_with_sample`). A sampled 1.4.0 or 1.5.0
 document is byte-for-byte the shape an earlier build signed, and the scorecard
 names no `logweir` build. So a 1.6.0-or-later sampled `pass` proves those
 checks ran; an earlier one proves what it always proved. Both readers print a
 second `sample coverage:` line for every sampled `pass` saying which
 ([the guide](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
-A complete verification's scorecard is the 1.4.0 or 1.5.0 document it was.
+A complete verification's scorecard is the 1.4.0 or 1.5.0 document it was,
+raised to 1.10.0 when the run created topics.
 
 ## `target_diff`, `integrity`, `topic_parity`
 
@@ -875,8 +987,10 @@ Since 1.2.0 a `newTopic` restore writes each of the four that differs, as
 `partition_count` or `replication_factor`):
 
 - into `not_reconstructed`, the authoritative list: a source setting the
-  restore did NOT reconstruct on the target. Applying it is the operator's
-  until PROD-05 does it ([stability.md](../stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+  restore did NOT reconstruct on the target when phase 7 compared it. A plan
+  with `target.topic_configuration` applies the source's settings in phase 9,
+  after this list is signed ([stability.md](../stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+  otherwise applying them is the operator's;
 - into `unexpected_divergence`, the list every reader has always shown, so a
   reader older than 1.2.0 sees a divergence: a weaker conclusion than the
   label it replaces, never a stronger one, and never the silence that reads
@@ -990,7 +1104,8 @@ A plan chooses how much of the restore phase 7 verifies with
 **`sampled`**, the default, is the check every earlier scorecard records: the
 first records of each sampled partition reconciled by a fingerprint that sorts
 headers, the sha256 of the segments those records came from, and the manifest's
-count bound for the window, which reads segment first and last timestamps.
+count bound for the window, which reads each segment's time bounds (its
+oldest and newest record since PROD-01.1b, its first and last before).
 **`complete`** reads every archived segment of every partition of every
 restored topic, checks its sha256 and decodes it, computes the expected output
 from each archived record's OWN timestamp, reads every restored record back,
@@ -999,8 +1114,8 @@ the expected-output model and what filters, partition subsets, compaction and
 transformations do to it — is
 [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md).
 A complete verification can pass a restore the sampled check fails, and fail one
-it passes: the exact per-partition model replaces the manifest's first/last
-count bound ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+it passes: the exact per-partition model replaces the segment count bound
+([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1062,6 +1177,54 @@ header order; a complete block's counts, or `INCOMPLETE` and why; and how many
 gaps and pruned ranges the verified partitions record — or the one line saying
 the coverage was not recorded; `logweir drill show` renders the same in its
 qualifiers footer (`integrity.verification`).
+
+### `integrity.verification.positions_mapping` (format 1.12.0 and 2.4.0)
+
+PROD-04.2. When a restore bound to a point whose receipt captured consumer
+groups passes a complete verification that covered every partition, phase 7
+maps every captured position onto the target, in the same in-order scan of
+each restored partition, and writes
+`logweir/drills/<run_id>.positions-mapping.json` (format 1.0.0, unsigned,
+at most 4 MiB, schema `schemas/logweir-positions-mapping-1.0.0.json`, `logweir
+schema positions-mapping`). This block binds it:
+
+```json
+"positions_mapping": {
+  "document": {"key": "logweir/drills/<run_id>.positions-mapping.json", "sha256": "sha256:…", "bytes": 1718},
+  "counts": {"exact": 4, "approximate": 0, "unavailable": 0},
+  "groups": 3
+}
+```
+
+`document` is absent and `omitted` is `tooLarge` (over 4 MiB) or `writeFailed`
+when no document was written. **The rule:** a captured position `P` maps to
+the first restored record whose last `x-original-offset` is at or above `P`
+(the target's end when none is); `exact` unless the restore's own selection
+excluded archived records in between (`approximate`, `skipped` counts them,
+offset holes are not records), or a capture gap or pruned range lies in
+between (`unavailable: ArchiveGap`). An emptied partition (`log_start =
+high_watermark = P`) maps `exact` to 0. Every other case is `unavailable` with
+its name: `TransactionalArchive`, `PartitionNotRestored`, `NoArchivedData`,
+`BeforeLogStart`, `BeforeArchive`, `BeyondArchive`, `PositionBeyondEnd`,
+`NotCaptured: <the capture's reason>`. A group the backup did not capture is
+listed with its reason and no entry.
+
+| Arm | Refuses |
+|---|---|
+| PM-1 | the block under a version before 1.12.0 (format 1) or 2.4.0 (format 2) |
+| PM-2 | the block beside an outcome that is not `pass`, a sampled verification, or `covered: false` |
+| PM-3 | both or neither of `document` and `omitted`, or an `omitted` outside the two words |
+| PM-4 | a document key that is not this run's, a digest that is not `sha256:<64 hex>`, or a length outside 1 to 4,194,304 |
+| PM-5 | `groups: 0` |
+
+With `--positions-mapping <file>` both readers also check the document
+(PMD-1 to PMD-7): the block names one; its bytes are the digest and length the
+block binds; it is format 1 of this run by the one rule; its counts are the
+block's; each entry's class, offset, `skipped` and reason fit; a mapped entry
+names a partition `complete.partitions[]` lists, in its restored topic, and
+one marked `PartitionNotRestored` names none; a group that was not captured has
+no entry. Both then print one `mapping:` line per entry. Applying the mapping
+is a `Switchover`'s ([kubernetes.md](../kubernetes.md#switching-consumer-groups-over)).
 
 ### `partial_reason` must SAY something
 

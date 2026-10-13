@@ -598,6 +598,7 @@ fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
         "{table}"
     );
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -637,6 +638,7 @@ fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
         partitions: vec![],
     };
     sc.integrity.verification = Some(Verification {
+        positions_mapping: None,
         coverage: COVERAGE_COMPLETE.into(),
         header_order: HEADER_ORDER_VERIFIED.into(),
         complete: Some(complete.clone()),
@@ -651,6 +653,7 @@ fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
     complete.covered = false;
     complete.incomplete_reason = Some("stopped at the bound".into());
     sc.integrity.verification = Some(Verification {
+        positions_mapping: None,
         coverage: COVERAGE_COMPLETE.into(),
         header_order: HEADER_ORDER_VERIFIED.into(),
         complete: Some(complete),

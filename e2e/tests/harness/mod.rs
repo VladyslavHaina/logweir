@@ -1583,6 +1583,21 @@ pub fn engine_validate_restore(doc: &str) -> (Option<i32>, String, String) {
     (out.status.code(), out.stdout_utf8(), out.stderr_utf8())
 }
 
+/// [`assert_format_at_least`]'s rule as a predicate, for a row that collects
+/// its checks rather than panicking on the first: the same major, and at
+/// least `min`. A version that is not semver is never at least anything.
+#[must_use]
+pub fn format_is_at_least(actual: &str, min: &str) -> bool {
+    let parse = |v: &str| -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+        Some((it.next()??, it.next()??, it.next().unwrap_or(Some(0))?))
+    };
+    match (parse(actual), parse(min)) {
+        (Some(a), Some(m)) => a.0 == m.0 && a >= m,
+        _ => false,
+    }
+}
+
 /// A document's `format_version` is AT LEAST `min`, the version that defines
 /// the field a row checks. Pinning the exact version broke every row the next
 /// time an unrelated optional field bumped the minor (PROD-03.0's receipt

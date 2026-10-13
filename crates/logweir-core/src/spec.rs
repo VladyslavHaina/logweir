@@ -598,9 +598,19 @@ pub struct TargetSpec {
     pub default_replication_factor: i16,
     /// "delete" (default) or "keep". **`Scratch` mode only**: phase 9 tears
     /// nothing down in `newTopic` mode at any value of this field (Global
-    /// Constraint 19).
-    #[serde(default = "delete")]
-    pub teardown: String,
+    /// Constraint 19). PROD-11.1a adds the clone form `{ttl_seconds: N}`
+    /// ([`crate::target_creation::Teardown`]), which a runner from before it
+    /// refuses at parse.
+    #[serde(default)]
+    pub teardown: crate::target_creation::Teardown,
+    /// **PROD-05.2.** Create the target topics from the bound point's
+    /// configuration model and, after a passing verdict, apply the settings
+    /// that would have dropped or re-stamped restored records
+    /// ([`crate::topic_transition`]). ABSENT: every topic is created as it
+    /// always was, byte for byte. An older runner ignores the block, applies
+    /// what it always did and claims nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<crate::topic_transition::TopicConfigurationPlan>,
 }
 impl TargetSpec {
     /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the
@@ -620,9 +630,6 @@ fn marker() -> String {
 }
 fn rf1() -> i16 {
     1
-}
-fn delete() -> String {
-    "delete".into()
 }
 
 /// **Interface I33, the Rust half.** The two restores tag 1 performs.
@@ -1272,6 +1279,10 @@ pub struct AllowedClusters {
 /// the referent is not a `Restore` — fail-closed where a cluster object is
 /// being authorised, backwards-compatible where a file is being read.
 pub const SUBJECT_KIND_RESTORE: &str = "Restore";
+
+/// **PROD-04.2.** The subject kind of an approval that authorises a
+/// `Switchover` (ADR 0008 Amendment A's reserved kind).
+pub const SUBJECT_KIND_SWITCHOVER: &str = "Switchover";
 
 fn default_subject_kind() -> String {
     SUBJECT_KIND_RESTORE.to_string()

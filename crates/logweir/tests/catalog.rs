@@ -936,14 +936,17 @@ fn the_catalog_key_line_comes_before_interface_i7s_pair() {
     let src =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backup/mod.rs"))
             .unwrap();
+    // Pushed into the terminal block in this order (FX-43:
+    // `crate::exit::FinalLines`, which prints the plain lines in push order,
+    // last).
     let catalog_at = src
-        .find("println!(\"catalog-key=")
+        .find("last.push(format!(\"catalog-key=")
         .expect("the catalog line is printed");
     let receipt_at = src
-        .find("println!(\"receipt-key=")
+        .find("last.push(format!(\"receipt-key=")
         .expect("I7's first line");
     let sidecar_at = src
-        .find("println!(\"sidecar-key=")
+        .find("last.push(format!(\"sidecar-key=")
         .expect("I7's second line");
     assert!(
         catalog_at < receipt_at && receipt_at < sidecar_at,

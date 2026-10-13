@@ -42,8 +42,9 @@ Neither returns 2 or 4.
 | 2 | `Failed` | `drill-not-pass` | `Failed=True`, `DrillNotPass` | Not produced by `backup run`; one vocabulary across both paths |
 | 3 | `Failed` | the state on `refusal-reason=`, or `GuardRefusedUnknownReason` | `Failed=True`, `GuardRefused` | A guard refused; the message ends with the runner's reason |
 | 4 | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` | `Failed=True`, `SigningOrLock` | Nothing uploaded. `ExecutionClaimUnproven`: the store refused the claim, does not enforce conditional create, or the archive could not be read for a reason no retry changes |
+| 0 to 4 | `Failed` (`Succeeded` at 0) | `RunnerOlderThanController` | the exit code's | The Job carries `--runner-line-token` and its runner printed no sealed `runner-exit=` line: the runner image is older than the controller (an older one stops at the flag, exit 1). Nothing of its log is read; never retried ([sealed lines](#sealed-lines-fx-43)) |
 | absent | `Failed` | `operational` | `Failed=True`, `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` / `VolumeMountFailed` / `CredentialReferenceMissing` / `RunnerImageUnavailable` / `PodCreationForbidden` / `PodOwnershipContested` | The runner reported no terminated state |
-| absent | `Failed` | `operational` | `Failed=True`, a refusal before any Job: `NameTooLong`, `ExecutionSpecInvalid`, `ScheduledIdentityMismatch`, `ScheduleNotFound`, `RunPolicyDigestMismatch`, `InvalidTopicSelection`, `GuardRefused` (a glob), `ReferentNotFound`, `CredentialNotRenderable`, `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `PlainWithoutTls`, `ArchiveUrlUnreadable`, `PlanConfigMapConflict`, `JobNameConflict`, `SelectionTooLarge`, and the dynamic-selection reasons | Nothing was created |
+| absent | `Failed` | `operational` | `Failed=True`, a refusal before any Job: `NameTooLong`, `ExecutionSpecInvalid`, `ScheduledIdentityMismatch`, `ScheduleNotFound`, `RunPolicyDigestMismatch`, `InvalidTopicSelection`, `GuardRefused` (a glob), `ReferentNotFound`, `CredentialNotRenderable`, `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `PlainWithoutTls`, `ArchiveUrlUnreadable`, `PlanConfigMapConflict`, `JobNameConflict`, `SelectionTooLarge`, `OwnerDetectionFailed`, and the dynamic-selection reasons | Nothing was created |
 
 `status.exitReason` carries the five lowercase wire strings (`ok`,
 `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock`) or a more
@@ -82,7 +83,8 @@ condition's reason.
 | `ApprovalBundleConflict` | The approval bundle was made by another controller; delete and re-create |
 | `ApprovalBundleMaterializationFailed` | Held: a bundle key cannot sign anything new under its usage |
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
-| `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
+| `RunnerOlderThanController` | Exit 0 to 4 with no sealed `runner-exit=` line: the runner image is older than the controller ([sealed lines](#sealed-lines-fx-43)) |
+| `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
 | `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point whose receipt or manifest is missing or unreadable is exit 1 |
 
 Plus the no-exit-code states of the `Backup` table, `PodOwnershipContested`,
@@ -96,6 +98,55 @@ stdout and stderr in no promised order, so every reader scans a bounded tail
 and matches **by key name, never by position**; the controller reads the final
 sixteen non-empty lines (`KEY_SCAN_TAIL_LINES = 16`). Optional lines go before
 the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
+
+### Sealed lines (FX-43)
+
+EVERY runner Job this controller builds carries a fresh line token as the
+runner container's last two arguments, `--runner-line-token <hex>` (40
+lower-case hex digits, 160 bits from the operating system's random source):
+`Restore`, `Backup`, the `KafkaCluster` probe, the check Jobs (`logweir check
+run`: `Preflight`, evidence fetch, `TopicDiscovery`, a dynamic `Backup`'s
+discovery, the `RecoveryCatalog` sync) and the `RetentionPolicy` Job
+(`logweir-retention`). The runner then prints every line below twice: first
+sealed, `@<token> <line>`, then the line itself. Its last write is the sealed
+lines of its final block, ONE sealed `runner-exit=<code>`, and the plain lines,
+which stay last in the order the tables give. Every line is one line whatever
+it holds (`logweir_core::runner_line::one_line`).
+
+- **A check seals two lines, not every frame:** the end frame and
+  `refusal-reason=`, each sealed before its plain copy, then the sealed
+  `runner-exit=`. The sealed end frame declares every stream's digest and the
+  topic lines' count and digest, so it binds the other frames; the
+  controller keeps the plain topic and part frames beside the sealed lines
+  (`runner_log::own_lines_binding`) and nothing else. A forged
+  `refusal-reason=`, or a forged complete relay when the runner printed none,
+  is not read.
+- **Retention** prints every `retention-*` line once, at the end, through the
+  same block, and its error text on one line.
+
+- **The controller reads only the lines sealed with its Job's token**
+  (`weirkeeper::runner_log::own_lines`, constant-time comparison), wherever
+  they stand in the last 256 lines (4 MiB) of the `runner` container. Every
+  other line is not read: a line a plan string, the Kafka client or an engine
+  got into the log, a plain line, a line sealed with another Job's token.
+- **A runner older than the controller is named.** A runner that predates
+  the flag stops at argument parsing (`error: unexpected argument
+  '--runner-line-token' found`, exit 1; the retention worker exits 3 with
+  `retention-refusal=UnknownArgument`) before any work. A Job with the flag
+  whose runner exited 0 to 4 and printed no sealed `runner-exit=` is
+  `exitReason: RunnerOlderThanController` (a probe: reason
+  `RunnerOlderThanController`, `reachable` cleared; a check:
+  `CheckContractMismatch` whose message names it; a retention run:
+  `lastEnforcement.refusalCode: RunnerOlderThanController`, nothing deleted);
+  nothing of its log is read, and a schedule does not retry it. A kill (137,
+  143) or a panic (101) is never named so.
+- **A Job an older controller built is read as that controller read it**:
+  with FX-34's `--line-token`, only `refusal-detail=` by its JSON token; with
+  no token, every reader's own rules over the whole tail.
+- A runner given `--line-token` prints exactly what an FX-34 runner printed,
+  and one given neither flag (a run started by hand) prints the plain lines.
+  The two flags are exclusive. `logweir check run`, `logweir-retention` and
+  `cluster-probe` take only `--runner-line-token`.
 
 ### `logweir backup run`
 
@@ -121,6 +172,13 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 | `offset-report-key=logweir/drills/<run_id>.offsets.json` | Exit 0 and 2, only when the engine wrote an offset report | `status.evidence` |
 | `target-topics-appeared={…}` then `failure-reason=TargetTopicAppeared` / `CreatedTopicsLeft` | Exit 1 from a stopped creation step, the last two lines; at most 76 KB | `status.targetTopicsAppeared`, `status.exitReason` |
 | `refusal-detail={…}` then `refusal-reason=<State>` | Exit 3, the last two lines | The `Failed` message; `status.exitReason` |
+
+### `logweir restore cleanup` (PROD-11.1a)
+
+| Line | When | Read into |
+|---|---|---|
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). Not printed when the evidence store or the cluster did not answer (exit 1) or the attestation was not persisted (exit 4) | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
+| `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
 
 The evidence keys (interface I8) are the final lines of a run that signed a
 scorecard, in that order, with nothing after them; `teardown-key=` comes before
@@ -163,13 +221,17 @@ the exit code for success, the keys only to find the document
   order, reading the last 256 lines; it refuses a value over 76 KB before
   parsing it and keeps only the names (and counts) its own plan maps. An older
   controller reads `appeared` and `left` only; one older still reports a plain
-  exit 1. The place rule cannot tell the runner's own last lines from text an
-  OLDER runner image was made to print last, so with such an image check the
-  names against the cluster before acting.
-- **Every error text the runner prints is on one line**
+  exit 1. Under FX-43's token the pair is the runner's sealed one (the place
+  rule then holds among the runner's own lines); a Job an older controller
+  built keeps the place rule over the raw tail.
+- **Every text the runner prints is on one line**
   (`logweir::exit::one_line` escapes every line break), so no plan- or
   broker-chosen string can start a line a controller reads by key. The Kafka
-  client's own stderr logging is not escaped.
+  client's own log lines are queued (`log.queue=true`) and printed by the
+  runner on one line each (`librdkafka: %<level>|<facility>| <message>`), and
+  a bootstrap entry or a storage location holding a control character or a
+  line break is refused before any client exists (exit 3, by field, the value
+  not repeated).
 
 ### Refusal detail
 
@@ -179,7 +241,7 @@ at most 2048 bytes:
 
 | Member | What it is |
 |---|---|
-| `token` | The `--line-token` value (32 to 128 lower-case hex digits) when the run was given one; written first. The controller reads only the last line carrying its own Job's token |
+| `token` | The `--line-token` or `--runner-line-token` value (32 to 128 lower-case hex digits) when the run was given one; written first. The controller reads only the last line carrying its own Job's token (under `--runner-line-token`, only the sealed copy) |
 | `code` | A member of the run kind's closed set (below), or `GuardRefused` |
 | `message` | The refusal's sentence, cleaned: printable ASCII and `§ – — … →`; whitespace and controls become one space, other runs one `U+FFFD`; URLs lose query and userinfo; credential shapes read `[redacted]`; at most 760 bytes, a cut one ends `…` |
 
@@ -191,13 +253,15 @@ set, else `GuardRefused`: ASCII letters and digits, a letter first, at most 64
 bytes. A run with nothing to say prints `the refusal carried no sentence`. At
 2048 bytes, CRI's 16 KiB line split never divides the line.
 
-**The line token.** `--line-token <hex>` is a flag of `restore run`, `drill
-run` and `backup run`: 32 to 128 lower-case hex digits; a malformed value or
-the flag given twice is a usage error (exit 1). `weirkeeper` writes 40 digits
-(160 bits) from the operating system's random source, fresh for each Job, as
-the runner container's last two arguments. It is not a credential, but it is
-treated as one in output: it appears in the pod template and the runner's one
-line and nowhere else. A reader honours only the LAST `refusal-detail=` line
+**The line token.** `--line-token <hex>` (FX-34) and `--runner-line-token
+<hex>` (FX-43, which this controller writes) are flags of `restore run`,
+`drill run` and `backup run`, and the second of `cluster-probe`: 32 to 128
+lower-case hex digits; a malformed value, a flag given twice or both flags
+together is a usage error (exit 1). `weirkeeper` writes 40 digits (160 bits)
+from the operating system's random source, fresh for each Job, as the runner
+container's last two arguments. It is not a credential, but it is treated as
+one in output: it appears in the pod template and the runner's lines and
+nowhere else ([sealed lines](#sealed-lines-fx-43)). A reader honours only the LAST `refusal-detail=` line
 whose `token` equals the Job's (compared in constant time) and ignores every
 other; a Job with no token has no line read. The line it takes must be at most
 2048 bytes, carry a code of the kind's set and agree with `refusal-reason=`,
@@ -205,24 +269,26 @@ and its sentence is cleaned again; a line that carries the token and fails one
 of those reads as no readable reason, and no other line is used in its place.
 `logweir_core::refusal_detail` implements both sides. A code added to a set is
 additive: a reader that predates it shows that the runner gave no readable
-reason. `logweir check run` and `logweir-retention` print no `refusal-detail=`
-and take no token.
+reason. `logweir check run` and `logweir-retention` print no `refusal-detail=`;
+they take `--runner-line-token` ([sealed lines](#sealed-lines-fx-43)).
 
 | Run | Codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `TopicConfigurationNotRecorded`, `TopicConfigRefusedByTarget`, `TopicClassDisagrees`, `TopicOwnerNotChecked` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 When the controller shows no reason, the message ends with nothing after
 `…exitCode` (no line carries this Job's token), with `the runner gave no
 readable reason`, with `the pod is gone`, with `the pod log read answered HTTP
-403` (or another status), or with `the last 32 lines of the pod log are over the
-512 KiB this controller reads`.
+403` (or another status), with `the last 256 lines of the pod log are over the
+4096 KiB this controller reads`, or with `RunnerOlderThanController: …` (the
+[mixed pair](#sealed-lines-fx-43), at any exit code 0 to 4).
 
 ### `logweir check run`
 
 ```
 argv: check run --plan /check/check-plan.json --check-contract-version 1
+      --runner-line-token <hex>
 env:  LOGWEIR_CHECK_CONTRACT_VERSION=1
       LOGWEIR_CHECK_PLAN_SHA256=sha256:<64 lowercase hex>
       LOGWEIR_CHECK_SUBJECT_UID=<uid>
@@ -304,6 +370,7 @@ per point; a summary line that arrives twice is an error.
 ```
 command: logweir-retention
 argv:    run --plan /retention/plan.json --retention-contract-version 1 [--dry-run]
+         --runner-line-token <hex>
 env:     LOGWEIR_RETENTION_PLAN_SHA256, _POLICY_UID, _POLICY_GENERATION,
          _SCOPE_PREFIX, _RUN_ID, _APPROVER (absent: unattended),
          _MAX_DELETIONS, _MAX_OBJECTS, _LOCATION
@@ -482,8 +549,11 @@ A run or check over a destination can also meet `DestinationRoleNotConfigured`
 `NoExitCode` and the crash states (Unknown); and the configuration refusals
 `ConnectionConfigInvalid`, `CredentialNotRenderable`, `PlainWithoutTls`,
 `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`,
-`CredentialBindingMismatch`. Every reason but `Reachable` clears
-`status.reachable`.
+`CredentialBindingMismatch`; and `RunnerOlderThanController` (Unknown: the
+probe Job's runner printed no line sealed with its token, FX-43). Every reason
+but `Reachable` clears `status.reachable`. `spec.bootstrapServers` refuses an
+entry holding a control character or a line or paragraph separator at
+admission.
 
 ### `RecoveryCatalog`
 
@@ -593,10 +663,15 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `archive.segments` | blocking | The sampled segments exist |
 | `approval.state` | blocking | The `Approval`'s own verdict |
 | `approval.keyValidity` | advisory | The approver key outlives the restore's deadline |
+| `switchover.restore` | blocking | A `Switchover` review's `Restore` exists with the named UID, is not scratch, `Succeeded` with a `Valid` verdict and a scorecard key, writes evidence to a saved destination, and the namespace has evidence keys (`RestoreNotFound`, `RestoreNotSucceeded`, `ArchiveUrlUnreadable`, `TrustRosterNotLoaded`) |
+| `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word) |
+| `switchover.target` | blocking | The target answers the restore's cluster id and each restored topic its recorded ID (`TargetNotTheRestores`) |
+| `switchover.groups` | blocking | Each requested target group admits a commit and holds no other committed position (`GroupNotAdmissible`); every position is in the details |
 
 A row expires after 15 minutes, except `connection.topicsDescribable` and
 `connection.topicConfigsReadable` (10 minutes), the `archive.*` rows (30
-minutes), `target.mappedTopics` and `target.topicCreate` (5 minutes), the two
+minutes), `target.mappedTopics`, `target.topicCreate`, `switchover.target` and
+`switchover.groups` (5 minutes), the two
 `approval.*` rows (`min(10 m, notAfter)`), and `plan.parse`, `plan.names` and
 every execution-only row (never).
 

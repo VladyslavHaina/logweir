@@ -203,8 +203,12 @@ impl Eq for LineToken {}
 /// runner prints a detail line at EVERY exit 3.
 pub const NO_SENTENCE: &str = "the refusal carried no sentence";
 
-/// Which runner refused. Each kind of run has its OWN closed set of reason
-/// codes: a `Backup`'s log cannot put a restore-only code on a `Backup`.
+/// Which runner's log a line is read from: THE one closed-set type for every
+/// per-kind list (FX-43 folded FX-34's and PROD-15.1's two into it). Each kind
+/// of run has its OWN closed set of refusal codes
+/// ([`RefusingRun::reason_codes`]) and of `failure-reason=` states
+/// ([`RefusingRun::failure_reasons`]): a `Backup`'s log cannot put a
+/// restore-only code or state on a `Backup`, nor the reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusingRun {
     /// `logweir restore run` (and its alias `drill run`): a `Restore`'s Job.
@@ -219,7 +223,7 @@ pub enum RefusingRun {
 /// Four of the codes are constants of the `logweir` crate, which this crate
 /// cannot name; `crates/logweir/tests/refusal_detail.rs` holds each literal
 /// here to its constant.
-pub const RESTORE_REASON_CODES: [&str; 14] = [
+pub const RESTORE_REASON_CODES: [&str; 19] = [
     crate::guard::TERMINAL_STATE_GUARD_REFUSED,
     crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     crate::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
@@ -227,6 +231,7 @@ pub const RESTORE_REASON_CODES: [&str; 14] = [
     crate::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     crate::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     crate::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
+    crate::guard::TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE,
     crate::guard::STORAGE_REGION_INVALID,
     crate::execution_contract::AUTHORIZATION_INVALID,
     crate::execution_contract::AUTHORIZATION_EXPIRED,
@@ -235,6 +240,11 @@ pub const RESTORE_REASON_CODES: [&str; 14] = [
     "PointBindingSetMismatch",
     "PointUntrusted",
     "RehearsalScopeViolation",
+    // PROD-05.2's four, `crate::topic_transition`'s.
+    crate::topic_transition::TOPIC_CONFIGURATION_NOT_RECORDED,
+    crate::topic_transition::TOPIC_CONFIG_REFUSED_BY_TARGET,
+    crate::topic_transition::TOPIC_CLASS_DISAGREES,
+    crate::topic_transition::TOPIC_OWNER_NOT_CHECKED,
 ];
 
 /// Every reason code `logweir backup run` can print. See
@@ -267,6 +277,16 @@ impl RefusingRun {
     #[must_use]
     pub fn reason_code(self, code: &str) -> Option<&'static str> {
         self.reason_codes().iter().copied().find(|c| *c == code)
+    }
+
+    /// This kind's closed list of `(failure-reason= state, exit code)` pairs
+    /// (`crate::guard::failure_reason_for_exit`).
+    #[must_use]
+    pub const fn failure_reasons(self) -> &'static [(&'static str, i32)] {
+        match self {
+            Self::Restore => &crate::guard::RESTORE_FAILURE_REASONS,
+            Self::Backup => &crate::guard::BACKUP_FAILURE_REASONS,
+        }
     }
 }
 
@@ -858,8 +878,8 @@ mod tests {
         );
         assert_eq!(
             restore.union(&backup).count(),
-            18,
-            "the exit-3 sweep's count of distinct codes"
+            23,
+            "the exit-3 sweep's count of distinct codes (19, and the four topic configuration refusals)"
         );
         // PER KIND: a code of one is not a code of the other.
         for only_restore in restore.difference(&backup) {

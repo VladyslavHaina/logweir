@@ -566,6 +566,76 @@ fn paths() -> Value {
             }],
         ),
         (
+            "/api/v1/namespaces/{ns}/switchovers",
+            vec![
+                list("listSwitchovers", "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.", "SwitchoverList"),
+                create(
+                    "createSwitchover",
+                    "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
+                    "CreateSwitchoverRequest",
+                    "SwitchoverResponse",
+                ),
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}",
+            vec![get_one("getSwitchover", "PROD-04.2: one Switchover projection, planBytes included.", "SwitchoverResponse")],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+            vec![Op {
+                method: "post",
+                operation_id: "submitSwitchoverApproval",
+                summary: "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("SubmitApprovalRequest"),
+                success: vec![
+                    ("201", "The Approval was created.", "ApprovalResponse"),
+                    ("200", "An identical Approval already exists (a replay).", "ApprovalResponse"),
+                ],
+                problems: all_codes(&[
+                    COMMON,
+                    NAMESPACED,
+                    KUBE,
+                    UNSAFE,
+                    &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
+                ]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
+            vec![Op {
+                method: "get",
+                operation_id: "getSwitchoverApprovalRequest",
+                summary: "PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The request.", "SwitchoverApprovalRequestResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
+            vec![Op {
+                method: "post",
+                operation_id: "approveSwitchoverInConsole",
+                summary: "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("ConsoleApprovalRequest"),
+                success: vec![
+                    ("201", "The Approval was created.", "ApprovalResponse"),
+                    ("200", "This approver already approved this request (a replay).", "ApprovalResponse"),
+                ],
+                problems: all_codes(&[
+                    COMMON,
+                    NAMESPACED,
+                    KUBE,
+                    UNSAFE,
+                    &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
+                ]),
+            }],
+        ),
+        (
             "/api/v1/namespaces/{ns}/approval-policy",
             vec![get_one(
                 "getApprovalPolicy",
@@ -1033,6 +1103,10 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::CreateRestoreRequest>();
     let _ = generator.subschema_for::<c::RestoreList>();
     let _ = generator.subschema_for::<c::RestoreResponse>();
+    let _ = generator.subschema_for::<c::CreateSwitchoverRequest>();
+    let _ = generator.subschema_for::<c::SwitchoverList>();
+    let _ = generator.subschema_for::<c::SwitchoverResponse>();
+    let _ = generator.subschema_for::<c::SwitchoverApprovalRequestResponse>();
     let _ = generator.subschema_for::<c::ApprovalList>();
     let _ = generator.subschema_for::<c::ApprovalResponse>();
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();

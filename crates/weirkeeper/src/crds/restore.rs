@@ -231,8 +231,8 @@ pub enum TargetMode {
     /// anywhere (Global Constraint 19).
     Scratch,
     /// A real restore into a new topic beside the existing one. Nothing is
-    /// overwritten and nothing is deleted; repointing consumers is tag 2's
-    /// `Switchover` and is not in this group.
+    /// overwritten and nothing is deleted; moving consumer groups onto it is a
+    /// separate, separately approved `Switchover` (PROD-04.2).
     NewTopic,
 }
 
@@ -1012,8 +1012,8 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_topics: Option<Vec<String>>,
     /// The source topics the new ones were restored from. Nothing here was
-    /// written to, in any tag: retiring an old topic is tag 2's `Switchover`
-    /// and is validated against this list.
+    /// written to, in any tag; a `Switchover` moves consumer groups onto the
+    /// new topics and retires or deletes no topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_topics: Option<Vec<String>>,
     /// The Job that ran, or is running, this restore.
@@ -1042,6 +1042,21 @@ pub struct RestoreStatus {
     /// What phase 9 removed, and what it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<Teardown>,
+    /// A TTL clone (`target.teardown: {ttl_seconds}` in a scratch plan): when
+    /// it expires and how its cleanup went. Absent on every
+    /// other `Restore`, and on anything an older controller reconciled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone: Option<CloneStatus>,
+    /// For a plan carrying `target.topic_configuration`: each
+    /// target topic's replication factor with its reason, its overrides
+    /// before (Logweir's during-restore settings and the source's at-creation
+    /// set) and after (the whole desired set), and what phase 9's transition
+    /// did. Read off the runner's `topic-configuration=` line and held to
+    /// this Restore's mapped target names: a CLAIM, like `topicPreflight`; the
+    /// signed scorecard's `target.topic_configuration` and the phase-9
+    /// attestation are the evidence. Absent on every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<RestoreTopicConfiguration>,
     /// The condition set. `RunnerReady` joins `Verified` as a condition every
     /// terminal builder carries forward, because a JSON merge patch replaces
     /// the whole list.
@@ -1106,6 +1121,126 @@ pub struct RestoreCompletion {
     pub sample_window: Option<SampleWindow>,
 }
 
+/// **A TTL clone's lifetime and cleanup.**
+///
+/// A passing clone keeps its topics until `expiresAt` (`Active`); then, or at
+/// once when the `Restore` is deleted (finalizer `logweir.dev/clone-cleanup`),
+/// one cleanup Job runs `logweir restore cleanup` (`Removing`), which deletes
+/// only the topics the run's signed scorecard records, while each topic's ID
+/// is the recorded one. `Removed` copies what it deleted to
+/// `status.teardown`. At most three attempts, five minutes apart; then
+/// `RemovalFailed`, and the finalizer stays until an operator removes it. A
+/// clone whose run did not pass and whose runner exited with one of its own
+/// codes (1 to 4) was torn down at once by its own run (`NotKept`). Anything
+/// the controller cannot settle (a plan it cannot read, a recorded run Job
+/// gone before its outcome, a run that ended with no exit code or was killed
+/// by a signal) is `RemovalFailed` with the reason: check the target for
+/// topics with the clone's prefix, delete any the run created, then remove the
+/// finalizer by hand.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneStatus {
+    /// The plan's `target.teardown.ttl_seconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    /// When the cleanup is due: the run's success, as the controller recorded
+    /// it, plus `ttlSeconds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Time>,
+    /// `Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// How many cleanup Jobs have been started (at most 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// The current cleanup Job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ref: Option<LocalRef>,
+    /// Why the cleanup failed or refused, when it did; bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub reason: Option<String>,
+}
+
+/// `Restore.status.topicConfiguration`: a restore's target topic configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTopicConfiguration {
+    /// `applied`, `partial`, or `notRun: <reason>` (`transitionNone`,
+    /// `verdictNotPass`, `topicsNotKept`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub transition: Option<String>,
+    /// Topics whose desired set was applied and read back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub applied: Option<Vec<String>>,
+    /// Topics not transitioned, each with its whole desired set: the
+    /// remaining step, which the operator applies. Logweir never retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub failed: Option<Vec<TopicConfigurationFailure>>,
+    /// Owned topics, whose configuration is the desired-state document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub exported: Option<Vec<String>>,
+    /// The desired-state document's evidence key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_state_key: Option<String>,
+    /// Per target topic: the replication factor and the overrides before
+    /// and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub topics: Option<Vec<TopicConfigurationStatusTopic>>,
+}
+
+/// One topic the transition did not apply.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationFailure {
+    /// The target topic.
+    pub topic: String,
+    /// Why (`ConfigChangedSinceCreation`, or the failure), bounded.
+    #[schemars(length(max = 256))]
+    pub error: String,
+    /// The topic's whole desired override set.
+    #[serde(default)]
+    pub desired: std::collections::BTreeMap<String, String>,
+}
+
+/// One target topic's configuration, before and after.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationStatusTopic {
+    /// The target topic.
+    pub topic: String,
+    /// `adminApi` or `desiredStateExport`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// The replication factor it was created with, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<TopicReplicationFactor>,
+    /// The overrides it was created with.
+    #[serde(default)]
+    pub before: std::collections::BTreeMap<String, String>,
+    /// The whole desired override set.
+    #[serde(default)]
+    pub after: std::collections::BTreeMap<String, String>,
+}
+
+/// A created topic's replication factor.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicReplicationFactor {
+    /// The source's, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<i64>,
+    /// The factor the topic was created with.
+    pub target: i64,
+    /// `sourceFactor`, `targetBrokers` or `notRecorded`.
+    pub reason: String,
+}
+
 /// One topic teardown could not remove.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1123,8 +1258,9 @@ pub struct TeardownFailure {
 /// exact names it created, through a deleter that refuses any name outside the
 /// run's prefix. The controller writes `failed` from the runner's
 /// `teardown-failed=` line (FX-44), on a run that passed and on one that
-/// failed after its creation step; it writes neither `deleted` nor
-/// `attestationKey`.
+/// failed after its creation step. For a TTL clone it also
+/// copies `deleted`, `failed` and `attestationKey` from its cleanup Job's
+/// `clone-cleanup=` line.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Teardown {

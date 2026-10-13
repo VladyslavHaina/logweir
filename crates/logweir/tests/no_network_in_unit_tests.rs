@@ -86,7 +86,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 35] = [
+const ALLOWED: [(&str, &str); 37] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -146,6 +146,20 @@ const ALLOWED: [(&str, &str); 35] = [
     (
         "crates/logweir/src/drill/mod.rs",
         "production: the orchestrator's reader and its two Store handles",
+    ),
+    (
+        "crates/logweir/src/restore_cleanup.rs",
+        "production: `logweir restore cleanup` (PROD-11.1a) dials the clone's target and \
+         reads the evidence store BY DESIGN; its seam `clean` takes a `&dyn ClusterReader`, \
+         a `&dyn TopicDeleter` and a `Store`, which `tests/restore_cleanup.rs` drives with \
+         doubles and `Store::in_memory`",
+    ),
+    (
+        "crates/logweir/src/switchover/mod.rs",
+        "production: `logweir switchover run` (PROD-04.2) dials the restore's target and \
+         reads the evidence store BY DESIGN; the group decision (`apply::decide_group`) and the \
+         plan, compare and record rules (`logweir_core::switchover`) take values and a \
+         `&dyn SwitchoverTarget`, which the unit rows drive with in-memory targets",
     ),
     (
         "crates/logweir/src/backup/mod.rs",
@@ -637,7 +651,7 @@ const PINNED_ARMS: [&str; 2] = ["AuthConfig::Plaintext", "AuthConfig::ScramSha51
 /// absence is asserted rather than assumed: the walk covers weirkeeper's whole
 /// `src`, so a `RdKafkaReader::connect(` appearing there would be an
 /// unsanctioned site and would fail this guard by name.
-const CONSTRUCTION_SITES: [(&str, &str, &str); 5] = [
+const CONSTRUCTION_SITES: [(&str, &str, &str); 7] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "pub fn dial(",
@@ -669,6 +683,23 @@ const CONSTRUCTION_SITES: [(&str, &str, &str); 5] = [
         "fn dial(",
         "`probe::dial` — interface I14's subcommand IS a dial (Task 15c); its pure half \
          `outcome` and its seam `probe` take a value and a `&dyn ClusterReader`",
+    ),
+    (
+        "crates/logweir/src/restore_cleanup.rs",
+        "fn target_client(",
+        "`restore_cleanup::target_client` — PROD-11.1a's `restore cleanup` dials the clone's \
+         target BY DESIGN, through the same `AuthConfig::from_spec`, projected CA and client \
+         certificate as `drill::context`; its seam `clean` takes a `&dyn ClusterReader` and a \
+         `&dyn TopicDeleter`",
+    ),
+    (
+        "crates/logweir/src/switchover/mod.rs",
+        "pub(crate) fn dial(",
+        "`switchover::dial` — PROD-04.2's `switchover run` and its `switchoverReadiness` \
+         review dial the restore's target BY DESIGN: the run builds its auth through \
+         `AuthConfig::from_spec` with the projected CA and client certificate, as \
+         `drill::context` does, and the review through `check::kafka::auth_config`; both \
+         decide every group over a `&dyn SwitchoverTarget`",
     ),
 ];
 

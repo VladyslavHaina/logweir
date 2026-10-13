@@ -23,8 +23,8 @@ use logweir::drill::{execute_with, execute_with_approved, phase1_approval};
 use logweir_core::original_name::ApprovalSubject;
 use logweir_core::scorecard::{
     ConsoleApprovalInfo, ConsolePrincipal, Scorecard, APPROVAL_MODE_CONSOLE,
-    FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL, FORMAT_VERSION_WITH_CONSOLE_APPROVAL,
-    FORMAT_VERSION_WITH_ORIGINAL_NAME, FORMAT_VERSION_WITH_PARTITION_SUBSETS,
+    FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION, FORMAT_VERSION_WITH_CONSOLE_APPROVAL,
+    FORMAT_VERSION_WITH_TARGET_CREATION,
 };
 
 const ISSUER: &str = "https://idp.example";
@@ -153,12 +153,13 @@ fn a_restore_approved_in_the_console_signs_who_approved_as_1_9_0() {
         approved_in_the_console(ApprovalSubject::Ordinary),
     )
     .expect("the drill passes");
-    assert_eq!(
-        outcome.scorecard.format_version,
-        FORMAT_VERSION_WITH_CONSOLE_APPROVAL
-    );
+    // 1.9.0 defines the block; the topics the run created raise it to
+    // 1.10.0 (PROD-11.1a).
+    assert!(logweir_core::scorecard::defines_console_approval(
+        &outcome.scorecard.format_version
+    ));
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, "1.9.0");
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     let console = sc.approval.console.as_ref().expect("the block is signed");
     assert_eq!(console.mode, "consoleApproval");
     assert_eq!(
@@ -189,12 +190,10 @@ fn a_restore_approved_in_the_console_signs_who_approved_as_1_9_0() {
     let (_, _, sc) = signed(&f);
     assert!(sc.approval.console.is_none());
     assert_eq!(sc.format_version, plain.format_version);
+    // A run nobody approved in the console carries no block, and its version
+    // is the one its created topics give it (PROD-11.1a), not the console's.
     assert_ne!(sc.format_version, FORMAT_VERSION_WITH_CONSOLE_APPROVAL);
-    assert!(
-        !logweir_core::scorecard::defines_console_approval(&sc.format_version),
-        "a run nobody approved in the console keeps the version it had: {}",
-        sc.format_version
-    );
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     let report = verified_by_the_reader(&f, "control-v1-approval");
     assert!(logweir::verify::console_approval_lines(report.console_approval.as_deref()).is_empty());
     assert!(!logweir::show::render_table(&sc).contains("approval.console"));
@@ -222,11 +221,13 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     )
     .expect("the subset runs");
     let (_, _, sc) = signed(&f);
+    assert!(logweir_core::scorecard::defines_console_approval(
+        &sc.format_version
+    ));
     assert_eq!(
         sc.format_version,
-        FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+        FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
     );
-    assert_eq!(sc.format_version, "2.1.0");
     assert!(sc
         .source
         .selection
@@ -243,7 +244,10 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
     execute_with(&f.args, &f.run_id, &f.ctx).expect("the subset runs");
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_PARTITION_SUBSETS);
+    assert_eq!(
+        sc.format_version,
+        FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
+    );
     assert!(sc.approval.console.is_none());
 }
 
@@ -269,7 +273,7 @@ fn an_original_name_restore_approved_in_the_console_says_so_in_both_places() {
     )
     .expect("the original-name restore runs");
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, "1.9.0");
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     let on = sc.target.original_name.as_ref().expect("the block");
     assert_eq!(on.approval_subject, "originalName");
     assert_eq!(on.approval_mode, "consoleApproval");
@@ -286,7 +290,7 @@ fn an_original_name_restore_approved_in_the_console_says_so_in_both_places() {
     let f = fixtures::orchestrator_fixture(Drill::RestoresUnderTheOriginalNames);
     execute_with(&f.args, &f.run_id, &f.ctx).expect("the original-name restore runs");
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_ORIGINAL_NAME);
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     assert_eq!(
         sc.target.original_name.as_ref().unwrap().approval_mode,
         "v1Approval"

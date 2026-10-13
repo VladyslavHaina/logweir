@@ -43,9 +43,10 @@
 //!   a selected partition whose first/last timestamps overlap
 //!   `[start-or-floor, end]` (`overlaps_time_window` in the pinned source).
 //!   That is the ENGINE's selection, which can skip an
-//!   in-window record of a non-monotonic segment; a complete verification
-//!   computes its expected output from each record's own timestamp instead
-//!   ([`ReplaySelection::selects_timestamp`]) and so detects the skip.
+//!   in-window record of a non-monotonic segment; the runner refuses such a
+//!   window before phase 2 (`crate::record_times`, PROD-01.1b), and a complete
+//!   verification computes its expected output from each record's own
+//!   timestamp ([`ReplaySelection::selects_timestamp`]).
 //!
 //! # What is refused, and never silently widened
 //!

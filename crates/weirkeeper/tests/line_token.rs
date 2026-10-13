@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use logweir_core::refusal_detail::{LineToken, LINE_TOKEN_ARG};
+use logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG;
 use weirkeeper::job::{self, RunnerJobSpec, RunnerOwner};
 
 fn spec() -> RunnerJobSpec {
@@ -208,9 +209,12 @@ fn the_token_is_the_runners_last_two_arguments_and_the_job_is_otherwise_unchange
         before[..],
         "the argv before it is untouched"
     );
-    assert_eq!(after[before.len()], LINE_TOKEN_ARG);
+    // FX-43's flag: every line the runner prints for a controller is sealed
+    // with the token, and a runner that predates the flag stops at it.
+    assert_eq!(after[before.len()], RUNNER_LINE_TOKEN_ARG);
     assert_eq!(after[before.len() + 1], token.expose_token());
-    assert_eq!(LINE_TOKEN_ARG, "--line-token");
+    assert_eq!(RUNNER_LINE_TOKEN_ARG, "--runner-line-token");
+    assert_eq!(LINE_TOKEN_ARG, "--line-token", "FX-34's, still read back");
 
     // Take the two arguments off again and the Job is the one `build` made.
     let mut stripped = serde_json::to_value(&tokened).expect("a Job serialises");
@@ -323,9 +327,11 @@ fn the_token_is_read_back_off_the_job_and_only_from_where_it_is_written() {
     assert_eq!(job::line_token(&sidecar), None);
 }
 
-/// **The token's text leaves the type in two places in the whole workspace,
-/// and both are the ones it exists for**: the Job's argument
-/// (`job::add_line_token`) and the runner's line (`RefusalDetail::to_line`).
+/// **The token's text leaves the type in three places in the whole workspace,
+/// and all are the ones it exists for**: the Job's argument
+/// (`job::add_line_token`), the runner's detail line
+/// (`RefusalDetail::to_line`) and the runner's seal on every line a
+/// controller reads (`runner_line::sealed`, FX-43).
 /// `LineToken` has no `Display`, and its `Debug` prints no value, so
 /// `expose_token` is the only way out; this row counts every mention of that
 /// name in every crate's product source, HOWEVER IT IS SPELLED: a method call
@@ -333,7 +339,7 @@ fn the_token_is_read_back_off_the_job_and_only_from_where_it_is_written() {
 /// anything else. The one definition is set aside.
 ///
 /// So the token cannot reach a status, a condition, an event, an annotation
-/// or a log line THROUGH THE TYPE, and a change that adds a third mention
+/// or a log line THROUGH THE TYPE, and a change that adds a fourth mention
 /// meets this row.
 ///
 /// **What this row cannot see**, and which rows do: once `job::add_line_token`
@@ -385,11 +391,12 @@ fn the_tokens_text_leaves_the_type_in_two_places_only() {
         files_with_a_caller.into_iter().collect::<Vec<_>>(),
         vec![
             "crates/logweir-core/src/refusal_detail.rs".to_string(),
+            "crates/logweir-core/src/runner_line.rs".to_string(),
             "crates/weirkeeper/src/job.rs".to_string(),
         ],
         "every mention of `expose_token`, the definition aside: {callers:?}"
     );
-    assert_eq!(callers.len(), 2, "one in each: {callers:?}");
+    assert_eq!(callers.len(), 3, "one in each: {callers:?}");
     assert_eq!(definitions, 1, "and it is defined once");
     // NEGATIVE CONTROL: the count sees the spelling with no dot and no
     // parentheses, which is the one a `.expose_token()` search misses.

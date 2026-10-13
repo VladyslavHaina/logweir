@@ -120,6 +120,11 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | `POST …/restores/{name}/approval` | `approval.submit` | a governed countersignature, or the two `drill approve` files |
 | `GET …/restores/{name}/approval-request` | `approval.read` | a two-person request, as the approver is shown it |
 | `POST …/restores/{name}/console-approval` | `approval.submit` | the second person's click |
+| `GET …/switchovers[/{name}]` | `restore.read` | `Switchover` projections; `planBytes` on one switchover only (PROD-04.2) |
+| `POST …/switchovers` | `restore.create` | creates a `Switchover` from a reviewed plan, under the restore create's gates |
+| `POST …/switchovers/{name}/approval` | `approval.submit` | the restore route's submission, for subject kind `Switchover` |
+| `GET …/switchovers/{name}/approval-request` | `approval.read` | a two-person switchover request: every group, topic and position |
+| `POST …/switchovers/{name}/console-approval` | `approval.submit` | the second person's click on a switchover |
 | `GET …/approval-policy` | `approval.read` | the namespace's effective approval policy |
 | `GET …/approvals[/{name}]` | `approval.read` | Approval metadata, no documents |
 | `GET …/approvals/{name}/packet` | `approval.readPacket` | the approval and sidecar documents, verbatim |
@@ -427,6 +432,23 @@ are `requester`, `approverPrincipal`, `requesterIssuer`, `requesterSubject`,
 `refused`), `approvedAt`, `expiresAt`, `approval`, and on a refusal the
 `failureCode` above.
 
+#### Switchovers (PROD-04.2)
+
+The switchover routes are held to every gate above, by the same functions
+(`routes::subject`): `POST …/switchovers` runs the restore create's refusals
+before the plan's own grammar, `POST …/switchovers/{name}/approval` is the
+restore submission (bounds, the private-key refusal, `subject_kind_mismatch`
+for a v1 document of another kind, `not_an_approval` for one that does not
+parse), and `…/approval-request` and `…/console-approval` are the restore
+read and click. A switchover's scope is the restore its plan applies and
+every group, topic and position with its class (`approximate`) and the
+position the group must hold first (`expected`, absent for none):
+`tooManyGroups` over 100 groups, `tooManyPositions` over 8192 positions,
+counted before the grammar. Its click's audit notes say `scopeGroupsShown`,
+`scopePositionsShown` and `scopePositionsInPlan` in place of the topic counts.
+The stored `Approval` has `subjectRef.kind: Switchover` and the document's
+`subject.kind` is `Switchover`, which every verifier compares.
+
 ### Topic mapping and original names
 
 `topicMapping` declares the previewed rows; it is never stored, is defined for
@@ -529,8 +551,11 @@ complete: `attestedComplete` without an `attestation` is served as `unknown`,
 with `attestationMissing` in `basis`.
 
 **Readiness checks.** A body names one `operation` (`backup`, `restore`,
-`destinationAccess`, `sourceConnection`) and that block only, else `422`
-naming both. A restore check names `recoveryPoint` or `catalogPoint`, not both
+`destinationAccess`, `sourceConnection`, `switchover`) and that block only,
+else `422` naming both. A `switchover` block names `restoreName` (and
+`restoreUid` when known) and at most 100 `groups` (`source`, optional
+`target`; a blank or control-character id is `invalid_group`, a target named
+twice `duplicate_target`); an approver may read it, as a restore check. A restore check names `recoveryPoint` or `catalogPoint`, not both
 (`422 exactly_one`); a `pointId` that is not `lwp1-` plus 32 lowercase hex is
 `422 invalid_point_id`. `applicable`, `stale` and `staleReasons` are recomputed
 on every read against the `?planHash=` you send; the verdict is advisory.

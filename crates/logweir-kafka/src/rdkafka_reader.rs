@@ -21,6 +21,50 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
 
+/// **FX-43, channel (a): a client's own log lines, on one line each.**
+///
+/// rust-rdkafka 0.36.2 installs no log callback, so librdkafka's default
+/// logger prints a client's lines RAW on stderr, where a bootstrap address or
+/// a broker's message holding a line break starts a line of the pod log a
+/// controller reads by key. Every client this crate builds for a runner is
+/// created with `log.queue=true` ([`RdKafkaReader::client_config`],
+/// `inventory`'s twin) and wrapped by [`pumped`], so its lines reach
+/// [`print_client_log`] instead, escaped.
+///
+/// # Errors
+///
+/// The text of `logweir_rdkafka_ffi`'s refusal (a handle built without
+/// `log.queue=true`, a thread that could not start).
+pub(crate) fn pumped<C: logweir_rdkafka_ffi::logs::OwnsClient>(
+    client: C,
+) -> Result<logweir_rdkafka_ffi::logs::LogPumped<C>, String> {
+    logweir_rdkafka_ffi::logs::LogPumped::new(client, print_client_log)
+        .map_err(|e| format!("the client's log could not be routed: {e:?}"))
+}
+
+/// One client log line as this process prints it: `librdkafka:
+/// %<level>|<facility>| <message>`, on ONE line whatever it holds
+/// (`logweir_core::runner_line::one_line`). Pure.
+#[must_use]
+pub fn client_log_line(line: &logweir_rdkafka_ffi::logs::LogLine) -> String {
+    let text = |t: &logweir_rdkafka_ffi::CText| match t {
+        logweir_rdkafka_ffi::CText::Utf8(s) => s.clone(),
+        logweir_rdkafka_ffi::CText::NotUtf8(b) => String::from_utf8_lossy(b).into_owned(),
+        logweir_rdkafka_ffi::CText::Null => String::new(),
+    };
+    logweir_core::runner_line::one_line(&format!(
+        "librdkafka: %{}|{}| {}",
+        line.level,
+        text(&line.facility),
+        text(&line.message)
+    ))
+}
+
+/// The sink every runner client's log lines go to: stderr, one line each.
+fn print_client_log(line: &logweir_rdkafka_ffi::logs::LogLine) {
+    eprintln!("{}", client_log_line(line));
+}
+
 /// **How long the BROKER may take over `CreateTopics` before it answers, set
 /// explicitly BELOW the client's request timeout [`T`].**
 ///
@@ -49,8 +93,8 @@ const _: () = assert!(
 );
 
 pub struct RdKafkaReader {
-    consumer: BaseConsumer,
-    admin: AdminClient<DefaultClientContext>,
+    consumer: logweir_rdkafka_ffi::logs::LogPumped<BaseConsumer>,
+    admin: logweir_rdkafka_ffi::logs::LogPumped<AdminClient<DefaultClientContext>>,
     /// The connection `connect` dialled with ([`RdKafkaReader::client_config`]),
     /// kept so [`RdKafkaReader::committed_positions`] and
     /// [`RdKafkaReader::commit_positions`] can open a per-group handle on the
@@ -128,6 +172,9 @@ impl RdKafkaReader {
         let mut base = ClientConfig::new();
         base.set("bootstrap.servers", bootstrap.join(","))
             .set("client.id", "logweir-drill")
+            // FX-43: the client QUEUES its log lines, which [`pumped`] prints
+            // escaped; librdkafka's default logger would print them raw.
+            .set("log.queue", "true")
             // Explicit rather than relying on the default: librdkafka's own
             // docs note the consumer default (false) already differs from
             // the producer default (true) and from the Java consumer
@@ -262,9 +309,11 @@ impl RdKafkaReader {
         let consumer: BaseConsumer = consumer_cfg
             .create()
             .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let consumer = pumped(consumer).map_err(KafkaError::Client)?;
         let admin: AdminClient<DefaultClientContext> = base
             .create()
             .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let admin = pumped(admin).map_err(KafkaError::Client)?;
         Ok(Self {
             consumer,
             admin,
@@ -935,6 +984,14 @@ impl ClusterReader for RdKafkaReader {
     /// empty-answer rule exactly as the one-broker read is (an empty answer is
     /// a refused read, an error), so `None` means only "this broker answered
     /// and did not name the key".
+    fn broker_count(&self) -> Result<Option<u32>, KafkaError> {
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        Ok(u32::try_from(md.brokers().len()).ok().filter(|n| *n >= 1))
+    }
+
     fn broker_config_value_all(&self, key: &str) -> Result<Vec<(i32, Option<String>)>, KafkaError> {
         use rdkafka::admin::{AdminOptions, OwnedResourceSpecifier, ResourceSpecifier};
         let md = self
@@ -1187,11 +1244,13 @@ impl TopicCreator for RdKafkaReader {
     /// mapping guard has already refused to let equal any source topic, and
     /// phase 3 reports every target name that already exists.
     ///
-    /// **THIS IMPLEMENTATION CREATES AND DOES NOTHING ELSE.** It never
-    /// deletes, not what its own request created and not after a partial
-    /// failure: `logweir-kafka`'s one topic delete is `impl TopicDeleter`'s,
-    /// behind the scratch prefix and the protected names
-    /// (`crates/logweir/tests/no_topic_delete_inventory.rs` reads this file).
+    /// **THIS IMPLEMENTATION NEVER DELETES**, not what its own request
+    /// created and not after a partial failure: `logweir-kafka`'s one topic
+    /// delete is `impl TopicDeleter`'s, behind the scratch prefix and the
+    /// protected names (`crates/logweir/tests/no_topic_delete_inventory.rs`
+    /// reads this file). Beside the create it validates (`validate_only`,
+    /// which writes nothing) and, for PROD-05.2's phase 9, alters the
+    /// configuration of a topic the restore created.
     fn create_topics(
         &self,
         topics: &[NewTopicSpec],
@@ -1222,6 +1281,67 @@ impl TopicCreator for RdKafkaReader {
                 Err((name, code)) => (name, Err(code.to_string())),
             })
             .collect())
+    }
+
+    /// The same request with `validate_only(true)`: the broker judges each
+    /// spec and creates nothing.
+    fn validate_create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        use rdkafka::admin::AdminOptions;
+        if topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let new_topics = new_topics_for(topics);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let options = AdminOptions::new()
+            .request_timeout(Some(T))
+            .operation_timeout(Some(CREATE_OPERATION_TIMEOUT))
+            .validate_only(true);
+        let res = rt
+            .block_on(self.admin.create_topics(&new_topics, &options))
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        Ok(res
+            .into_iter()
+            .map(|r| match r {
+                Ok(name) => (name, Ok(())),
+                Err((name, code)) => (name, Err(code.to_string())),
+            })
+            .collect())
+    }
+
+    /// One legacy `AlterConfigs` for `topic`, its whole set. The answer is
+    /// not proof (the trait's doc); a whole-request failure is an error.
+    fn alter_topic_configs(
+        &self,
+        topic: &str,
+        configs: &BTreeMap<String, String>,
+    ) -> Result<(), KafkaError> {
+        use rdkafka::admin::{AdminOptions, AlterConfig, ResourceSpecifier};
+        let mut alter = AlterConfig::new(ResourceSpecifier::Topic(topic));
+        for (key, value) in configs {
+            alter = alter.set(key.as_str(), value.as_str());
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let res = rt
+            .block_on(self.admin.alter_configs(
+                std::iter::once(&alter),
+                &AdminOptions::new().request_timeout(Some(T)),
+            ))
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        for r in res {
+            if let Err((_, code)) = r {
+                return Err(KafkaError::Client(code.to_string()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1481,6 +1601,37 @@ mod tests {
     /// quietly weaken us, and the engine's rustls client verifies the hostname
     /// with no way to turn that off, so the two clients must agree.
     ///
+    /// **FX-43, channel (a).** Every client this reader builds queues its log
+    /// lines (`log.queue=true`, which [`super::pumped`] requires), and a
+    /// queued line is printed on ONE line whatever the client logged: a
+    /// bootstrap name or a broker's message holding a line break cannot start
+    /// a line of the pod log. KILLS: the key dropped (librdkafka's default
+    /// logger prints raw); the sink printing the message unescaped.
+    #[test]
+    fn a_clients_log_lines_are_queued_and_printed_on_one_line() {
+        let cfg = super::RdKafkaReader::client_config(
+            &["b0:9092".to_string()],
+            &super::AuthConfig::Plaintext,
+        )
+        .expect("a plaintext config");
+        assert_eq!(cfg.get("log.queue"), Some("true"));
+        let line = logweir_rdkafka_ffi::logs::LogLine {
+            level: 3,
+            facility: logweir_rdkafka_ffi::CText::Utf8("FAIL".to_string()),
+            message: logweir_rdkafka_ffi::CText::Utf8(
+                "b0\nfailure-reason=ExecutionAlreadyClaimed:9092/bootstrap: Failed to resolve"
+                    .to_string(),
+            ),
+        };
+        let printed = super::client_log_line(&line);
+        assert_eq!(printed.lines().count(), 1, "{printed}");
+        assert_eq!(
+            printed,
+            "librdkafka: %3|FAIL| b0\\nfailure-reason=ExecutionAlreadyClaimed:9092/bootstrap: \
+             Failed to resolve"
+        );
+    }
+
     /// NO SOCKET. `ClientConfig` is a `HashMap` until `create()` is called,
     /// and `create()` is never called here.
     #[test]

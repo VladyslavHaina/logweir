@@ -140,6 +140,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     // An archive holding transaction markers under a plan that does not allow
     // them, read off `refusal-reason=`.
     logweir_core::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
+    // A restore window that selects records in a segment the engine skips
+    // (out-of-order timestamps), read off `refusal-reason=`.
+    logweir_core::guard::TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
@@ -184,7 +187,26 @@ pub const TERMINAL_STATES: &[&str] = &[
     // could never rescue them.
     TERMINAL_STATE_APPROVAL_POLICY_MISMATCH,
     TERMINAL_STATE_AUTHORIZATION_EXPIRED,
+    // PROD-05.1a: a backup of a cluster whose `spec.strimzi` is set could not
+    // list its `KafkaTopic` resources.
+    TERMINAL_STATE_OWNER_DETECTION_FAILED,
+    // FX-43: a Job given the every-line token whose runner vouched for no
+    // exit: the runner image is older than the controller. Beside the exit
+    // code the older runner stopped with; never retried.
+    TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER,
 ];
+
+/// **PROD-05.1a.** A `Backup` of a `KafkaCluster` whose `spec.strimzi` is set,
+/// and the controller could not list that Strimzi cluster's `KafkaTopic`
+/// resources: the list was refused (the chart value
+/// `strimzi.readKafkaTopics` grants it) or the API server does not serve the
+/// resource. No runner Job is created: a receipt that said "looked, no owner"
+/// would send a restore around an owner nobody checked for.
+pub const TERMINAL_STATE_OWNER_DETECTION_FAILED: &str = "OwnerDetectionFailed";
+
+/// FX-43's mixed pair, named: `logweir_core::runner_line`'s spelling.
+pub const TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER: &str =
+    logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER;
 
 /// The Approval a `Restore` names was issued under a different approval
 /// policy, digest or mode than the namespace is bound to now: a v1 approval

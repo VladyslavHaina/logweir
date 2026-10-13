@@ -72,6 +72,7 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
             topic_mapping_prefix: PREFIX.into(),
             default_replication_factor: 1,
             teardown: "delete".into(),
+            topic_configuration: None,
         },
         sample: SampleSpec {
             window_start: window_end - chrono::Duration::hours(1),
@@ -1577,12 +1578,18 @@ fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
     let printed = body
         .find("TOPIC_PREFLIGHT_KEY_PREFIX")
         .expect("just asserted");
+    // FX-43: pushed into the terminal block (`crate::exit::FinalLines`),
+    // which `exiting` prints once, last, on stdout, the pod's log.
     let println_at = body[..printed]
-        .rfind("println!")
-        .expect("the key reaches stdout through `println!`, which is the pod's log");
+        .rfind("last.push(")
+        .expect("the key reaches stdout through the terminal block, which is the pod's log");
     assert!(
         body[println_at..printed].len() < 80,
-        "the `println!` is the one that carries the key, not an unrelated one above it"
+        "the push is the one that carries the key, not an unrelated one above it"
+    );
+    assert!(
+        body[printed..].contains("last.print(code);"),
+        "and the block is printed after it"
     );
     assert!(
         body[..println_at].contains("ExitCode::Ok"),

@@ -418,9 +418,10 @@ fn every_construction_site_hands_its_clients_the_path_it_read() {
 
     assert_eq!(
         sites.len(),
-        5,
-        "five files wire a CA into a client today — backup, probe, drill, doctor and D2 §4.2's \
-         check runner. A change to that COUNT is a decision about Global Constraint 29's \
+        7,
+        "seven files wire a CA into a client today — backup, probe, drill, doctor, D2 §4.2's \
+         check runner, PROD-11.1a's `restore cleanup` and PROD-04.2's `switchover run` (both \
+         the target's variable). A change to that COUNT is a decision about Global Constraint 29's \
          runner half and belongs in a commit message, not in a passing test: {:?}",
         sites.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );

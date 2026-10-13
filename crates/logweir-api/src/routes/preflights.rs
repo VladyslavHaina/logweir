@@ -44,7 +44,9 @@ use weirkeeper::crds::preflight::{
     BackupPreflightRequest as CrdBackupRequest, CatalogPointRef, DestinationAccessRequest,
     Preflight as PreflightCr, PreflightOperation, PreflightRequest, PreflightSpec,
     RestorePreflightRequest as CrdRestoreRequest,
-    SourceConnectionPreflightRequest as CrdSourceConnectionRequest, UidRef,
+    SourceConnectionPreflightRequest as CrdSourceConnectionRequest,
+    SwitchoverPreflightGroup as CrdSwitchoverGroup,
+    SwitchoverPreflightRequest as CrdSwitchoverRequest, UidRef,
 };
 use weirkeeper::crds::recovery_catalog::RecoveryCatalog;
 use weirkeeper::crds::restore::Restore as RestoreCr;
@@ -101,6 +103,7 @@ fn operation_dto(operation: PreflightOperation) -> PreflightOperationDto {
         PreflightOperation::Restore => PreflightOperationDto::Restore,
         PreflightOperation::DestinationAccess => PreflightOperationDto::DestinationAccess,
         PreflightOperation::SourceConnection => PreflightOperationDto::SourceConnection,
+        PreflightOperation::Switchover => PreflightOperationDto::Switchover,
     }
 }
 
@@ -484,6 +487,7 @@ fn core_operation(operation: PreflightOperation) -> CoreCheckOperation {
         PreflightOperation::Restore => CoreCheckOperation::Restore,
         PreflightOperation::DestinationAccess => CoreCheckOperation::DestinationAccess,
         PreflightOperation::SourceConnection => CoreCheckOperation::SourceConnection,
+        PreflightOperation::Switchover => CoreCheckOperation::Switchover,
     }
 }
 
@@ -792,7 +796,14 @@ fn narrow_for_approver(
         && !roles
             .iter()
             .any(|r| matches!(r, Role::Viewer | Role::Operator | Role::Administrator));
-    if approver_only && object.spec.request.operation != PreflightOperation::Restore {
+    // A switchover's review is, like a restore's, the readiness of the thing
+    // an approver is asked to authorise.
+    if approver_only
+        && !matches!(
+            object.spec.request.operation,
+            PreflightOperation::Restore | PreflightOperation::Switchover
+        )
+    {
         actor.audit.set_failure("forbidden");
         return Err(ApiError::not_found());
     }
@@ -821,12 +832,14 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
         ("restore", request.restore.is_some()),
         ("destinationAccess", request.destination_access.is_some()),
         ("sourceConnection", request.source_connection.is_some()),
+        ("switchover", request.switchover.is_some()),
     ];
     let expected = match request.operation {
         PreflightOperationDto::Backup => "backup",
         PreflightOperationDto::Restore => "restore",
         PreflightOperationDto::DestinationAccess => "destinationAccess",
         PreflightOperationDto::SourceConnection => "sourceConnection",
+        PreflightOperationDto::Switchover => "switchover",
     };
     for (name, present) in blocks {
         if present && name != expected {
@@ -1013,6 +1026,41 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
             &mut errors,
         );
     }
+    if let Some(review) = &request.switchover {
+        check_reference("switchover.restoreName", &review.restore_name, &mut errors);
+        let groups = review.groups.as_deref().unwrap_or_default();
+        if review.groups.is_some() && (groups.is_empty() || groups.len() > 100) {
+            errors.push(FieldError::new(
+                "switchover.groups",
+                "count_out_of_range",
+                "between 1 and 100 groups, or none for every group the mapping maps",
+            ));
+        }
+        let mut targets = std::collections::BTreeSet::new();
+        for (i, g) in groups.iter().enumerate() {
+            let target = g.target.as_deref().unwrap_or(&g.source);
+            let is_group_id = |id: &str| {
+                !id.trim().is_empty()
+                    && id.len() <= logweir_core::switchover::MAX_GROUP_ID_BYTES
+                    && !id.chars().any(char::is_control)
+            };
+            if !is_group_id(&g.source) || !is_group_id(target) {
+                errors.push(FieldError::new(
+                    format!("switchover.groups[{i}]"),
+                    "invalid_group",
+                    "a group id is not blank, carries no control character and is at most 255 \
+                     bytes",
+                ));
+            }
+            if !targets.insert(target) {
+                errors.push(FieldError::new(
+                    format!("switchover.groups[{i}].target"),
+                    "duplicate_target",
+                    "a target group is named once",
+                ));
+            }
+        }
+    }
     if let Some(skip) = &request.skip_checks {
         if skip.len() > 32 {
             errors.push(FieldError::new(
@@ -1157,6 +1205,7 @@ pub fn build(
                         PreflightOperation::DestinationAccess
                     }
                     PreflightOperationDto::SourceConnection => PreflightOperation::SourceConnection,
+                    PreflightOperationDto::Switchover => PreflightOperation::Switchover,
                 },
                 backup: request.backup.as_ref().map(|b| CrdBackupRequest {
                     source_ref: local(&b.source_connection),
@@ -1197,6 +1246,21 @@ pub fn build(
                     CrdSourceConnectionRequest {
                         connection_ref: local(&c.connection_ref),
                     }
+                }),
+                switchover: request.switchover.as_ref().map(|r| CrdSwitchoverRequest {
+                    restore_ref: UidRef {
+                        name: r.restore_name.clone(),
+                        uid: r.restore_uid.clone(),
+                    },
+                    groups: r.groups.as_ref().map(|groups| {
+                        groups
+                            .iter()
+                            .map(|g| CrdSwitchoverGroup {
+                                source: g.source.clone(),
+                                target: g.target.clone(),
+                            })
+                            .collect()
+                    }),
                 }),
                 skip_checks: request.skip_checks.clone(),
                 timeout_seconds: request
@@ -1340,6 +1404,7 @@ pub async fn start_destination_access(
             roles: roles.to_vec(),
         }),
         source_connection: None,
+        switchover: None,
         skip_checks: None,
         timeout_seconds: Some(weirkeeper::crds::preflight::DEFAULT_TIMEOUT_SECONDS),
     };
@@ -1728,6 +1793,7 @@ mod tests {
                     restore: None,
                     destination_access: None,
                     source_connection: None,
+                    switchover: None,
                     skip_checks: None,
                     timeout_seconds: 120,
                 },

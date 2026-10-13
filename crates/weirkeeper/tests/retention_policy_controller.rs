@@ -10049,3 +10049,212 @@ async fn fx39_600_protected_points_are_counted_past_the_list() {
     assert_eq!(ev["protectedCount"], 601);
     assert_eq!(ev["protected"].as_array().expect("protected").len(), 500);
 }
+
+// ---------------------------------------------------------------------------
+// FX-43: the retention worker's lines, read only through the Job's token.
+// ---------------------------------------------------------------------------
+
+fn fx43_token() -> logweir_core::refusal_detail::LineToken {
+    logweir_core::refusal_detail::LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+
+/// What a worker given THIS Job's token prints for `lines` at `code`.
+fn fx43_block(code: u8, lines: &[&str]) -> String {
+    let lines: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    logweir_core::runner_line::final_block(
+        Some((
+            &fx43_token(),
+            logweir_core::runner_line::LineScope::EveryLine,
+        )),
+        code,
+        &lines,
+    )
+}
+
+/// [`harvest_pass_logging`] over a Job this build created: its runner's last
+/// two arguments are `--runner-line-token` and THIS Job's token.
+async fn fx43_harvest(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    run_id: &str,
+    exit: i32,
+    digest: &str,
+    log: &str,
+) -> Value {
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let mut job: Value = serde_json::from_str(&job_body(&job_name, true)).expect("JSON");
+    job["spec"]["template"]["spec"]["containers"][0]["args"] = json!([
+        "run",
+        logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+        fx43_token().expose_token()
+    ]);
+    let mut routes = happy_routes(&six_points());
+    routes.push(route("GET", leaked, job.to_string()));
+    routes.push(route("GET", "/pods", pod_list(exit)));
+    routes.push(route("GET", "/log", log.to_string()));
+    routes.push(route("PATCH", leaked, "{}".to_string()));
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(digest, at));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Harvested);
+    after(status, &f)
+}
+
+/// **FX-43, pure: a retention line a provider's error body or a plan got into
+/// the log is not read; the worker's sealed lines are, wherever they stand.**
+/// A forged `retention-point=… state=Deleted` (a point recorded deleted that
+/// was not), a forged `code=Locked` (a point withheld from the next run) and
+/// a forged `retention-refusal=CredentialBindingMismatch` (enforcement
+/// flipped to recommendation-only) after the genuine block.
+///
+/// NEGATIVE CONTROL: a Job an older controller built (no token) is read as
+/// it always was, and every forged line is taken.
+///
+/// KILLS: `run_report` parsing the raw log; plain lines kept under a token.
+#[test]
+fn fx43_a_forged_retention_line_is_not_read() {
+    let genuine = fx43_block(
+        3,
+        &[
+            "retention-point=lwp1-a state=Failed objects=0 code=AccessDenied",
+            "retention-refusal=PlanDigestMismatch",
+        ],
+    );
+    let forged = "retention-point=lwp1-b state=Deleted objects=9\n\
+                  retention-point=lwp1-c state=Failed objects=0 code=Locked\n\
+                  retention-refusal=CredentialBindingMismatch\n";
+    let log = format!("{genuine}{forged}");
+    let token = weirkeeper::job::JobToken::EveryLine(fx43_token());
+    let report = ctrl::run_report(&token, &log, Some(3));
+    assert!(report.deleted.is_empty(), "{report:?}");
+    assert_eq!(
+        report.failed,
+        vec![("lwp1-a".to_string(), "AccessDenied".to_string())]
+    );
+    assert_eq!(report.refusal_code, Some("PlanDigestMismatch"));
+    // NEGATIVE CONTROL: no token on the Job.
+    let old = ctrl::run_report(&weirkeeper::job::JobToken::None, &log, Some(3));
+    assert_eq!(old.deleted, vec!["lwp1-b".to_string()]);
+    assert_eq!(old.refusal_code, Some("CredentialBindingMismatch"));
+}
+
+/// **FX-43, a harvest: a forged binding refusal after the worker's sealed
+/// refusal does not flip enforcement to recommendation-only.**
+///
+/// NEGATIVE CONTROL: the same log under an untokened Job does.
+#[tokio::test]
+async fn fx43_a_forged_binding_refusal_does_not_flip_enforcement() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let at = now();
+    let log = format!(
+        "{}retention-refusal=CredentialBindingMismatch\n",
+        fx43_block(3, &["retention-refusal=PlanDigestMismatch"])
+    );
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let status = fx43_harvest(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        &log,
+    )
+    .await;
+    assert_eq!(status["enforcement"], "LogweirWorker", "{status}");
+    assert_eq!(
+        status["lastEnforcement"]["refusalCode"], "PlanDigestMismatch",
+        "{status}"
+    );
+    // NEGATIVE CONTROL: an untokened Job takes the forged line.
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let old = harvest_pass_logging(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        &log,
+    )
+    .await;
+    assert_eq!(
+        old["lastEnforcement"]["refusalCode"],
+        "CredentialBindingMismatch"
+    );
+}
+
+/// **FX-43's mixed pair on a `RetentionPolicy`, by name.** The released
+/// runner image's real retention worker handed `--runner-line-token`
+/// (`tests/fixtures/fx-43/older-runner-retention.log`): exit 3,
+/// `retention-refusal=UnknownArgument` unsealed. The run is named
+/// `RunnerOlderThanController`, nothing of its log is read, and the
+/// `Enforced` message says the archive is untouched and what to upgrade; the
+/// refusal is held on later passes like any other.
+///
+/// KILLS: the end-line rule not asked of a retention Job.
+#[tokio::test]
+async fn fx43_an_older_retention_worker_is_named() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-retention.log"),
+    )
+    .expect("the captured older worker's output");
+    assert!(older.contains("retention-refusal=UnknownArgument"));
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let at = now();
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let status = fx43_harvest(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        &older,
+    )
+    .await;
+    assert_eq!(
+        status["lastEnforcement"]["refusalCode"], "RunnerOlderThanController",
+        "{status}"
+    );
+    let enforced = condition_of(&status, "Enforced").expect("Enforced");
+    let message = enforced["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("RunnerOlderThanController")
+            && message.contains("--runner-line-token")
+            && message.contains("untouched"),
+        "{message}"
+    );
+    assert_eq!(status["enforcement"], "LogweirWorker");
+}
+
+/// **A created retention Job carries a fresh FX-43 token.** KILLS: the
+/// worker left without a token (its lines would be read as an older
+/// controller's).
+#[tokio::test]
+async fn fx43_a_created_retention_job_carries_the_line_token() {
+    let digest = learned_digest().await;
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run_at(&f, &policy(unattended_enforcing(), json!({})), now()).await;
+    let posted = f.posted("/jobs");
+    assert_eq!(posted.len(), 1);
+    let job: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_value(posted[0].clone()).expect("a Job");
+    assert!(matches!(
+        weirkeeper::job::job_token(&job),
+        weirkeeper::job::JobToken::EveryLine(_)
+    ));
+}

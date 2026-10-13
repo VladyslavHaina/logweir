@@ -530,6 +530,7 @@ fn every_granted_verb_has_a_caller() {
             // The other direction of the same mapping.
             "trustpolicies" => "TrustPolicy",
             "retentionpolicies" => "RetentionPolicy",
+            "switchovers" => "Switchover",
             "protectionpolicies" => "ProtectionPolicy",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
@@ -943,9 +944,14 @@ fn every_call_site_has_a_grant() {
             // `Restore` for the active-restore protection set; and `Job` for
             // the one Job it creates.
             "RetentionPolicy" => ("logweir.dev", "retentionpolicies"),
+            "Switchover" => ("logweir.dev", "switchovers"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
+            // PROD-05.1a: the ONE untyped handle, `strimzi_topics.rs`'s list of
+            // Strimzi `KafkaTopic`s. Its grant is opt-in
+            // (`strimzi.readKafkaTopics`); see the loop below.
+            "DynamicObject" => (STRIMZI_GROUP, "kafkatopics"),
             other => panic!(
                 "crates/weirkeeper/src/ calls the Kubernetes API through `Api<{other}>`, and \
                  this test cannot map that type to an (apiGroup, resource). Add the mapping — \
@@ -1024,9 +1030,22 @@ fn every_call_site_has_a_grant() {
 
     let mut checked = 0usize;
     for file in &files {
-        let rules = rules_of(file, "weirkeeper");
+        let mut rules = rules_of(file, "weirkeeper");
+        // The opt-in grant is a Role in each namespace the chart lists
+        // (`strimzi-topics.yaml`), never the ClusterRole: a render without
+        // `strimzi.readKafkaTopics` grants nothing on `kafkatopics`, and the
+        // controller then refuses the read (`OwnerDetectionFailed`); a render
+        // with it must grant the call like any other, through that Role.
+        let strimzi_roles = strimzi_roles(file);
+        let grants_strimzi = !strimzi_roles.is_empty();
+        for role in strimzi_roles {
+            rules.extend(role);
+        }
         for (ty, methods) in &callers {
             let (group, resource) = resource_of(ty);
+            if group == STRIMZI_GROUP && !grants_strimzi {
+                continue;
+            }
             for method in methods {
                 for (needed_resource, verb) in needs(resource, method) {
                     let granted = rules.iter().any(|(groups, resources, verbs)| {
@@ -1055,6 +1074,101 @@ fn every_call_site_has_a_grant() {
          gone quiet",
         files.len()
     );
+}
+
+/// Strimzi's API group, read by PROD-05.1a.
+const STRIMZI_GROUP: &str = "kafka.strimzi.io";
+
+/// One RBAC rule as `(apiGroups, resources, verbs)`, each sorted.
+type Rule = (Vec<String>, Vec<String>, Vec<String>);
+
+/// The rules of every `weirkeeper-strimzi-kafkatopics` Role in a render, one
+/// list per Role.
+fn strimzi_roles(rel: &str) -> Vec<Vec<Rule>> {
+    manifests_in(&repo().join(rel))
+        .iter()
+        .filter(|m| m.kind == "Role" && m.name() == "weirkeeper-strimzi-kafkatopics")
+        .map(|role| {
+            role.value["rules"]
+                .as_sequence()
+                .expect("the Role has rules")
+                .iter()
+                .map(|r| {
+                    let take = |k: &str| -> Vec<String> {
+                        let mut v: Vec<String> = r[k]
+                            .as_sequence()
+                            .expect("an RBAC list")
+                            .iter()
+                            .map(|x| x.as_str().expect("an RBAC string").to_string())
+                            .collect();
+                        v.sort();
+                        v
+                    };
+                    (take("apiGroups"), take("resources"), take("verbs"))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// **PROD-05.1a's grant is `get` and `list` on `kafkatopics`, in a Role in each
+/// namespace the chart lists, and only when asked.** No ClusterRole of any
+/// render names Strimzi's group; the default render has no such Role; the
+/// `tuned` render (`strimzi.readKafkaTopics: true`, `namespaces: [kafka]`) has
+/// exactly one, in `kafka`, granting exactly those two verbs on that one
+/// resource, bound to the controller's account. KILLS: a cluster-wide grant
+/// (the confused deputy: a KafkaCluster's author could point the read at any
+/// namespace); the rule rendered by default; a wider verb set or a second
+/// resource.
+#[test]
+fn the_strimzi_grant_is_a_role_in_each_listed_namespace_and_only_when_asked() {
+    for path in files_under("charts/logweir/rendered") {
+        let rel = path
+            .strip_prefix(repo())
+            .expect("under the repository")
+            .to_string_lossy()
+            .to_string();
+        for m in manifests_in(&path) {
+            if m.kind == "ClusterRole" {
+                let text = serde_yaml::to_string(&m.value["rules"]).unwrap_or_default();
+                assert!(
+                    !text.contains(STRIMZI_GROUP),
+                    "{rel}: ClusterRole {} names {STRIMZI_GROUP}; the read is granted per \
+                     namespace only",
+                    m.name()
+                );
+            }
+        }
+    }
+    assert!(strimzi_roles(DEFAULT_RENDER).is_empty());
+    let tuned = "charts/logweir/rendered/tuned.yaml";
+    assert_eq!(
+        strimzi_roles(tuned),
+        vec![vec![(
+            vec![STRIMZI_GROUP.to_string()],
+            vec!["kafkatopics".to_string()],
+            vec!["get".to_string(), "list".to_string()], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        )]]
+    );
+    let docs = manifests_in(&repo().join(tuned));
+    let role = docs
+        .iter()
+        .find(|m| m.kind == "Role" && m.name() == "weirkeeper-strimzi-kafkatopics")
+        .unwrap();
+    assert_eq!(role.value["metadata"]["namespace"].as_str(), Some("kafka"));
+    let binding = docs
+        .iter()
+        .find(|m| m.kind == "RoleBinding" && m.name() == "weirkeeper-strimzi-kafkatopics")
+        .expect("the Role is bound");
+    assert_eq!(
+        binding.value["metadata"]["namespace"].as_str(),
+        Some("kafka")
+    );
+    assert_eq!(
+        binding.value["subjects"][0]["name"].as_str(),
+        Some("weirkeeper")
+    );
+    assert_eq!(binding.value["roleRef"]["kind"].as_str(), Some("Role"));
 }
 
 /// The six ClusterRoles, verb for verb.
@@ -1140,6 +1254,12 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["backups"]),
             v(&["create", "patch"]),
         ),
+        // PROD-11.1a: `patch` adds and removes the `logweir.dev/clone-cleanup`
+        // finalizer on a TTL clone's `Restore`, one metadata merge patch
+        // preconditioned on the object's version
+        // (`controllers/restore_clone.rs::set_finalizer`). No `update`, no
+        // `delete`.
+        (v(&["logweir.dev"]), v(&["restores"]), v(&["patch"])),
         (
             v(&["logweir.dev"]),
             v(&[
@@ -1261,6 +1381,19 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["retentionpolicies/status"]),
             v(&["patch"]),
         ),
+        // PROD-04.2: the `Switchover` reconciler's watch and namespace-wide
+        // `list`, the `Approval` reconciler's `get` of a switchover subject,
+        // and `patch_status`.
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers"]),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers/status"]),
+            v(&["patch"]),
+        ),
     ];
     assert_eq!(
         rules_of(DEFAULT_RENDER, "weirkeeper"),
@@ -1287,6 +1420,12 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         (
             v(&["logweir.dev"]),
             v(&SEVEN_NEW_KINDS),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        // PROD-04.2, in a rule of its own.
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers"]),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
     ];
@@ -1356,6 +1495,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // second, unnoticed field, which the API server would then refuse for
         // that field alone.
         (v(&["logweir.dev"]), v(&["recoverycatalogs"]), v(&["patch"])),
+        // PROD-04.2: request a switchover; it runs only under its own
+        // Approval, which `logweir-approver` creates.
+        (v(&["logweir.dev"]), v(&["switchovers"]), v(&["create"])),
     ];
     let operator_rules = rules_of(DEFAULT_RENDER, "logweir-operator");
     assert_eq!(

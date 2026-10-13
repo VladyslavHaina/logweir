@@ -149,10 +149,24 @@ pub const STORAGE_REGION_INVALID: &str = "StorageRegionInvalid";
 ///
 /// The message names the field and never the value: a region crafted as a
 /// userinfo could carry a credential.
+///
+/// **FX-43, channel (b):** the same call holds the location's text to a
+/// grammar: a bucket, prefix, account, container or path holding a control
+/// character or a line or paragraph separator is refused too
+/// ([`crate::runner_line::holds_line_breaking_or_control`]). The evidence keys
+/// a runner prints are built from it, and a key holding a line break would be
+/// an object no run wrote.
 pub fn reject_invalid_storage_region(
     field: &str,
     storage: &crate::engine::StorageUrl,
 ) -> Result<(), GuardRefusal> {
+    if let Some(part) = storage.line_breaking_part() {
+        return Err(GuardRefusal(format!(
+            "{field}.{part} holds a control character or a line break; the evidence keys this \
+             run prints are built from it, so it is refused before anything runs and the value \
+             is not repeated here. No client was built."
+        )));
+    }
     if storage.has_invalid_region() {
         return Err(GuardRefusal(format!(
             "{STORAGE_REGION_INVALID}: {field}.region is not an S3 region name: it must match \
@@ -163,6 +177,32 @@ pub fn reject_invalid_storage_region(
         )));
     }
     Ok(())
+}
+
+/// **FX-43, channel (a).** Refuses a spec's bootstrap server entry holding a
+/// control character or a line or paragraph separator
+/// ([`crate::runner_line::holds_line_breaking_or_control`]), before any client
+/// exists: the Kafka client logs a server it cannot reach by name, and such an
+/// entry would start a line of the pod log a controller reads by key. The
+/// `KafkaCluster` CRD refuses the same entries at admission, and
+/// `logweir cluster-probe` at its argument.
+///
+/// The message names the field and the entry's position, never the value.
+pub fn reject_line_breaking_bootstrap_servers(
+    field: &str,
+    servers: &[String],
+) -> Result<(), GuardRefusal> {
+    match servers
+        .iter()
+        .position(|s| crate::runner_line::holds_line_breaking_or_control(s))
+    {
+        Some(at) => Err(GuardRefusal(format!(
+            "{field}[{at}] holds a control character or a line break; a bootstrap server is a \
+             host:port, so it is refused before any client is built and the value is not \
+             repeated here"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// **SASL/PLAIN only over TLS.** Refuses a spec's auth block whose
@@ -371,8 +411,14 @@ pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
 /// `restore.allow_transaction_markers: true`. Its call site is
 /// `crate::transaction_markers::refusal`; refused before phase 2.
 pub const TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE: &str = "TransactionMarkersInArchive";
+/// [I9] The restore window selects archived records in a segment the engine
+/// skips: its first and last record timestamps do not overlap the window, and
+/// its records are out of timestamp order. Its call site is
+/// `crate::record_times::refusal`; refused before phase 2.
+pub const TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE: &str =
+    "PointInTimeSelectionIncomplete";
 /// [I9] Every terminal state a guard refusal can name.
-pub const TERMINAL_STATES: [&str; 7] = [
+pub const TERMINAL_STATES: [&str; 8] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
@@ -380,6 +426,7 @@ pub const TERMINAL_STATES: [&str; 7] = [
     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
+    TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE,
 ];
 
 /// [I9] A refusal message MAY open with `<State>: `, naming one of
@@ -473,18 +520,6 @@ pub const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE: &str =
 /// the log's bounded tail.
 pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 
-/// Which runner's log a `failure-reason=` line is read from. **The closed
-/// set is PER KIND**: one list for both reconcilers would let a Backup's log
-/// lift a restore-only state onto a `Backup`, and a Restore's log a
-/// backup-only one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureReasonKind {
-    /// `logweir backup run`: RECEIPT-DUP's two execution-claim states.
-    Backup,
-    /// `logweir restore run`: the stopped creation step's two states.
-    Restore,
-}
-
 /// Every state a BACKUP's `failure-reason=` may carry, WITH the one exit code
 /// it may accompany. A CLOSED list in both directions: a controller lifts a
 /// value into `status.exitReason` only when the pair is on its kind's list,
@@ -503,31 +538,21 @@ pub const RESTORE_FAILURE_REASONS: [(&str, i32); 2] = [
     (TERMINAL_STATE_CREATED_TOPICS_LEFT, 1),
 ];
 
-impl FailureReasonKind {
-    /// This kind's closed list of `(state, exit code)` pairs.
-    #[must_use]
-    pub fn reasons(self) -> &'static [(&'static str, i32)] {
-        match self {
-            FailureReasonKind::Backup => &BACKUP_FAILURE_REASONS,
-            FailureReasonKind::Restore => &RESTORE_FAILURE_REASONS,
-        }
-    }
-}
-
 /// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.
 pub fn failure_reason_line(state: &str) -> String {
     format!("{FAILURE_REASON_PREFIX}{state}")
 }
 
-/// The state a `failure-reason=` VALUE names, if the value is on `kind`'s
+/// The state a `failure-reason=` VALUE names, if the value is on `run`'s
 /// closed list for THIS exit code; `None` otherwise — a state of the other
-/// kind included.
+/// kind included. The kind is the one closed-set type every per-kind list
+/// hangs off ([`crate::refusal_detail::RefusingRun`], FX-43).
 pub fn failure_reason_for_exit(
-    kind: FailureReasonKind,
+    run: crate::refusal_detail::RefusingRun,
     exit_code: i32,
     value: &str,
 ) -> Option<&'static str> {
-    kind.reasons()
+    run.failure_reasons()
         .iter()
         .find(|(state, code)| *code == exit_code && *state == value)
         .map(|(state, _)| *state)

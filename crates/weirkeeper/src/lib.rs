@@ -76,6 +76,8 @@ pub mod runner_log;
 pub mod runner_resources;
 pub mod scope;
 pub mod slot;
+/// PROD-05.1a: the read of a Strimzi cluster's `KafkaTopic` resources.
+pub mod strimzi_topics;
 pub mod testing;
 pub mod verification;
 

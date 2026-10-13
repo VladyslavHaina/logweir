@@ -270,6 +270,14 @@ closed_vocabulary! {
         EngineProtocolSupported => "EngineProtocolSupported",
         TopicConfigsReadable => "TopicConfigsReadable",
         GroupTypesListed => "GroupTypesListed",
+        // PROD-04.2 §3.8, `switchoverReadiness`: the restore's signed
+        // scorecard and the positions mapping it binds verified; the target
+        // is the cluster and the topic generations the restore wrote; every
+        // requested group could be applied now.
+        RestoreSucceeded => "RestoreSucceeded",
+        RestoreEvidenceVerified => "RestoreEvidenceVerified",
+        TargetIsTheRestores => "TargetIsTheRestores",
+        GroupsAdmissible => "GroupsAdmissible",
         Succeeded => "Succeeded",
         // NotReady codes.
         ConnectionNotFound => "ConnectionNotFound",
@@ -392,6 +400,18 @@ closed_vocabulary! {
         EngineProtocolUnsupported => "EngineProtocolUnsupported",
         TopicConfigsNotReadable => "TopicConfigsNotReadable",
         GroupTypesNotListed => "GroupTypesNotListed",
+        // PROD-04.2 §3.8: the `Restore` a switchover readiness check names is
+        // not there (or not that UID), or did not succeed with a verified
+        // scorecard; its evidence or mapping did not verify (the message
+        // opens with the switchover's own word: `NoPositionsMapping`,
+        // `MappingDigestMismatch`, `VerificationNotComplete`, ...); the target
+        // is not the cluster or the topic generation the restore wrote; a
+        // requested group could not be applied now (`GroupActive`, ...).
+        RestoreNotFound => "RestoreNotFound",
+        RestoreNotSucceeded => "RestoreNotSucceeded",
+        RestoreEvidenceRefused => "RestoreEvidenceRefused",
+        TargetNotTheRestores => "TargetNotTheRestores",
+        GroupNotAdmissible => "GroupNotAdmissible",
         NotReady => "NotReady",
         // Unknown / execution-only codes.
         PodNotStarted => "PodNotStarted",
@@ -506,6 +526,13 @@ closed_vocabulary! {
         ArchiveSegments => "archive.segments",
         ApprovalState => "approval.state",
         ApprovalKeyValidity => "approval.keyValidity",
+        // PROD-04.2 §3.8, the `switchoverReadiness` rows: the `Restore`
+        // (controller), its signed evidence and mapping, the target cluster
+        // and topic generations, and the requested groups (check Job).
+        SwitchoverRestore => "switchover.restore",
+        SwitchoverEvidence => "switchover.evidence",
+        SwitchoverTarget => "switchover.target",
+        SwitchoverGroups => "switchover.groups",
     }
 }
 
@@ -561,7 +588,9 @@ pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
             CheckId::ConnectionGroupTypes,
         ],
         CheckOperation::Restore => &[CheckId::TargetEngineProtocol],
-        CheckOperation::DestinationAccess | CheckOperation::SourceConnection => &[],
+        CheckOperation::DestinationAccess
+        | CheckOperation::SourceConnection
+        | CheckOperation::Switchover => &[],
     }
 }
 
@@ -782,7 +811,7 @@ pub fn advisory_warnings(checks: &[CheckOutcome]) -> Vec<&CheckOutcome> {
         .collect()
 }
 
-/// Which of the seven plan kinds a request is.
+/// Which of the eight plan kinds a request is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckPlanKind {
@@ -801,6 +830,10 @@ pub enum CheckPlanKind {
     /// catalog in object storage, relayed as the body `docs/kubernetes.md`,
     /// *The recovery catalog*, describes.
     CatalogSync,
+    /// PROD-04.2 §3.8: the review before a `Switchover` — the restore's
+    /// signed evidence and mapping, the target, and each requested group's
+    /// type, state, members and committed positions. Advisory.
+    SwitchoverReadiness,
 }
 
 impl CheckPlanKind {
@@ -819,11 +852,12 @@ impl CheckPlanKind {
             Self::EvidenceFetch => "evidenceFetch",
             Self::CatalogSync => "catalogSync",
             Self::SourceConnection => "sourceConnection",
+            Self::SwitchoverReadiness => "switchoverReadiness",
         }
     }
 
     /// The two-letter Job-name discriminator (`td`, `rd`, `rp`,
-    /// `da`, `ev`, `cs`, `sc`). It lives here so the controller and any tooling
+    /// `da`, `ev`, `cs`, `sc`, `sw`). It lives here so the controller and any tooling
     /// that has to recognise a check Job by name read one table.
     ///
     /// `const fn` for the reason [`CheckPlanKind::as_str`] gives.
@@ -837,10 +871,11 @@ impl CheckPlanKind {
             Self::EvidenceFetch => "ev",
             Self::CatalogSync => "cs",
             Self::SourceConnection => "sc",
+            Self::SwitchoverReadiness => "sw",
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::TopicInventory,
         Self::OperationReadiness,
         Self::RestorePreflight,
@@ -848,6 +883,7 @@ impl CheckPlanKind {
         Self::EvidenceFetch,
         Self::CatalogSync,
         Self::SourceConnection,
+        Self::SwitchoverReadiness,
     ];
 }
 
@@ -859,6 +895,8 @@ pub enum CheckOperation {
     DestinationAccess,
     /// The connection itself, and nothing that uses it.
     SourceConnection,
+    /// PROD-04.2: applying a verified restore's consumer positions.
+    Switchover,
 }
 
 /// How a Kafka connection is authenticated, spelled as the plan spells it.
@@ -1311,6 +1349,49 @@ pub struct RestorePreflightRequest {
     pub capability_checks: Vec<CheckId>,
 }
 
+/// One group a `switchoverReadiness` check reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SwitchoverReadinessGroup {
+    /// The captured (source) group, as the mapping names it.
+    pub source: String,
+    /// The target group id a switchover would commit for; absent: the same
+    /// id (what `logweir switchover plan` writes by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// `switchoverReadiness` (PROD-04.2 §3.8): the review before a `Switchover`.
+///
+/// It verifies the restore's signed scorecard and the positions mapping it
+/// binds as the switchover's own step 3 does, holds the target to the
+/// cluster and topic generations the restore wrote, and reads each requested
+/// target group's type, state, members and committed positions on its mapped
+/// partitions. It WRITES NOTHING and authorises nothing: the `Switchover` Job
+/// repeats every check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SwitchoverReadinessRequest {
+    /// The `Restore`, by name and UID.
+    pub restore_name: String,
+    pub restore_uid: String,
+    /// `sha256:<64 hex>` of the restore's plan bytes: the scorecard's
+    /// `approval.plan_hash` must be it.
+    pub restore_plan_sha256: String,
+    /// `Restore.status.evidence.scorecardKey`, under the evidence root.
+    pub scorecard_key: String,
+    /// The restore's target cluster, dialled as the restore's own principal.
+    pub target: ConnectionPlan,
+    /// The restore's evidence destination, read with its `evidenceRead`
+    /// grant (as an `evidenceFetch` is).
+    pub evidence: DestinationPlan,
+    /// The evidence-signing keys of the namespace's trust: public halves only.
+    pub keyring: crate::execution_contract::EvidenceKeyring,
+    /// The groups to read; empty: every group the mapping maps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SwitchoverReadinessGroup>,
+}
+
 /// `sourceConnection`.
 ///
 /// ONE FIELD, AND THE ABSENCES ARE THE CONTRACT. `deny_unknown_fields` on a
@@ -1467,7 +1548,7 @@ pub struct CatalogSyncRequest {
     pub trust_bundle_file: Option<String>,
 }
 
-/// The seven requests, externally tagged so an unknown kind is a parse error
+/// The eight requests, externally tagged so an unknown kind is a parse error
 /// with the kind named, and so each variant keeps its own
 /// `deny_unknown_fields`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1488,6 +1569,8 @@ pub enum CheckRequest {
     CatalogSync(Box<CatalogSyncRequest>),
     // NOT boxed: one connection, which is the smallest shape in this enum.
     SourceConnection(SourceConnectionRequest),
+    // Boxed: a connection, a destination and a keyring.
+    SwitchoverReadiness(Box<SwitchoverReadinessRequest>),
 }
 
 impl CheckRequest {
@@ -1501,6 +1584,7 @@ impl CheckRequest {
             Self::EvidenceFetch(_) => CheckPlanKind::EvidenceFetch,
             Self::CatalogSync(_) => CheckPlanKind::CatalogSync,
             Self::SourceConnection(_) => CheckPlanKind::SourceConnection,
+            Self::SwitchoverReadiness(_) => CheckPlanKind::SwitchoverReadiness,
         }
     }
 
@@ -1536,7 +1620,8 @@ impl CheckRequest {
             Self::TopicInventory(_)
             | Self::EvidenceFetch(_)
             | Self::CatalogSync(_)
-            | Self::SourceConnection(_) => Vec::new(),
+            | Self::SourceConnection(_)
+            | Self::SwitchoverReadiness(_) => Vec::new(),
         }
     }
 
@@ -1553,7 +1638,8 @@ impl CheckRequest {
             | Self::DestinationAccess(_)
             | Self::EvidenceFetch(_)
             | Self::CatalogSync(_)
-            | Self::SourceConnection(_) => &[],
+            | Self::SourceConnection(_)
+            | Self::SwitchoverReadiness(_) => &[],
         }
     }
 
@@ -1585,6 +1671,9 @@ fn validate_grant_bindings(request: &CheckRequest) -> Result<(), CheckPlanError>
             vec![("request.evidenceFetch.destination", &r.destination)]
         }
         CheckRequest::CatalogSync(r) => vec![("request.catalogSync.destination", &r.destination)],
+        CheckRequest::SwitchoverReadiness(r) => {
+            vec![("request.switchoverReadiness.evidence", &r.evidence)]
+        }
         _ => Vec::new(),
     };
     for (field, d) in unread {
@@ -1614,6 +1703,78 @@ fn validate_grant_bindings(request: &CheckRequest) -> Result<(), CheckPlanError>
                 ));
             }
             seen.push(g.role);
+        }
+    }
+    Ok(())
+}
+
+/// The bounds of a `switchoverReadiness` request: the restore's identity and
+/// plan hash, a scorecard key, a keyring of public keys, and at most
+/// [`crate::switchover::MAX_GROUPS`] groups, each a group id by the
+/// switchover plan's rule, no target named twice.
+fn validate_switchover_readiness(r: &SwitchoverReadinessRequest) -> Result<(), CheckPlanError> {
+    const F: &str = "request.switchoverReadiness";
+    if r.restore_name.is_empty() || r.restore_uid.is_empty() {
+        return Err(CheckPlanError::field(
+            &format!("{F}.restoreName"),
+            "a readiness check names its Restore and that Restore's UID",
+        ));
+    }
+    if !is_sha256_prefixed(&r.restore_plan_sha256) {
+        return Err(CheckPlanError::field(
+            &format!("{F}.restorePlanSha256"),
+            "restorePlanSha256 is sha256:<64 lowercase hex>",
+        ));
+    }
+    if r.scorecard_key.is_empty()
+        || r.scorecard_key.len() > 1024
+        || !r.scorecard_key.ends_with(".json")
+    {
+        return Err(CheckPlanError::field(
+            &format!("{F}.scorecardKey"),
+            "the restore's scorecard key, a `.json` object key of at most 1024 bytes",
+        ));
+    }
+    if r.keyring.keys.is_empty() || r.keyring.keys.len() > 64 {
+        return Err(CheckPlanError::field(
+            &format!("{F}.keyring.keys"),
+            format!(
+                "{} evidence-signing keys is outside 1..=64; a scorecard verifies under at least \
+                 one",
+                r.keyring.keys.len()
+            ),
+        ));
+    }
+    if r.groups.len() > crate::switchover::MAX_GROUPS {
+        return Err(CheckPlanError::field(
+            &format!("{F}.groups"),
+            format!(
+                "{} groups exceeds the cap of {}",
+                r.groups.len(),
+                crate::switchover::MAX_GROUPS
+            ),
+        ));
+    }
+    let mut targets = std::collections::BTreeSet::new();
+    for (i, g) in r.groups.iter().enumerate() {
+        let target = g.target.as_deref().unwrap_or(&g.source);
+        for id in [g.source.as_str(), target] {
+            if id.trim().is_empty()
+                || id.chars().any(char::is_control)
+                || id.len() > crate::switchover::MAX_GROUP_ID_BYTES
+            {
+                return Err(CheckPlanError::field(
+                    &format!("{F}.groups[{i}]"),
+                    "a group id is not blank, carries no control character and is at most 255 \
+                     bytes",
+                ));
+            }
+        }
+        if !targets.insert(target) {
+            return Err(CheckPlanError::field(
+                &format!("{F}.groups[{i}].target"),
+                "a target group is named twice",
+            ));
         }
     }
     Ok(())
@@ -1903,6 +2064,7 @@ impl CheckPlan {
             // its only ceiling. The arm is written out so a field added here
             // later is a compile error at a site that asks "what bounds this?".
             CheckRequest::SourceConnection(_) => {}
+            CheckRequest::SwitchoverReadiness(r) => validate_switchover_readiness(r)?,
             CheckRequest::EvidenceFetch(r) => {
                 if r.objects.is_empty() || r.objects.len() > MAX_EVIDENCE_OBJECTS {
                     return Err(CheckPlanError::field(

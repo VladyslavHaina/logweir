@@ -324,9 +324,10 @@ stack with each engine a published version pinned, puts the pin back and
 drills that archive with the checkout's engine. On a slot:
 `eval "$(e2e/compose/stack-env.sh --slot N)"; scripts/archive-compat.sh engines`.
 
-## CI's e2e job: four shards
+## CI's e2e job: shards by test binary
 
-CI runs the e2e package in four shards by test binary (FX-41), each on its
+CI runs the e2e package in shards by test binary (FX-41: four; PROD-04.2's
+`switchover` rows are a fifth), each on its
 own runner with its own default stack (`COMPOSE_PROFILES=auth`, Kafka 4.3.1).
 The lists are `jobs.e2e.strategy.matrix` in `.github/workflows/ci.yml`. **A
 new file under `e2e/tests/` goes into one shard's `tests`:**

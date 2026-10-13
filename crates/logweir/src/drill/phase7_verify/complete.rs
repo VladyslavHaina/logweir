@@ -31,10 +31,8 @@
 //!    (`logweir_kafka::fingerprint::record_digest_ordered`).
 //!
 //! The count check is EXACT: a partition passes only when the restored count
-//! equals the expected count and every record is accounted for. The
-//! manifest's first/last-timestamp count BOUND (`check_restored_count`) is
-//! not consulted in this lane; it is what makes a correct point-in-time
-//! restore fail and a skipped segment pass.
+//! equals the expected count and every record is accounted for. The segment
+//! count BOUND (`check_restored_count`) is not consulted in this lane.
 //!
 //! # One ledger, still
 //!
@@ -198,6 +196,7 @@ fn archive_side(
     p: Option<&PartitionFacts>,
     window: &CompleteWindow,
     findings: &mut Findings,
+    mut excluded: Option<&mut Vec<i64>>,
 ) -> Result<ArchiveSide, DrillError> {
     let mut side = ArchiveSide {
         segments: 0,
@@ -323,6 +322,10 @@ fn archive_side(
             }
             prev = Some(prev.map_or(r.offset, |pv| pv.max(r.offset)));
             if !selected(window, r.timestamp) {
+                // The positions mapping counts what the selection excluded.
+                if let Some(x) = excluded.as_deref_mut() {
+                    x.push(r.offset);
+                }
                 continue;
             }
             if lineage_offset(&r.headers) != Some(r.offset) {
@@ -367,6 +370,7 @@ fn replay_side(
     hi: i64,
     expected: &BTreeMap<i64, [u8; 32]>,
     findings: &mut Findings,
+    mut prober: Option<&mut logweir_core::positions_mapping::Prober>,
 ) -> Result<ReplayComparison, DrillError> {
     let mut r = ReplayComparison {
         expected: expected.len() as u64,
@@ -394,6 +398,10 @@ fn replay_side(
                 ));
                 continue;
             };
+            // The positions mapping's step 1, in this same in-order read.
+            if let Some(p) = prober.as_deref_mut() {
+                p.observe(c.offset, o);
+            }
             if !seen.insert(o) {
                 r.duplicates += 1;
                 findings.push(format!(
@@ -456,6 +464,9 @@ pub(super) struct CompleteOutcome {
     /// partition, structured.
     pub(super) gaps: Vec<OffsetRange>,
     pub(super) pruned: Vec<OffsetRange>,
+    /// The positions mapping's scans, per compared partition that carried a
+    /// captured position (PROD-04.2).
+    pub(super) scans: super::positions::Scans,
 }
 
 /// The complete lane: one verdict per partition of every restored topic —
@@ -465,6 +476,7 @@ pub(super) struct CompleteOutcome {
 /// `listed` is phase 4's selection; every entry must be one of the
 /// partitions this lane verifies, or the ledger could not cover it, which is
 /// refused (`Operational`) rather than truncated.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     reader: &dyn ClusterReader,
     store: &Store,
@@ -473,8 +485,10 @@ pub(super) fn run(
     mapping: &BTreeMap<String, String>,
     plan: &RestorePlan,
     max_records: Option<u64>,
+    probes: Option<&super::positions::Probes>,
 ) -> Result<CompleteOutcome, DrillError> {
     let window = window_of(plan);
+    let mut scans = super::positions::Scans::new();
     // The plan's partition selection; a plan with no subset selects every
     // partition.
     let selection = ReplaySelection::from_plan(plan);
@@ -619,7 +633,18 @@ pub(super) fn run(
         }
         budget_used = budget_used.saturating_add(estimate);
 
-        let side = archive_side(store, pf, &window, &mut findings)?;
+        // A selected partition that carries a captured position is probed.
+        let mut probe = probes
+            .and_then(|pr| pr.get(&(src.clone(), u32::try_from(*pid).ok()?)))
+            .filter(|_| chosen)
+            .map(super::positions::PartitionProbe::new);
+        let side = archive_side(
+            store,
+            pf,
+            &window,
+            &mut findings,
+            probe.as_mut().map(|p| &mut p.excluded),
+        )?;
         archive.segments += side.segments;
         archive.segments_verified += side.verified;
         archive.segments_failed.extend(side.failed.iter().cloned());
@@ -673,7 +698,21 @@ pub(super) fn run(
                 (replay, Evidence::Unverified { why }, false)
             }
             None => {
-                let replay = replay_side(reader, tgt, *pid, *hi, &side.expected, &mut findings)?;
+                let replay = replay_side(
+                    reader,
+                    tgt,
+                    *pid,
+                    *hi,
+                    &side.expected,
+                    &mut findings,
+                    probe.as_mut().map(|p| &mut p.prober),
+                )?;
+                if let (Some(probe), Ok(p)) = (probe.take(), u32::try_from(*pid)) {
+                    let gaps = pf.map_or_else(Vec::new, |f| {
+                        f.gaps.iter().chain(f.pruned.iter()).copied().collect()
+                    });
+                    scans.insert((src.clone(), p), probe.finish(tgt, *hi, gaps));
+                }
                 let records = if replay.is_exact() {
                     Evidence::Verified {
                         checked: replay.expected,
@@ -754,6 +793,7 @@ pub(super) fn run(
         },
         gaps,
         pruned,
+        scans,
     })
 }
 

@@ -184,6 +184,25 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Gating::Blocking,
         Some(EXPIRY_DEFAULT),
     ),
+    // PROD-04.2 §3.8, `switchoverReadiness`. The evidence row reads signed
+    // bytes, and the trust that judges them can change, so it carries the
+    // default expiry; the target and the groups can change at any moment (a
+    // member joins, a topic is recreated), so they carry the shortest one.
+    (
+        CheckId::SwitchoverEvidence,
+        Gating::Blocking,
+        Some(EXPIRY_DEFAULT),
+    ),
+    (
+        CheckId::SwitchoverTarget,
+        Gating::Blocking,
+        Some(EXPIRY_TARGET_COLLISION),
+    ),
+    (
+        CheckId::SwitchoverGroups,
+        Gating::Blocking,
+        Some(EXPIRY_TARGET_COLLISION),
+    ),
 ];
 
 /// This row's catalogue entry, or `None` for a row the runner does not own.

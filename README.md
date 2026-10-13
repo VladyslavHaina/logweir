@@ -199,7 +199,6 @@ package and fixture READMEs stay beside the files they describe.
 | Use or develop the console | [Console guide](console/README.md) |
 | Use the bounded product API (`logweir-api`) | [Product API](docs/api.md) |
 | Verify signed evidence | [Auditor guide](docs/verify-a-scorecard.md) |
-| See what the evidence shows for backup and restore-testing controls | [Control-evidence mapping](docs/control-evidence.md) |
 | Generate, pin and rotate keys | [Signing keys](docs/keys.md) |
 | Collect metrics | [Metrics](docs/metrics.md) |
 | Interpret document fields | [Scorecard](docs/formats/drill-scorecard.md), [backup receipt](docs/formats/backup-receipt.md), [catalog point](docs/formats/catalog-point.md), [approval documents](docs/formats/approval-documents.md), [drill spec](docs/formats/drill-spec.md) |

@@ -29,7 +29,7 @@ fn crd_dir() -> PathBuf {
 }
 
 /// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
-const FILES: [&str; 13] = [
+const FILES: [&str; 14] = [
     "kafkaclusters.yaml",
     "backupschedules.yaml",
     "backups.yaml",
@@ -43,6 +43,7 @@ const FILES: [&str; 13] = [
     "protectionpolicies.yaml",
     "recoverycatalogs.yaml",
     "retentionpolicies.yaml",
+    "switchovers.yaml",
 ];
 
 /// One checked-in CRD, parsed.
@@ -248,12 +249,13 @@ fn the_kind_list_is_exactly_the_adr() {
     );
     assert_eq!(
         weirkeeper::crds::KINDS.len(),
-        13,
-        "ADR 0008 records thirteen kinds — Amendment A's six, Amendment F's \
-         BackupDestination, TopicDiscovery and Preflight, and Amendment G's TrustPolicy, \
+        14,
+        "ADR 0008 records fourteen kinds — Amendment A's six, Amendment F's \
+         BackupDestination, TopicDiscovery and Preflight, Amendment G's TrustPolicy, \
          ProtectionPolicy, RecoveryCatalog and RetentionPolicy (its RehearsalSchedule is \
-         withdrawn in v1, OD-12). A fourteenth needs its own amendment in \
-         docs/architecture.md, and this line is where that decision becomes a diff."
+         withdrawn in v1, OD-12), and Amendment K's Switchover (Amendment A's reserved \
+         kind, PROD-04.2). A fifteenth needs its own amendment in docs/architecture.md, and \
+         this line is where that decision becomes a diff."
     );
 
     // AND NO KIND IS REMOVED. `TrustRoster` stays served and reconciled,
@@ -285,11 +287,10 @@ fn the_kind_list_is_exactly_the_adr() {
          Amendment A's six plus Amendment F's three"
     );
 
-    // The four names that must NOT be kinds, each for its own reason: a drill
+    // The three names that must NOT be kinds, each for its own reason: a drill
     // is a `Restore` with `spec.target.mode: scratch` (`Drill`,
-    // `RestoreDrill`), `Switchover` is tag 2, and `MetadataSnapshot` is
-    // reserved and unbuilt.
-    for forbidden in ["Drill", "RestoreDrill", "Switchover", "MetadataSnapshot"] {
+    // `RestoreDrill`), and `MetadataSnapshot` is reserved and unbuilt.
+    for forbidden in ["Drill", "RestoreDrill", "MetadataSnapshot"] {
         assert!(
             !kinds.iter().any(|k| k == forbidden),
             "`{forbidden}` is not a kind of this group; the emitted set was {kinds:?}"
@@ -337,13 +338,24 @@ fn no_vendor_crd_group_is_named_anywhere() {
         root.join("crates/weirkeeper/examples"),
         root.join("charts/logweir/crds"),
     ];
-    let needles = ["kafka.oso.sh", "kafkabackup.com", "osodevops/"];
+    let needles = [
+        "kafka.oso.sh",
+        "kafkabackup.com",
+        "osodevops/",
+        "kafka.strimzi.io",
+    ];
+    // PROD-05.1a, Amendment K (4): ONE file may name Strimzi's group, the
+    // read-only list of its `KafkaTopic`s (`get`/`list` only, chart-gated).
+    let exempt = root.join("crates/weirkeeper/src/strimzi_topics.rs");
     let mut hits = Vec::new();
     let mut scanned_files = 0usize;
     for dir in &scanned {
         for (path, text) in files_under(dir) {
             scanned_files += 1;
             for needle in needles {
+                if needle == "kafka.strimzi.io" && path == exempt {
+                    continue;
+                }
                 if text.contains(needle) {
                     hits.push(format!("{} names `{needle}`", path.display()));
                 }
@@ -423,7 +435,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// `exitReason` is written from an exit code, and a refusal the CONTROLLER
 /// makes before any `POST` has none, so every admission refusal would print
 /// `operational`. `Backup` has no `REASON` column.
-const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
+const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
     (
         "KafkaCluster",
         &[
@@ -589,6 +601,17 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
             ("AGE", ".metadata.creationTimestamp", "date"),
         ],
     ),
+    (
+        "Switchover",
+        &[
+            ("RESTORE", ".spec.restoreRef.name", "string"),
+            ("PHASE", ".status.phase", "string"),
+            ("APPLIED", ".status.counts.applied", "integer"),
+            ("REFUSED", ".status.counts.refused", "integer"),
+            ("REASON", ".status.reason", "string"),
+            ("AGE", ".metadata.creationTimestamp", "date"),
+        ],
+    ),
 ];
 
 /// The scope of each kind: the trust kinds Cluster, every other kind
@@ -601,7 +624,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
 /// namespace and a cross-namespace reference is a privilege-escalation
 /// surface. A kind that became Cluster-scoped would move its objects out of
 /// every namespaced RBAC rule.
-const SCOPES: [(&str, &str); 13] = [
+const SCOPES: [(&str, &str); 14] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
     ("Backup", "Namespaced"),
@@ -615,6 +638,7 @@ const SCOPES: [(&str, &str); 13] = [
     ("ProtectionPolicy", "Namespaced"),
     ("RecoveryCatalog", "Namespaced"),
     ("RetentionPolicy", "Namespaced"),
+    ("Switchover", "Namespaced"),
 ];
 
 /// Every kind's printer columns are exactly the table: name, `jsonPath` and
@@ -832,6 +856,7 @@ fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
         "backupdestinations.yaml" => &crds::backup_destination::SPEC_RULES,
         "topicdiscoveries.yaml" => &crds::topic_discovery::SPEC_RULES,
         "preflights.yaml" => &crds::preflight::SPEC_RULES,
+        "switchovers.yaml" => &crds::switchover::SPEC_RULES,
         other => panic!("no `.spec` rule list is declared for {other} — add one beside its kind"),
     };
     rules
@@ -2314,7 +2339,7 @@ fn approval_status_subject_provenance_is_complete() {
     );
     assert_eq!(
         enum_values(at(subject, &["properties", "kind"])),
-        vec!["Restore", "Backup", "RehearsalSchedule"]
+        vec!["Restore", "Backup", "RehearsalSchedule", "Switchover"]
     );
 }
 
@@ -2325,7 +2350,7 @@ fn approval_status_subject_provenance_is_complete() {
 /// kind is part of the bytes the approval binds, so an approval that matches
 /// a `Restore`'s plan hash is not accepted for a schedule.
 #[test]
-fn the_subject_kind_enum_has_no_switchover() {
+fn the_subject_kind_enum_names_the_switchover_last() {
     let doc = crd("approvals.yaml");
     let node = at(
         spec_schema(&doc),
@@ -2333,14 +2358,11 @@ fn the_subject_kind_enum_has_no_switchover() {
     );
     assert_eq!(
         enum_values(node),
-        vec!["Restore", "Backup", "RehearsalSchedule"],
-        "the subject kind enum is exactly these three — the subject kind is part of the bytes \
-         the approval binds, so an `Approval` whose planHash matches a `Restore` is never \
-         accepted for a `Switchover`"
-    );
-    assert!(
-        !enum_values(node).iter().any(|v| v == "Switchover"),
-        "`Switchover` is tag 2 and appears in no enum of this group"
+        vec!["Restore", "Backup", "RehearsalSchedule", "Switchover"],
+        "the subject kind enum is exactly these four, `Switchover` appended (PROD-04.2) so no \
+         existing spelling moved — the subject kind is part of the bytes the approval binds, \
+         so an `Approval` whose planHash matches a `Restore` is never accepted for a \
+         `Switchover`"
     );
 }
 
@@ -2369,6 +2391,59 @@ fn restore_target_mode_accepts_only_scratch_or_new_topic() {
         Some("string"),
         "`target.topicNaming.prefix` is what `status.newTopics` is built from"
     );
+}
+
+/// **FX-43: every `spec.bootstrapServers` entry is held to a pattern the API
+/// server enforces at admission**: no C0 or C1 control character and no line
+/// or paragraph separator, the set the runner's guard refuses
+/// (`logweir_core::runner_line::holds_line_breaking_or_control`). The pattern
+/// is RE2 (the API server's), so the separators are `\x{…}`. The live
+/// refusal is a PoC row (`kubectl apply` of such an object is refused).
+///
+/// KILLS: the pattern dropped from the items; a range narrowed (`\n` only).
+#[test]
+fn kafka_cluster_bootstrap_servers_refuse_control_characters_at_admission() {
+    let doc = crd("kafkaclusters.yaml");
+    let items = at(
+        spec_schema(&doc),
+        &["properties", "bootstrapServers", "items"],
+    );
+    let pattern = items
+        .get("pattern")
+        .and_then(Value::as_str)
+        .expect("the items carry a pattern");
+    assert_eq!(
+        pattern,
+        weirkeeper::crds::kafka_cluster::BOOTSTRAP_SERVER_PATTERN
+    );
+    assert_eq!(pattern, r"^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$");
+    // And the schema the type derives, which `emit_crds` renders from (the
+    // committed file above could lag it until `just crds-check`).
+    let derived = serde_json::to_value(
+        <weirkeeper::crds::kafka_cluster::KafkaCluster as kube::CustomResourceExt>::crd(),
+    )
+    .expect("the CRD serialises");
+    assert_eq!(
+        derived["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["bootstrapServers"]["items"]["pattern"],
+        weirkeeper::crds::kafka_cluster::BOOTSTRAP_SERVER_PATTERN
+    );
+    // The same set the runner refuses: every C0 and C1 control, DEL, and the
+    // two separators, and nothing printable.
+    for c in [
+        '\u{0}', '\n', '\r', '\u{1f}', '\u{7f}', '\u{85}', '\u{9f}', '\u{2028}', '\u{2029}',
+    ] {
+        assert!(
+            logweir_core::runner_line::holds_line_breaking_or_control(&c.to_string()),
+            "{c:?}"
+        );
+    }
+    for c in [' ', '~', '\u{a0}', 'é', '\u{2027}', '\u{202a}'] {
+        assert!(
+            !logweir_core::runner_line::holds_line_breaking_or_control(&c.to_string()),
+            "{c:?}"
+        );
+    }
 }
 
 /// The auth mode enum, byte for byte; `the_crd_auth_mode_enum_and_auth_spec_agree`
@@ -2441,6 +2516,22 @@ fn kafka_cluster_auth_mode_accepts_only_the_five_modes() {
             keys,
             vec!["key", "name"],
             "a CA source is {{name, key}} in THIS namespace — no namespace field"
+        );
+    }
+}
+
+/// PROD-05.1a: `spec.strimzi.cluster` is a label value (the
+/// `strimzi.io/cluster` selector), so the API server refuses a name a label
+/// cannot hold, instead of the controller requeueing on a 400 forever.
+#[test]
+fn the_strimzi_cluster_name_is_bounded_as_a_label_value() {
+    let doc = crd("kafkaclusters.yaml");
+    let strimzi = at(spec_schema(&doc), &["properties", "strimzi", "properties"]);
+    for field in ["namespace", "cluster"] {
+        assert_eq!(
+            at(strimzi, &[field, "maxLength"]).as_u64(),
+            Some(63),
+            "`strimzi.{field}` is at most 63 characters"
         );
     }
 }
@@ -2850,6 +2941,7 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
         "protectionpolicies.yaml",
         "recoverycatalogs.yaml",
         "retentionpolicies.yaml",
+        "switchovers.yaml",
     ] {
         let doc = crd(file);
         let mut stack = vec![
@@ -3157,8 +3249,14 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
     let request = at(spec_schema(&doc), &["properties", "request"]);
     assert_eq!(
         enum_values(at(request, &["properties", "operation"])),
-        vec!["Backup", "Restore", "DestinationAccess", "SourceConnection"],
-        "four operations, and P3 ties the block to the value"
+        vec![
+            "Backup",
+            "Restore",
+            "DestinationAccess",
+            "SourceConnection",
+            "Switchover"
+        ],
+        "five operations (PROD-04.2 adds Switchover), and P3 ties the block to the value"
     );
     assert_eq!(
         required(request),
@@ -3216,6 +3314,33 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
         (
             "DestinationAccess with sourceConnection",
             req("DestinationAccess", "sourceConnection"),
+            false,
+        ),
+        // PROD-04.2's fifth operation, by the same pair: its own block is
+        // admitted, any other refused, and no other operation may carry it.
+        (
+            "Switchover with switchover",
+            req("Switchover", "switchover"),
+            true,
+        ),
+        (
+            "Switchover with restore",
+            req("Switchover", "restore"),
+            false,
+        ),
+        (
+            "Switchover with no block at all",
+            yaml("operation: Switchover\n"),
+            false,
+        ),
+        (
+            "SourceConnection with switchover",
+            req("SourceConnection", "switchover"),
+            false,
+        ),
+        (
+            "Restore with switchover",
+            req("Restore", "switchover"),
             false,
         ),
     ] {

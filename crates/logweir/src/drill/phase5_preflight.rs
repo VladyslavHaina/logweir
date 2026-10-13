@@ -39,7 +39,9 @@ const RENDERED_WINDOW_START_PREFIX: &str = "  time_window_start: ";
 /// mutant there is invisible to any assertion made about the plan struct. So
 /// this function renders the document FIRST, parses the integer off its
 /// `  time_window_start: ` line, and compares THAT against a floor it
-/// re-derives from the manifest it already holds.
+/// re-derives from the manifest it already holds — in a run, the facts widened
+/// by the restored segments' records (`logweir_core::record_times::widen`),
+/// which `build_plan` binds from too.
 ///
 /// # Why exit 3, not ruling R-E's exit 1
 ///

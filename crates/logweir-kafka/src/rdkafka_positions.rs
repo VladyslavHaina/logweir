@@ -94,7 +94,7 @@ pub(crate) fn is_group_refusal(e: &RdError) -> bool {
 /// A non-member consumer of ONE group, which can only read and commit that
 /// group's positions. See the module documentation.
 pub(crate) struct GroupHandle {
-    consumer: BaseConsumer,
+    consumer: logweir_rdkafka_ffi::logs::LogPumped<BaseConsumer>,
     group: String,
     bound: Duration,
 }
@@ -108,6 +108,7 @@ impl GroupHandle {
         let consumer: BaseConsumer = handle_config(base, group, bound)
             .create()
             .map_err(|e| e.to_string())?;
+        let consumer = crate::rdkafka_reader::pumped(consumer)?;
         Ok(Self {
             consumer,
             group: group.to_string(),

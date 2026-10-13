@@ -47,6 +47,7 @@
         "topicPrefix": "",
         "replicationFactor": 1,
         "teardown": "delete",
+        "lineageHeaders": "kept",
         "ownerStatement": {
           "owners": [],
           "ownerPath": false

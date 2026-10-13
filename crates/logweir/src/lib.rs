@@ -37,6 +37,10 @@ pub mod metrics;
 /// and not an engine command (GC3): the engine's four reachable subcommands are
 /// unchanged by it.
 pub mod probe;
+/// `logweir restore cleanup`: a TTL clone's cleanup, deleting only the
+/// topics its signed scorecard records, while each one's ID is unchanged
+/// (PROD-11.1a).
+pub mod restore_cleanup;
 pub mod schema;
 pub mod show;
 /// ONE execution signer, `pub` so the catalog point record (D3 §5.2) can name
@@ -45,6 +49,8 @@ pub mod show;
 /// (`scripts/check-one-signer.sh`), which visibility does not widen: one type
 /// in this workspace holds a parsed private key.
 pub mod signer;
+/// `logweir switchover plan|rollback-plan|run` (PROD-04.2).
+pub mod switchover;
 /// The ONE read of a projected private-CA location, shared by
 /// every command that dials Kafka over TLS.
 pub mod tls_ca;

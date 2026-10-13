@@ -69,7 +69,10 @@ Standard refuses them; install a demo only into a namespace that admits them.
 
 Nothing optional is on by default. `manifest_lint.rs` holds the controller's
 role to its calls: no verb on `secrets`, no `update`, and `delete` only on
-`topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
+`topicdiscoveries` and `preflights`. `patch` on `restores` (PROD-11.1a) adds
+and removes a TTL clone's finalizer `logweir.dev/clone-cleanup`; a rollback to
+a controller without it leaves the finalizer on clone `Restore`s, which an
+operator then removes by hand ([docs/kubernetes.md](../../docs/kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)). Every status write is a merge `PATCH`
 carrying a `metadata.resourceVersion` precondition.
 
 ## Values
@@ -109,6 +112,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `controller.failFastSeconds` | `""` (300 s) | patience for a stuck run; `0` is never (for a Secret materialised late); under 60 is clamped up; unparseable is the default |
 | `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job stays; under 3600 is clamped up |
 | `controller.watchNamespaces` | `[]` (all) | the execution namespaces (below) |
+| `strimzi.readKafkaTopics`, `strimzi.namespaces` | `false`, `[]` | let the controller read (`get`, `list`) Strimzi `KafkaTopic`s in the listed namespaces, through a Role in each, for a `KafkaCluster` with `spec.strimzi` ([kubernetes.md](../../docs/kubernetes.md#strimzi-owners-of-a-backups-topics)); any other namespace is refused `OwnerDetectionFailed` |
 | `controller.resources` | 50m / 128Mi, limit 512Mi | also `nodeSelector`, `tolerations`, `affinity` |
 | `checks.maxActivePerNamespace`, `.maxActiveTotal` | `4`, `20` | check Jobs at once; the total must be at least the per-namespace value |
 | `checks.maxActiveDiscoveriesPerConnection` | `1` | |

@@ -494,9 +494,10 @@ fn a_sigterm_stopped_restore_is_signed_fail_never_pass() {
             python_verify == Some(Some(0)),
             format!("verify_scorecard.py exited {python_verify:?}"),
         );
-        // Every sampled document is 1.6.0 (FX-23: the version marks the build).
+        // Every sampled document is at least 1.6.0 (FX-23: the version marks
+        // the build); never an exact pin, as later optional blocks bump it.
         check(
-            v["format_version"] == json!("1.6.0"),
+            harness::format_is_at_least(v["format_version"].as_str().unwrap_or_default(), "1.6.0"),
             format!("format_version {}", v["format_version"]),
         );
         match variant {

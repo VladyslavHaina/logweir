@@ -47,7 +47,7 @@ pub const CLIENT_ID: &str = "logweir-console";
 pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
-pub const PLURALS: [&str; 11] = [
+pub const PLURALS: [&str; 12] = [
     "kafkaclusters",
     "backupschedules",
     "backups",
@@ -59,6 +59,7 @@ pub const PLURALS: [&str; 11] = [
     "protectionpolicies",
     "recoverycatalogs",
     "retentionpolicies",
+    "switchovers",
 ];
 
 /// The CLUSTER-SCOPED plurals. They live under `PREFIX`'s parent path, with
@@ -165,6 +166,7 @@ fn kind_of(plural: &str) -> &'static str {
         "protectionpolicies" => "ProtectionPolicy",
         "recoverycatalogs" => "RecoveryCatalog",
         "retentionpolicies" => "RetentionPolicy",
+        "switchovers" => "Switchover",
         "trustpolicies" => "TrustPolicy",
         "trustrosters" => "TrustRoster",
         "configmaps" => "ConfigMap",

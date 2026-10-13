@@ -85,10 +85,11 @@ writes.
 
 | Document | Versions | Defined in |
 |---|---|---|
-| Drill scorecard | 1.0.0–1.9.0, 2.0.0, 2.1.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
+| Drill scorecard | 1.0.0–1.12.0, 2.0.0–2.4.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
 | Backup receipt | 1.0.0–1.8.0 | [formats/backup-receipt.md](formats/backup-receipt.md#versions) |
 | Consumer positions document | 1.0.0 | [formats/backup-receipt.md](formats/backup-receipt.md#two-documents-the-receipts-summary-and-the-positions-document) |
 | Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
+| Positions mapping, switchover plan, switchover record | 1.0.0 | [formats/switchover-record.md](formats/switchover-record.md#versions) |
 | Put receipt, teardown attestation | 1.0.0 | [verify-a-scorecard.md](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Approval document v1, authorization document v2 (2.0.0–2.2.0), standing rehearsal authorization (1.0.0, 1.1.0) | as listed | [formats/approval-documents.md](formats/approval-documents.md) |
 
@@ -128,6 +129,7 @@ of its format's Versions table:
 | <a id="receipt-format-180-source_watermarks-and-the-empty-capture-prod-021"></a>Receipt format 1.8.0 (PROD-02.1) | [`source_watermarks`](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180) |
 | <a id="scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151"></a>Scorecard format 1.8.0 (PROD-15.1) | [`target.original_name`](formats/drill-scorecard.md#targetoriginal_name-format-180), [the approval subject](formats/approval-documents.md#the-per-run-approval-document-v1), [restoring under the original names](kubernetes.md#restoring-under-the-original-topic-names) |
 | <a id="scorecard-190-and-210-authorization-document-220-two-person-approval-in-the-console-prod-162"></a>Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0 (PROD-16.2) | [`approval.console`](formats/drill-scorecard.md#approvalconsole-format-190-and-210), [the authorization document](formats/approval-documents.md#the-authorization-document-v2) |
+| <a id="scorecard-1110-and-230-targettopic_configuration-prod-052"></a>Scorecard 1.11.0 and 2.3.0 (PROD-05.2) | [`target.topic_configuration`](formats/drill-scorecard.md#targettopic_configuration-format-1110-and-230), [the plan field](formats/drill-spec.md#targettopic_configuration-prod-052) |
 | <a id="the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"></a>The standing rehearsal authorization | [formats/approval-documents.md](formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110) |
 | <a id="logweir-notify-delivers-exit-codes-and-its-notify-result-lines-plat-142"></a>`logweir notify deliver` (PLAT-14.2) | withdrawn in v1 (release-notes item 74): clap refuses the subcommand |
 | <a id="refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34"></a>`refusal-detail=` (FX-34), and the other runner output contracts (I8, the progress channel, `teardown-failed=`, `teardown-key=`, `logweir check run`, `logweir-retention`) | [reference.md](reference.md#runner-output-lines); the mixed-version rules [below](#mixed-versions) |
@@ -186,28 +188,42 @@ into one Deployment). These are the rules for the times they differ.
 
 ### The runner image must be at least as new as the controller
 
-The controller passes `--line-token` to every `Restore` and `Backup` Job it
-creates ([refusal detail](reference.md#refusal-detail)). **A runner that does
-not know the flag is not supported under this controller.** It stops while
-parsing its arguments, before any work: exit 1, stdout empty, and stderr
-opening with `error: unexpected argument '--line-token' found`. The object says
-`exitCode: 1`, `exitReason: operational` and names no cause. This is EVERY
-runner image published before this change, the images published from `main`
-since `v0.2.0-rc.1` included, and not only an older release. No tagged
-release's runner loses a working run to it: since PROD-00.2 (release-notes
-item 35) a runner image published before that change declares no engine, the
-controller gives it none, and its runs already stop at exit 1 before the engine
-starts. The execution-contract version is not what refuses anything here: it is
-`"2"` in `v0.2.0-rc.1` and now. To roll back, move both together or the
-controller first. (A Job a controller had created before the upgrade has no
-token and its run is unaffected.) What it looks like and what to do are in
+**FX-43 makes this the contract, and names the pair when it is broken.** The
+controller passes `--runner-line-token` to every runner Job it creates
+(`Restore`, `Backup`, the `KafkaCluster` probe, the check Jobs and the
+`RetentionPolicy` Job), and reads only the lines the runner seals with that
+token ([sealed lines](reference.md#sealed-lines-fx-43)). A runner
+that does not know the flag (every runner image published before this change,
+the released `v0.2.0` included) stops while parsing its arguments, before any
+work: exit 1, stdout empty, stderr opening with `error: unexpected argument
+'--runner-line-token' found`. The object says so: `exitReason:
+RunnerOlderThanController` on a `Restore` or `Backup` (a schedule does not
+retry it), reason `RunnerOlderThanController` and `reachable` cleared on a
+`KafkaCluster`, `CheckContractMismatch` naming it on a check, and
+`lastEnforcement.refusalCode: RunnerOlderThanController` on a retention run
+(nothing deleted). The same name is given to any run whose runner exited 0 to 4
+and printed no sealed `runner-exit=` line. Upgrade the runner image to the
+controller's version; to roll back, move both together or the controller
+first. What it looks like and what to do are in
 [the guide](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
 
-The other directions: a new runner under an older controller prints the line
-without a token, and the older controller ignores it; a code the controller
-does not know is not shown, while the state on `refusal-reason=` and the exit
-code are recorded as always; a Job with no token, read by this controller,
-has no line read as a reason, and its message is byte for byte what it was.
+The other directions degrade to what they did before, never to trusting more:
+
+- *A newer runner under an older controller.* An FX-34 controller passes
+  `--line-token`, and this runner then prints exactly what an FX-34 runner
+  printed. A controller older still passes no token and reads the plain
+  lines, which this runner prints after the sealed ones, in their old order
+  and place.
+- *A Job an older controller created, read by this one* (an upgrade with runs
+  in flight): with `--line-token`, only `refusal-detail=` is read by its
+  token, as FX-34 did; with no token, every reader keeps its own rules. Such
+  a run is never called `RunnerOlderThanController`.
+- *An older controller reading a Job this one created* (a rollback with runs
+  in flight): it finds no flag it knows, reads the Job as untokened, and
+  reads the plain lines. A check's plain end frame follows its sealed twin,
+  which an older decoder ignores as a non-frame line.
+- A code the controller does not know is not shown, while the state on
+  `refusal-reason=` and the exit code are recorded as always.
 
 ### Interface I8 is amended: exit 2 prints the signed failure's keys too
 
@@ -312,6 +328,19 @@ observed*, never a default that flatters the object:**
 | `status.evidence.verification.trust` | `basis: None`, and the badge uses the pre-existing rule |
 | a catalog point's `partitions` | the size bound is not enforced, recorded as `sizeBasis: unknown` |
 | a record's `execution` | provenance unknown |
+
+### Safe clones (PROD-11.1a): an older runner refuses, an older controller ignores
+
+`Restore.status.clone` and the finalizer `logweir.dev/clone-cleanup` are new;
+every other object reads as before. A runner from before PROD-11.1a refuses a
+clone plan at parse (`target.teardown` was a string) and creates nothing; keep
+the runner image at least as new as the controller. A controller from before it
+ignores `status.clone` and the finalizer: after a rollback, a clone is never
+cleaned up and deleting its `Restore` waits until the finalizer is removed by
+hand ([the steps](kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
+Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
+subset), carrying `target.creation`; older readers accept it and ignore the
+block.
 
 ### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
 
@@ -442,24 +471,38 @@ offsets logged. That is the safe direction, but a drill against a compacted
 scratch topic means nothing in v0.1: restore into a topic with
 `cleanup.policy=delete`, which is what phase 6 creates by default.
 
-### A `newTopic` restore does not reconstruct the source's topic settings
+### A `newTopic` restore reconstructs the source's topic settings only when asked
 
-A restore creates every target topic itself, in both modes: the manifest's
-partition count, the plan's `default_replication_factor` (1 when it names
-none), `retention.ms=-1`, `message.timestamp.type=CreateTime`, and the target
-broker's default for everything else, `cleanup.policy` included. For a
-`newTopic` restore the source's compaction, retention and replication factor
-are therefore **not reconstructed**, and since scorecard format 1.2.0 the
-signed scorecard names each in `topic_parity.not_reconstructed`; in a
-`newTopic` document signed before 1.2.0 the `intentionally_deviated` label means
-the same ([the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
-**Apply the source settings after the restore is verified**, never before:
-`cleanup.policy` and `retention.ms` with `kafka-configs.sh --alter` (a retention
-shorter than the restored records' age deletes them at the next retention
-check), and the replication factor with a partition reassignment. Logweir does
-neither. Only the overrides the engine captured are compared: a setting
-inherited from the broker's defaults is never named. A scratch drill is
-unaffected.
+<a id="a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings"></a>
+
+Without `target.topic_configuration` in the plan, a restore creates every
+target topic itself, in both modes, as it always did: the manifest's partition
+count, the plan's `default_replication_factor` (1 when it names none),
+`retention.ms=-1`, `message.timestamp.type=CreateTime`, and the target broker's
+default for everything else, `cleanup.policy` included. For such a `newTopic`
+restore the source's compaction, retention and replication factor are **not
+reconstructed**; since scorecard format 1.2.0 the signed scorecard names each
+in `topic_parity.not_reconstructed`, and in a `newTopic` document signed before
+1.2.0 the `intentionally_deviated` label means the same
+([the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
+
+**With `target.topic_configuration`** (PROD-05.2, a plan bound to a point whose
+receipt is 1.3.0 or later) the topics are created from the point's model: the
+source's partition count, a replication factor bounded by the target's brokers
+with its reason, and the source's portable overrides, beside Logweir's own
+settings that keep every restored record until the verdict. With
+`transition: afterVerification`, phase 9 then applies the source's compaction,
+retention and timestamp settings, after a passing verdict only and only to a
+topic still holding what it was created with; a `retention.ms` shorter than
+the restored records' age deletes them at the next retention check, which the
+restore preflight states. Inherited values, reassignment throttles, provider
+keys and secrets are never applied, and a topic a declarative owner manages is
+never altered: its desired state is exported for the owner. The scorecard
+carries `target.topic_configuration` (1.11.0, 2.3.0) and the phase-9
+attestation what was applied
+([the format](formats/drill-scorecard.md#targettopic_configuration-format-1110-and-230)).
+`topic_parity` still compares what phase 7 saw, before the transition. A
+scratch drill is unaffected unless its plan carries the block.
 
 ### `engine_subreport` is always null in v0.1
 
@@ -496,22 +539,44 @@ then skipped and `sample.coverage_note` says so. A segment in the window the
 check cannot decode refuses the run; one after the window that cannot be read
 does not, and the note counts it. The shape is the only signal: a record of
 your own with that shape is counted too, and a transaction whose marker the
-archive lacks, or that sits in an unread segment, is not detected (PROD-01.1b,
-PROD-00.3a).
+archive lacks, or that sits in an unread segment, is not detected
+(PROD-00.3a).
 
-### Recovery-point selection uses segment first and last timestamps
+### Out-of-order timestamps inside a segment
 
 The archive describes each segment by its first and last record timestamps,
-not its minimum and maximum, and the engine's segment selection and Logweir's
-window floor and count bound read those. With timestamps out of order within a
-segment, a record older than every segment's first record is dropped from every
-restore of that archive; a point-in-time restore can omit a record at or before
-the point and still pass; and a correct point-in-time restore can fail the
-count check (three rows of `e2e/tests/record_semantics.rs`;
-[decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment)).
-**Complete coverage** (PROD-08.1) selects the expected output by each record's
-own timestamp, so the omitted and dropped records fail it and the correct
-restore passes. The restores themselves are unchanged until PROD-01.1b.
+not its minimum and maximum, and the engine selects the segments a restore
+reads by those two values. Since PROD-01.1b a restore reads every segment of
+the partitions it restores once before it creates anything (the pass the
+transaction-marker check makes, which now runs under
+`restore.allow_transaction_markers: true` too), and:
+
+- the window starts at the **oldest archived record**, so no record older than
+  every segment's first is dropped, and the count bounds use each segment's
+  oldest and newest record;
+- a window that selects a record held, out of timestamp order, in a segment
+  the engine skips (its first record is after the window's end, or its last
+  is before a stated start) is **refused**, exit 3,
+  `refusal-reason=PointInTimeSelectionIncomplete`, naming the segment and the
+  point or start that reads it. There is no override: choose that point or
+  start;
+- a segment the restore reads and the runner cannot decode refuses the run, as
+  before, and now under the marker override too; one it does not read that the
+  store does not hold, or that the runner cannot decode, is counted in
+  `sample.coverage_note`, never refused (any other store error stops the run,
+  exit 1).
+
+The three rows of `e2e/tests/record_semantics.rs`
+([decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment))
+measure it: the record below the old floor is restored and the drill passes, a
+correct point-in-time restore passes, and the skipped record is refused before
+any write. **Upgrade:** a `Restore` or a `RehearsalSchedule` slot over such an
+archive that used to run, and could sign a pass with a record left out, is now
+refused; an archive in timestamp order restores exactly as before. The restore
+preview reads the manifest only: its `archive.coverage` row says the run may
+refuse so, and cannot say whether it will. Rolling the
+runner back restores the old selection. The engine itself still selects by
+first and last; reading minimum and maximum from the manifest is PROD-00.3b.
 
 ### `LogAppendTime` sources are restored with the producers' timestamps
 
@@ -644,7 +709,7 @@ newest`), and so is a `point_in_time` equal to `covered.from_ms`
 (`PointInTimeBeforeCoverage`); the console offers `[from_ms + 1 ms, to_ms - 1
 ms]` and defaults to its end. Both floors are the minimum segment start over
 the topics a document names, and a stated start (`"<start>/<end>"`, PROD-11.1)
-must be at or after it ([segment first and last timestamps](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+must be at or after it ([out-of-order timestamps](#out-of-order-timestamps-inside-a-segment)).
 
 ### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
 

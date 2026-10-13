@@ -609,7 +609,33 @@ FORMAT_VERSION = "1.4.0"
 # and every partition empty. Arm 4 admits the empty window only beside the
 # block. `source_watermarks` lines say "coverage recorded" or, for every
 # receipt without the block, "coverage not recorded".
-SCRIPT_VERSION = "1.30.0"
+#
+# 1.31.0 (PROD-11.1a) knows scorecard 1.10.0 and 2.2.0 and their optional
+# `target.creation` block: the topics a run created, with each topic's ID at
+# creation, `lineage_headers: kept`, and a TTL clone's lifetime. Arms TCR-1 to
+# TCR-5, mirrored byte for byte and in position (after CA-8): the block only
+# from 1.10.0 / 2.2.0, lineage headers kept, each topic named once with a
+# partition, an ID or its closed-set reason, and a lifetime only on a bounded
+# scratch clone. One `target creation:` line, in the Rust reader's words.
+#
+# 1.32.0 (PROD-05.2) knows scorecard format 1.11.0, and 2.3.0 of format 2, and
+# their optional `target.topic_configuration`: a restore that created its
+# topics from the bound point's configuration model and applies the deferred
+# settings after a passing verdict. Five arms, TC-1 to TC-5, mirrored byte for
+# byte and in position (after CA-8, before `redactions`): the block only from
+# 1.11.0 of format 1 or 2.3.0 of format 2; its transition `afterVerification`
+# or `none`; each topic's route `adminApi` or `desiredStateExport`, its
+# replication factor reason from its closed set and a factor of at least 1;
+# `desired_state` exactly when a topic is exported, named by sha256; and no
+# secret with a value. They fire only on a document carrying the block (OD-7
+# (a)). The shape layer refuses a block that is not the writer's shape.
+#
+# 1.33.0 (PROD-04.2) knows scorecard 1.12.0 and 2.4.0's
+# `integrity.verification.positions_mapping` (arms PM-1 to PM-5, in position
+# before `redactions`), `--positions-mapping <file>` (arms PMD-1 to PMD-7,
+# `check_positions_mapping_document`), and the switchover record's payload
+# type, verified signature-only like the teardown attestation.
+SCRIPT_VERSION = "1.33.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -670,6 +696,33 @@ ORIGINAL_NAME_OWNER_KINDS = ("strimzi", "external")
 SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR = 9
 SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2 = 1
 
+# PROD-11.1a: `target.creation`, the topics a run created. The first minor of
+# format 1, and of format 2, that defines the block (arm TCR-1) --
+# `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`; its one `lineage_headers` value and
+# a clone's bounds are `LINEAGE_HEADERS_KEPT`, `CLONE_TTL_MIN_SECONDS` and
+# `CLONE_TTL_MAX_SECONDS` in `crates/logweir-core/src/target_creation.rs`
+# (`docs/test_verify_scorecard.py::test_the_target_creation_constants_are_the_rust_readers`).
+SCORECARD_TARGET_CREATION_SINCE_MINOR = 10
+SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2 = 2
+LINEAGE_HEADERS_KEPT = "kept"
+CLONE_TTL_MIN_SECONDS = 300
+CLONE_TTL_MAX_SECONDS = 2592000
+
+# PROD-05.2: `target.topic_configuration`. The first minor of format 1, and
+# of format 2, that defines the block (arm TC-1) --
+# `TOPIC_CONFIGURATION_SINCE_MINOR` and
+# `TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`, and its closed sets, `TRANSITIONS`,
+# `ROUTES` and `RF_REASONS` in `crates/logweir-core/src/topic_transition.rs`,
+# which they must equal
+# (`docs/test_verify_scorecard.py::test_the_topic_configuration_constants_are_the_rust_readers`).
+SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR = 11
+SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2 = 3
+TOPIC_CONFIGURATION_TRANSITIONS = ("afterVerification", "none")
+TOPIC_CONFIGURATION_ROUTES = ("adminApi", "desiredStateExport")
+TOPIC_CONFIGURATION_RF_REASONS = ("sourceFactor", "targetBrokers", "notRecorded")
+
 # The block's one mode, and the new member of `ORIGINAL_NAME_APPROVAL_MODES`
 # above -- `APPROVAL_MODE_CONSOLE` in `scorecard.rs`. THE VOCABULARY IS HELD TO
 # THE RUST READER'S BY A ROW, member for member and in order:
@@ -691,6 +744,30 @@ CONSOLE_MAX_COMPARABLE_LEN = 255
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
 # `crates/logweir-core/src/scorecard.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_unsampled_topics_minor_is_the_rust_readers`).
+# PROD-04.2: the first minors of formats 1 and 2 that define
+# `integrity.verification.positions_mapping` -- `POSITIONS_MAPPING_SINCE_MINOR`
+# and `POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs` -- and the closed sets and bounds of
+# `crates/logweir-core/src/positions_mapping.rs`.
+SCORECARD_POSITIONS_MAPPING_SINCE_MINOR = 12
+SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2 = 4
+PM_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+PM_RULE = "firstTargetRecordAtOrAboveLineage"
+PM_OMITTED_REASONS = ("tooLarge", "writeFailed")
+PM_SELECTION_EXCLUDED = "selectionExcluded"
+PM_NOT_CAPTURED = "NotCaptured"
+PM_PARTITION_NOT_RESTORED = "PartitionNotRestored"
+PM_UNAVAILABLE_REASONS = (
+    "TransactionalArchive",
+    "ArchiveGap",
+    "PartitionNotRestored",
+    "NoArchivedData",
+    "BeforeLogStart",
+    "BeforeArchive",
+    "BeyondArchive",
+    "PositionBeyondEnd",
+)
+
 SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR = 6
 
 # The first minor of SCORECARD format 1 that defines `integrity.verification`
@@ -1138,6 +1215,7 @@ RECEIPT_CONFIG_SOURCES = (
 # verdict, and it says so in as many words.
 PAYLOAD_TYPES = {
     "scorecard": PAYLOAD_TYPE,
+    "switchover-record": "application/vnd.logweir.switchover-record+json;version=1.0.0",
     "backup-receipt": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
     "catalog-point": "application/vnd.logweir.catalog-point+json;version=1.0.0",
     "receipt": "application/vnd.logweir.drill-put-receipt+json;version=1.0.0",
@@ -1312,6 +1390,332 @@ def _defines_console_approval(version) -> bool:
     if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
         return minor >= SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2
     return False
+
+
+def _defines_target_creation(version) -> bool:
+    """Whether a document of `version` defines `target.creation` (arm TCR-1):
+    1.x from 1.10.0, 2.x from 2.2.0 -- the twin of
+    `logweir_core::scorecard::defines_target_creation`."""
+    major, minor = _major(version), _minor(version)
+    if minor is None:
+        return False
+    if major == 1:
+        return minor >= SCORECARD_TARGET_CREATION_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _defines_topic_configuration(version) -> bool:
+    """Whether a document of `version` defines `target.topic_configuration`
+    -- the twin of `logweir_core::scorecard::defines_topic_configuration` (arm
+    TC-1): a 1.x document from 1.11.0 on, or a 2.x document from 2.3.0 on."""
+    minor = _minor(version)
+    if minor is None:
+        return False
+    major = _major(version)
+    if major == 1:
+        return minor >= SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _defines_positions_mapping(version) -> bool:
+    """Whether a document of `version` defines
+    `integrity.verification.positions_mapping` (arm PM-1): a 1.x document from
+    1.12.0 on, a 2.x document from 2.4.0 on -- the twin of
+    `logweir_core::scorecard::defines_positions_mapping`."""
+    major, minor = _major(version), _minor(version)
+    if minor is None:
+        return False
+    if major == 1:
+        return minor >= SCORECARD_POSITIONS_MAPPING_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _pm_u64(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 2 ** 64
+
+
+def _positions_mapping_shape_ok(block) -> bool:
+    """`integrity.verification.positions_mapping` has the shape
+    `PositionsMapping` deserialises (PROD-04.2): `document` absent, null or an
+    object of a string `key`, a string `sha256` and a u64 `bytes`; `omitted`
+    absent, null or a string; `counts`, three u64; `groups`, a u32."""
+    if not isinstance(block, dict):
+        return False
+    document = block.get("document")
+    if document is not None and not (
+        isinstance(document, dict)
+        and isinstance(document.get("key"), str)
+        and isinstance(document.get("sha256"), str)
+        and _pm_u64(document.get("bytes"))
+    ):
+        return False
+    omitted = block.get("omitted")
+    if omitted is not None and not isinstance(omitted, str):
+        return False
+    counts = block.get("counts")
+    if not isinstance(counts, dict) or not all(
+        _pm_u64(counts.get(k)) for k in ("exact", "approximate", "unavailable")
+    ):
+        return False
+    groups = block.get("groups")
+    return _pm_u64(groups) and groups < 2 ** 32
+
+
+def _positions_mapping_fault(doc, version) -> str:
+    """Arms PM-1 to PM-5, `logweir_core::positions_mapping::check_block`'s
+    twin, word for word and in order; "" when the block holds or is absent."""
+    verification = doc["integrity"].get("verification")
+    if not isinstance(verification, dict):
+        return ""
+    pm = verification.get("positions_mapping")
+    if pm is None:
+        return ""
+    # PM-1. Defined from 1.12.0 of format 1 and 2.4.0 of format 2.
+    if not _defines_positions_mapping(version):
+        return (
+            "integrity.verification.positions_mapping is present but the format_version does "
+            "not define it: the block is defined from "
+            f"1.{SCORECARD_POSITIONS_MAPPING_SINCE_MINOR}.0 of format 1 and from "
+            f"2.{SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+        )
+    # PM-2. Only over a passing complete verification (08.1-A4).
+    complete = verification.get("complete")
+    covered = isinstance(complete, dict) and complete.get("covered") is True
+    if not (doc.get("outcome") == "pass" and verification.get("coverage") == "complete"
+            and covered):
+        return (
+            "integrity.verification.positions_mapping is present but the run is not a "
+            "passing complete verification; positions are mapped only when outcome is "
+            "pass, coverage is complete and complete.covered is true"
+        )
+    # PM-3. A document, or the reason there is none: exactly one.
+    document, omitted = pm.get("document"), pm.get("omitted")
+    if not ((document is not None and omitted is None)
+            or (document is None and omitted in PM_OMITTED_REASONS)):
+        return (
+            "integrity.verification.positions_mapping names exactly one of document "
+            "and omitted, and omitted is tooLarge or writeFailed"
+        )
+    # PM-4. The document is this run's, and its digest and length are sound.
+    if document is not None and (
+        document["key"] != f"logweir/drills/{doc['run_id']}.positions-mapping.json"
+        or not _is_sha256_prefixed(document["sha256"])
+        or document["bytes"] == 0
+        or document["bytes"] > PM_MAX_DOCUMENT_BYTES
+    ):
+        return (
+            "integrity.verification.positions_mapping.document is not this run's mapping: "
+            "its key is logweir/drills/<run_id>.positions-mapping.json, its sha256 is "
+            f"sha256:<64 lowercase hex> and its length is 1 to {PM_MAX_DOCUMENT_BYTES} bytes"
+        )
+    # PM-5. It maps at least one group.
+    if pm["groups"] == 0:
+        return (
+            "integrity.verification.positions_mapping.groups is 0; a mapping is written only "
+            "for a point that selected consumer groups"
+        )
+    return ""
+
+
+def _pm_is_unavailable_reason(reason) -> bool:
+    if not isinstance(reason, str):
+        return False
+    if reason in PM_UNAVAILABLE_REASONS:
+        return True
+    prefix = PM_NOT_CAPTURED + ": "
+    return reason.startswith(prefix) and len(reason) > len(prefix)
+
+
+def _pm_int(x, low, high) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and low <= x < high
+
+
+def _positions_mapping_document_shape(pm) -> str:
+    """The mapping document has the shape `MappingDocument` deserialises; the
+    Rust reader refuses any other at parse, so a shape fault is the same
+    verdict in other words."""
+    if not isinstance(pm, dict):
+        return "it does not parse as a positions-mapping document: not an object"
+    for name in ("format_version", "run_id", "point_id", "positions_sha256", "rule"):
+        if not isinstance(pm.get(name), str):
+            return f"it does not parse as a positions-mapping document: {name} is not a string"
+    groups = pm.get("groups")
+    if not isinstance(groups, dict):
+        return "it does not parse as a positions-mapping document: groups is not an object"
+    for g in groups.values():
+        if not (
+            isinstance(g, dict)
+            and isinstance(g.get("active_at_capture"), bool)
+            and isinstance(g.get("entries"), list)
+            and _pm_int(g.get("no_committed_position"), 0, 2 ** 32)
+            and (g.get("reason") is None or isinstance(g.get("reason"), str))
+            and (g.get("group_type") is None or isinstance(g.get("group_type"), str))
+        ):
+            return "it does not parse as a positions-mapping document: a group is malformed"
+        for e in g["entries"]:
+            if not (
+                isinstance(e, dict)
+                and isinstance(e.get("topic"), str)
+                and _pm_int(e.get("partition"), 0, 2 ** 32)
+                and isinstance(e.get("class"), str)
+                and (e.get("position") is None or _pm_int(e.get("position"), -(2 ** 63), 2 ** 63))
+                and (e.get("target_topic") is None or isinstance(e.get("target_topic"), str))
+                and (e.get("target_offset") is None
+                     or _pm_int(e.get("target_offset"), -(2 ** 63), 2 ** 63))
+                and (e.get("skipped") is None or _pm_u64(e.get("skipped")))
+                and (e.get("reason") is None or isinstance(e.get("reason"), str))
+            ):
+                return "it does not parse as a positions-mapping document: an entry is malformed"
+    return ""
+
+
+def check_positions_mapping_document(doc, raw, pm) -> str:
+    """Arms PMD-1 to PMD-7, `logweir_core::positions_mapping::validate_document`'s
+    twin, word for word and in order: the mapping document `--positions-mapping`
+    names, against the VERIFIED scorecard's block and its verified partitions."""
+    verification = doc["integrity"].get("verification") or {}
+    block = verification.get("positions_mapping")
+    if block is None:
+        return (
+            "the scorecard carries no positions_mapping block, so it binds no mapping"
+        )
+    run_id = doc["run_id"]
+    # PMD-1. The block names a document.
+    d = block.get("document")
+    if d is None:
+        return (
+            "the scorecard's positions_mapping block names no document (omitted), so there is "
+            "no mapping to verify"
+        )
+    # PMD-2. The exact bytes the scorecard's signature covers.
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if digest != d["sha256"] or len(raw) != d["bytes"]:
+        return (
+            f"the positions-mapping document is {digest} over {len(raw)} bytes but the "
+            f"scorecard binds {d['sha256']} over {d['bytes']} bytes: it is not the mapping "
+            "this scorecard signed"
+        )
+    # PMD-3. Format 1, this run's, by the one rule.
+    if pm["format_version"].split(".")[0] != "1" or pm["run_id"] != run_id or pm["rule"] != PM_RULE:
+        return (
+            f"the positions-mapping document is not a format 1 mapping of run "
+            f"{_rust_debug_str(run_id)} by rule {PM_RULE}"
+        )
+    # PMD-4. The block's counts are what the document says.
+    counts = {"exact": 0, "approximate": 0, "unavailable": 0}
+    for g in pm["groups"].values():
+        for e in g["entries"]:
+            if e["class"] in ("exact", "approximate"):
+                counts[e["class"]] += 1
+            else:
+                counts["unavailable"] += 1
+    if counts != {k: block["counts"][k] for k in counts} or len(pm["groups"]) != block["groups"]:
+        return (
+            "the positions-mapping document's groups and class counts are not the ones the "
+            "scorecard's block records"
+        )
+    verified = {}
+    complete = verification.get("complete")
+    if isinstance(complete, dict):
+        for p in complete.get("partitions", []):
+            verified[(p["topic"], p["partition"])] = p["target_topic"]
+    for gid in sorted(pm["groups"]):
+        g = pm["groups"][gid]
+        shown = _rust_debug_str(gid)
+        # PMD-7. A group the backup did not capture maps nothing.
+        reason = g.get("reason")
+        if reason is not None and (
+            not _pm_is_unavailable_reason(reason)
+            or not reason.startswith(PM_NOT_CAPTURED)
+            or g["entries"]
+        ):
+            return (
+                f"group {shown} carries a reason, so it was not captured: its reason is "
+                "\"NotCaptured: <why>\" and it has no entry"
+            )
+        for e in g["entries"]:
+            where = f"group {shown} entry {_rust_debug_str(e['topic'])}/{e['partition']}"
+            # PMD-5. The class, the offset, the count and the reason fit.
+            cls, offset, skipped, why = (
+                e["class"], e.get("target_offset"), e.get("skipped"), e.get("reason"))
+            if cls == "exact":
+                fits = offset is not None and offset >= 0 and skipped is None and why is None
+            elif cls == "approximate":
+                fits = (offset is not None and offset >= 0 and skipped is not None
+                        and skipped >= 1 and why == PM_SELECTION_EXCLUDED)
+            elif cls == "unavailable":
+                fits = offset is None and skipped is None and _pm_is_unavailable_reason(why)
+            else:
+                fits = False
+            if not fits:
+                return (
+                    f"{where}: an exact entry carries a target offset and nothing else, an "
+                    "approximate one a target offset, skipped of at least 1 and reason "
+                    "selectionExcluded, and an unavailable one only a reason from the closed set"
+                )
+            # PMD-6. A mapped entry lands on a partition this scorecard
+            # verified, in its restored topic; one said not restored was not.
+            at = verified.get((e["topic"], e["partition"]))
+            if cls == "unavailable":
+                landed = why != PM_PARTITION_NOT_RESTORED or at is None
+            else:
+                landed = at is not None and e.get("target_topic") == at
+            if not landed:
+                return (
+                    f"{where}: a mapped entry names a partition the scorecard verified and its "
+                    "restored topic, and one marked PartitionNotRestored names none"
+                )
+    return ""
+
+
+def _positions_mapping_lines(block, verified=None):
+    """The lines `crates/logweir/src/verify.rs::positions_mapping_lines`
+    prints, in the same order and words."""
+    if block is None:
+        return []
+    c = block["counts"]
+    lines = [
+        f"positions_mapping: {block['groups']} group(s); {c['exact']} exact, "
+        f"{c['approximate']} approximate, {c['unavailable']} unavailable"
+    ]
+    d, omitted = block.get("document"), block.get("omitted")
+    if d is not None:
+        lines.append(
+            f"positions_mapping: document {d['key']} ({d['sha256']}, {d['bytes']} bytes) "
+            + ("verified against this scorecard" if verified is not None else
+               "not checked: pass --positions-mapping <file> to verify it and print each "
+               "position")
+        )
+    elif omitted is not None:
+        lines.append(f"positions_mapping: no document ({omitted})")
+    if verified is None:
+        return lines
+    for gid in sorted(verified["groups"]):
+        g = verified["groups"][gid]
+        shown = _rust_debug_str(gid)
+        if g.get("reason") is not None:
+            lines.append(f"positions_mapping[{shown}]: {g['reason']}")
+            continue
+        for e in g["entries"]:
+            at = f"positions_mapping[{shown}][{_rust_debug_str(e['topic'])}:{e['partition']}]"
+            to = f"{e.get('target_topic') or '-'}:{e.get('target_offset') or 0}"
+            position = "-" if e.get("position") is None else str(e["position"])
+            if e["class"] == "exact":
+                lines.append(f"{at}: position {position} -> {to}, exact")
+            elif e["class"] == "approximate":
+                lines.append(
+                    f"{at}: position {position} -> {to}, approximate ({e.get('skipped') or 0} "
+                    "skipped)"
+                )
+            else:
+                lines.append(f"{at}: position {position}, unavailable ({e.get('reason') or '-'})")
+    return lines
 
 
 def _days_from_civil(year: int, month: int, day: int) -> int:
@@ -1621,6 +2025,135 @@ def _console_approval_shape_ok(block) -> bool:
         _instant(block.get(name)) is not None
         for name in ("requested_at", "approved_at", "request_expires_at")
     )
+
+
+def _target_creation_shape_ok(block) -> bool:
+    """`target.creation` has the shape `TargetCreation` deserialises
+    (PROD-11.1a, format 1.10.0 and 2.2.0): `topics`, an array of objects with a
+    string `name`, a `u32` `partitions`, a string or null `topic_id` and an
+    optional string `topic_id_reason`; a string `lineage_headers`; and an
+    optional `u64` `teardown_after_seconds`. Unknown keys are ignored, as serde
+    ignores them."""
+    if not isinstance(block, dict) or not isinstance(block.get("lineage_headers"), str):
+        return False
+    ttl = block.get("teardown_after_seconds")
+    if ttl is not None and not (
+        isinstance(ttl, int) and not isinstance(ttl, bool) and 0 <= ttl < 2 ** 64
+    ):
+        return False
+    topics = block.get("topics")
+    if not isinstance(topics, list):
+        return False
+    for t in topics:
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+            return False
+        partitions = t.get("partitions")
+        if not (
+            isinstance(partitions, int)
+            and not isinstance(partitions, bool)
+            and 0 <= partitions < 2 ** 32
+        ):
+            return False
+        for name in ("topic_id", "topic_id_reason"):
+            value = t.get(name)
+            if value is not None and not isinstance(value, str):
+                return False
+    return True
+
+
+def _str_map(x) -> bool:
+    return isinstance(x, dict) and all(
+        isinstance(k, str) and isinstance(v, str) for k, v in x.items()
+    )
+
+
+def _u32(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 2 ** 32
+
+
+def _topic_configuration_shape_ok(block) -> bool:
+    """`target.topic_configuration` has the shape `TopicConfigurationBlock`
+    deserialises (PROD-05.2, format 1.11.0 and 2.3.0): strings `transition`
+    and `target_line`; `topics`, an object of topic objects, each with a
+    string `source_topic` and `route`, an optional `partitions` (u32), a
+    `replication_factor` of an optional `source` and a `target` (u32) and a
+    string `reason`, three string maps (`during_restore`, `at_creation`,
+    `deferred`), a `not_applied` array of `{key, value?, portability, reason,
+    target_default?}` strings, an optional `capped` map of `{source, applied}`,
+    an optional `owner` of three strings and an optional bool `not_recorded`;
+    and an optional `desired_state` of a string `key`, a string `sha256` and a
+    u64 `bytes`. Unknown keys are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    if not isinstance(block.get("transition"), str) or not isinstance(
+        block.get("target_line"), str
+    ):
+        return False
+    topics = block.get("topics")
+    if not isinstance(topics, dict):
+        return False
+    for topic in topics.values():
+        if not isinstance(topic, dict):
+            return False
+        if not isinstance(topic.get("source_topic"), str) or not isinstance(
+            topic.get("route"), str
+        ):
+            return False
+        if topic.get("partitions") is not None and not _u32(topic.get("partitions")):
+            return False
+        rf = topic.get("replication_factor")
+        if not isinstance(rf, dict) or not _u32(rf.get("target")):
+            return False
+        if rf.get("source") is not None and not _u32(rf.get("source")):
+            return False
+        if not isinstance(rf.get("reason"), str):
+            return False
+        for name in ("during_restore", "at_creation", "deferred"):
+            if not _str_map(topic.get(name)):
+                return False
+        not_applied = topic.get("not_applied")
+        if not isinstance(not_applied, list):
+            return False
+        for n in not_applied:
+            if not isinstance(n, dict) or not all(
+                isinstance(n.get(k), str) for k in ("key", "portability", "reason")
+            ):
+                return False
+            for k in ("value", "target_default"):
+                if n.get(k) is not None and not isinstance(n.get(k), str):
+                    return False
+        # `capped` and `not_recorded` are absent or a value, never null: the
+        # Rust reader's `BTreeMap` and `bool` (serde default) refuse null.
+        capped = topic.get("capped")
+        if "capped" in topic and not (
+            isinstance(capped, dict)
+            and all(
+                isinstance(c, dict)
+                and isinstance(c.get("source"), str)
+                and isinstance(c.get("applied"), str)
+                for c in capped.values()
+            )
+        ):
+            return False
+        owner = topic.get("owner")
+        if owner is not None and not (
+            isinstance(owner, dict)
+            and all(isinstance(owner.get(k), str) for k in ("kind", "basis", "reference"))
+        ):
+            return False
+        if "not_recorded" in topic and not isinstance(topic.get("not_recorded"), bool):
+            return False
+    desired = block.get("desired_state")
+    if desired is not None and not (
+        isinstance(desired, dict)
+        and isinstance(desired.get("key"), str)
+        and isinstance(desired.get("sha256"), str)
+        and isinstance(desired.get("bytes"), int)
+        and not isinstance(desired.get("bytes"), bool)
+        and 0 <= desired.get("bytes") < 2 ** 64
+    ):
+        return False
+    return True
 
 
 def _is_sha256_prefixed(value) -> bool:
@@ -2163,6 +2696,34 @@ def check_invariants(doc) -> str:
             "a bool owner_path"
         )
 
+    # Also shape (PROD-11.1a, scorecard 1.10.0 and 2.2.0): `target.creation`
+    # is an `Option<TargetCreation>` over there, so `null` is ABSENT and
+    # anything that is not the writer's shape is refused at DESERIALISATION.
+    # Arms TCR-1 to TCR-5 below compare its fields, so the shape is asserted
+    # first.
+    creation = target.get("creation")
+    if creation is not None and not _target_creation_shape_ok(creation):
+        return (
+            "target.creation is not an object of the shape the writer gives it: an array of "
+            "topics of a string name, an integer partition count, a topic id or null and an "
+            "optional reason, a string lineage_headers and an optional integer lifetime"
+        )
+
+    # Also shape (PROD-05.2, scorecard 1.11.0 and 2.3.0):
+    # `target.topic_configuration` is an `Option<TopicConfigurationBlock>`
+    # over there, so `null` is ABSENT and anything that is not the writer's
+    # shape is refused at DESERIALISATION. Arms TC-1 to TC-5 below compare
+    # its fields, so the shape is asserted first.
+    topic_configuration = target.get("topic_configuration")
+    if topic_configuration is not None and not _topic_configuration_shape_ok(
+        topic_configuration
+    ):
+        return (
+            "target.topic_configuration is not an object of the shape the writer gives it: a "
+            "transition, a target line, per topic its route, replication factor, three "
+            "setting maps and the settings not applied, and an optional desired-state document"
+        )
+
     # Also shape (PROD-16.2, scorecard 1.9.0 and 2.1.0): `approval.console` is
     # an `Option<ConsoleApprovalInfo>` over there, so `null` is ABSENT and
     # anything that is not the writer's shape is refused at DESERIALISATION.
@@ -2277,6 +2838,14 @@ def check_invariants(doc) -> str:
         return (
             "integrity.verification is not an object of the shape the writer gives it: "
             "four strings, two arrays of offset ranges and an optional complete block"
+        )
+    # PROD-04.2: the positions mapping block, refused at DESERIALISATION over
+    # there when it is not the writer's shape.
+    if isinstance(verification, dict) and verification.get("positions_mapping") is not None \
+            and not _positions_mapping_shape_ok(verification["positions_mapping"]):
+        return (
+            "integrity.verification.positions_mapping is not an object of the shape the "
+            "writer gives it"
         )
 
     # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
@@ -3175,6 +3744,132 @@ def check_invariants(doc) -> str:
             "approval.console is present; a console approval names who approved, and a "
             "governed, ordinary or v1 approval carries no console approver"
         )
+
+    # `target.creation` (format 1.10.0, and 2.2.0; PROD-11.1a): arms TCR-1 to
+    # TCR-5, mirrored ARM FOR ARM, IN THIS POSITION (after CA-8, before
+    # `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block. Not interpolated except TCR-1's version.
+    if creation is not None:
+        # TCR-1. The block is defined from 1.10.0 of format 1 and from 2.2.0 of
+        # format 2.
+        if not _defines_target_creation(version):
+            return (
+                f"target.creation is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is defined from "
+                f"1.{SCORECARD_TARGET_CREATION_SINCE_MINOR}.0 of format 1 and from "
+                f"2.{SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+            )
+        # TCR-2. Restored records keep their lineage headers, always.
+        if creation["lineage_headers"] != LINEAGE_HEADERS_KEPT:
+            return (
+                "target.creation.lineage_headers is not \"kept\"; every restored record "
+                "keeps x-original-offset and x-original-timestamp"
+            )
+        # TCR-3. The block names what was created: at least one topic, each
+        # once, by a name, with at least one partition.
+        created = creation["topics"]
+        created_names = [t["name"] for t in created]
+        if (
+            not created
+            or len(set(created_names)) != len(created_names)
+            or any(
+                not t["name"].strip(RUST_WHITESPACE) or t["partitions"] == 0 for t in created
+            )
+        ):
+            return (
+                "target.creation.topics is empty, names a topic twice, or names a blank topic "
+                "or one with no partitions; the block is present exactly when the run created "
+                "topics, and names each once"
+            )
+
+        # TCR-4. Each topic carries a real topic ID or the closed-set reason
+        # there is none, never both and never neither.
+        def _identity_bad(t):
+            topic_id, reason = t.get("topic_id"), t.get("topic_id_reason")
+            if topic_id is not None and reason is None:
+                return not _is_canonical_topic_id(topic_id)
+            if topic_id is None and reason is not None:
+                return reason not in RECEIPT_TOPIC_ID_REASONS
+            return True
+
+        if any(_identity_bad(t) for t in created):
+            return (
+                "target.creation.topics carries a topic_id that is not a topic ID this format "
+                "defines, or a topic_id_reason outside the closed set, or both or neither; a "
+                "created topic's identity is its ID or the reason there is none"
+            )
+        # TCR-5. Only a scratch restore is a clone, and its lifetime is the
+        # plan's bounded TTL.
+        ttl = creation.get("teardown_after_seconds")
+        if ttl is not None and (
+            target.get("mode") not in (None, "scratch")
+            or not CLONE_TTL_MIN_SECONDS <= ttl <= CLONE_TTL_MAX_SECONDS
+        ):
+            return (
+                "target.creation.teardown_after_seconds is present but target.mode is not "
+                "scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, "
+                "kept from five minutes to thirty days"
+            )
+
+    # `target.topic_configuration` (format 1.11.0, and 2.3.0; PROD-05.2): arms
+    # TC-1 to TC-5, mirrored ARM FOR ARM, IN THIS POSITION and with the same
+    # words from `Scorecard::validate_invariants`. They fire ONLY on a
+    # document carrying the block. Not interpolated except TC-1's version.
+    if topic_configuration is not None:
+        # TC-1. The block is defined from 1.11.0 of format 1 and from 2.3.0 of
+        # format 2.
+        if not _defines_topic_configuration(version):
+            return (
+                f"target.topic_configuration is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is defined from "
+                f"1.{SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR}.0 of format 1 and from "
+                f"2.{SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+            )
+        topics = topic_configuration["topics"].values()
+        # TC-2.
+        if topic_configuration["transition"] not in TOPIC_CONFIGURATION_TRANSITIONS:
+            return (
+                "target.topic_configuration.transition is not \"afterVerification\" or \"none\""
+            )
+        # TC-3.
+        if any(
+            t["route"] not in TOPIC_CONFIGURATION_ROUTES
+            or t["replication_factor"]["reason"] not in TOPIC_CONFIGURATION_RF_REASONS
+            or t["replication_factor"]["target"] == 0
+            for t in topics
+        ):
+            return (
+                "target.topic_configuration names a route outside adminApi and "
+                "desiredStateExport, a replication factor reason outside its closed set, or a "
+                "replication factor of 0"
+            )
+        # TC-4.
+        exported = any(t["route"] == "desiredStateExport" for t in topics)
+        desired = topic_configuration.get("desired_state")
+        if exported != (desired is not None) or (
+            desired is not None and not _is_sha256_prefixed(desired["sha256"])
+        ):
+            return (
+                "target.topic_configuration.desired_state is present exactly when a topic's "
+                "route is desiredStateExport, and names its document by sha256"
+            )
+        # TC-5. A secret is never copied into a signed document.
+        if any(
+            (n["portability"] == "secret") == (n.get("value") is not None)
+            for t in topics
+            for n in t["not_applied"]
+        ):
+            return (
+                "target.topic_configuration lists a secret with a value, or another entry "
+                "without one"
+            )
+
+    # PM-1 to PM-5 (PROD-04.2), mirrored in this position (after CA-8, before
+    # `redactions`) from `logweir_core::positions_mapping::check_block`.
+    pm_fault = _positions_mapping_fault(doc, version)
+    if pm_fault:
+        return pm_fault
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -5131,6 +5826,37 @@ def _console_approval_lines(block):
     ]
 
 
+def _target_creation_lines(block):
+    """`target.creation` as a line -- the twin of `crates/logweir/src/
+    verify.rs::target_creation_lines` (PROD-11.1a): the writer's sentence
+    (`TargetCreation::lines`). Absent prints nothing: the run created no
+    topic."""
+    if block is None:
+        return []
+    topics = []
+    for t in block["topics"]:
+        if t.get("topic_id") is not None:
+            ident = f"topic ID {t['topic_id']}"
+        elif t.get("topic_id_reason") is not None:
+            ident = f"no topic ID ({t['topic_id_reason']})"
+        else:
+            ident = "no topic ID"
+        unit = "partition" if t["partitions"] == 1 else "partitions"
+        topics.append(f"{t['name']} ({t['partitions']} {unit}, {ident})")
+    count = "1 topic" if len(block["topics"]) == 1 else f"{len(block['topics'])} topics"
+    line = (
+        f"target creation: this run created {count}: {', '.join(topics)}; restored records "
+        f"keep their lineage headers ({block['lineage_headers']})"
+    )
+    ttl = block.get("teardown_after_seconds")
+    if ttl is not None:
+        line += (
+            f"; a clone, deleted {ttl} seconds after the run, each topic only while its ID is "
+            "the one recorded here"
+        )
+    return [line]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -5235,7 +5961,17 @@ def main(
     pubkey_path: str,
     payload_type_wanted: str = PAYLOAD_TYPE,
     positions_path=None,
+    mapping_path=None,
 ) -> int:
+    # PROD-04.2: the positions-mapping document is checked against the restore
+    # scorecard that binds it, and against nothing else.
+    if mapping_path is not None and payload_type_wanted != PAYLOAD_TYPE:
+        print(
+            "INVALID: --positions-mapping applies to --payload-type scorecard only: the "
+            "mapping is checked against the restore scorecard that binds it",
+            file=sys.stderr,
+        )
+        return 1
     # PROD-04.1: the positions document is checked against the backup receipt
     # that binds it, and against nothing else.
     if positions_path is not None and payload_type_wanted != PAYLOAD_TYPES["backup-receipt"]:
@@ -5415,6 +6151,34 @@ def main(
             print(f"INVALID: APPROVAL CLAIM NOT VERIFIED: {detail}", file=sys.stderr)
             return 1
 
+        # PROD-04.2: the positions-mapping document, only when given, against
+        # the scorecard that was just verified -- its exact bytes.
+        verified_mapping = None
+        if mapping_path is not None:
+            try:
+                raw = open(mapping_path, "rb").read()
+            except OSError as e:
+                print(
+                    f"INVALID: cannot read positions-mapping document {mapping_path!r}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                pm = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(
+                    f"INVALID: the positions-mapping document is not valid JSON: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            problem = _positions_mapping_document_shape(pm) or check_positions_mapping_document(
+                doc, raw, pm
+            )
+            if problem:
+                print(f"INVALID: {problem}", file=sys.stderr)
+                return 1
+            verified_mapping = pm
+
         # Every field below is reachable: `check_invariants` returned "", which
         # required each of these blocks to be present and well-formed.
         integrity = doc["integrity"]
@@ -5481,6 +6245,14 @@ def main(
         # (`crates/logweir/src/verify.rs::verification_lines`).
         for line in _verification_lines(doc["integrity"].get("verification")):
             print(f"       coverage: {line}")
+        # PROD-04.2: the positions mapping, when the run wrote one, and each
+        # mapped position when `--positions-mapping` gave the document and it
+        # held (`crates/logweir/src/verify.rs::positions_mapping_lines`).
+        verification = doc["integrity"].get("verification") or {}
+        for line in _positions_mapping_lines(
+            verification.get("positions_mapping"), verified_mapping
+        ):
+            print(f"       mapping:  {line}")
         # FX-23: what a sampled pass proves at this document's version (review
         # M2), and the topics the cap left out. The same lines `logweir drill
         # verify` prints (`crates/logweir/src/verify.rs::sampled_pass_lines`,
@@ -5499,6 +6271,11 @@ def main(
         # admitted it, in the words `logweir drill verify` prints
         # (`original_name_lines`).
         for line in _original_name_lines(doc["target"].get("original_name")):
+            print(f"       target:   {line}")
+        # PROD-11.1a: what the run created, by name and ID at creation. The
+        # same line `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::target_creation_lines`).
+        for line in _target_creation_lines(doc["target"].get("creation")):
             print(f"       target:   {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
@@ -5561,6 +6338,12 @@ def main(
             "approval inside the request's window, approval.approver the approver's principal, "
             "approval.key_id the console's key, approval.approved_at the instant of the "
             "approval, and target.original_name.approval_mode consoleApproval exactly beside it; "
+            "target.creation only from 1.10.0 of format 1 or 2.2.0 of format 2, lineage headers "
+            "kept, each created topic once with a partition and its ID or the reason there is "
+            "none, and a lifetime only on a scratch clone, from 300 to 2592000 seconds; "
+            "integrity.verification.positions_mapping only from 1.12.0 of format 1 or 2.4.0 of "
+            "format 2, only over a passing complete verification, a document or the reason "
+            "there is none, the run's own key, and at least one group; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -5818,6 +6601,7 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     wanted = PAYLOAD_TYPE
     positions = None
+    mapping = None
     rest = []
     i = 0
     while i < len(argv):
@@ -5833,6 +6617,14 @@ if __name__ == "__main__":
         if a.startswith("--consumer-positions="):
             positions = a.split("=", 1)[1]
             i += 1
+            continue
+        # PROD-04.2: the positions-mapping document a restore scorecard binds.
+        if a == "--positions-mapping":
+            if i + 1 >= len(argv):
+                print("INVALID: --positions-mapping needs a value", file=sys.stderr)
+                sys.exit(1)
+            mapping = argv[i + 1]
+            i += 2
             continue
         if a == "--payload-type":
             if i + 1 >= len(argv):
@@ -5860,8 +6652,9 @@ if __name__ == "__main__":
             f"usage: {sys.argv[0]} "
             "[--payload-type " + "|".join(sorted(PAYLOAD_TYPES)) + "] "
             "[--consumer-positions <positions.json>] "
+            "[--positions-mapping <positions-mapping.json>] "
             "<document.json> <document.sig> <public.pem>",
             file=sys.stderr,
         )
         sys.exit(1)
-    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions))
+    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions, mapping))

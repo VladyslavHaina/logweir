@@ -48,14 +48,14 @@ use axum::response::Response;
 use http::{StatusCode, Uri};
 use kube::ResourceExt as _;
 use logweir_core::approval_policy::{
-    self as policy, ApprovalPolicy, ApprovalRoute, AuthorizationRefusal, ExpectedSubject,
-    Requester, RestoreAuthorization,
+    self as policy, ApprovalPolicy, ApprovalRoute, AuthorizationRefusal, Requester,
+    RestoreAuthorization,
 };
-use logweir_core::approval_scope::{self, ApprovalScope, ScopeIncomplete};
-use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
-use weirkeeper::crds::restore::Restore;
+use logweir_core::approval_scope::{self, ApprovalScope};
+use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectRef};
 
-use super::{authorize, get_object, json, ApiPath};
+use super::subject::{Kind, ShownScope, Subject};
+use super::{authorize, json, ApiPath};
 use crate::app::AppState;
 use crate::approval::{self, VerifiedRequest};
 use crate::auth::Actor;
@@ -65,6 +65,9 @@ use crate::contract::{
     ApprovalScopeView, ApprovalSubjectView, ApproveOfferView, ApproveRefusal,
     ConsoleApprovalRequest, ScopeOwnerStatementView, ScopeOwnerView, ScopeRecoveryView,
     ScopeSourceView, ScopeStorageView, ScopeTargetView, ScopeTopicView, ScopeVerificationView,
+    SwitchoverApprovalRequestResponse, SwitchoverApprovalRequestView, SwitchoverScopeGroupView,
+    SwitchoverScopePositionView, SwitchoverScopeRecordView, SwitchoverScopeRestoreView,
+    SwitchoverScopeTopicView, SwitchoverScopeView,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::kube::KubeFailure;
@@ -75,6 +78,12 @@ use crate::projection;
 pub const ROUTE_REQUEST: &str = "GET /api/v1/namespaces/{ns}/restores/{name}/approval-request";
 /// The click's route identifier.
 pub const ROUTE_APPROVE: &str = "POST /api/v1/namespaces/{ns}/restores/{name}/console-approval";
+/// PROD-04.2: a switchover's request read.
+pub const ROUTE_SWITCHOVER_REQUEST: &str =
+    "GET /api/v1/namespaces/{ns}/switchovers/{name}/approval-request";
+/// PROD-04.2: a switchover's click.
+pub const ROUTE_SWITCHOVER_APPROVE: &str =
+    "POST /api/v1/namespaces/{ns}/switchovers/{name}/console-approval";
 
 /// What both routes need about the namespace before they read a request: the
 /// policy a `two-person` namespace is bound to, or the refusal.
@@ -138,19 +147,10 @@ enum Loaded {
     },
 }
 
-/// What a Restore expects an authorization to bind, from the object itself.
-fn expected_subject(ns: &str, restore: &Restore) -> ExpectedSubject {
-    ExpectedSubject {
-        namespace: ns.to_string(),
-        name: restore.name_any(),
-        uid: restore.uid().unwrap_or_default(),
-        plan_hash: logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes()),
-    }
-}
-
-/// **Steps 3 and 4.** Read the stored request for `restore`, verify this
-/// console's own signature on it, and hold the verified bytes to the Restore,
-/// its plan and the namespace's current policy.
+/// **Steps 3 and 4.** Read the stored request for `subject` (a `Restore` or a
+/// `Switchover`), verify this console's own signature on it, and hold the
+/// verified bytes to the object, its kind, its plan and the namespace's
+/// current policy.
 ///
 /// THE STORED OBJECT IS REDUCED TO TWO STRINGS BEFORE ANYTHING IS DECIDED:
 /// `spec.approvalBytes` and `spec.sidecarBytes`. Its annotations, labels,
@@ -163,10 +163,10 @@ fn expected_subject(ns: &str, restore: &Restore) -> ExpectedSubject {
 /// The adapter's failure, or `internal_error` for an unreadable key.
 async fn load_request(
     state: &AppState,
-    ns: &str,
-    restore: &Restore,
+    subject: &Subject,
     bound: &ApprovalPolicy,
 ) -> Result<Loaded, ApiError> {
+    let ns = subject.namespace.as_str();
     let key = match state.approval().confirmation_key() {
         Ok(Some(key)) => key,
         Ok(None) => {
@@ -179,7 +179,7 @@ async fn load_request(
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     };
-    let confirmation_name = approval::confirmation_name(restore.spec.approval_ref_name());
+    let confirmation_name = approval::confirmation_name(&subject.approval_name);
     let (approval_bytes, sidecar_bytes) =
         match state.kube().get::<Approval>(ns, &confirmation_name).await {
             Ok(object) => (object.spec.approval_bytes, object.spec.sidecar_bytes),
@@ -187,9 +187,11 @@ async fn load_request(
                 return Ok(Loaded::NotConfirmed {
                     code: "confirmation_absent",
                     sentence: format!(
-                        "Restore {} has no request {confirmation_name}: only a Restore submitted \
-                         through the console carries one, and only that can be approved here.",
-                        restore.name_any()
+                        "{} {} has no request {confirmation_name}: only a {} submitted through \
+                         the console carries one, and only that can be approved here.",
+                        subject.title(),
+                        subject.name,
+                        subject.title()
                     ),
                 })
             }
@@ -211,29 +213,29 @@ async fn load_request(
                 sentence: format!(
                     "The stored request {confirmation_name} does not carry this console's \
                      signature over its bytes. It was not confirmed here, nothing of it is \
-                     shown, and it is never approved. Submit the Restore again through the \
-                     console."
+                     shown, and it is never approved. Submit the {} again through the console.",
+                    subject.title()
                 ),
             });
         }
     };
-    // ---- 4. THE VERIFIED BYTES, AGAINST THIS RESTORE AND THIS POLICY ------
+    // ---- 4. THE VERIFIED BYTES, AGAINST THIS OBJECT AND THIS POLICY -------
+    // `expected()` carries the KIND: a Restore's request never binds a
+    // Switchover and back.
     let doc = &verified.document;
-    let binding =
-        policy::check_request_binding(doc, &expected_subject(ns, restore), bound, state.now())
-            .and_then(|()| {
-                // The subject the request was signed for is the one this Restore declares;
-                // the controller holds both to the plan.
-                let declared = super::restores::restore_approval_subject(restore);
-                if doc.approval_subject.as_deref() == declared.wire() {
-                    Ok(())
-                } else {
-                    Err(AuthorizationRefusal::DocumentInvalid(
-                "the request was signed for another approval subject than this Restore declares"
-                    .to_string(),
-            ))
-                }
-            });
+    let binding = policy::check_request_binding(doc, &subject.expected(), bound, state.now())
+        .and_then(|()| {
+            // The subject the request was signed for is the one this object declares;
+            // the controller holds both to the plan.
+            if doc.approval_subject.as_deref() == subject.approval_subject.wire() {
+                Ok(())
+            } else {
+                Err(AuthorizationRefusal::DocumentInvalid(format!(
+                    "the request was signed for another approval subject than this {} declares",
+                    subject.title()
+                )))
+            }
+        });
     match binding {
         Ok(()) => Ok(Loaded::Pending(verified)),
         Err(AuthorizationRefusal::Expired(_)) => Ok(Loaded::Expired(verified)),
@@ -248,26 +250,30 @@ async fn load_request(
             Ok(Loaded::NotConfirmed {
                 code: "confirmation_not_bound",
                 sentence: format!(
-                    "The stored request {confirmation_name} was not signed for this Restore's \
-                     UID and plan under the namespace's current policy {} ({}). It is never \
-                     approved. Submit the Restore again.",
+                    "The stored request {confirmation_name} was not signed for this {}'s UID \
+                     and plan under the namespace's current policy {} ({}). It is never \
+                     approved. Submit the {} again.",
+                    subject.title(),
                     bound.name,
-                    refusal.reason()
+                    refusal.reason(),
+                    subject.title()
                 ),
             })
         }
     }
 }
 
-/// The approval already stored under the Restore's `approvalRef`, when this
+/// The approval already stored under the object's `approvalRef`, when this
 /// console signed it: who approved and when, from its verified bytes.
 async fn stored_approval(
     state: &AppState,
-    ns: &str,
-    restore: &Restore,
+    subject: &Subject,
 ) -> Result<Option<(Approval, Option<RestoreAuthorization>)>, ApiError> {
-    let name = restore.spec.approval_ref_name().to_string();
-    match state.kube().get::<Approval>(ns, &name).await {
+    match state
+        .kube()
+        .get::<Approval>(&subject.namespace, &subject.approval_name)
+        .await
+    {
         Ok(object) => {
             let verified = match state.approval().confirmation_key() {
                 Ok(Some(key)) => approval::verified_request(
@@ -296,7 +302,13 @@ fn approver_of(actor: &Actor) -> policy::Approver {
 
 /// Whether this session is offered the Approve button for a pending request,
 /// by the rules the click is held to.
-fn offer(state: &AppState, actor: &Actor, ns: &str, requester: &Requester) -> ApproveOfferView {
+fn offer(
+    state: &AppState,
+    actor: &Actor,
+    subject: &Subject,
+    requester: &Requester,
+) -> ApproveOfferView {
+    let ns = subject.namespace.as_str();
     let refuse = |refusal: ApproveRefusal, sentence: String| ApproveOfferView {
         offered: false,
         refusal: Some(refusal),
@@ -333,9 +345,11 @@ fn offer(state: &AppState, actor: &Actor, ns: &str, requester: &Requester) -> Ap
             if same {
                 refuse(
                     ApproveRefusal::Requester,
-                    "You requested this restore. A two-person approval needs a second person, \
-                     and no role changes that."
-                        .to_string(),
+                    format!(
+                        "You requested this {}. A two-person approval needs a second person, and \
+                         no role changes that.",
+                        subject.noun()
+                    ),
                 )
             } else {
                 refuse(
@@ -354,42 +368,6 @@ fn capitalised(text: &str) -> String {
         Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
         None => String::new(),
     }
-}
-
-/// **WHAT A SECOND PERSON IS SHOWN IS WHAT THEY APPROVE, ALL OF IT, OR
-/// NOTHING IS APPROVABLE**.
-///
-/// The approval scope of a VERIFIED request: the one function
-/// (`logweir_core::approval_scope::approval_scope`) over the request's signed
-/// bytes and the plan they name by hash. `plan_bytes` is the Restore's
-/// `spec.planBytes`, and that function holds it to the request's `planHash`
-/// before it reads one byte of it — so nothing shown comes from a field of
-/// the Restore object the console's signature does not cover.
-///
-/// Beside it, the plan's topic count, counted a second and independent way:
-/// the audit record of an approval states both, and a scope whose list is not
-/// the plan's own length is refused as incomplete.
-///
-/// The view and the click BOTH call this; the click re-derives it, so an
-/// approval is never given on what a view found earlier.
-///
-/// # Errors
-///
-/// Why the request cannot be shown in full.
-fn scope_of(
-    request: &RestoreAuthorization,
-    plan_bytes: &str,
-) -> Result<(ApprovalScope, usize), ScopeIncomplete> {
-    let scope = approval_scope::approval_scope(request, plan_bytes.as_bytes())?;
-    let in_plan = serde_yaml::from_str::<logweir_core::spec::DrillSpec>(plan_bytes)
-        .map_err(|_| ScopeIncomplete::PlanUnreadable)?
-        .source
-        .topics
-        .len();
-    if scope.topics.len() != in_plan {
-        return Err(ScopeIncomplete::TooManyTopics { count: in_plan });
-    }
-    Ok((scope, in_plan))
 }
 
 fn storage_view(storage: &approval_scope::ScopeStorage) -> ScopeStorageView {
@@ -428,6 +406,8 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             auth_username: scope.target.auth_username.clone(),
             replication_factor: scope.target.replication_factor,
             teardown: scope.target.teardown.clone(),
+            teardown_after_seconds: scope.target.teardown_after_seconds,
+            lineage_headers: scope.target.lineage_headers.to_string(),
             owner_statement: scope.target.owner_statement.as_ref().map(|statement| {
                 ScopeOwnerStatementView {
                     owners: statement.owners.as_ref().map(|owners| {
@@ -446,6 +426,21 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             mode: scope.target.mode.to_string(),
             topic_prefix: scope.target.topic_prefix.clone(),
             allow_transaction_markers: scope.target.allow_transaction_markers,
+            topic_configuration: scope.target.topic_configuration.as_ref().map(|block| {
+                crate::contract::ScopeTopicConfigurationView {
+                    transition: block.transition.to_string(),
+                    owners: block.owners.as_ref().map(|owners| {
+                        owners
+                            .iter()
+                            .map(|o| ScopeOwnerView {
+                                topic: o.topic.clone(),
+                                kind: o.kind.clone(),
+                                reference: o.reference.clone(),
+                            })
+                            .collect()
+                    }),
+                }
+            }),
         },
         topics: scope
             .topics
@@ -467,34 +462,81 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
     }
 }
 
-/// `GET .../restores/{name}/approval-request` — the request, as the second
-/// person is shown it before the click.
-///
-/// It verifies the console's own signature exactly as the click does, and
-/// shows the request's fields only from the verified bytes. It signs and
-/// stores nothing.
+/// The switchover scope, as the page is sent it: every group, topic and
+/// position, never a slice.
+fn switchover_scope_view(scope: &approval_scope::SwitchoverScope) -> SwitchoverScopeView {
+    let plan = &scope.plan;
+    SwitchoverScopeView {
+        restore: SwitchoverScopeRestoreView {
+            name: plan.restore.name.clone(),
+            uid: plan.restore.uid.clone(),
+            plan_hash: plan.restore.plan_hash.clone(),
+            scorecard_sha256: plan.restore.scorecard_sha256.clone(),
+            mapping_sha256: plan.restore.mapping_sha256.clone(),
+        },
+        rollback_of: plan
+            .rollback_of
+            .as_ref()
+            .map(|(key, sha256)| SwitchoverScopeRecordView {
+                key: key.clone(),
+                sha256: sha256.clone(),
+            }),
+        groups: plan
+            .groups
+            .iter()
+            .map(|group| SwitchoverScopeGroupView {
+                source: group.source.clone(),
+                target: group.target.clone(),
+                topics: group
+                    .topics
+                    .iter()
+                    .map(|topic| SwitchoverScopeTopicView {
+                        topic: topic.topic.clone(),
+                        positions: topic
+                            .positions
+                            .iter()
+                            .map(|p| SwitchoverScopePositionView {
+                                partition: p.partition,
+                                offset: p.offset,
+                                approximate: p.approximate,
+                                expected: p.expected,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        groups_count: plan.groups.len(),
+        positions_count: plan.positions,
+    }
+}
+
+/// **The request, as the second person is shown it**, for either kind: the
+/// view with every field but `scope`, and the complete scope beside it when
+/// there is one. It verifies the console's own signature exactly as the click
+/// does and shows the request's fields only from the verified bytes. The
+/// view's `restore`/`restoreUid` carry the subject's name and UID; a
+/// switchover's handler moves them to its own view.
 ///
 /// # Errors
 ///
 /// `policy_mismatch` outside a two-person namespace, `not_found`.
-pub async fn request(
-    State(state): State<AppState>,
-    RequestId(request_id): RequestId,
-    actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
-    uri: Uri,
-) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
-    crate::http::parse_query(uri.query(), &[])?;
-    let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
-    let bound = console_policy(&state, &actor, &ns).await?;
-    let approval_name = restore.spec.approval_ref_name().to_string();
+#[allow(clippy::too_many_lines)]
+async fn request_for(
+    state: &AppState,
+    actor: &Actor,
+    ns: &str,
+    kind: Kind,
+    name: &str,
+) -> Result<(ApprovalRequestView, Option<ShownScope>), ApiError> {
+    let subject = Subject::fetch(state, actor, ns, kind, name).await?;
+    let bound = console_policy(state, actor, ns).await?;
     let mut view = ApprovalRequestView {
-        namespace: ns.clone(),
-        restore: restore.name_any(),
-        restore_uid: restore.uid().unwrap_or_default(),
-        confirmation_name: approval::confirmation_name(&approval_name),
-        approval_name,
+        namespace: ns.to_string(),
+        restore: subject.name.clone(),
+        restore_uid: subject.uid.clone(),
+        confirmation_name: approval::confirmation_name(&subject.approval_name),
+        approval_name: subject.approval_name.clone(),
         policy: bound.name.clone(),
         policy_digest: bound.digest(),
         state: ApprovalRequestState::NotConfirmed,
@@ -518,18 +560,12 @@ pub async fn request(
             sentence: "There is no pending request to approve.".to_string(),
         },
     };
-    let loaded = load_request(&state, &ns, &restore, &bound).await?;
+    let loaded = load_request(state, &subject, &bound).await?;
     let (verified, expired) = match loaded {
         Loaded::NotConfirmed { code, sentence } => {
             actor.audit.note("approvalRequest", code);
             view.state_sentence = sentence;
-            return Ok(json(
-                StatusCode::OK,
-                &ApprovalRequestResponse {
-                    request_id,
-                    item: view,
-                },
-            ));
+            return Ok((view, None));
         }
         Loaded::Pending(verified) => (verified, false),
         Loaded::Expired(verified) => (verified, true),
@@ -537,9 +573,9 @@ pub async fn request(
     let doc = &verified.document;
     view.requester = Some(doc.requester.principal_id());
     view.plan_hash = Some(doc.plan_hash.clone());
-    let subject =
+    let approval_subject =
         logweir_core::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref());
-    view.approval_subject = Some(match subject {
+    view.approval_subject = Some(match approval_subject {
         Ok(logweir_core::original_name::ApprovalSubject::OriginalName) => {
             ApprovalSubjectView::OriginalName
         }
@@ -547,27 +583,28 @@ pub async fn request(
         Err(_) => ApprovalSubjectView::Unknown,
     });
     // THE APPROVAL SCOPE, WHOLE OR NOT AT ALL — from the verified request and
-    // the plan it names by hash, and from no field of the Restore object.
-    match scope_of(doc, &restore.spec.plan_bytes) {
-        Ok((scope, _)) => {
+    // the plan it names by hash, and from no other field of the object.
+    let shown = match subject.scope(doc) {
+        Ok(scope) => {
             view.scope_complete = true;
-            view.scope = Some(scope_view(&scope));
+            Some(scope)
         }
         Err(incomplete) => {
             view.scope_incomplete = Some(incomplete.code().to_string());
-            view.scope_sentence = Some(format!("{incomplete}."));
+            view.scope_sentence = Some(format!("{}.", incomplete.sentence_for(subject.scope_of())));
+            None
         }
-    }
+    };
     view.ticket.clone_from(&doc.ticket);
     view.issued_at = Some(doc.issued_at);
     view.expires_at = Some(doc.expires_at);
     view.confirmation_sha256 = Some(verified.sha256.clone());
-    if let Some((_, approved)) = stored_approval(&state, &ns, &restore).await? {
+    if let Some((_, approved)) = stored_approval(state, &subject).await? {
         view.state = ApprovalRequestState::Approved;
         view.state_sentence = format!(
-            "Approval {} exists for this Restore; the controller's verdict on it is on the \
-             Approval.",
-            view.approval_name
+            "Approval {} exists for this {}; the controller's verdict on it is on the Approval.",
+            view.approval_name,
+            subject.title()
         );
         if let Some(approved) = approved {
             view.approver = approved
@@ -580,9 +617,10 @@ pub async fn request(
     } else if expired {
         view.state = ApprovalRequestState::Expired;
         view.state_sentence = format!(
-            "The request expired at {}; an expired request authorises nothing. Submit the \
-             Restore again.",
-            doc.expires_at.to_rfc3339()
+            "The request expired at {}; an expired request authorises nothing. Submit the {} \
+             again.",
+            doc.expires_at.to_rfc3339(),
+            subject.title()
         );
         view.approve.sentence =
             "The request has expired and can no longer be approved.".to_string();
@@ -595,9 +633,9 @@ pub async fn request(
              until {}.",
             doc.expires_at.to_rfc3339()
         );
-        view.approve = offer(&state, &actor, &ns, &doc.requester);
+        view.approve = offer(state, actor, &subject, &doc.requester);
         // NOBODY IS OFFERED A REQUEST THAT CANNOT BE SHOWN IN FULL, whoever
-        // they are; and the click refuses it by name (`approve`, step 5b).
+        // they are; and the click refuses it by name (`approve_for`, step 5b).
         if let Some(sentence) = view.scope_sentence.clone() {
             view.approve = ApproveOfferView {
                 offered: false,
@@ -606,11 +644,91 @@ pub async fn request(
             };
         }
     }
+    Ok((view, shown))
+}
+
+/// `GET .../restores/{name}/approval-request` — the request, as the second
+/// person is shown it before the click.
+///
+/// It verifies the console's own signature exactly as the click does, and
+/// shows the request's fields only from the verified bytes. It signs and
+/// stores nothing.
+///
+/// # Errors
+///
+/// `policy_mismatch` outside a two-person namespace, `not_found`.
+pub async fn request(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ns, name)): ApiPath<(String, String)>,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    let (mut view, shown) = request_for(&state, &actor, &ns, Kind::Restore, &name).await?;
+    if let Some(ShownScope::Restore { scope, .. }) = &shown {
+        view.scope = Some(scope_view(scope));
+    }
     Ok(json(
         StatusCode::OK,
         &ApprovalRequestResponse {
             request_id,
             item: view,
+        },
+    ))
+}
+
+/// `GET .../switchovers/{name}/approval-request` (PROD-04.2) — a
+/// switchover's request, as the second person is shown it: every group,
+/// topic and position the plan commits, or why it cannot be shown in full.
+/// The restore route's rules, by the same function.
+///
+/// # Errors
+///
+/// `policy_mismatch` outside a two-person namespace, `not_found`.
+pub async fn switchover_request(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ns, name)): ApiPath<(String, String)>,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    let (view, shown) = request_for(&state, &actor, &ns, Kind::Switchover, &name).await?;
+    let scope = match &shown {
+        Some(ShownScope::Switchover { scope, .. }) => Some(switchover_scope_view(scope)),
+        _ => None,
+    };
+    Ok(json(
+        StatusCode::OK,
+        &SwitchoverApprovalRequestResponse {
+            request_id,
+            item: SwitchoverApprovalRequestView {
+                namespace: view.namespace,
+                switchover: view.restore,
+                switchover_uid: view.restore_uid,
+                approval_name: view.approval_name,
+                confirmation_name: view.confirmation_name,
+                policy: view.policy,
+                policy_digest: view.policy_digest,
+                state: view.state,
+                state_sentence: view.state_sentence,
+                requester: view.requester,
+                plan_hash: view.plan_hash,
+                scope_complete: view.scope_complete && scope.is_some(),
+                scope_incomplete: view.scope_incomplete,
+                scope_sentence: view.scope_sentence,
+                scope,
+                ticket: view.ticket,
+                issued_at: view.issued_at,
+                expires_at: view.expires_at,
+                confirmation_sha256: view.confirmation_sha256,
+                approver: view.approver,
+                approved_at: view.approved_at,
+                approve: view.approve,
+            },
         },
     ))
 }
@@ -651,7 +769,6 @@ fn refused(actor: &Actor, code: &'static str, problem: ProblemCode, detail: Stri
 /// console's, or not this Restore's), `not_found`, `state_conflict` (expired;
 /// changed since it was shown; already approved by someone else),
 /// `validation_failed`.
-#[allow(clippy::too_many_lines)]
 pub async fn approve(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
@@ -660,8 +777,62 @@ pub async fn approve(
     uri: Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
+    approve_for(
+        &state,
+        &actor,
+        request_id,
+        &ns,
+        Kind::Restore,
+        &name,
+        &uri,
+        body,
+    )
+    .await
+}
+
+/// `POST .../switchovers/{name}/console-approval` (PROD-04.2) — the second
+/// person's click on a switchover's request: the restore click's every step,
+/// by the same function, over the switchover's scope.
+///
+/// # Errors
+///
+/// As [`approve`].
+pub async fn switchover_approve(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ns, name)): ApiPath<(String, String)>,
+    uri: Uri,
+    body: Body,
+) -> Result<Response, ApiError> {
+    approve_for(
+        &state,
+        &actor,
+        request_id,
+        &ns,
+        Kind::Switchover,
+        &name,
+        &uri,
+        body,
+    )
+    .await
+}
+
+/// The click, for either kind (see the module documentation for the order
+/// and its reasons).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn approve_for(
+    state: &AppState,
+    actor: &Actor,
+    request_id: String,
+    ns: &str,
+    kind: Kind,
+    name: &str,
+    uri: &Uri,
+    body: Body,
+) -> Result<Response, ApiError> {
     // ---- 1. the Approver role ---------------------------------------------
-    authorize(&state, &actor, &ns, Action::SubmitApproval)?;
+    authorize(state, actor, ns, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: ConsoleApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
     let well_formed = request
@@ -682,13 +853,13 @@ pub async fn approve(
         )]));
     }
     actor.audit.note("approverPrincipal", &actor.id());
-    note_principal(&actor, "approver", &actor.issuer, &actor.subject);
+    note_principal(actor, "approver", &actor.issuer, &actor.subject);
     // ---- 2. the console's mode, and the namespace's ------------------------
     if !ApprovalRoute::SecondPersonInConsole.console_may_approve(state.console_kind())
         || policy::fold_issuer(&actor.issuer) == policy::LOCAL_ADMIN_ISSUER
     {
         return Err(refused(
-            &actor,
+            actor,
             "local_admin_cannot_approve",
             ProblemCode::PolicyMismatch,
             "This is the in-cluster administrator console, whose one identity cannot be two \
@@ -696,29 +867,30 @@ pub async fn approve(
                 .to_string(),
         ));
     }
-    let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
-    let bound = console_policy(&state, &actor, &ns).await?;
+    let subject = Subject::fetch(state, actor, ns, kind, name).await?;
+    let bound = console_policy(state, actor, ns).await?;
     // ---- 3 / 4. the console's own signature, then the binding --------------
-    let verified = match load_request(&state, &ns, &restore, &bound).await? {
+    let verified = match load_request(state, &subject, &bound).await? {
         Loaded::Pending(verified) => verified,
         Loaded::Expired(verified) => {
             actor
                 .audit
                 .note("requester", &verified.document.requester.principal_id());
             note_principal(
-                &actor,
+                actor,
                 "requester",
                 &verified.document.requester.issuer,
                 &verified.document.requester.subject,
             );
             return Err(refused(
-                &actor,
+                actor,
                 "request_expired",
                 ProblemCode::StateConflict,
                 format!(
                     "The request expired at {}; an expired request authorises nothing. Submit \
-                     the Restore again.",
-                    verified.document.expires_at.to_rfc3339()
+                     the {} again.",
+                    verified.document.expires_at.to_rfc3339(),
+                    subject.title()
                 ),
             ));
         }
@@ -728,7 +900,7 @@ pub async fn approve(
             } else {
                 ProblemCode::PolicyMismatch
             };
-            return Err(refused(&actor, code, problem, sentence));
+            return Err(refused(actor, code, problem, sentence));
         }
     };
     // FROM HERE ON, EVERY FACT ABOUT THE REQUEST IS `doc`: the bytes this
@@ -737,7 +909,7 @@ pub async fn approve(
     let requester = doc.requester.principal_id();
     actor.audit.note("requester", &requester);
     note_principal(
-        &actor,
+        actor,
         "requester",
         &doc.requester.issuer,
         &doc.requester.subject,
@@ -747,46 +919,46 @@ pub async fn approve(
     // ---- 5. what was shown is what is approved -----------------------------
     if request.confirmation_sha256 != verified.sha256 {
         return Err(refused(
-            &actor,
+            actor,
             "request_changed",
             ProblemCode::StateConflict,
-            "The request stored for this Restore is not the one you were shown (its signed \
-             bytes hash to another value). Open the request again and review it before \
-             approving. Nothing was approved."
-                .to_string(),
+            format!(
+                "The request stored for this {} is not the one you were shown (its signed bytes \
+                 hash to another value). Open the request again and review it before approving. \
+                 Nothing was approved.",
+                subject.title()
+            ),
         ));
     }
     // ---- 5b. what was shown was the whole of it -----------------------------
     // RE-DERIVED HERE, from the same verified bytes, and never taken from a
     // view: a page with a bug, an older page or a direct call with the right
     // hash cannot approve a request the console could not show in full.
-    let (scope, topics_in_plan) = match scope_of(doc, &restore.spec.plan_bytes) {
+    let shown = match subject.scope(doc) {
         Ok(found) => found,
         Err(incomplete) => {
             actor
                 .audit
                 .note("scope", &format!("incomplete:{}", incomplete.code()));
             return Err(refused(
-                &actor,
+                actor,
                 "scope_incomplete",
                 ProblemCode::StateConflict,
-                format!("{incomplete}. Nothing was approved."),
+                format!(
+                    "{}. Nothing was approved.",
+                    incomplete.sentence_for(subject.scope_of())
+                ),
             ));
         }
     };
     actor.audit.note("scope", "complete");
-    actor
-        .audit
-        .note("scopeTopicsShown", &scope.topics.len().to_string());
-    actor
-        .audit
-        .note("scopeTopicsInPlan", &topics_in_plan.to_string());
+    shown.audit(actor);
     // ---- 6. requester is not approver --------------------------------------
-    let approver = approver_of(&actor);
+    let approver = approver_of(actor);
     if let Err(refusal) = policy::console_separation(&doc.requester, &approver) {
         actor.audit.note("separation", "refused");
         return Err(refused(
-            &actor,
+            actor,
             "self_approval_forbidden",
             ProblemCode::Forbidden,
             format!(
@@ -799,7 +971,7 @@ pub async fn approve(
     // ---- 7. the approval: the verified request plus who and when -----------
     let now = state.now();
     let approved = approval::approved_document(doc, approver, now);
-    let expected = expected_subject(&ns, &restore);
+    let expected = subject.expected();
     // THE READERS' OWN RULE, BEFORE ANYTHING IS SIGNED. The controller and the
     // runner will refuse a document this refuses; the console never signs one.
     if let Err(refusal) = policy::check_restore_authorization(&approved, &expected, &bound, now) {
@@ -807,13 +979,13 @@ pub async fn approve(
             // The console's clock is behind the one that stamped the request
             // (another replica), or the window closed in this instant.
             AuthorizationRefusal::WindowInvalid(_) | AuthorizationRefusal::Expired(_) => refused(
-                &actor,
+                actor,
                 "approval_outside_window",
                 ProblemCode::StateConflict,
                 format!("{refusal}. Try again; nothing was approved."),
             ),
             other => refused(
-                &actor,
+                actor,
                 "approval_not_valid",
                 ProblemCode::InternalError,
                 format!("The approval this console built would not verify ({other}); it was not signed."),
@@ -835,11 +1007,11 @@ pub async fn approve(
     let sidecar = key
         .sign(&bytes)
         .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?;
-    let approval_name = restore.spec.approval_ref_name().to_string();
+    let approval_name = subject.approval_name.clone();
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(approval_name.clone()),
-            namespace: Some(ns.clone()),
+            namespace: Some(ns.to_string()),
             // FOR A HUMAN READING THE OBJECT, NEVER FOR A DECISION: every
             // reader takes these from the signed bytes.
             annotations: Some(
@@ -862,8 +1034,8 @@ pub async fn approve(
         },
         spec: ApprovalSpec {
             subject_ref: SubjectRef {
-                kind: SubjectKind::Restore,
-                name: restore.name_any(),
+                kind: subject.crd_kind(),
+                name: subject.name.clone(),
             },
             plan_hash: approved.plan_hash.clone(),
             approval_bytes: String::from_utf8(bytes).map_err(|_| {
@@ -882,12 +1054,12 @@ pub async fn approve(
         status: None,
     };
     // ---- 8. create-only ----------------------------------------------------
-    let (stored, replayed) = match state.kube().create(&ns, &object).await {
+    let (stored, replayed) = match state.kube().create(ns, &object).await {
         Ok(created) => (created, false),
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(&ns, &approval_name)
+                .get::<Approval>(ns, &approval_name)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             // A REPLAY IS THE SAME APPROVER'S APPROVAL OF THE SAME REQUEST,
@@ -910,13 +1082,14 @@ pub async fn approve(
             });
             if !same {
                 return Err(refused(
-                    &actor,
+                    actor,
                     "already_approved",
                     ProblemCode::StateConflict,
                     format!(
-                        "An Approval named {approval_name} already exists for this Restore and \
+                        "An Approval named {approval_name} already exists for this {} and \
                          is not your approval of this request; it is immutable and never \
-                         replaced."
+                         replaced.",
+                        subject.title()
                     ),
                 ));
             }

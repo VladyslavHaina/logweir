@@ -1488,19 +1488,18 @@ fn ts_setup(row: &mut Row, tag: &str, layout: &Layout) -> (String, String, Vec<R
     (topic, backup_id, source, archive)
 }
 
-/// **The floor.** Every restore's window starts at the minimum of each
-/// segment's FIRST record timestamp (`BackupSetFacts::
-/// earliest_covered_timestamp_ms`), and the engine filters every record by its
-/// own timestamp. A record older than every segment's first record is below
-/// the floor.
+/// **The floor.** The engine selects segments by their first and last
+/// record timestamps and filters every record by its own. p0's one segment is
+/// `[+2000, +1000, +3000, +4000]`: its record `+1000` is older than every
+/// segment's first record.
 ///
-/// Contract, both measured here: capture keeps it; replay drops it from a full
-/// restore AND from a point-in-time restore. Logweir's verdict differs: the
-/// full restore's segment is wholly inside the window, so the count bound
-/// counts it whole and the drill FAILS; at a point the segment straddles, the
-/// bound counts it only as an upper bound (`logweir-core engine.rs:205-210`)
-/// and the record lies below the sample window (`logweir-engine-oso
-/// engine.rs:511-513`), so the drill PASSES (review M1).
+/// Contract: capture keeps it. Before PROD-01.1b the window started at the
+/// minimum FIRST-record timestamp (`+2000`), so replay dropped the record from
+/// a full restore (signed `fail-integrity`) and from a point-in-time restore
+/// at `+3500` (signed `pass`, review M1). Since PROD-01.1b the runner reads
+/// each record's own timestamp before it writes anything and the window
+/// starts at the oldest record: both restores are exact and pass, under both
+/// coverages. The negative control is this row as it stood before (§2.2).
 #[test]
 fn non_monotonic_create_time_below_the_window_floor() {
     let mut row = Row::new("ts-floor");
@@ -1515,7 +1514,7 @@ fn non_monotonic_create_time_below_the_window_floor() {
     let rep = replay(&archive, |_| true, &r.observed);
     let e2e = end_to_end(&source, &source, |_| true, &r.observed);
     // The same archive at a point p0's segment straddles, with the sample
-    // window starting at the floor.
+    // window starting at the old floor.
     let pit = T + 3500;
     let rp = restore(
         &mut row,
@@ -1530,7 +1529,7 @@ fn non_monotonic_create_time_below_the_window_floor() {
     let e2e_pit = end_to_end(&source, &source, in_window, &rp.observed);
     // PROD-08.1 (acceptance row 08-3): the same two restores with complete
     // coverage, whose expected output has no lower bound under an archive
-    // floor — so the record below the floor is expected, and missing.
+    // floor — so the record below the old floor is expected.
     let rc = restore_complete(&mut row, "cfull", &backup_id, &topic, None, (T, T + 10_000));
     let rcp = restore_complete(
         &mut row,
@@ -1555,54 +1554,66 @@ fn non_monotonic_create_time_below_the_window_floor() {
         ],
         &cap,
         json!({"layout": "p0 [T+2000, T+1000, T+3000, T+4000]; p1 [T+2000 x3, T+2500]; p2 [T+2100..T+2400]",
-               "floor_expected": T + 2000, "point_in_time": pit}),
+               "floor_expected": T + 1000, "point_in_time": pit}),
     );
     if !contract_applies("ts-floor") {
         return;
     }
-    let lost = with_class("missing", &[(0, 1)]);
-    assert_eq!(keys(&cap), BTreeSet::new(), "capture: {:#?}", render(&cap));
-    for (what, rep, e2e) in [("full", &rep, &e2e), ("pit", &rep_pit, &e2e_pit)] {
-        assert_eq!(keys(rep), lost, "{what} replay: {:#?}", render(rep));
-        assert_eq!(keys(e2e), lost, "{what} end to end: {:#?}", render(e2e));
+    let exact = BTreeSet::new();
+    assert_eq!(keys(&cap), exact, "capture: {:#?}", render(&cap));
+    // PROD-01.1b (acceptance): all twelve in full, all eleven at the point,
+    // p0@1 included, and both pass.
+    for (what, r, rep, e2e, n) in [
+        ("full", &r, &rep, &e2e, 12),
+        ("pit", &rp, &rep_pit, &e2e_pit, 11),
+    ] {
+        assert_eq!(keys(rep), exact, "{what} replay: {:#?}", render(rep));
+        assert_eq!(keys(e2e), exact, "{what} end to end: {:#?}", render(e2e));
+        assert_eq!(r.observed.len(), n, "{what}");
+        assert!(
+            r.observed
+                .iter()
+                .any(|x| (x.partition, x.timestamp) == (0, T + 1000)),
+            "{what}: p0@1 restored"
+        );
+        assert_verdict(&format!("ts-floor {what}"), r, 0, "pass");
     }
-    assert_verdict("ts-floor full", &r, 2, "fail-integrity");
-    assert_verdict("ts-floor pit", &rp, 0, "pass");
-    // PROD-08.1, 08-3: complete coverage reports the record below the floor
-    // MISSING in both restores — at the point too, where the sampled drill
-    // above signs `pass` — until PROD-01.1b moves the floor.
-    for (what, c) in [("complete full", &rc), ("complete pit", &rcp)] {
-        assert_verdict(&format!("ts-floor {what}"), c, 2, "fail-integrity");
+    for (what, c, n) in [("complete full", &rc, 12), ("complete pit", &rcp, 11)] {
+        assert_verdict(&format!("ts-floor {what}"), c, 0, "pass");
         let b = complete_block(c);
         assert_eq!(b["covered"], true, "{what}: {b}");
-        assert_eq!(b["replay"]["missing"], 1, "{what}: {b}");
-        assert!(
-            complete_findings(c).contains("p0: source offset 1 is missing from the target"),
-            "{what}: {}",
-            complete_findings(c)
+        assert_eq!(
+            (&b["replay"]["expected"], &b["replay"]["missing"]),
+            (&json!(n), &json!(0)),
+            "{what}: {b}"
         );
     }
     mutants_are_caught(
         "ts-floor",
         |o| keys(&end_to_end(&source, &source, |_| true, o)),
         &r.observed,
-        &lost,
+        &exact,
     );
     mutants_are_caught(
         "ts-floor pit",
         |o| keys(&end_to_end(&source, &source, in_window, o)),
         &rp.observed,
-        &lost,
+        &exact,
     );
 }
 
-/// **The point-in-time end.** A segment whose FIRST record is after the
-/// recovery point is skipped whole, although it holds a record at or before
-/// it. Equal timestamps at the point itself are restored (inclusive end).
+/// **The point-in-time end.** p0's second segment `[+9000, +2500, +9100,
+/// +9200]` starts after the recovery point `+5000` and holds `+2500`, out of
+/// timestamp order. The engine selects segments by first and last record, so
+/// it skips the segment and the record with it. Equal timestamps at the point
+/// itself are restored (inclusive end).
 ///
-/// Contract: capture keeps the record; replay omits it; the manifest's count
-/// bound excludes the skipped segment too, so the omission is invisible to
-/// Logweir's verification.
+/// Contract: capture keeps the record. Before PROD-01.1b replay omitted it and
+/// the drill signed `pass` (16/16; complete coverage failed it). Since
+/// PROD-01.1b the restore is REFUSED before any write, exit 3,
+/// `PointInTimeSelectionIncomplete`, naming the segment and the point that
+/// reads it, under both coverages; at that point (`+9000`) the same archive
+/// restores exactly and passes (the control).
 #[test]
 fn non_monotonic_create_time_skipped_at_the_point_in_time() {
     let mut row = Row::new("ts-pit");
@@ -1621,6 +1632,19 @@ fn non_monotonic_create_time_skipped_at_the_point_in_time() {
     // PROD-08.1 (acceptance row 08-1): the same restore, complete coverage.
     let rc = restore_complete(&mut row, "cpit", &backup_id, &topic, Some(pit), (T, pit));
     let rep_c = replay(&archive, in_window, &rc.observed);
+    // The control: the point the refusal names, at the segment's first record.
+    let later = T + 9000;
+    let in_later = |x: &Rec| x.timestamp <= later;
+    let rl = restore(
+        &mut row,
+        "later",
+        &backup_id,
+        &topic,
+        Some(later),
+        (T, later),
+    );
+    let rep_l = replay(&archive, in_later, &rl.observed);
+    let e2e_l = end_to_end(&source, &source, in_later, &rl.observed);
     record_outcome(
         "ts-pit",
         &source,
@@ -1629,49 +1653,77 @@ fn non_monotonic_create_time_skipped_at_the_point_in_time() {
         &[
             ("pit", &r, &rep[..], &e2e[..]),
             ("complete pit", &rc, &rep_c[..], &[][..]),
+            ("later", &rl, &rep_l[..], &e2e_l[..]),
         ],
         &cap,
-        json!({"point_in_time": pit,
+        json!({"point_in_time": pit, "control_point": later,
                "layout": "p0 [T+2000..T+2300 | T+9000, T+2500, T+9100, T+9200]; p1 [T+2000, T+5000 x3]; p2 [T+2000..T+2300 | T+2400, T+4000, T+4500, T+5000]"}),
     );
     if !contract_applies("ts-pit") {
         return;
     }
-    let lost = with_class("missing", &[(0, 5)]);
-    assert_verdict("ts-pit", &r, 0, "pass");
-    // PROD-08.1, 08-1: the expected output, from each record's own timestamp,
-    // holds p0@5; the engine skipped its segment; complete coverage FAILS
-    // naming it, where the sampled drill above signs `pass`.
-    assert_verdict("ts-pit complete", &rc, 2, "fail-integrity");
-    let b = complete_block(&rc);
+    assert_eq!(keys(&cap), BTreeSet::new(), "capture: {:#?}", render(&cap));
+    // PROD-01.1b (acceptance): refused before any write, naming the segment.
+    let skipped = archive
+        .segments
+        .iter()
+        .find(|g| g.partition == 0 && g.start_timestamp == T + 9000)
+        .expect("p0's second segment");
+    for (what, refused) in [("sampled", &r), ("complete", &rc)] {
+        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
+        assert_eq!(
+            refused.verdict["refusal_reason"], "refusal-reason=PointInTimeSelectionIncomplete",
+            "{what}: {}",
+            refused.verdict
+        );
+        let tail = refused.verdict["stderr_tail"].to_string();
+        assert!(
+            tail.contains(&skipped.key)
+                && tail.contains(&format!(
+                    "partition 0 (first record epoch-ms {}, last epoch-ms {}) holds 1",
+                    T + 9000,
+                    T + 9200
+                ))
+                && tail.contains(&format!(
+                    "a recovery point at or after epoch-ms {}",
+                    T + 9000
+                )),
+            "{what}: {tail}"
+        );
+        assert!(!topic_exists(&refused.target), "{what}: {}", refused.target);
+        assert!(refused.observed.is_empty(), "{what}");
+    }
+    let exact = BTreeSet::new();
+    assert_verdict("ts-pit later", &rl, 0, "pass");
+    assert_eq!(keys(&rep_l), exact, "later replay: {:#?}", render(&rep_l));
     assert_eq!(
-        (&b["replay"]["expected"], &b["replay"]["missing"]),
-        (&json!(17), &json!(1)),
-        "{b}"
+        keys(&e2e_l),
+        exact,
+        "later end to end: {:#?}",
+        render(&e2e_l)
     );
     assert!(
-        complete_findings(&rc).contains("p0: source offset 5 is missing from the target"),
-        "{}",
-        complete_findings(&rc)
+        rl.observed
+            .iter()
+            .any(|x| (x.partition, x.timestamp) == (0, T + 2500)),
+        "p0@5 restored at the later point"
     );
-    assert_eq!(keys(&cap), BTreeSet::new(), "capture: {:#?}", render(&cap));
-    assert_eq!(keys(&rep), lost, "replay: {:#?}", render(&rep));
-    assert_eq!(keys(&e2e), lost, "end to end: {:#?}", render(&e2e));
     mutants_are_caught(
-        "ts-pit",
-        |o| keys(&end_to_end(&source, &source, in_window, o)),
-        &r.observed,
-        &lost,
+        "ts-pit later",
+        |o| keys(&end_to_end(&source, &source, in_later, o)),
+        &rl.observed,
+        &exact,
     );
 }
 
 /// **The false failure.** A segment whose first and last records are inside
 /// the window but which holds a record after the recovery point: the engine
-/// restores exactly the right records, and the manifest's count bound, which
-/// counts the segment whole, says a record is missing.
+/// restores exactly the right records.
 ///
-/// Contract: capture, replay and end to end are exact; Logweir's verdict is
-/// the only thing wrong.
+/// Contract: capture, replay and end to end are exact. Before PROD-01.1b the
+/// manifest's count bound counted the segment whole and the drill signed
+/// `fail-integrity`; since PROD-01.1b the bound reads the segment's oldest and
+/// newest record and the drill passes, as complete coverage does.
 #[test]
 fn non_monotonic_create_time_inside_a_wholly_inside_segment() {
     let mut row = Row::new("ts-bound");
@@ -1707,9 +1759,8 @@ fn non_monotonic_create_time_inside_a_wholly_inside_segment() {
         return;
     }
     let exact = BTreeSet::new();
-    assert_verdict("ts-bound", &r, 2, "fail-integrity");
-    // PROD-08.1, 08-2: the exact model does not fail the correct restore the
-    // first/last count bound fails above.
+    // PROD-01.1b (acceptance): the correct restore passes.
+    assert_verdict("ts-bound", &r, 0, "pass");
     assert_verdict("ts-bound complete", &rc, 0, "pass");
     let b = complete_block(&rc);
     assert_eq!(b["covered"], true, "{b}");

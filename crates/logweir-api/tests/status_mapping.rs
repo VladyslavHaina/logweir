@@ -1073,6 +1073,9 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
             "teardown",
             "trust",
             "verificationScope",
+            // PROD-11.1a: a TTL clone's lifetime and cleanup. Its cleanup
+            // Job's name stays out (`status.clone.jobRef` is not projected).
+            "clone",
         ]),
         "the operation contract's field set changed. Adding one is a MINOR change to \
          schemas/logweir-api-v1.openapi.json and needs `just schema`; adding an \

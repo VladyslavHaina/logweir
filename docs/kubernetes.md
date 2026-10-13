@@ -337,6 +337,31 @@ run may claim, for example
 `{"mode":"SelectedTopics","coverage":"NamedTopics","resolvedTopicCount":2,"resolvedTopicBytes":14}`.
 Only `coverage: AllUserTopicsAttested` may be shown as "all topics".
 
+### Strimzi owners of a backup's topics
+
+A `KafkaCluster` whose topics a Strimzi cluster manages names it:
+`spec.strimzi: {namespace: kafka, cluster: my-cluster}`. A `Backup` of it then
+lists the `KafkaTopic`s of that namespace labelled
+`strimzi.io/cluster=my-cluster` (unmanaged ones excluded), freezes those naming
+the run's topics into its plan, and the receipt records each topic's owner and
+`owner_detection: [kafkaTopicResources]`, so a restore exports desired state
+for it instead of changing it.
+
+- The read is opt-in and per namespace: chart values
+  `strimzi.readKafkaTopics: true` and `strimzi.namespaces: [kafka]` grant `get`
+  and `list` on `kafkatopics` through a Role in each listed namespace, and
+  nothing else.
+- A namespace the chart does not list, a refused list, or no `KafkaTopic`
+  resource served fails the backup closed, `OwnerDetectionFailed`, before any
+  Job: never "looked, no owner". Remove `spec.strimzi` to back up without it.
+- A frozen run never lists again. A controller older than this field refuses a
+  plan that carries the list (`PlanConfigMapConflict`); roll back only after
+  such runs finish.
+- The exported `KafkaTopic` keeps the SOURCE owner's namespace and carries no
+  `strimzi.io/cluster` label: Logweir does not know which `Kafka` resource
+  manages the target. Set the target's namespace and label before applying
+  it; as exported, no operator reconciles it.
+
 ### Dynamic selection
 
 `topics: []` with `spec.allUserTopics` means every user topic the run's principal
@@ -1060,8 +1085,10 @@ sample:
   plan's `original_name.owners` (an empty list is the approver's signed
   statement), in `--kafka-topic-resources <file>` (`kubectl get kafkatopics -A -o
   yaml`; CLI only), and in the owners the bound point's receipt recorded; it
-  refuses when it looked in neither of the first two. The controller does not
-  list `KafkaTopic`s. `owner_path: true` restores anyway: pause the owner first
+  refuses when it looked in neither of the first two. The controller lists
+  `KafkaTopic`s for a `Backup` only
+  ([Strimzi owners](#strimzi-owners-of-a-backups-topics)), never for a
+  restore. `owner_path: true` restores anyway: pause the owner first
   (`strimzi.io/pause-reconciliation: "true"`, suspend GitOps sync) and make its
   desired state keep the restored `retention.ms`.
 - **Stop every producer of a restored name first.** A producer still writing is
@@ -1083,13 +1110,48 @@ sample:
 - A `Preflight` accepts the identity mapping it asked for but does not evaluate
   the cluster and owner conditions; phase 0 does.
 
+### The target topics' configuration
+
+A plan with `target.topic_configuration`
+([the plan field](formats/drill-spec.md#targettopic_configuration-prod-052))
+creates each target topic from the bound point's configuration model and,
+with `transition: afterVerification`, applies the source's compaction,
+retention and timestamp settings in phase 9 after a passing verdict. The
+`Restore` itself declares nothing new: the block is in `planBytes`, and the
+approval scope shows the choice and every owner it states.
+
+- **Preview first.** A `Preflight` `operation: Restore` writes one details line
+  per topic (`GET …/preflights/{id}/details`, `check: target.topicConfiguration`):
+  the replication factor and why, the during-restore, at-creation,
+  after-verification and never-applied sets, each inherited value against the
+  target's own default, the owner route, the target's `validate_only` verdicts,
+  and what the transition's retention deletes. Or the refusal phase 0 would
+  make.
+- **`status.topicConfiguration`** carries each topic's replication factor with
+  its reason, its overrides before (Logweir's, with the at-creation set) and
+  after (the whole desired set), and the transition's outcome: `applied`,
+  `partial` or `notRun: <reason>`; `applied`, `failed` (each with its whole
+  desired set: the remaining step, which you apply; Logweir never retries),
+  `exported` and `desiredStateKey`. It is read off the runner's log; the signed
+  scorecard's `target.topic_configuration` and the phase-9 attestation
+  (`logweir/drills/<run_id>.teardown.json`) are the evidence.
+- **The restore principal** needs `DescribeConfigs` and `AlterConfigs` on the
+  restored topics, and `CreateTopics` with `validate_only`. A denied
+  `AlterConfigs` is a `failed` topic, found by reading the overrides back.
+- **Owned topics** (a Strimzi `KafkaTopic` recorded at backup, or `owners` in
+  the plan) are created with Logweir's settings only and never altered; apply
+  the exported `KafkaTopic` YAML (`desiredStateKey`) with your owner.
+
 ### Exit 3 and the evidence keys
 
 `TargetTopicConfigRefused`, `CredentialNotRenderable`,
 `PointInTimeByProducerTime` (a point in time over a `LogAppendTime` topic without
 `restore.time_basis: producerTime`, [the plan field](formats/drill-spec.md#restoretime_basis-fx-8))
-and `TransactionMarkersInArchive` (without `restore.allow_transaction_markers:
-true`) are exit 3 told apart only by the `refusal-reason=` line. The point-binding
+`TransactionMarkersInArchive` (without `restore.allow_transaction_markers:
+true`) and `PointInTimeSelectionIncomplete` (a window that selects records held
+out of timestamp order in a segment the engine skips,
+[the limitation](stability.md#out-of-order-timestamps-inside-a-segment))
+are exit 3 told apart only by the `refusal-reason=` line. The point-binding
 refusals (`PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch`)
 read `refusal-reason=GuardRefused`; their name opens the message. A log with no
 such line is `GuardRefusedUnknownReason`. See
@@ -1147,6 +1209,60 @@ kubectl --context docker-desktop get restore r1 \
 
 `Valid` alone says the document is authentic; `pass` alone says the drill passed
 by a document nobody verified. The `SIGNED` and `OUTCOME` columns show both.
+
+### Safe clones: a scratch restore kept for a declared time
+
+A clone (PROD-11.1a) is a `scratch` restore whose plan says how long to keep
+what it restored:
+
+```yaml
+target:
+  mode: scratch
+  topic_mapping_prefix: "clone-"
+  teardown: {ttl_seconds: 86400}   # 300 (five minutes) to 2592000 (thirty days)
+```
+
+Scratch mode's checks hold unchanged: the target cluster is in the
+`TrustPolicy`'s `allowedTargetClusterIds`, it is not the source, and the marker
+topic exists. The map form outside scratch mode is refused
+`CloneTtlNeedsScratch`, out of bounds `CloneTtlOutOfRange`, both before any Job.
+A runner from before this feature cannot parse the map form and restores
+nothing. Restored records always keep `x-original-offset` and
+`x-original-timestamp`; the approval scope shows `teardownAfterSeconds` and
+`lineageHeaders: kept`.
+
+The `Restore` carries the finalizer `logweir.dev/clone-cleanup` from admission,
+before its run Job exists. `status.clone` says where the clone is:
+
+| `phase` | Meaning |
+|---|---|
+| `Active` | The run passed; its topics are kept until `expiresAt` (the success the controller recorded plus `ttlSeconds`). The cleanup Job exists, suspended. |
+| `Removing` | At `expiresAt`, or at once when the `Restore` is deleted: the cleanup Job (`logweir-clone-cleanup-<uid>-<attempt>`) runs `logweir restore cleanup`. |
+| `Removed` | It deleted what the run's signed scorecard records (`target.creation`), on the cluster the scorecard records, each topic only while its ID is the recorded one. `status.teardown` lists `deleted`, the topics it left (`failed`, with why) and the signed attestation (`logweir/drills/<run_id>.cleanup.json`). The finalizer is released. |
+| `NotKept` | The run did not pass and the runner exited with one of its own codes (1 to 4): its phase 9, or the teardown of a run that failed after creating, removed what it created at once and named anything it left in `status.teardown.failed`; a stopped creation step deletes nothing and names what it left in `status.targetTopicsAppeared`. A run refused before any Job created nothing. The finalizer is released. |
+| `RemovalFailed` | The cleanup refused (exit 3, for example `CloneTargetClusterChanged`: the target answers with another cluster ID), failed three times five minutes apart, or the controller cannot settle the clone (a plan it cannot read, a recorded run Job gone before its outcome, a run that ended with no exit code or was killed by a signal, 137 or 143, so its teardown never ran). `status.clone.reason` says which. The finalizer stays. |
+
+A topic recreated by someone else since the run is never deleted: it is left
+`CloneTargetReplaced` in `status.teardown.failed`, and the clone still reaches
+`Removed`. One window remains: the cleanup reads each topic's ID and then
+deletes by name, because librdkafka has no delete by topic ID, so a topic
+deleted and created again under a recorded name between that read and the
+delete request would be deleted. The cleanup verifies the run's scorecard with
+the installation's current signing key (and, for a plan bound to a recovery
+point, the evidence keyring); a signing key rotated during a clone's lifetime
+makes it refuse, `RemovalFailed`, and nothing is deleted. **On `RemovalFailed`**, check the target for topics with the clone's
+prefix, delete any the run created (`status.teardown.failed` and the scorecard's
+`target.creation` name them), then remove the finalizer:
+
+```bash
+kubectl --context docker-desktop -n <ns> patch restore <name> --type=json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+The controller needs `patch` on `restores` for the finalizer (the chart grants
+it). **Rollback:** a controller from before this feature ignores the finalizer,
+so deleting a clone's `Restore` waits until the finalizer is removed by hand as
+above; delete the clone's topics first.
 
 ### The recovery catalog
 
@@ -1344,6 +1460,7 @@ kubectl --context docker-desktop get preflight -n team-a
 | `Restore` | A draft plan or an existing `Restore`, a target, the source and evidence destinations (or `legacySourceArchive`), the recovery point (`recoveryPointRef` or `catalogPointRef`, at most one) | The target, plan, archive and approval rows, and the target's capability row |
 | `DestinationAccess` | A `BackupDestination` and 1–4 roles | The `destination.*` rows for those roles, and `destination.credentialBound` over every declared `SecretKeys` grant |
 | `SourceConnection` | One `connectionRef` and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy`, `configuration.egress`. No destination credential, CA or signing key is mounted |
+| `Switchover` | `switchover.restoreRef` (name, optional UID) and at most 100 `groups` (`source`, optional `target`; none: every mapped group) | The review before a `Switchover` (*Switching consumer groups over*): `switchover.restore`, `target.resolved`, `destination.resolved`, then the Job's `switchover.evidence`, `switchover.target`, `switchover.groups`. The pod gets the restore's target credential and its evidence destination's `evidenceRead` grant; no signing key |
 
 **A `ready` verdict authorises nothing.** Every execution-time guard still runs,
 and none reads a `Preflight` (a source-scan test,
@@ -2371,13 +2488,132 @@ A partition with no committed offset is counted, never offset 0.
 - **Set only with `kubectl`.** The API's create bodies refuse
   `consumerGroups`, and the console neither sets nor shows it; a console edit
   leaves a `kubectl`-set selection alone.
-- **Nothing here resets a group.** To read positions with the source gone, see
+- **Nothing here resets a group.** A restore maps the positions; only a
+  [`Switchover`](#switching-consumer-groups-over) applies them. To read
+  positions with the source gone, see
   [the receipt format](formats/backup-receipt.md#recovering-positions-with-the-source-offline).
 - A schedule that names groups changes its `runPolicySha256`. An older
   controller ignores `consumerGroups` on a run it has not frozen yet (it records
   no positions) and refuses a run whose frozen inputs carry it
   (`PlanConfigMapConflict`): let such runs finish, or remove the field, before
   rolling back.
+
+## Switching consumer groups over
+
+A restore writes the data under new offsets; a consumer that resumes from its
+old position would skip or re-read records. Logweir translates the positions a
+backup captured and applies them, reviewed, to **stopped** groups on the
+restore's target. Nothing commits a position automatically after a restore.
+
+1. **Back up with groups** (`spec.consumerGroups`, above).
+2. **Restore with `coverage: complete`**, bound to that point. When the run
+   passes and covered every partition, phase 7 maps every captured position
+   onto the target and writes `logweir/drills/<run_id>.positions-mapping.json`
+   beside the scorecard, bound by digest in
+   `integrity.verification.positions_mapping` (scorecard 1.12.0, or 2.4.0 for
+   a partition subset). Each entry is `exact`, `approximate` (the restore's own
+   selection excluded records the group had not read; `skipped` counts them) or
+   `unavailable` with a reason (`ArchiveGap`, `PartitionNotRestored`,
+   `TransactionalArchive`, `BeforeLogStart`, `NotCaptured: …`, …). A sampled
+   or failing restore writes no mapping.
+3. **Review** (optional, advisory). A `Preflight` with `operation: Switchover`
+   (`POST …/preflights` `{"operation": "switchover", "switchover":
+   {"restoreName": R, "restoreUid": U, "groups": [{"source": "app"}]}}`) reads
+   what the switchover would, and changes nothing: `switchover.restore` (the
+   `Restore` exists with that UID, is not scratch, `Succeeded` with a `Valid`
+   verdict, writes evidence to a saved destination, and the namespace has
+   evidence keys), `switchover.evidence` (the signed scorecard and the mapping
+   it binds verify, as the run's step 3), `switchover.target` (the restore's
+   cluster id and topic IDs, as step 5) and `switchover.groups` (each target
+   group's type, state and members admit a commit, and its committed
+   positions are none or already the mapped ones). The details
+   (`GET …/preflights/{id}/details`) carry one line per group and restored
+   topic, every partition with its mapped offset, class and committed
+   position. A `ready` review authorises nothing; the run repeats every check.
+   An inline-archive restore is not reviewed (`ArchiveUrlUnreadable`); create
+   the `Switchover`, which checks it.
+4. **Plan.** `logweir switchover plan --scorecard S --positions-mapping M
+   --restore-name R --restore-uid U [--group src[=target]]… --out plan.yaml`
+   plans every mapped entry (unavailable ones are listed, never planned) with
+   `expected: none`. An operator may replace `expected` with the positions a
+   target group already holds (an earlier attempt's); the approver sees it and
+   the run holds the group to it.
+5. **Approve and create** a `Switchover` (operators create, approvers approve):
+
+   ```yaml
+   apiVersion: logweir.dev/v1alpha1
+   kind: Switchover
+   metadata: {name: orders-cutover}
+   spec:
+     planBytes: |          # the plan file, verbatim
+       ...
+     approvalRef: {name: orders-cutover}
+     restoreRef: {name: incident-4471, uid: 6f1c…}
+     deadlineSeconds: 900
+   ```
+
+   The `Approval` names `subjectRef: {kind: Switchover, name: orders-cutover}`;
+   `logweir drill approve --subject-kind Switchover --spec plan.yaml` mints a v1
+   document, and a namespace bound to an approval policy takes its normal mode
+   (confirm, two-person or strict). An approval for the `Restore` cannot
+   authorise it (`SubjectKindMismatch`).
+6. **Admission.** The controller refuses a plan that is not its
+   `restoreRef`'s, a `Restore` that did not succeed with a `Valid` verdict
+   (`RestoreNotSucceeded`), a scratch restore (`RestoreIsScratch`) and a second
+   switchover of the same restore while one runs (`SwitchoverInProgress`), then
+   creates one Job (`logweir switchover run`) with the restore's target
+   connection and evidence grant.
+7. **The run** verifies the approval, the scorecard's signature and plan hash,
+   a passing complete verification (`VerificationNotComplete`, naming the
+   field), the mapping's digest, every plan entry against the mapping
+   (`PlanDisagreesWithMapping`), the target's cluster id
+   (`TargetClusterChanged`) and each restored topic's ID against the one
+   recorded at creation (`TargetGenerationChanged`, `TargetIdentityUnknown`).
+   Then, per group, independently: a group with members is `GroupActive`; a
+   share or streams group `TargetGroupTypeUnsupported`; one the principal
+   cannot see `TargetNotVisible`; an offset outside the partition now
+   `BelowTargetLogStart`/`AboveTargetEnd` (`TargetMarksUnreadable` when a
+   partition's marks could not be read); the committed positions are read
+   (the priors) and compared — `applied` when they are what the plan expects,
+   `alreadyApplied` when they are the plan's, `TargetPositionsChanged`
+   otherwise — and the commit is Logweir's own non-member commit, which the
+   broker refuses while the group has a member. Each group is read back.
+8. **The result.** `status.phase` is `Succeeded`, `PartiallyApplied`, `Failed`
+   or `Refused`; `status.groups[]` one outcome per group;
+   `status.evidence.recordKey` the signed record
+   `logweir/switchovers/<run_id>.record.json` (+ `.sig`; verify it with
+   `logweir drill verify --payload-type switchover-record`, signature only).
+
+**Retry and rollback.** The same plan in a new `Switchover` (and a new
+approval) is safe: applied groups read `alreadyApplied`, refused ones are tried
+again, moved ones are `TargetPositionsChanged`. `logweir switchover
+rollback-plan --record R` builds `offsets := prior, expected := applied`; a
+group whose consumers ran since is refused, naming how many records they read,
+and a prior that was absent cannot be restored through a commit — it is listed
+with the `kafka-consumer-groups.sh --delete-offsets` command to run.
+
+**A group left `failed: CommitFailed` with some partitions applied** (the
+record's `applied` per partition says which) can be neither re-run (its
+positions are no longer all what the plan expects: `TargetPositionsChanged`)
+nor rolled back (`rollback-plan` reverses `applied` groups only). Both refuse,
+so nothing is overwritten. The way out, with the group stopped, is the
+broker's own tool: remove the positions the record shows applied
+(`kafka-consumer-groups.sh --bootstrap-server <b> --group <g> --topic <t>:<p>
+--delete-offsets`, one per applied partition), check with `--describe` that
+the group holds no position on the restored topic, and create a new
+`Switchover` with the same plan. (Setting the rest by hand with
+`--reset-offsets --to-offset <planned> --execute` also works, and no signed
+record then shows that commit.)
+
+**Permissions.** The runner's target principal needs Describe on the cluster
+(a complete group listing), Describe and Read on each target group, and
+Describe on the restored topics. The controller needs `get, list, watch` on
+`switchovers` and `patch` on `switchovers/status` (the chart grants them).
+
+**Upgrade and rollback.** An older controller ignores `Switchover` objects
+(nothing is applied); a Helm rollback leaves the CRD and its objects inert. An
+older verifier ignores `positions_mapping` and refuses the switchover record's
+payload type.
 
 ## Protection health
 
@@ -2642,27 +2878,29 @@ the runner exited 3 (guard-refused); the code was read from status.containerStat
 `status.progress.message` carries the same text. `status.exitReason` stays the
 state off the `refusal-reason=` line (or `GuardRefusedUnknownReason`).
 
-- The reason is shown only from a `refusal-detail=` line that carries this Job's
-  line token: a fresh 160-bit value the controller passes as `--line-token
-  <hex>`, which no plan can contain. The token is never shown on any status,
-  event, API answer or log line of the controller. Its code must be on the
-  kind's closed list ([reference.md](reference.md#refusal-detail)).
+- The reason is shown only from a `refusal-detail=` line the runner sealed
+  with this Job's line token: a fresh 160-bit value the controller passes as
+  `--runner-line-token <hex>`, which no plan can contain. Every line the
+  controller reads off a runner (the evidence keys, the states, the probe's
+  two lines, the progress lines) is held to the same token
+  ([sealed lines](reference.md#sealed-lines-fx-43)). The token is never shown
+  on any status, event, API answer or log line of the controller. The code
+  must be on the kind's closed list ([reference.md](reference.md#refusal-detail)).
 - The sentence is cleaned: printable ASCII and `§ – — … →` kept, URLs lose query
   and userinfo, credential shapes become `[redacted]`, cut to 760 bytes. It is
   partly written by whoever wrote the plan; read it as a description of that
   object.
-- The controller reads the `runner` container's last 32 lines, at most 512 KiB,
-  once. When nothing is shown, the message says why: no line with the token, a
-  line that did not validate, `the pod is gone`, a refused read (`HTTP 403`), or
-  a log over 512 KiB.
+- The controller reads the `runner` container's last 256 lines, at most 4 MiB,
+  once, at every exit code. When nothing is shown, the message says why: no
+  line with the token, a line that did not validate, `the pod is gone`, a
+  refused read (`HTTP 403`), or a log over 4 MiB.
 
 #### The runner image must be at least as new as the controller
 
-The controller passes `--line-token` to every `Restore` and `Backup` Job, and
-every runner image published before this change stops while parsing its
-arguments, the images published from `main` since `v0.2.0-rc.1` included. (Since
-release-notes item 35, a runner image published before PROD-00.2 declares no
-engine and already stops at exit 1, so no tagged release loses a working run.)
+The controller passes `--runner-line-token` to every runner Job (`Restore`,
+`Backup`, the `KafkaCluster` probe, the check Jobs and the `RetentionPolicy`
+Job), and every runner image published before FX-43 (the released `v0.2.0`
+included) stops while parsing its arguments, before any work.
 
 One `helm upgrade` of the packaged chart moves `controllerImage` and
 `runnerImage` together. The mixed pair comes from two pinned tags with one
@@ -2671,16 +2909,24 @@ mirror that copies the controller first, a node holding an old `logweir:latest`
 under `IfNotPresent`), or from a `runnerImage` pinned apart.
 
 **What it looks like:** every run ends `Failed`, `exitCode: 1`,
-`exitReason: operational`, with nothing on the object naming the cause. The
-runner pod's log starts with
+`exitReason: RunnerOlderThanController`, and the message names the flag and
+the chart value; a `BackupSchedule` does not retry it. A `KafkaCluster` says
+`Reachable=Unknown`, reason `RunnerOlderThanController`, with `reachable`
+cleared. A check (a `Preflight` row, a `TopicDiscovery`, a `RecoveryCatalog`
+sync) fails `CheckContractMismatch` with `RunnerOlderThanController` in its
+message. A `RetentionPolicy` run is refused before deleting anything:
+`Enforced=False`, `lastEnforcement.refusalCode: RunnerOlderThanController`. The runner pod's log starts with
 
 ```
-error: unexpected argument '--line-token' found
+error: unexpected argument '--runner-line-token' found
 ```
 
 **What to do:** set `runnerImage` to the image from the same build as
-`controllerImage`, in one `helm upgrade`. **Rolling back: both together, or the
-controller first.** An older controller passes no token.
+`controllerImage`, in one `helm upgrade`, and create the run again. **Rolling
+back: both together, or the controller first.** An older controller passes
+`--line-token` or no token, and this runner then prints what that controller
+reads. Runs created before an upgrade are read as the controller that created
+them read them.
 
 ### A run that is stuck or failed with no exit code
 
@@ -2860,8 +3106,9 @@ back:
 - **Set every `RetentionPolicy` to `mode: Report`**, wait for `status.lease` to
   clear and enforcement Jobs to finish. An older worker records delete markers
   as deletions on a versioned bucket and refuses a plan with `co_point_ids`.
-- **Delete `SourceConnection` preflights.** An older controller cannot decode
-  them, and then reconciles no `Preflight` in any namespace:
+- **Delete `SourceConnection` and `Switchover` preflights.** An older
+  controller cannot decode them, and then reconciles no `Preflight` in any
+  namespace (repeat the query below with `"Switchover"`):
 
   ```bash
   kubectl --context docker-desktop get preflights -A \

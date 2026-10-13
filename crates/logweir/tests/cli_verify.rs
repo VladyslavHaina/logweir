@@ -11,14 +11,20 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest version (2.1.0); the writer writes 2.1.0 only for a
+            // The newest version (2.4.0: a partition-subset restore that
+            // mapped consumer positions, PROD-04.2; 1.12.0 for any other such
+            // restore). Before it, 2.3.0 for a partition-subset restore whose
+            // plan carries `target.topic_configuration` (PROD-05.2) and 1.11.0
+            // for any other restore with the plan block, 2.2.0 for a
+            // partition subset that created topics (PROD-11.1a) and 1.10.0
+            // for any other run that created topics, 2.1.0 for a
             // partition-subset restore a second person approved in the
             // console and 2.0.0 for any other partition subset, 1.9.0 for any
             // other restore approved in the console, 1.8.0 for one under the
             // original topic names, 1.7.0 for one that states a window start
             // only, 1.6.0 for every other sampled drill, and 1.4.0/1.5.0 for a
             // complete one.
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
         )),
         "{s}"
     );
@@ -888,6 +894,7 @@ fn drill_verify_prints_what_the_verdict_covered() {
         serde_json::from_slice(&std::fs::read(format!("{FIX}/scorecard.json")).unwrap()).unwrap();
     sc.format_version = logweir_core::FORMAT_VERSION.into();
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -955,6 +962,7 @@ fn a_sampled_pass_says_what_it_proves_at_its_version() {
     use logweir_core::outcome::Outcome;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -1004,6 +1012,7 @@ fn a_sampled_pass_over_a_selection_says_so() {
     use logweir_core::outcome::Outcome;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -1104,6 +1113,7 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
     use logweir_core::outcome::IntegrityResult;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
