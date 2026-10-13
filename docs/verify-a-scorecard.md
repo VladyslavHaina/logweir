@@ -458,7 +458,7 @@ allowlist. A value inherited from a broker default is never compared: a
 (measured by FX-4). The receipt's `config_coverage` records the effective value;
 comparing other effective values is PROD-05.1's.
 
-### A `newTopic` restore does not reconstruct the source's topic settings
+### A `newTopic` restore does not reconstruct the source's topic settings unless its plan asks
 
 A restore creates its topics at the plan's replication factor, with
 `retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch drill
@@ -467,6 +467,10 @@ NOT reconstructed, listed in 1.2.0's `topic_parity.not_reconstructed` and in
 `unexpected_divergence`. **A `newTopic` scorecard before 1.2.0 labels them
 `intentionally_deviated`; that label is the defect FX-3 fixed, not intent**
 ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings)).
+A plan with `target.topic_configuration` creates them from the point's model
+and applies the source's compaction and retention after a passing verdict;
+its document (1.10.0, 2.2.0) carries `target.topic_configuration`, and
+`topic_parity` still describes what phase 7 saw, before that transition.
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 

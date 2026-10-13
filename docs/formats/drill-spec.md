@@ -558,6 +558,55 @@ the original names without the conditions above. The full account, with the
 
 ---
 
+## `target.topic_configuration` (PROD-05.2)
+
+```yaml
+target:
+  topic_configuration:
+    transition: afterVerification   # or none
+    owners: []                      # the approver's statement, where the point looked for none
+    # owners: [{topic: orders, kind: strimzi, reference: kafka/orders}]
+```
+
+Optional. **Create each target topic from the bound point's configuration
+model** (receipt 1.3.0, `source.point` required) instead of the target's
+defaults, and, with `afterVerification`, apply the settings that would have
+dropped, compacted, rejected or re-stamped restored records only once the
+signed verdict is a pass. Absent: every topic is created as before, byte for
+byte.
+
+- **At creation:** the model's partition count; a replication factor of
+  `min(source, target brokers)`, with the reason; the source's other portable
+  overrides (`min.insync.replicas` capped at the factor; `removedInKafka4` keys
+  only to a 3.x target); and Logweir's own `retention.ms=-1`,
+  `retention.bytes=-1`, `cleanup.policy=delete`, `CreateTime` and unbounded
+  timestamp bounds. The target broker's own record-timestamp bound then
+  refuses nothing.
+- **After verification** (phase 9, a pass only, topics the run keeps): one
+  `AlterConfigs` per topic with its WHOLE desired set, which removes Logweir's
+  settings; only while the topic's overrides are still the ones it was created
+  with (`ConfigChangedSinceCreation`), proved by reading them back. A shorter
+  `retention.ms` than the restored records' age deletes them at the broker's
+  next retention check: the restore preflight says so.
+- **Never applied:** inherited values, the source's reassignment throttles,
+  provider keys and secrets; each is listed with the source's value.
+- **Owners:** an owned topic is created with Logweir's settings only and never
+  altered; its configuration is put as `KafkaTopic` YAML (or a neutral
+  document for an `external` owner) beside the scorecard. **`owners`** is the
+  approver's statement, by source topic, where the point's backup looked for
+  none (`owner_detection: []`); without either the plan is refused.
+- **Refused before anything is created** (exit 3, the code opens the
+  message): `TopicConfigurationNotRecorded` (no point, or a receipt before
+  1.3.0), `TopicOwnerNotChecked`, `TopicClassDisagrees` (a recorded class this
+  build's table disagrees with), `TopicConfigRefusedByTarget` (the target's
+  `CreateTopics validate_only` refused a setting, named).
+
+**Old runners.** A runner built before PROD-05.2 ignores the block, creates its
+topics as before and signs no `target.topic_configuration`, so nothing is
+claimed.
+
+---
+
 ## `notifications`
 
 **Withdrawn (release notes, item 74).** A run posts nothing to a webhook,

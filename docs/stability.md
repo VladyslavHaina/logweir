@@ -85,7 +85,7 @@ writes.
 
 | Document | Versions | Defined in |
 |---|---|---|
-| Drill scorecard | 1.0.0–1.9.0, 2.0.0, 2.1.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
+| Drill scorecard | 1.0.0–1.10.0, 2.0.0–2.2.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
 | Backup receipt | 1.0.0–1.8.0 | [formats/backup-receipt.md](formats/backup-receipt.md#versions) |
 | Consumer positions document | 1.0.0 | [formats/backup-receipt.md](formats/backup-receipt.md#two-documents-the-receipts-summary-and-the-positions-document) |
 | Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
@@ -128,6 +128,7 @@ of its format's Versions table:
 | <a id="receipt-format-180-source_watermarks-and-the-empty-capture-prod-021"></a>Receipt format 1.8.0 (PROD-02.1) | [`source_watermarks`](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180) |
 | <a id="scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151"></a>Scorecard format 1.8.0 (PROD-15.1) | [`target.original_name`](formats/drill-scorecard.md#targetoriginal_name-format-180), [the approval subject](formats/approval-documents.md#the-per-run-approval-document-v1), [restoring under the original names](kubernetes.md#restoring-under-the-original-topic-names) |
 | <a id="scorecard-190-and-210-authorization-document-220-two-person-approval-in-the-console-prod-162"></a>Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0 (PROD-16.2) | [`approval.console`](formats/drill-scorecard.md#approvalconsole-format-190-and-210), [the authorization document](formats/approval-documents.md#the-authorization-document-v2) |
+| <a id="scorecard-1100-and-220-targettopic_configuration-prod-052"></a>Scorecard 1.10.0 and 2.2.0 (PROD-05.2) | [`target.topic_configuration`](formats/drill-scorecard.md#targettopic_configuration-format-1100-and-220), [the plan field](formats/drill-spec.md#targettopic_configuration-prod-052) |
 | <a id="the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"></a>The standing rehearsal authorization | [formats/approval-documents.md](formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110) |
 | <a id="logweir-notify-delivers-exit-codes-and-its-notify-result-lines-plat-142"></a>`logweir notify deliver` (PLAT-14.2) | withdrawn in v1 (release-notes item 74): clap refuses the subcommand |
 | <a id="refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34"></a>`refusal-detail=` (FX-34), and the other runner output contracts (I8, the progress channel, `teardown-failed=`, `teardown-key=`, `logweir check run`, `logweir-retention`) | [reference.md](reference.md#runner-output-lines); the mixed-version rules [below](#mixed-versions) |
@@ -442,24 +443,38 @@ offsets logged. That is the safe direction, but a drill against a compacted
 scratch topic means nothing in v0.1: restore into a topic with
 `cleanup.policy=delete`, which is what phase 6 creates by default.
 
-### A `newTopic` restore does not reconstruct the source's topic settings
+### A `newTopic` restore reconstructs the source's topic settings only when asked
 
-A restore creates every target topic itself, in both modes: the manifest's
-partition count, the plan's `default_replication_factor` (1 when it names
-none), `retention.ms=-1`, `message.timestamp.type=CreateTime`, and the target
-broker's default for everything else, `cleanup.policy` included. For a
-`newTopic` restore the source's compaction, retention and replication factor
-are therefore **not reconstructed**, and since scorecard format 1.2.0 the
-signed scorecard names each in `topic_parity.not_reconstructed`; in a
-`newTopic` document signed before 1.2.0 the `intentionally_deviated` label means
-the same ([the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
-**Apply the source settings after the restore is verified**, never before:
-`cleanup.policy` and `retention.ms` with `kafka-configs.sh --alter` (a retention
-shorter than the restored records' age deletes them at the next retention
-check), and the replication factor with a partition reassignment. Logweir does
-neither. Only the overrides the engine captured are compared: a setting
-inherited from the broker's defaults is never named. A scratch drill is
-unaffected.
+<a id="a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings"></a>
+
+Without `target.topic_configuration` in the plan, a restore creates every
+target topic itself, in both modes, as it always did: the manifest's partition
+count, the plan's `default_replication_factor` (1 when it names none),
+`retention.ms=-1`, `message.timestamp.type=CreateTime`, and the target broker's
+default for everything else, `cleanup.policy` included. For such a `newTopic`
+restore the source's compaction, retention and replication factor are **not
+reconstructed**; since scorecard format 1.2.0 the signed scorecard names each
+in `topic_parity.not_reconstructed`, and in a `newTopic` document signed before
+1.2.0 the `intentionally_deviated` label means the same
+([the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
+
+**With `target.topic_configuration`** (PROD-05.2, a plan bound to a point whose
+receipt is 1.3.0 or later) the topics are created from the point's model: the
+source's partition count, a replication factor bounded by the target's brokers
+with its reason, and the source's portable overrides, beside Logweir's own
+settings that keep every restored record until the verdict. With
+`transition: afterVerification`, phase 9 then applies the source's compaction,
+retention and timestamp settings, after a passing verdict only and only to a
+topic still holding what it was created with; a `retention.ms` shorter than
+the restored records' age deletes them at the next retention check, which the
+restore preflight states. Inherited values, reassignment throttles, provider
+keys and secrets are never applied, and a topic a declarative owner manages is
+never altered: its desired state is exported for the owner. The scorecard
+carries `target.topic_configuration` (1.10.0, 2.2.0) and the phase-9
+attestation what was applied
+([the format](formats/drill-scorecard.md#targettopic_configuration-format-1100-and-220)).
+`topic_parity` still compares what phase 7 saw, before the transition. A
+scratch drill is unaffected unless its plan carries the block.
 
 ### `engine_subreport` is always null in v0.1
 
