@@ -4,8 +4,8 @@
 import { describe, expect, it } from "vitest";
 import type { TrustPolicy } from "../../api/backups";
 import { UNKNOWN, compromiseGuard, keyEvaluation, lifecycleWords, unknownReason, usabilityWords } from "./model";
-import policyDoc from "../../../../ui/tests/fixtures/console/trust-policy.json";
-import policyList from "../../../../ui/tests/fixtures/console/trust-policies-list.json";
+import policyDoc from "../../../fixtures/console/trust-policy.json";
+import policyList from "../../../fixtures/console/trust-policies-list.json";
 
 const policy = (): TrustPolicy => JSON.parse(JSON.stringify(policyDoc.item)) as TrustPolicy;
 

@@ -125,9 +125,9 @@ is_exempt() {
 # output, its comments, or the CI step that runs it" — so the CI step is
 # walked too, under `.github/workflows/`.
 #
-# Absent roots are SKIPPED rather than erroring: `config/` and `ui/` do not
-# exist in this tree yet, and a gate that refuses to run is a gate that does
-# not run.
+# Absent roots are SKIPPED rather than erroring: a gate that refuses to run is
+# a gate that does not run. The console is walked through its sources
+# (`console/src`), never its `node_modules/` or build output.
 FILE_SURFACES=(
   README.md
   SECURITY.md
@@ -139,7 +139,7 @@ DIR_SURFACES=(
   docs
   config
   examples
-  ui
+  console/src
   .github/workflows
   scripts
 )

@@ -336,7 +336,7 @@ async fn the_configured_bundle_reaches_the_client_through_the_preflight() {
     }
     std::fs::write(dir.join("client.secret"), "a-client-secret\n").unwrap();
     std::fs::write(dir.join("ca.crt"), pem("CERTIFICATE", &minted.cert_der)).unwrap();
-    let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui");
     let text = format!(
         "mode: shared\nlisten: \"127.0.0.1:1\"\npublicBaseUrl: \"https://console.example\"\n\
          uiDirectory: {ui}\n\

@@ -1,12 +1,12 @@
 // The mock's cadence against the controller's own worked examples. Every
 // expected value below is copied from crates/weirkeeper/tests/cadence.rs (which
 // runs the Rust module) or from the console fixtures the API produced
-// (ui/tests/fixtures/console/cadence-preview-*.json), so the mock build previews
+// (console/fixtures/console/cadence-preview-*.json), so the mock build previews
 // the cadences the controller will actually run.
 import { describe, expect, it } from "vitest";
 import { compilePreset, matchPreset, nextRuns, parseCron, type Adjustment } from "./cadence";
-import gap from "../../../ui/tests/fixtures/console/cadence-preview-gap.json";
-import repeated from "../../../ui/tests/fixtures/console/cadence-preview-repeated.json";
+import gap from "../../fixtures/console/cadence-preview-gap.json";
+import repeated from "../../fixtures/console/cadence-preview-repeated.json";
 
 const utc = (y: number, mo: number, d: number, h: number, mi: number) => Date.UTC(y, mo - 1, d, h, mi);
 const slot = (at: string) => at.replace(/[-:]/g, "").replace("T", "-").replace("Z", "");

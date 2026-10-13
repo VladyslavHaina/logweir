@@ -1064,7 +1064,7 @@ pub struct RunOpts<'a> {
     pub bin: Option<PathBuf>,
     /// PROD-08.1a: the plan as EXACT BYTES, written verbatim instead of
     /// `spec` re-serialised — for a plan another emitter produced (the
-    /// console's `ui/plan.js`), whose hash an approval binds as written. `None`
+    /// console's `renderPlanBytes`), whose hash an approval binds as written. `None`
     /// keeps every existing caller byte for byte.
     pub spec_bytes: Option<&'a str>,
 }

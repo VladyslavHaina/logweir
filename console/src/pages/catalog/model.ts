@@ -75,7 +75,7 @@ const MINTED_SET_ID =
 /**
  * Whether `id` is a set id the catalog sync's redactor reads as an identity (`check_contract.rs` `is_set_id`):
  * a UUID, or `<schedule uid>-<yyyymmdd>-<hhmmss>` (with `-r<k>` for a retry) whose slot is a real instant.
- * `ui/tests/fixtures/set-ids.json` is read by this side's tests and by the Rust side's.
+ * `console/fixtures/set-ids.json` is read by this side's tests and by the Rust side's.
  */
 export function isMintedSetId(id: unknown): boolean {
   const m = MINTED_SET_ID.exec(typeof id === "string" ? id : "");

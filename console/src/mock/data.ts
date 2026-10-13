@@ -1,6 +1,6 @@
 // Mock documents for the prototype, typed by the generated product-API schema, so
 // every field name and state here is one the real API publishes. Values imitate
-// the PoC and the console fixtures (ui/tests/fixtures/console/).
+// the PoC and the console fixtures (console/fixtures/console/).
 import type {
   Backup,
   Capabilities,

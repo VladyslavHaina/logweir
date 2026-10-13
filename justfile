@@ -14,12 +14,9 @@ lint:
     python3 scripts/test_k8s_scram_seed.py
     python3 scripts/test_plat06_case_e_rows.py
     python3 scripts/test_bind_credential_rows.py
-    python3 scripts/test_console_steps.py
     python3 scripts/test_no_duplicate_definitions.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
-    ./scripts/check-ui-offline.sh
-    ./scripts/check-ui-behaviour.sh
     ./scripts/check-unverified-labels.sh
     ./scripts/check-unsafe-scope.sh
 
@@ -379,7 +376,7 @@ engine:
 # http/https are never fetched (Global Constraint 17); this is a repository
 # integrity check, not a network check.
 links:
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/README.md e2e/fixtures/ ui/ charts/ deploy/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/README.md e2e/fixtures/ console/README.md console/fixtures/ charts/ deploy/
 
 # Task 22. The v0.1.0 definition of done, as far as it is mechanically
 # checkable without GitHub Actions or a live stack. Prints what it could NOT

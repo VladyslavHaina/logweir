@@ -12366,7 +12366,7 @@ fn the_preview_and_execution_resolve_the_same_selection() {
 }
 
 /// **The sync lists each topic's schema dependency as the shared
-/// fixture says.** `ui/tests/fixtures/console/catalog-point-schema-dependency.json`
+/// fixture says.** `console/fixtures/console/catalog-point-schema-dependency.json`
 /// holds a point record's `topics[].schema_dependency` (`recordTopics`) and the
 /// entry the view must list for each (`entryTopics`): the verdict, the basis or
 /// reason, the DEPENDENT sides only, their ids merged (never a not-dependent
@@ -12375,7 +12375,7 @@ fn the_preview_and_execution_resolve_the_same_selection() {
 #[test]
 fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
     use logweir::check::kinds::catalog_sync::EntrySchemaDependency;
-    let path = repo_root().join("ui/tests/fixtures/console/catalog-point-schema-dependency.json");
+    let path = repo_root().join("console/fixtures/console/catalog-point-schema-dependency.json");
     let fixture: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let records = fixture["recordTopics"].as_array().unwrap();

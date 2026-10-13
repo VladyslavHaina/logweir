@@ -3684,15 +3684,22 @@ fn complete_coverage_discloses_a_compaction_hole_inside_the_span() {
 
 // ================================================================ PROD-08.1a
 
-/// The console's own plan emitter (`ui/plan.js` `renderPlanBytes`), run by
-/// node over `fields` — the EXACT bytes the console hands the product API's
-/// create route, which stores them unchanged as `Restore.spec.planBytes`.
+/// The console's own plan renderer (`console/src/pages/restores/plan.ts`
+/// `renderPlanBytes`, which imports nothing, so node runs it with its types
+/// stripped), over `fields`: the EXACT bytes the console hands the product
+/// API's create route, which stores them unchanged as `Restore.spec.planBytes`.
 fn console_plan_bytes(fields: &Value) -> String {
-    let script = "import { renderPlanBytes } from './ui/plan.js';\n\
+    let script = "import { renderPlanBytes } from './console/src/pages/restores/plan.ts';\n\
                   process.stdout.write(renderPlanBytes(JSON.parse(process.argv[1])));\n";
     let mut cmd = std::process::Command::new("node");
     cmd.current_dir(root())
-        .args(["--input-type=module", "-e", script, "--"])
+        .args([
+            "--experimental-strip-types",
+            "--input-type=module",
+            "-e",
+            script,
+            "--",
+        ])
         .arg(fields.to_string());
     let out = kafka::output_within(cmd, 60).expect("node ran");
     assert_eq!(

@@ -1641,7 +1641,10 @@ mod tests {
         assert_eq!(config.namespaces, vec!["team-a".to_string()]);
         // Relative paths resolve against the CONFIG FILE's directory, as the
         // prose under the block says.
-        assert_eq!(config.ui_directory, PathBuf::from("/etc/logweir/ui"));
+        assert_eq!(
+            config.ui_directory,
+            PathBuf::from("/etc/logweir/console/dist")
+        );
         assert_eq!(
             config.cursor_key,
             CursorKeySource::RawFile(PathBuf::from("/etc/logweir/cursor.key"))

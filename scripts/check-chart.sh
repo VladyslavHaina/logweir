@@ -53,10 +53,10 @@ echo "   helm ${helm_version}"
 
 # ---------------------------------------------------------------- 2. the UI
 # The page ships inside the console image (`Dockerfile.console`), whose served
-# bytes `scripts/check-image-api.sh` hashes against `ui/`. What a chart gate can
+# bytes `scripts/check-image-api.sh` hashes against `console/dist`. What a chart gate can
 # say about the page is that the chart carries NO copy of it: a directory that
 # came back would be a second source of the page that nothing hashes.
-echo "== 2. the chart carries NO copy of ui/ (the page is the console image's) =="
+echo "== 2. the chart carries NO copy of the page (it is the console image's) =="
 if [ -e "$CHART/ui" ]; then
   echo "FAIL: $CHART/ui exists. The page ships inside the console image" >&2
   echo "      (Dockerfile.console), asserted by scripts/check-image-api.sh against the" >&2
@@ -1858,7 +1858,7 @@ if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
   exit 1
 fi
-echo "ok: charts/logweir — no copy of ui/ (the page is the console image's),"
+echo "ok: charts/logweir — no copy of the page (it is the console image's),"
 echo "    helm lint clean, rendered files current, every image a digest except the three Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
 echo "    flag, values.yaml names the tree's own repositories at :$LOGWEIR_TAG, and every"

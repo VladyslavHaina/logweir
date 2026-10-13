@@ -14,10 +14,10 @@ import {
   schemaDependentTopics,
   viewIsUsable,
 } from "./model";
-import setIds from "../../../../ui/tests/fixtures/set-ids.json";
-import states from "../../../../ui/tests/fixtures/console/catalog-points-states.json";
-import catalogDoc from "../../../../ui/tests/fixtures/console/catalog.json";
-import schemaPoints from "../../../../ui/tests/fixtures/console/catalog-point-schema-dependency.json";
+import setIds from "../../../fixtures/set-ids.json";
+import states from "../../../fixtures/console/catalog-points-states.json";
+import catalogDoc from "../../../fixtures/console/catalog.json";
+import schemaPoints from "../../../fixtures/console/catalog-point-schema-dependency.json";
 
 const SET = "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260922-140000";
 

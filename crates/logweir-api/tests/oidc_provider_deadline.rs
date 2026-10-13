@@ -863,7 +863,7 @@ fn shared_server(issuer: &str) -> (Server, u16, Scratch) {
          user: fixture\nusers:\n- name: fixture\n  user: {}\n",
     )
     .unwrap();
-    let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui");
     for _attempt in 0..5 {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()

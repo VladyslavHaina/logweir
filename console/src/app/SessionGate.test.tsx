@@ -1,13 +1,13 @@
 // The session gate over the whole console: what GET /api/v1/session answers decides the
 // page, and the namespaces, roles and capability flags come from that document. The
-// session reads are the API's recorded documents (ui/tests/fixtures/console/); the
+// session reads are the API's recorded documents (console/fixtures/console/); the
 // Overview's own reads go to the in-page mock, which holds team-a and team-b.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import localAdmin from "../../../ui/tests/fixtures/console/session.json";
-import viewer from "../../../ui/tests/fixtures/console/session-viewer.json";
+import localAdmin from "../../fixtures/console/session.json";
+import viewer from "../../fixtures/console/session-viewer.json";
 import { ApiError, api, readSession } from "../api/client";
 import type { Session } from "../api/types";
 import { createConsoleRouter } from "../router";

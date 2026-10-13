@@ -1,21 +1,18 @@
 // @vitest-environment node
 // The wizard's rules, and the claim R5 rests on: for the same inputs the new wizard
-// emits the old wizard's plan bytes. The differential below drives ui/pages/
-// restore-wizard.js's own initialState and setters (the functions the old page runs on
-// every edit) beside planFields, over one recovery point in product-API shape and its
-// custom-resource projection, and compares the rendered bytes.
+// emits the old wizard's plan bytes. The old wizard (ui/pages/restore-wizard.js, retired
+// by R8) was driven through its own setters for each scenario below, and what it rendered
+// is recorded in console/fixtures/legacy-console.json; the rows compare planFields'
+// rendering with those bytes.
 import { describe, expect, it } from "vitest";
-// @ts-expect-error ui/ is plain JavaScript; the differential reads it untyped.
-import * as old from "../../../../ui/pages/restore-wizard.js";
-// @ts-expect-error ui/ is plain JavaScript.
-import { renderPlanBytes as oldRender } from "../../../../ui/plan.js";
-import twoPerson from "../../../../ui/tests/fixtures/console/approval-policy-two-person.json";
-import readyFixture from "../../../../ui/tests/fixtures/console/preflight-ready.json";
-import notReadyFixture from "../../../../ui/tests/fixtures/console/preflight-not-ready.json";
-import staleFixture from "../../../../ui/tests/fixtures/console/preflight-stale.json";
-import pendingFixture from "../../../../ui/tests/fixtures/console/preflight-pending.json";
-import catalogPoints from "../../../../ui/tests/fixtures/console/catalog-points.json";
-import setIds from "../../../../ui/tests/fixtures/set-ids.json";
+import recorded from "../../../fixtures/legacy-console.json";
+import twoPerson from "../../../fixtures/console/approval-policy-two-person.json";
+import readyFixture from "../../../fixtures/console/preflight-ready.json";
+import notReadyFixture from "../../../fixtures/console/preflight-not-ready.json";
+import staleFixture from "../../../fixtures/console/preflight-stale.json";
+import pendingFixture from "../../../fixtures/console/preflight-pending.json";
+import catalogPoints from "../../../fixtures/console/catalog-points.json";
+import setIds from "../../../fixtures/set-ids.json";
 import { renderPlanBytes, preparePlanDocument } from "./plan";
 import { backupPoint, catalogPointOffer, frozenDestinationProblem, type Backup, type Destination, type PointView, type RecoveryPoint } from "./points";
 import {
@@ -110,23 +107,6 @@ const row: PointView = {
   ],
 };
 
-/** The custom-resource projection ui/client.js gives the old page. */
-const oldBackup = (b: Backup) => ({
-  metadata: { name: b.name, uid: b.uid, creationTimestamp: b.createdAt },
-  spec: {
-    sourceRef: b.sourceRef,
-    topics: b.topics.slice(),
-    archive: b.archive.credentialRef ? { url: b.archive.url, secretRef: { name: b.archive.credentialRef.name } } : { url: b.archive.url },
-    ...(b.destinationRef ? { destinationRef: { ...b.destinationRef } } : {}),
-  },
-  status: { phase: "Succeeded", backupId: b.backupId, windowCovered: { ...b.windowCovered! }, ...(b.locationDigest ? { locationDigest: b.locationDigest } : {}) },
-});
-const oldCluster = (c: Connection) => ({
-  metadata: { name: c.name, uid: c.uid },
-  spec: { role: c.role, bootstrapServers: c.bootstrapServers.slice(), auth: { mode: c.auth.mode, tls: c.auth.tls, ...(c.auth.username ? { username: c.auth.username } : {}) } },
-  status: {},
-});
-
 const BLANK: WizardValues = {
   pointKey: "",
   topics: ["orders", "orders-dlq", "payments"],
@@ -172,105 +152,61 @@ interface Scenario {
   evidence?: Destination;
   brokers?: BrokerFact;
   values: Partial<WizardValues>;
-  /** The edits the old page applies for the same inputs, in its refresh order. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the old wizard's untyped state (ui/pages/restore-wizard.js)
-  edits: (state: Record<string, any>) => void;
 }
 
 const SCENARIOS: Scenario[] = [
-  { name: "the defaults, sampled", values: {}, edits: () => {} },
-  { name: "bound to its catalog row", bound: true, values: {}, edits: () => {} },
+  { name: "the defaults, sampled", values: {} },
+  { name: "bound to its catalog row", bound: true, values: {} },
   {
     name: "complete coverage with a bound",
     values: { coverage: "complete", completeMaxRecords: "5000" },
-    edits: (s) => old.setCoverage(s, true, "5000"),
   },
   {
     name: "a subset ticked out of order",
     values: { topics: ["payments", "orders"] },
-    edits: (s) => {
-      s.fields.topics = ["payments", "orders"];
-      s.fields.topics = old.selectedTopics(s);
-    },
   },
-  { name: "a typed prefix", values: { prefix: "drill-x-" }, edits: (s) => old.setTopicPrefix(s, "drill-x-") },
+  { name: "a typed prefix", values: { prefix: "drill-x-" } },
   {
     name: "an earlier point in time (the prefix keeps the point's default)",
     values: { timeMode: "earlier", pointInTime: "2026-10-13T11:30:00Z" },
-    edits: (s) => {
-      s.fields.pointInTime = "2026-10-13T11:30:00Z";
-    },
   },
   {
     name: "an earlier point with the prefix emptied (the default follows the point)",
     values: { timeMode: "earlier", pointInTime: "2026-10-13T11:30:00Z", prefix: "" },
-    edits: (s) => {
-      s.fields.pointInTime = "2026-10-13T11:30:00Z";
-      old.setTopicPrefix(s, old.defaultPrefixFor(s)); // the emptied field falls back to the default
-    },
   },
-  { name: "producer time", values: { timeBasis: true }, edits: (s) => (s.fields.timeBasis = "producerTime") },
-  { name: "scratch mode", values: { scratch: true }, edits: (s) => (s.fields.target.mode = "scratch") },
+  { name: "producer time", values: { timeBasis: true } },
+  { name: "scratch mode", values: { scratch: true } },
   {
     name: "original names with the owner statement",
     bound: true,
     values: { naming: "original", noOwner: true, coverage: "sampled" },
-    edits: (s) => {
-      old.setOriginalName(s, true, true);
-      old.requireCompleteCoverage(s);
-    },
   },
-  { name: "a plaintext target", connection: plainTarget, values: { target: "scratch" }, edits: (s) => old.selectTarget(s, plainTarget.uid, plainTarget.name) },
-  { name: "a typed replication factor", values: { replication: "2" }, edits: (s) => old.setReplicationFactor(s, "2") },
-  { name: "brokers below the source's factor", bound: true, brokers: { ...fresh3, count: 2 }, values: {}, edits: () => {} },
-  { name: "no broker count", brokers: BROKERS_NOT_READ, values: {}, edits: () => {} },
+  { name: "a plaintext target", connection: plainTarget, values: { target: "scratch" } },
+  { name: "a typed replication factor", values: { replication: "2" } },
+  { name: "brokers below the source's factor", bound: true, brokers: { ...fresh3, count: 2 }, values: {} },
+  { name: "no broker count", brokers: BROKERS_NOT_READ, values: {} },
   {
     name: "a fresh-target retry",
     retryOf: "orders-restore-x7c2m",
     values: {},
-    edits: (s) => old.setTopicPrefix(s, old.freshTargetPrefix(s.fields.pointInTime, "orders-restore-x7c2m")),
   },
   {
     name: "another evidence destination",
     evidence: vault,
     values: { evidenceDestination: "evidence-vault" },
-    edits: (s) => {
-      s.evidenceDestinations = [vault];
-      old.selectEvidenceDestination(s, vault.uid, vault.name, vault);
-    },
   },
   {
     name: "an inline (legacy) archive",
     backup: legacyBackup,
     values: { archiveSecret: "legacy-s3", storeEndpoint: "https://s3.legacy:9000", storeRegion: "us-east-1", storePathStyle: true, evidenceBucket: "legacy-bucket", evidenceDestination: "" },
-    edits: (s) => {
-      Object.assign(s.fields.source, { endpoint: "https://s3.legacy:9000", region: "us-east-1", pathStyle: true, allowHttp: false });
-      old.syncEvidenceStore(s);
-    },
   },
 ];
 
+/** The bytes the old wizard rendered for a scenario (recorded before its removal). */
 function oldPlan(sc: Scenario): string {
-  const b = sc.backup ?? backup;
-  const conn = sc.connection ?? target;
-  const choice = sc.bound
-    ? { point: old.catalogRecoveryPoint({ metadata: { name: "primary" }, spec: { destinationRef: { name: "primary" } } }, row, destination, oldBackup(b)) }
-    : undefined;
-  const state = old.initialState(
-    "team-a",
-    { items: [oldCluster(target), oldCluster(plainTarget)].filter((c) => c.metadata.uid === conn.uid || c.metadata.uid === target.uid) },
-    { items: [oldBackup(b)] },
-    { uid: b.uid, backup: b.name, ...(sc.retryOf ? { retryOf: sc.retryOf } : {}) },
-    b.destinationRef ? destination : null,
-    b.destinationRef ? [destination] : [],
-    choice,
-  );
-  if (sc.bound) state.sourceFacts = old.sourceFactsOfEntry(row, "primary");
-  const brokers = sc.brokers ?? fresh3;
-  state.targetBrokers = brokers.count === null ? old.BROKERS_NOT_READ : { ...old.BROKERS_NOT_READ, count: brokers.count, fresh: brokers.fresh, uid: target.uid, name: target.name, discovery: brokers.discovery };
-  sc.edits(state);
-  old.syncReplicationDefault(state);
-  return oldRender(state.fields);
+  const bytes = (recorded.wizardPlans as Record<string, string>)[sc.name];
+  if (bytes === undefined) throw new Error(`no recorded plan for ${sc.name}`);
+  return bytes;
 }
 
 function newPlan(sc: Scenario): string {
@@ -358,7 +294,6 @@ describe("a fresh-target retry", () => {
   it("is deterministic, differs from the point's default, and agrees with the old wizard", () => {
     const at = "2026-10-13T12:04:00Z";
     expect(freshTargetPrefix(at, "orders-restore-x7c2m")).toBe("restore-20261013T120400Z-retry-rex7c2m-");
-    expect(freshTargetPrefix(at, "orders-restore-x7c2m")).toBe(old.freshTargetPrefix(at, "orders-restore-x7c2m"));
     expect(defaultPrefixFor(at, "orders-restore-x7c2m")).not.toBe(defaultPrefixFor(at, ""));
   });
   it("mints a different Restore and Approval name, so the failed run's approval cannot authorise it", async () => {
@@ -384,7 +319,7 @@ describe("the replication factor", () => {
   ];
   it.each(table)("the default for source %j and brokers %j agrees with the old rule", (factors, brokers) => {
     const now = replicationDefault(factors, brokers);
-    const then = old.replicationDefault(factors, brokers);
+    const then = recorded.replicationDefaults.find((r) => JSON.stringify([r.factors, r.brokers]) === JSON.stringify([factors, brokers]))!;
     expect({ value: now.value, basis: now.basis }).toEqual({ value: then.value, basis: then.basis });
   });
   it("a factor above a FRESH broker count is refused by the readiness check's code; a stale count refuses nothing", () => {
@@ -576,7 +511,7 @@ describe("the readiness gate", () => {
 // --------------------------------------------------- points and destinations
 
 describe("recovery points", () => {
-  it("a catalog row is offered by the old rules (selectable, unredacted, whole), agreeing with ui/", () => {
+  it("a catalog row is offered by the old rules (selectable, unredacted, whole)", () => {
     const base = { ...row };
     const cases: [string, PointView, { viewExpired?: boolean; backupVerdictsIncomplete?: string | null }][] = [
       ["whole", base, {}],
@@ -588,7 +523,6 @@ describe("recovery points", () => {
       ["verdicts incomplete", base, { backupVerdictsIncomplete: "listFailed" }],
       ["bad point id", { ...base, pointId: "lwp1-XYZ" }, {}],
     ];
-    for (const [, entry, page] of cases) expect(catalogPointOffer(entry, page).offer).toBe(old.catalogPointOffer(entry, page).offer);
     expect(cases.filter(([, e, p]) => catalogPointOffer(e, p).offer).map(([n]) => n)).toEqual(["whole"]);
   });
   it("a point frozen against a destination that was recreated or moved is refused, naming both", () => {

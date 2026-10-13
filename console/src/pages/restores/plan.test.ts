@@ -1,27 +1,27 @@
 // @vitest-environment node
 // The plan goldens, the most important rows of R5: the plan hash is what an approver
 // signs. These read the SAME files crates/logweir/tests/ui_lint.rs deserialises into
-// the runner's RestoreSpec (ui/tests/fixtures/plan*.golden.yaml), so "Rust parses the
+// the runner's RestoreSpec (console/fixtures/plan*.golden.yaml), so "Rust parses the
 // golden" and "the new console emits the golden" together say the runner parses what
-// the new console emits. A differential row holds the port to ui/plan.js itself over a
-// corpus of awkward inputs, errors included.
+// the new console emits. A differential row holds the port to what the retired
+// ui/plan.js answered over a corpus of awkward inputs, errors included
+// (console/fixtures/legacy-console.json, recorded before its removal).
 // @ts-expect-error this package has no @types/node; the row wants Node's own digest as an independent check.
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-// @ts-expect-error ui/plan.js is plain JavaScript; the differential reads it untyped.
-import * as legacy from "../../../../ui/plan.js";
-import plainFields from "../../../../ui/tests/fixtures/plan-fields.json";
-import completeFields from "../../../../ui/tests/fixtures/plan-complete-fields.json";
-import originalFields from "../../../../ui/tests/fixtures/plan-original-name-fields.json";
-import pointFields from "../../../../ui/tests/fixtures/plan-point-fields.json";
-import timeBasisFields from "../../../../ui/tests/fixtures/plan-time-basis-fields.json";
-import cloneFields from "../../../../ui/tests/fixtures/plan-clone-fields.json";
-import plainGolden from "../../../../ui/tests/fixtures/plan.golden.yaml?raw";
-import completeGolden from "../../../../ui/tests/fixtures/plan-complete.golden.yaml?raw";
-import originalGolden from "../../../../ui/tests/fixtures/plan-original-name.golden.yaml?raw";
-import pointGolden from "../../../../ui/tests/fixtures/plan-point.golden.yaml?raw";
-import timeBasisGolden from "../../../../ui/tests/fixtures/plan-time-basis.golden.yaml?raw";
-import cloneGolden from "../../../../ui/tests/fixtures/plan-clone.golden.yaml?raw";
+import recorded from "../../../fixtures/legacy-console.json";
+import plainFields from "../../../fixtures/plan-fields.json";
+import completeFields from "../../../fixtures/plan-complete-fields.json";
+import originalFields from "../../../fixtures/plan-original-name-fields.json";
+import pointFields from "../../../fixtures/plan-point-fields.json";
+import timeBasisFields from "../../../fixtures/plan-time-basis-fields.json";
+import cloneFields from "../../../fixtures/plan-clone-fields.json";
+import plainGolden from "../../../fixtures/plan.golden.yaml?raw";
+import completeGolden from "../../../fixtures/plan-complete.golden.yaml?raw";
+import originalGolden from "../../../fixtures/plan-original-name.golden.yaml?raw";
+import pointGolden from "../../../fixtures/plan-point.golden.yaml?raw";
+import timeBasisGolden from "../../../fixtures/plan-time-basis.golden.yaml?raw";
+import cloneGolden from "../../../fixtures/plan-clone.golden.yaml?raw";
 import {
   INSECURE_CONTEXT_SENTENCE,
   defaultTopicPrefix,
@@ -63,7 +63,7 @@ describe("the plan goldens", () => {
     expect(renderPlanBytes(moved)).not.toBe(plainGolden);
   });
 
-  it("the values ui_lint.rs asserts after the RestoreSpec parse are the ones the console wrote", () => {
+  it("the values console_plan.rs asserts after the RestoreSpec parse are the ones the console wrote", () => {
     // The Rust arm deserialises each golden and compares these values with the fields file.
     expect(renderPlanBytes(fields(plainFields))).toContain('  mode: "newTopic"\n  topic_naming:\n    prefix: "restore-20260907T140500Z-"\n');
     expect(renderPlanBytes(fields(plainFields))).toContain('restore:\n  point_in_time: "2026-09-07T14:05:00Z"\nsample:');
@@ -103,20 +103,18 @@ describe("the plan goldens", () => {
   });
 });
 
-describe("the port agrees with ui/plan.js", () => {
-  /** Old and new answer the same: equal bytes, or the same error class and message. */
-  function same(input: unknown) {
-    const run = (render: (f: unknown) => string) => {
-      try {
-        return { ok: render(structuredClone(input)) };
-      } catch (error) {
-        return { error: `${(error as Error).constructor.name}: ${(error as Error).message}` };
-      }
-    };
-    const left = run(legacy.renderPlanBytes as (f: unknown) => string);
-    const right = run(renderPlanBytes as (f: unknown) => string);
+describe("the port agrees with what ui/plan.js answered", () => {
+  /** The new renderer answers as the old one did: equal bytes, or the same error class and message. */
+  function same(name: string, input: unknown) {
+    let right: { ok: string } | { error: string };
+    try {
+      right = { ok: renderPlanBytes(structuredClone(input) as PlanFields) };
+    } catch (error) {
+      right = { error: `${(error as Error).constructor.name}: ${(error as Error).message}` };
+    }
+    const left = (recorded.planCorpus as Record<string, { ok: string } | { error: string }>)[name];
+    expect(left, `a recorded answer for ${name}`).toBeDefined();
     expect(right).toEqual(left);
-    return left;
   }
 
   const base = () => fields(plainFields) as PlanFields & Record<string, unknown>;
@@ -170,10 +168,10 @@ describe("the port agrees with ui/plan.js", () => {
     ["manifest digest short", (f) => (f.point = { ...structuredClone(pointFields.point), manifestSha256: "sha256:abc" })],
   ];
 
-  it.each(corpus)("%s", (_name, change) => {
+  it.each(corpus)("%s", (name, change) => {
     const f = base();
     change(f);
-    same(f);
+    same(name, f);
   });
 
   it("the corpus exercises both arms: documents and refusals", () => {
@@ -191,10 +189,8 @@ describe("the port agrees with ui/plan.js", () => {
     expect(outcomes.filter((o) => o === "refused").length).toBeGreaterThan(10);
   });
 
-  it("the default prefix agrees with ui/plan.js for the same instant", () => {
-    for (const at of ["2026-09-07T14:05:00Z", "2026-09-07T14:04:59.999Z", "1999-12-31T23:59:59Z"]) {
-      expect(defaultTopicPrefix(at)).toBe(legacy.defaultTopicPrefix(at));
-    }
+  it("the default prefix agrees with ui/plan.js (and console_plan.rs with Rust's) for the same instant", () => {
+    for (const [at, want] of Object.entries(recorded.defaultPrefixes)) expect(defaultTopicPrefix(at)).toBe(want);
     expect(defaultTopicPrefix("2026-09-07T14:05:00Z")).toBe("restore-20260907T140500Z-");
     expect(() => defaultTopicPrefix("not an instant")).toThrow(TypeError);
   });
@@ -205,7 +201,6 @@ describe("the hash and the two names", () => {
     const plan = renderPlanBytes(fields(plainFields));
     const independent = createHash("sha256").update(plan, "utf8").digest("hex");
     expect(await planHash(plan)).toBe(`sha256:${independent}`);
-    expect(await planHash(plan)).toBe(await legacy.planHash(plan));
     // A trimmed or re-normalised document is another hash (negative control).
     expect(await planHash(plan.trimEnd())).not.toBe(`sha256:${independent}`);
   });
@@ -214,7 +209,6 @@ describe("the hash and the two names", () => {
     const plan = renderPlanBytes(fields(plainFields));
     const suffix = createHash("sha256").update(plan, "utf8").digest("hex").slice(0, 8);
     expect(await mintNames(plan)).toEqual({ restoreName: `restore-${suffix}`, approvalName: `approval-${suffix}` });
-    expect(await mintNames(plan)).toEqual(await legacy.mintNames(plan));
   });
 
   it("the prepared plan is one frozen object per document: the reviewed object is the submitted object", async () => {

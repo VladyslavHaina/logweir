@@ -1359,7 +1359,7 @@ async fn a_compromise_after_the_admission_is_recorded_before_revocation_and_neve
     let shared: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../ui/tests/fixtures/console/approval-revoked-after-use.json"
+            "/../../console/fixtures/console/approval-revoked-after-use.json"
         ))
         .expect("the shared fixture is readable"),
     )

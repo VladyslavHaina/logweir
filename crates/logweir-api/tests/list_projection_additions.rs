@@ -6,8 +6,8 @@
 //! * `OperationSummary.exitCode` / `outcome` on a LIST row -- the Backups
 //!   table's EXIT and the History table's RESULT.
 //!
-//! BOTH SIDES READ ONE FIXTURE. `ui/tests/fixtures/console/schedule-last-slot.json`
-//! is this crate's projection of `ui/tests/fixtures/schedule-policy.json`, and
+//! BOTH SIDES READ ONE FIXTURE. `console/fixtures/console/schedule-last-slot.json`
+//! is this crate's projection of `console/fixtures/schedule-policy.json`, and
 //! `ui/tests/console-ux.spec.js` decodes and renders the same file, so the
 //! field names cannot drift between the API and the console.
 

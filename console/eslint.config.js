@@ -1,5 +1,5 @@
 // The console's lint rules: the recommended JavaScript and TypeScript sets, and the three
-// rules that replace the current console's ui_lint.rs and check-ui-offline.sh gates
+// rules that replaced the old console's ui_lint.rs and check-ui-offline.sh gates
 // (docs/to-do/decisions/PROD-18.1-console.md §3.3):
 //   - no `dangerouslySetInnerHTML`: text only, never markup from data;
 //   - `fetch` and `EventSource` only in src/api/: one place issues requests;

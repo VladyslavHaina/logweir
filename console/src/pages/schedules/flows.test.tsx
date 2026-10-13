@@ -13,8 +13,8 @@ import { SessionGate } from "../../app/SessionGate";
 import { scheduleRoutes } from "./routes";
 import { BackUpNow } from "./BackUpNow";
 import { NextRuns } from "./parts";
-import repeated from "../../../../ui/tests/fixtures/console/cadence-preview-repeated.json";
-import policyFixture from "../../../../ui/tests/fixtures/console/schedule-policy.json";
+import repeated from "../../../fixtures/console/cadence-preview-repeated.json";
+import policyFixture from "../../../fixtures/console/schedule-policy.json";
 
 type S = components["schemas"];
 

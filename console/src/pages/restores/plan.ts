@@ -6,7 +6,7 @@
 // docs/mvp/03-spec.md section 6.1). The controller writes Restore.spec.planBytes
 // verbatim into the runner's plan ConfigMap and the runner parses it, so an invented
 // shape would pass every approval check and fail only inside the runner pod. The
-// goldens under ui/tests/fixtures/plan*.golden.yaml are deserialised into RestoreSpec
+// goldens under console/fixtures/plan*.golden.yaml are deserialised into RestoreSpec
 // by crates/logweir/tests/ui_lint.rs; plan.test.ts holds this module to the same files.
 //
 // Nothing here parses the document it emits, reads a clock or makes a request:
@@ -68,7 +68,7 @@ export interface PlanAuth {
   tls?: boolean;
 }
 
-/** What the wizard accumulates: the argument to renderPlanBytes (ui/tests/fixtures/plan-fields.json). */
+/** What the wizard accumulates: the argument to renderPlanBytes (console/fixtures/plan-fields.json). */
 export interface PlanFields {
   name?: string;
   backupSetRef: string;

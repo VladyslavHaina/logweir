@@ -32,7 +32,7 @@ deployment.yaml used to refuse it.)
 {{- fail "api.console.enabled requires api.enabled: the console runs AS the principal `api.enabled` renders (its ServiceAccount, its two ClusterRoles and its per-namespace RoleBindings). A pod without them holds no grant on any Logweir kind and every route would 403. Set api.enabled=true." -}}
 {{- end -}}
 {{- if not $c.image -}}
-{{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the twenty-six page files it serves at /ui/." -}}
+{{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the console it serves at /ui/." -}}
 {{- end -}}
 {{- if not $c.keySecret -}}
 {{- fail "api.console.keySecret is empty. The console needs a cursor MAC key of at least 32 bytes (and, in shared mode, a session key), and this chart DELIBERATELY does not generate one: a Helm-generated key changes on every render, which would make the rendered fixtures unstable and the key unrecoverable on upgrade. D0 requires these to be persistent, versioned Secrets created or adopted EXPLICITLY. Create one and name it here; charts/logweir/README.md carries the command." -}}

@@ -12933,7 +12933,7 @@ async fn the_longest_refusal_message_fits_the_progress_field() {
 
 /// **The fixture the console's suite reads is what this controller stores.**
 ///
-/// `ui/tests/fixtures/refusal-condition.json` holds one hostile
+/// `console/fixtures/refusal-condition.json` holds one hostile
 /// `refusal-detail=` line, the terminal message weirkeeper stores for it, and
 /// the same message with its bidi controls left live.
 /// `ui/tests/condition-message.spec.js` proves the console shows both inert;
@@ -12942,7 +12942,7 @@ async fn the_longest_refusal_message_fits_the_progress_field() {
 #[tokio::test]
 async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
     let fixture: Value = serde_json::from_str(
-        &std::fs::read_to_string(workspace_root().join("ui/tests/fixtures/refusal-condition.json"))
+        &std::fs::read_to_string(workspace_root().join("console/fixtures/refusal-condition.json"))
             .expect("the shared fixture ships"),
     )
     .expect("the fixture is JSON");

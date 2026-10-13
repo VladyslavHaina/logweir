@@ -1,18 +1,18 @@
 // @vitest-environment jsdom
 // The approvals module's rules and its requests, over the console fixtures the
-// API produced (ui/tests/fixtures/console/). Ported from ui/tests/
+// API produced (console/fixtures/console/). Ported from ui/tests/
 // console-approval.spec.js and approval-policy.spec.js (the approvals page's
 // rows); every row sits beside the input that must make it say no.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./client";
-import approvalFixture from "../../../ui/tests/fixtures/console/approval.json";
-import revokedFixture from "../../../ui/tests/fixtures/console/approval-revoked-after-use.json";
-import twoPersonFixture from "../../../ui/tests/fixtures/console/approval-policy-two-person.json";
-import pendingFixture from "../../../ui/tests/fixtures/console/approval-request-pending.json";
-import approvedFixture from "../../../ui/tests/fixtures/console/approval-request-approved.json";
-import notConfirmedFixture from "../../../ui/tests/fixtures/console/approval-request-not-confirmed.json";
-import incompleteFixture from "../../../ui/tests/fixtures/console/approval-request-scope-incomplete.json";
-import originalFixture from "../../../ui/tests/fixtures/console/approval-request-original-name.json";
+import approvalFixture from "../../fixtures/console/approval.json";
+import revokedFixture from "../../fixtures/console/approval-revoked-after-use.json";
+import twoPersonFixture from "../../fixtures/console/approval-policy-two-person.json";
+import pendingFixture from "../../fixtures/console/approval-request-pending.json";
+import approvedFixture from "../../fixtures/console/approval-request-approved.json";
+import notConfirmedFixture from "../../fixtures/console/approval-request-not-confirmed.json";
+import incompleteFixture from "../../fixtures/console/approval-request-scope-incomplete.json";
+import originalFixture from "../../fixtures/console/approval-request-original-name.json";
 import {
   afterwardsWords,
   approvalMode,

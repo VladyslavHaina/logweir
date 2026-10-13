@@ -4,7 +4,7 @@
 //! reason `RecordedBeforeRevocation`, `Consumed=True` with the admission
 //! instant, and the record (authorization, key id) kept.
 //!
-//! THE FIXTURE IS SHARED. `ui/tests/fixtures/console/approval-revoked-after-use.json`
+//! THE FIXTURE IS SHARED. `console/fixtures/console/approval-revoked-after-use.json`
 //! is what this row projects a custom resource INTO, what
 //! `ui/tests/approval-policy.spec.js` renders never green, and what
 //! `crates/weirkeeper/tests/approval_policy.rs` checks the controller writes.
@@ -17,7 +17,7 @@ use weirkeeper::crds::approval::Approval;
 fn fixture() -> Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../ui/tests/fixtures/console/approval-revoked-after-use.json"
+        "/../../console/fixtures/console/approval-revoked-after-use.json"
     );
     let text = std::fs::read_to_string(path).expect("the shared fixture is readable");
     serde_json::from_str(&text).expect("the shared fixture is JSON")

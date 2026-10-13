@@ -45,3 +45,4 @@
 /console/node_modules
 /console/dist
 /console/dist-single
+/console/e2e-results

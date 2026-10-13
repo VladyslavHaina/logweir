@@ -144,6 +144,10 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
+      # The console rows (record_semantics, schema_dependency) run the
+      # console's own TypeScript with node's types stripped: Node 22.6 or later.
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - uses: taiki-e/install-action@v2
         with: { tool: just }

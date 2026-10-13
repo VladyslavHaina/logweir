@@ -1,6 +1,6 @@
 // The backup half of the green-badge rule, ported from the old console's
 // ui/tests/list-verdict.spec.js, detail-trust.spec.js, trust-basis-class.spec.js
-// and manual-run-queue.spec.js. Fixtures are the API's (ui/tests/fixtures/console/).
+// and manual-run-queue.spec.js. Fixtures are the API's (console/fixtures/console/).
 // Every row has a negative control: a value that makes the assertion fail.
 import { describe, expect, it } from "vitest";
 import type { Backup, OperationView } from "../../api/backups";
@@ -19,10 +19,10 @@ import {
   triggerWords,
   windowShort,
 } from "./verdict";
-import backupsList from "../../../../ui/tests/fixtures/console/backups-list.json";
-import backupDoc from "../../../../ui/tests/fixtures/console/backup.json";
-import operationBackup from "../../../../ui/tests/fixtures/console/operation-backup.json";
-import operationPreparing from "../../../../ui/tests/fixtures/console/operation-backup-preparing.json";
+import backupsList from "../../../fixtures/console/backups-list.json";
+import backupDoc from "../../../fixtures/console/backup.json";
+import operationBackup from "../../../fixtures/console/operation-backup.json";
+import operationPreparing from "../../../fixtures/console/operation-backup-preparing.json";
 
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 const op = (): OperationView => copy(operationBackup.item) as unknown as OperationView;

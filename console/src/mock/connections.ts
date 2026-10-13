@@ -1,7 +1,7 @@
 // The mock of the Connections routes, readiness checks and topic discovery.
 // Like the real service, it keeps a typed credential nowhere: a create turns
 // it into a Secret NAME and drops the value. Shapes follow the console
-// fixtures (ui/tests/fixtures/console/).
+// fixtures (console/fixtures/console/).
 import type { components } from "../api/schema";
 import { connections, hex, requestId } from "./data";
 import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";

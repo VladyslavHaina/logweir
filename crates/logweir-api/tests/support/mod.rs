@@ -1392,7 +1392,7 @@ pub fn schedule_body() -> Value {
 }
 
 pub fn golden_plan() -> String {
-    std::fs::read_to_string(repo_root().join("ui/tests/fixtures/plan.golden.yaml"))
+    std::fs::read_to_string(repo_root().join("console/fixtures/plan.golden.yaml"))
         .expect("the plan golden exists")
 }
 
@@ -1410,7 +1410,7 @@ pub fn restore_body(plan: &str) -> Value {
 }
 
 pub fn fixture(name: &str) -> Value {
-    let path = repo_root().join("ui/tests/fixtures").join(name);
+    let path = repo_root().join("console/fixtures").join(name);
     serde_json::from_str(
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
     )

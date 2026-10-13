@@ -3269,7 +3269,7 @@ pub struct NextRunView {
 ///
 /// A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth;
 /// this is the catalogue entry an expression IS, so a form can round-trip it.
-/// `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.
+/// `console/fixtures/cadence-presets.json` is the same catalogue as data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CadencePreset {

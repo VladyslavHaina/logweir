@@ -307,15 +307,7 @@ assemble() {
   cp "$package" "$out/"
   chart_sha=$(sha256_of "$out/logweir-chart-$VERSION.tgz")
 
-  # 4. The page files the console and UI images ship, by digest — the list the
-  #    release notes' candidate record asks for (docs/release-notes.md).
-  find ui -type f ! -name '*.md' ! -path 'ui/tests/*' > "$work/ui-files"
-  sort "$work/ui-files" > "$work/ui-files.sorted"
-  while IFS= read -r file; do
-    printf '%s  %s\n' "$(sha256_of "$file")" "$file"
-  done < "$work/ui-files.sorted" > "$out/ui-files.sha256"
-
-  # 5. release.json: what this release is, machine-readable.
+  # 4. release.json: what this release is, machine-readable.
   {
     for target in "${TARGETS[@]}"; do
       jq -n --arg target "$target" --arg file "logweir-$target.tar.xz" \
@@ -343,10 +335,10 @@ assemble() {
       archives: $archives[0]
     }' > "$out/release.json"
 
-  # 6. The release's notes, from the same data.
+  # 5. The release's notes, from the same data.
   release_notes "$out/release.json" > "$notes"
 
-  # 7. SHA256SUMS over every asset, then the whole directory checked again.
+  # 6. SHA256SUMS over every asset, then the whole directory checked again.
   for file in "$out"/*; do
     asset="${file##*/}"
     [[ "$asset" == SHA256SUMS ]] || printf '%s  %s\n' "$(sha256_of "$file")" "$asset"
@@ -397,7 +389,7 @@ release_notes() { # release.json -> the GitHub Release body (Markdown)
     "python3 verify_scorecard.py scorecard.json scorecard.sig signer.pub.pem   # pip install cryptography",
     "```",
     "",
-    "`release.json` lists every asset, image digest and the chart; `ui-files.sha256` lists, by digest, the page files the console and UI images ship.",
+    "`release.json` lists every asset, image digest and the chart; the console is the `logweir-console` image, by digest.",
     "",
     "## Licences",
     "",
@@ -432,7 +424,7 @@ verify() {
   for target in "${TARGETS[@]}"; do
     check_archive "$dir" "$target"
   done
-  for asset in verify_scorecard.py LICENSE NOTICE THIRD_PARTY_NOTICES.md kafka-backup-LICENSE release.json ui-files.sha256; do
+  for asset in verify_scorecard.py LICENSE NOTICE THIRD_PARTY_NOTICES.md kafka-backup-LICENSE release.json; do
     [[ -f "$dir/$asset" ]] || die "$dir has no $asset"
   done
   listed=$(jq -r .chart.package "$dir/release.json")

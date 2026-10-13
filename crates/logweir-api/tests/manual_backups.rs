@@ -966,7 +966,7 @@ async fn the_shipped_sample_is_what_this_route_creates() {
 
 // THE NAME RULE, pinned across two languages by ONE file.
 
-/// **`ui/tests/fixtures/manual-backup-names.json` is THIS route's own rule, and
+/// **`console/fixtures/manual-backup-names.json` is THIS route's own rule, and
 /// this is the Rust half of that pin.**
 ///
 /// A manual `Backup` has no name until its idempotency scope is hashed, so the
@@ -993,7 +993,7 @@ fn the_manual_run_name_fixture_is_this_routes_own_rule() {
     use logweir_api::idempotency::{self, IdempotencyKey, NAME_HASH_CHARS};
     use logweir_api::routes::backups::{NAME_PREFIX, ROUTE_CREATE};
 
-    let path = support::repo_root().join("ui/tests/fixtures/manual-backup-names.json");
+    let path = support::repo_root().join("console/fixtures/manual-backup-names.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "{} is missing ({e}); it is the pin between this route and ui/client.js",

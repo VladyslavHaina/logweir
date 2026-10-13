@@ -1512,7 +1512,7 @@ export interface components {
         /**
          * @description One of the five preset cadences (D1 §4.2), with its parameters.
          *
-         *     A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.
+         *     A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `console/fixtures/cadence-presets.json` is the same catalogue as data.
          */
         CadencePreset: {
             /** @enum {string} */

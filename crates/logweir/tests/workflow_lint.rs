@@ -1043,10 +1043,13 @@ fn the_console_job_runs_when_the_console_or_its_schema_changed() {
     assert_eq!(console(&page, &rust), "console=false");
     let schema = commit(dir, "schemas/logweir-api-v1.openapi.json");
     assert_eq!(console(&rust, &schema), "console=true");
-    // The API's recorded documents the console tests import.
-    let fixture = commit(dir, "ui/tests/fixtures/console/session.json");
+    // The recorded documents the console tests import live under console/.
+    let fixture = commit(dir, "console/fixtures/console/session.json");
     assert_eq!(console(&schema, &fixture), "console=true");
-    let other_fixture = commit(dir, "ui/tests/fixtures/set-ids.json");
+    let other_fixture = commit(
+        dir,
+        "crates/logweir-api/tests/fixtures/backup-succeeded-verified.json",
+    );
     assert_eq!(console(&fixture, &other_fixture), "console=false");
     let other_schema = commit(dir, "schemas/logweir-receipt.json");
     assert_eq!(console(&other_fixture, &other_schema), "console=false");

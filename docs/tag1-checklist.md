@@ -135,7 +135,6 @@ artifacts.
 | `kafka-backup-LICENSE` | the engine's MIT licence (`third_party/LICENSE-MIT`), owed because the runner image redistributes the engine | `SHA256SUMS` |
 | `logweir-chart-<version>.tgz` | the chart package, pushed as these bytes to `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <version>` | `SHA256SUMS`; its four images are pinned by digest (`assemble`); the registry serves the same bytes back (`ci-images.sh chart-push`) |
 | `release.json` | the tag, commit, publication commit, the three promoted image references and the identity bootstrap pin, each with its digest and platforms, the chart, and each archive's run-time needs | `SHA256SUMS` |
-| `ui-files.sha256` | the page files the console and UI images ship, by digest | `SHA256SUMS`; the candidate record's `ui/` row |
 | `SHA256SUMS` | the sha256 of every asset above | `scripts/release.sh verify`, on the assembled set and on the published release downloaded back |
 
 The release's notes state where the images come from, the measured run-time

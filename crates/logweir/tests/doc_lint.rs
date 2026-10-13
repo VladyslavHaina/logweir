@@ -738,12 +738,13 @@ fn the_readme_states_its_threat_model_residuals() {
          position instead"
     );
 
-    // The release-notes note about the UI bundle.
+    // The release-notes note about the console's bytes.
     assert!(
-        readme.contains("listed by\ndigest in the release notes")
-            || readme.contains("listed by digest in the release notes"),
-        "README.md must record that the `ui/` bundle's contents are listed by digest \
-         in the release notes, so which bytes the page is has to be checkable"
+        readme.contains("list the console image by digest")
+            && readme.contains("`scripts/check-image-api.sh` holds the image's `/ui`"),
+        "README.md must record that the release notes list the console image by digest and \
+         that the image's /ui is held to the tree's build, so which bytes the page is has to \
+         be checkable"
     );
 }
 
@@ -945,7 +946,7 @@ fn ui_section_pointers_name_the_heading_that_exists() {
 
     let mut sources: Vec<PathBuf> = docs_markdown();
     sources.push(repo_root().join("README.md"));
-    sources.push(repo_root().join("ui").join("README.md"));
+    sources.push(repo_root().join("console").join("README.md"));
 
     let mut sites: Vec<String> = Vec::new();
     for path in &sources {
@@ -1770,13 +1771,6 @@ fn the_release_notes_carry_every_owed_operator_action() {
         "*Required operator actions* must keep its six numbered steps, in order"
     );
 
-    // The UI bundle digest listing README.md promises, with the gate's own
-    // selection of shipped files.
-    assert!(
-        notes.contains("find ui -type f ! -name '*.md' ! -path 'ui/tests/*'"),
-        "docs/release-notes.md must give the command that lists the shipped ui/ files \
-         by digest — README.md says the release notes carry that list"
-    );
     for heading in [
         "### Required operator actions",
         "### Verification scope",

@@ -4,7 +4,7 @@
 // where a refusal lands, what a role without the grant is offered, and what the
 // pages refuse to claim. The network is a fake the typed client is handed in
 // place of the mock, so every request is recorded. Session and document
-// fixtures are the API's own (ui/tests/fixtures/console/).
+// fixtures are the API's own (console/fixtures/console/).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -16,16 +16,16 @@ import { KEYS_FORBIDDEN_SENTENCE } from "../trust/model";
 import { DIFFERENT_RUN_SENTENCE } from "./BackupDetail";
 import { CASES } from "./verdict";
 import { SessionGate } from "../../app/SessionGate";
-import operator from "../../../../ui/tests/fixtures/console/session-manual-backups.json";
-import viewer from "../../../../ui/tests/fixtures/console/session-viewer.json";
-import schedulesList from "../../../../ui/tests/fixtures/console/schedules-list.json";
-import backupDoc from "../../../../ui/tests/fixtures/console/backup.json";
-import backupsList from "../../../../ui/tests/fixtures/console/backups-list.json";
-import operationBackup from "../../../../ui/tests/fixtures/console/operation-backup.json";
-import catalogsList from "../../../../ui/tests/fixtures/console/catalogs-list.json";
-import catalogDoc from "../../../../ui/tests/fixtures/console/catalog.json";
-import signers from "../../../../ui/tests/fixtures/console/catalog-signers.json";
-import trustList from "../../../../ui/tests/fixtures/console/trust-policies-list.json";
+import operator from "../../../fixtures/console/session-manual-backups.json";
+import viewer from "../../../fixtures/console/session-viewer.json";
+import schedulesList from "../../../fixtures/console/schedules-list.json";
+import backupDoc from "../../../fixtures/console/backup.json";
+import backupsList from "../../../fixtures/console/backups-list.json";
+import operationBackup from "../../../fixtures/console/operation-backup.json";
+import catalogsList from "../../../fixtures/console/catalogs-list.json";
+import catalogDoc from "../../../fixtures/console/catalog.json";
+import signers from "../../../fixtures/console/catalog-signers.json";
+import trustList from "../../../fixtures/console/trust-policies-list.json";
 
 configure({ asyncUtilTimeout: 5000 });
 vi.setConfig({ testTimeout: 30_000 });

@@ -1,6 +1,6 @@
 // The schedule form's rules and the facts the pages derive, each with the
 // input that must make it say no. Fixtures are the API's own documents
-// (ui/tests/fixtures/console/), the ones the old console's rows read.
+// (console/fixtures/console/), the ones the old console's rows read.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/client";
 import type { RetentionPolicy, Schedule } from "../../api/schedules";
@@ -23,10 +23,10 @@ import {
   valuesOf,
   type PolicyValues,
 } from "./model";
-import policyFixture from "../../../../ui/tests/fixtures/console/schedule-policy.json";
-import presetFixture from "../../../../ui/tests/fixtures/console/schedule-preset.json";
-import listFixture from "../../../../ui/tests/fixtures/console/schedules-list.json";
-import retentionFixture from "../../../../ui/tests/fixtures/console/retention-policies-list.json";
+import policyFixture from "../../../fixtures/console/schedule-policy.json";
+import presetFixture from "../../../fixtures/console/schedule-preset.json";
+import listFixture from "../../../fixtures/console/schedules-list.json";
+import retentionFixture from "../../../fixtures/console/retention-policies-list.json";
 
 type S = components["schemas"];
 // Cast, not checked: a JSON import widens every enum to string.

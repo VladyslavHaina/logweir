@@ -8820,7 +8820,7 @@ fn the_expected_rows_include_the_binding_row_when_a_grant_is_listed() {
 #[test]
 fn fx20c_the_console_fixture_is_the_status_entry_entry_of_writes() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+        .join("../../console/fixtures/console/preflight-binding-mismatch.json");
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
     let want = fixture["item"]["checks"]

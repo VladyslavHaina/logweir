@@ -528,7 +528,11 @@ async fn the_console_build_is_served_at_ui_and_nothing_else() {
             "text/javascript; charset=utf-8",
             &b"console.log(1)"[..],
         ),
-        ("/ui/assets/index-DeF.css", "text/css; charset=utf-8", b"a{}"),
+        (
+            "/ui/assets/index-DeF.css",
+            "text/css; charset=utf-8",
+            b"a{}",
+        ),
         ("/ui/assets/RedHatTextVF-Gh_i.woff2", "font/woff2", b"wOF2"),
         ("/ui/assets/PF-Bkg-Jk.svg", "image/svg+xml", b"<svg/>"),
     ] {

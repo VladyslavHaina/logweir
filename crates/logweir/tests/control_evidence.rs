@@ -1874,7 +1874,7 @@ fn shipped_pages() -> Vec<(String, String)> {
             }
         }
     }
-    for extra in ["README.md", "charts/logweir/README.md", "ui/README.md"] {
+    for extra in ["README.md", "charts/logweir/README.md", "console/README.md"] {
         found.push(root.join(extra));
     }
     found.sort();

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // A restore's page and the list's words, over the console fixtures ui/tests reads too
-// (ui/tests/fixtures/console/): green only by the restore badge rule, covered: false is
+// (console/fixtures/console/): green only by the restore badge rule, covered: false is
 // never a pass, a narrowed restore is said as partial, a stopped creation step names
 // every topic it left, and a failed run offers a retry to a fresh target.
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,16 +8,15 @@ import { cleanup, configure, render, screen } from "@testing-library/react";
 import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-// @ts-expect-error ui/ is plain JavaScript; the line readers are compared with it.
-import * as oldRender from "../../../../ui/render.js";
-import subsetRestore from "../../../../ui/tests/fixtures/console/restore-subset-pass.json";
-import subsetOperation from "../../../../ui/tests/fixtures/console/operation-restore-subset-pass.json";
-import uncoveredRestore from "../../../../ui/tests/fixtures/console/restore-complete-uncovered.json";
-import uncoveredOperation from "../../../../ui/tests/fixtures/console/operation-restore-complete-uncovered.json";
-import untrustedOperation from "../../../../ui/tests/fixtures/console/operation-restore-untrusted.json";
-import unconfirmedRestore from "../../../../ui/tests/fixtures/console/restore-creation-unconfirmed.json";
-import timeBasisRestore from "../../../../ui/tests/fixtures/console/restore-time-basis.json";
-import plainRestore from "../../../../ui/tests/fixtures/console/restore.json";
+import recorded from "../../../fixtures/legacy-console.json";
+import subsetRestore from "../../../fixtures/console/restore-subset-pass.json";
+import subsetOperation from "../../../fixtures/console/operation-restore-subset-pass.json";
+import uncoveredRestore from "../../../fixtures/console/restore-complete-uncovered.json";
+import uncoveredOperation from "../../../fixtures/console/operation-restore-complete-uncovered.json";
+import untrustedOperation from "../../../fixtures/console/operation-restore-untrusted.json";
+import unconfirmedRestore from "../../../fixtures/console/restore-creation-unconfirmed.json";
+import timeBasisRestore from "../../../fixtures/console/restore-time-basis.json";
+import plainRestore from "../../../fixtures/console/restore.json";
 import type { OperationView, Restore } from "./words";
 import {
   completeCoverageSentence,
@@ -77,7 +76,7 @@ describe("the words", () => {
     expect(signedTimeBasisText(R(timeBasisRestore).timeBasis)).toMatch(/producer time.*lat.*NOT RECORDED: old/);
     expect(signedTimeBasisText(null)).toMatch(/^Not recorded/);
   });
-  it("the plan line readers agree with ui/render.js on block, flow and commented plans", () => {
+  it("the plan line readers agree with what ui/render.js read from block, flow and commented plans", () => {
     const plans = [
       (R(plainRestore) as { planBytes?: string }).planBytes ?? "",
       'restore: {point_in_time: "2026-09-07T14:05:00Z", time_basis: producerTime}\nevidence:\n  bucket: "logweir-evidence"\n',
@@ -85,10 +84,11 @@ describe("the words", () => {
       "restore:\n  time_basis: 'producerTime' # opted in\n",
       "",
     ];
-    for (const plan of plans) {
-      expect(planTimeBasis(plan)).toBe(oldRender.planTimeBasis(plan));
-      expect(planEvidenceBucket(plan)).toBe(oldRender.planEvidenceBucket(plan));
-      expect(planBlockValue(plan, "evidence", "bucket")).toBe(oldRender.planBlockValue(plan, "evidence", "bucket"));
+    expect(recorded.planLines.map((l) => l.plan)).toEqual(plans);
+    for (const { plan, timeBasis, evidenceBucket, block } of recorded.planLines) {
+      expect(planTimeBasis(plan)).toBe(timeBasis);
+      expect(planEvidenceBucket(plan)).toBe(evidenceBucket);
+      expect(planBlockValue(plan, "evidence", "bucket")).toBe(block);
     }
     expect(planTimeBasis(plans[1])).toBe("producerTime");
     expect(planTimeBasis(plans[2])).toBe("");

@@ -764,7 +764,7 @@ fn the_refusal_names_the_policy_that_records_the_compromise() {
 // The shared keys-page fixture: what this controller writes IS what the
 // console renders (`ui/tests/d3.spec.js`)
 
-/// `ui/tests/fixtures/d3/trustpolicy-compromise-inherited.json` is a policy
+/// `console/fixtures/d3/trustpolicy-compromise-inherited.json` is a policy
 /// listing the installation signer `Active` while ANOTHER policy records its
 /// `KeyCompromise` revocation. This row reads the fixture's own `spec`,
 /// evaluates it beside the recording policy at the fixture's instant, and
@@ -774,7 +774,7 @@ fn the_refusal_names_the_policy_that_records_the_compromise() {
 fn the_shared_keys_fixture_is_what_the_controller_writes() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../ui/tests/fixtures/d3/trustpolicy-compromise-inherited.json"
+        "/../../console/fixtures/d3/trustpolicy-compromise-inherited.json"
     );
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("the shared fixture"))

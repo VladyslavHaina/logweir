@@ -527,7 +527,7 @@ fn recorded_before_revocation_is_untrusted_and_keeps_its_basis_and_key_state() {
 
 /// **The console's own `RecordedBeforeRevocation` fixture, read by the API.**
 ///
-/// `ui/tests/fixtures/d3/restore-recorded-before-revocation.json` is what
+/// `console/fixtures/d3/restore-recorded-before-revocation.json` is what
 /// `ui/tests/d3.spec.js` renders as "recorded before revocation" and never
 /// green. A fixture two sides must agree on is read by both sides' tests, so
 /// the API projects the same object here: `untrusted`, not `verified`.
@@ -535,7 +535,7 @@ fn recorded_before_revocation_is_untrusted_and_keeps_its_basis_and_key_state() {
 fn the_consoles_recorded_before_revocation_restore_projects_untrusted() {
     let object = serde_json::from_str::<Value>(
         &std::fs::read_to_string(
-            repo_root().join("ui/tests/fixtures/d3/restore-recorded-before-revocation.json"),
+            repo_root().join("console/fixtures/d3/restore-recorded-before-revocation.json"),
         )
         .expect("the console fixture exists"),
     )

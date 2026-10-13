@@ -32,7 +32,7 @@ export const PRESETS: { kind: PresetKind; label: string; params: Param[] }[] = [
   { kind: "monthly", label: "Every month", params: ["dayOfMonth", "hour", "minute"] },
 ];
 
-/** The parameter bounds `ui/tests/fixtures/cadence-presets.json` (Rust's catalogue) states. */
+/** The parameter bounds `console/fixtures/cadence-presets.json` (Rust's catalogue) states. */
 export const BOUNDS: Record<Param, { min: number; max: number; values?: number[] }> = {
   minute: { min: 0, max: 59 },
   hour: { min: 0, max: 23 },

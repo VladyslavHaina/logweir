@@ -6530,7 +6530,7 @@
         ]
       },
       "CadencePreset": {
-        "description": "One of the five preset cadences (D1 §4.2), with its parameters.\n\nA PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.",
+        "description": "One of the five preset cadences (D1 §4.2), with its parameters.\n\nA PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `console/fixtures/cadence-presets.json` is the same catalogue as data.",
         "oneOf": [
           {
             "description": "Every hour at `minute`.",

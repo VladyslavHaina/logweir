@@ -2580,10 +2580,9 @@ fn both_dockerfiles_copy_the_fingerprint() {
 /// this repository stays green, because the other gates need a built image and
 /// this row reads checked-in bytes in microseconds:
 ///
-///   1. It COPYs the page with TWO globs and never `COPY ui /ui`. A
-///      whole-directory copy takes `ui/README.md` and
-///      `ui/tests/` — the second of which carries a throwaway keypair (Global
-///      Constraint 28) — and keeps taking whatever lands under `ui/` next.
+///   1. It COPYs the page from the console stage's build output only
+///      (PROD-18.1 R8), never a directory of the tree: a tree copy would take
+///      the console's sources, fixtures and tests with it.
 ///   2. It carries all THREE licence files: this image ships a statically
 ///      linked Rust binary, so the dependency graph's notices travel with it.
 ///   3. It does NOT carry the org-root anchor. That anchor is in the runner and
@@ -2599,8 +2598,7 @@ fn both_dockerfiles_copy_the_fingerprint() {
 fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
     let text = read("Dockerfile.console");
     for needle in [
-        "COPY ui/*.html ui/*.js ui/*.css /ui/",
-        "COPY ui/pages /ui/pages",
+        "COPY --from=console /src/console/dist /ui",
         "COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/",
         "cargo build --release --target \"$triple\" -p logweir-api",
         "ENTRYPOINT [\"/usr/local/bin/logweir-api\"]",
@@ -2617,11 +2615,19 @@ fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
          aws-lc-sys's cmake/bindgen steps read the HOST /usr/include and fail on a cross target, \
          and emulating the compile under QEMU is forbidden (STANDING RULE 10)"
     );
+    let to_ui: Vec<&str> = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("COPY ") && l.trim_end().ends_with(" /ui"))
+        .collect();
+    assert_eq!(
+        to_ui,
+        ["COPY --from=console /src/console/dist /ui"],
+        "Dockerfile.console copies the page from the console stage's build only, never a \
+         directory of the tree"
+    );
     assert!(
-        !text.lines().any(|l| l.trim_start().starts_with("COPY ui ")),
-        "Dockerfile.console must copy the page with the two globs, never `COPY ui /ui`: a \
-         whole-directory copy takes ui/README.md and ui/tests/ with it, and ui/tests/ carries a \
-         throwaway keypair"
+        !text.lines().any(|l| l.trim_start().starts_with("COPY ui")),
+        "Dockerfile.console copies no ui/ directory"
     );
     // The header PROSE names the anchor to say why it is absent, so the
     // assertion is about the INSTRUCTION and not about the string.

@@ -2394,7 +2394,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
     }
 }
 
-/// **The fixture both sides read.** `ui/tests/fixtures/set-ids.json`
+/// **The fixture both sides read.** `console/fixtures/set-ids.json`
 /// lists the set ids the controller mints and near misses it never mints; the
 /// console's `isMintedSetId` (`ui/tests/restore-catalog.spec.js`) reads the
 /// same file. Here: every minted id survives the redactor bare and as the
@@ -2404,7 +2404,7 @@ fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
     const RUN: &str = "01M3BNHJFZCV0D4BRZ0EM0RESH";
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../ui/tests/fixtures/set-ids.json"
+        "/../../console/fixtures/set-ids.json"
     );
     let text = std::fs::read_to_string(path).expect("the shared fixture is readable");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("the fixture is JSON");

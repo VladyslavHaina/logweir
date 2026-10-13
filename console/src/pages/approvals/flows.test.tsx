@@ -8,12 +8,12 @@ import { cleanup, configure, fireEvent, render, renderHook, screen, waitFor, wit
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import sessionFixture from "../../../../ui/tests/fixtures/console/session.json";
-import restoreFixture from "../../../../ui/tests/fixtures/console/restore.json";
-import approvalFixture from "../../../../ui/tests/fixtures/console/approval.json";
-import twoPersonFixture from "../../../../ui/tests/fixtures/console/approval-policy-two-person.json";
-import pendingFixture from "../../../../ui/tests/fixtures/console/approval-request-pending.json";
-import packetFixture from "../../../../ui/tests/fixtures/console/approval-packet.json";
+import sessionFixture from "../../../fixtures/console/session.json";
+import restoreFixture from "../../../fixtures/console/restore.json";
+import approvalFixture from "../../../fixtures/console/approval.json";
+import twoPersonFixture from "../../../fixtures/console/approval-policy-two-person.json";
+import pendingFixture from "../../../fixtures/console/approval-request-pending.json";
+import packetFixture from "../../../fixtures/console/approval-packet.json";
 import { approvalRoutes } from "./routes";
 import { sha256 } from "../../components/hash";
 import { PRIVATE_KEY_REFUSAL, useApprovalsNavCount, type ApprovalPolicy } from "../../api/approvals";

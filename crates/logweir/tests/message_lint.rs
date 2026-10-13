@@ -1,8 +1,8 @@
 //! No tracker task id in a string the product says to a person (MCP round 2,
 //! R2-13).
 //!
-//! The console's own lint (`ui/tests/console-ux.spec.js`, MCP-24) keeps ids
-//! like `PLAT-02.2` out of the strings `ui/` ships, and the second human-like
+//! The old console's lint (MCP-24) kept ids like `PLAT-02.2` out of the
+//! strings the page shipped, and the second human-like
 //! pass still read one on step 5: "The runner still validates its signer
 //! before it writes anything (PLAT-02.2)", a remedy the CONTROLLER writes.
 //! This is the same rule over every string literal under `crates/*/src` --

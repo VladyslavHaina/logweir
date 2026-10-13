@@ -32,9 +32,9 @@ import {
 import type { components } from "./schema";
 
 type S = components["schemas"];
-const fixtures = import.meta.glob("../../../ui/tests/fixtures/console/*.json", { eager: true, import: "default" });
+const fixtures = import.meta.glob("../../fixtures/console/*.json", { eager: true, import: "default" });
 function fixture<T>(name: string): T {
-  const found = fixtures[`../../../ui/tests/fixtures/console/${name}`];
+  const found = fixtures[`../../fixtures/console/${name}`];
   if (found === undefined) throw new Error(`no fixture ${name}`);
   return structuredClone(found) as T;
 }

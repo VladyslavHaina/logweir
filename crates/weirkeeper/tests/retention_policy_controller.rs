@@ -9466,7 +9466,7 @@ fn fx22_every_held_back_point_stays_in_the_plan_writers_rail() {
 }
 
 /// The CR-shaped fixture every other surface's held-back row starts from.
-const FX22_FIXTURE: &str = "ui/tests/fixtures/retention-held-back.json";
+const FX22_FIXTURE: &str = "console/fixtures/retention-held-back.json";
 
 /// The two `Report` policies of [`FX22_FIXTURE`] over the same 371 points,
 /// exactly as one reconcile leaves each of them, as the file's bytes.
@@ -9515,7 +9515,7 @@ async fn fx22_shared_document() -> String {
 /// * here, the checked-in file must equal what the reconciler writes;
 /// * `crates/logweir-api/tests/retention_accounting.rs` serves the two objects
 ///   through the real router and holds
-///   `ui/tests/fixtures/console/retention-policies-held-back.json` to the
+///   `console/fixtures/console/retention-policies-held-back.json` to the
 ///   answer;
 /// * `ui/tests/d3.spec.js` decodes and renders that console fixture.
 ///

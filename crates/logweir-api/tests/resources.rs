@@ -496,7 +496,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
 /// call one, so a page that hard-codes 249 or a replication factor of 1 agrees
 /// with the product only by inspection -- which is exactly how a number drifts
 /// in one language and is discovered in an incident. The fixture
-/// `ui/tests/fixtures/restore-limits.json` is the shared statement: the node
+/// `console/fixtures/restore-limits.json` is the shared statement: the node
 /// suite asserts the page renders these values, and this asserts they ARE the
 /// Rust ones. Moving either constant fails a test in both languages.
 ///

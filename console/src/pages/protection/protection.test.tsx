@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Protection: the age against the objective is the Overview's derivation, the
 // three statuses of Protected stay apart, and an evaluated Unknown is never
-// "not evaluated yet". Fixtures are the API's (ui/tests/fixtures/console/).
+// "not evaluated yet". Fixtures are the API's (console/fixtures/console/).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -13,11 +13,11 @@ import { HealthStatus } from "../../components/Status";
 import { SessionProvider } from "../../api/session";
 import type { Session } from "../../api/types";
 import { scheduleRoutes } from "../schedules/routes";
-import sessionDoc from "../../../../ui/tests/fixtures/console/session.json";
+import sessionDoc from "../../../fixtures/console/session.json";
 import { openProblems, protectedWords } from "./Protection";
-import listFixture from "../../../../ui/tests/fixtures/console/protection-policies-list.json";
-import healthy from "../../../../ui/tests/fixtures/console/protection-policy.json";
-import unknown from "../../../../ui/tests/fixtures/console/protection-policy-unknown.json";
+import listFixture from "../../../fixtures/console/protection-policies-list.json";
+import healthy from "../../../fixtures/console/protection-policy.json";
+import unknown from "../../../fixtures/console/protection-policy-unknown.json";
 
 type P = components["schemas"]["ProtectionPolicyView"];
 configure({ asyncUtilTimeout: 5000 });

@@ -1,10 +1,10 @@
-// The Overview's derivations, over the API's recorded documents (ui/tests/fixtures/console/,
+// The Overview's derivations, over the API's recorded documents (console/fixtures/console/,
 // the same files the current console's contract rows read) and small variants of them.
 import { describe, expect, it } from "vitest";
-import backupsList from "../../../ui/tests/fixtures/console/backups-list.json";
-import restoresList from "../../../ui/tests/fixtures/console/restores-list.json";
-import connectionsList from "../../../ui/tests/fixtures/console/connections-list.json";
-import policiesList from "../../../ui/tests/fixtures/console/protection-policies-list.json";
+import backupsList from "../../fixtures/console/backups-list.json";
+import restoresList from "../../fixtures/console/restores-list.json";
+import connectionsList from "../../fixtures/console/connections-list.json";
+import policiesList from "../../fixtures/console/protection-policies-list.json";
 import type { Backup, Connection, ProtectionPolicy, Restore } from "../api/types";
 import { newestFirst } from "../api/queries";
 import { attentionItems, failedLastDay, pointAgeSeconds } from "../app/attention";
