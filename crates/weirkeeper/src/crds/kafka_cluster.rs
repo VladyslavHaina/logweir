@@ -383,9 +383,12 @@ pub struct StrimziRef {
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
     )]
     pub namespace: String,
-    /// The `Kafka` resource's name: the `strimzi.io/cluster` label value.
+    /// The `Kafka` resource's name: the `strimzi.io/cluster` label value, so
+    /// at most 63 characters (a label value's bound; a longer one would make
+    /// every `KafkaTopic` list a 400). The pattern is a subset of a label
+    /// value's.
     #[schemars(
-        length(min = 1, max = 253),
+        length(min = 1, max = 63),
         regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
     )]
     pub cluster: String,

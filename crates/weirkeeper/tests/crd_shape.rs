@@ -2456,6 +2456,22 @@ fn kafka_cluster_auth_mode_accepts_only_the_five_modes() {
     }
 }
 
+/// PROD-05.1a: `spec.strimzi.cluster` is a label value (the
+/// `strimzi.io/cluster` selector), so the API server refuses a name a label
+/// cannot hold, instead of the controller requeueing on a 400 forever.
+#[test]
+fn the_strimzi_cluster_name_is_bounded_as_a_label_value() {
+    let doc = crd("kafkaclusters.yaml");
+    let strimzi = at(spec_schema(&doc), &["properties", "strimzi", "properties"]);
+    for field in ["namespace", "cluster"] {
+        assert_eq!(
+            at(strimzi, &[field, "maxLength"]).as_u64(),
+            Some(63),
+            "`strimzi.{field}` is at most 63 characters"
+        );
+    }
+}
+
 /// Interface **I22**: `windowCovered` is two epoch-millisecond integers.
 #[test]
 fn window_covered_is_epoch_milliseconds() {
