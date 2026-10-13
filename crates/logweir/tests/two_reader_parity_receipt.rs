@@ -537,7 +537,7 @@ fn rust_payload_types() -> Vec<(String, String)> {
     let verify_src = std::fs::read_to_string(root().join("crates/logweir-verify/src/lib.rs"))
         .expect("read crates/logweir-verify/src/lib.rs");
     let body = src
-        .split_once("const TYPES: [(&str, &str); 5] = [")
+        .split_once("const TYPES: [(&str, &str); 6] = [")
         .expect("crates/logweir/src/verify.rs declares the TYPES table")
         .1
         .split_once("];")
@@ -593,7 +593,7 @@ fn the_two_payload_type_resolvers_agree() {
     // table is asserted separately below, against that message.
     let rust = rust_payload_types();
     let python = python_payload_types();
-    assert_eq!(rust.len(), 5, "the Rust map has five entries: {rust:?}");
+    assert_eq!(rust.len(), 6, "the Rust map has six entries: {rust:?}");
     let mut rust_sorted = rust.clone();
     rust_sorted.sort();
     let mut python_sorted = python.clone();
@@ -884,5 +884,116 @@ fn a_backup_of_many_topics_is_accepted_by_both_verifiers() {
     assert_eq!(
         rust_reason, python_reason,
         "the two readers refuse in the same words"
+    );
+}
+
+/// **PROD-04.2: two-reader parity over the positions-mapping corpus**
+/// (`e2e/fixtures/invariants/positions-mapping-index.json`). Each case is a
+/// restore scorecard carrying `integrity.verification.positions_mapping` and,
+/// when the case names one, the mapping document handed over with
+/// `--positions-mapping`. Both readers reach the recorded exit codes and
+/// refuse with the recorded text once each reader's prefix is stripped (arms
+/// PM-1 to PM-5 in the scorecard's invariants, PMD-1 to PMD-7 against the
+/// document); on an accepted case both print the SAME `positions_mapping`
+/// lines. A separate binary from the scorecard corpus for the reason this
+/// file's own doc gives (GC22's per-test bound).
+#[test]
+fn two_reader_parity_over_the_positions_mapping_corpus() {
+    const RUST_SCORECARD: &str =
+        "SIGNATURE VALID but the document is self-contradicting: scorecard invariant violated: ";
+    let py = require_python();
+    let root = root();
+    let key = SigningKey::from_pem_file(&root.join("e2e/fixtures/signed/signing.pem"))
+        .expect("the checked-in throwaway fixture signing key");
+    let entries = read_json(&corpus().join("positions-mapping-index.json"))
+        .as_array()
+        .expect("positions-mapping-index.json is a JSON array")
+        .clone();
+    assert!(entries.len() >= 12, "one case per arm and the accepts");
+    let mapping_lines = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.find("positions_mapping").map(|i| l[i..].to_string()))
+            .collect()
+    };
+    let mut failures: Vec<String> = Vec::new();
+    for entry in &entries {
+        let id = s(entry, "id");
+        let want_reason = s(entry, "reason");
+        let bytes = std::fs::read(corpus().join(s(entry, "scorecard"))).expect("the scorecard");
+        let sidecar =
+            sign_detached(&key, logweir_evidence::PAYLOAD_TYPE_SCORECARD, &bytes).expect("sign");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (doc, sig) = (dir.path().join("case.json"), dir.path().join("case.sig"));
+        std::fs::write(&doc, &bytes).unwrap();
+        std::fs::write(&sig, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let mapping = entry.get("mapping").and_then(Value::as_str).map(|m| {
+            let path = dir.path().join("case.mapping.json");
+            std::fs::write(&path, std::fs::read(corpus().join(m)).expect("the mapping")).unwrap();
+            path
+        });
+        let pubkey = root.join("e2e/fixtures/signed/public.pem");
+        let mut rust = Command::new(env!("CARGO_BIN_EXE_logweir"));
+        rust.current_dir(&root)
+            .args(["drill", "verify", "--scorecard"])
+            .arg(&doc)
+            .arg("--signature")
+            .arg(&sig)
+            .arg("--public-key")
+            .arg(&pubkey);
+        let mut python = Command::new(&py);
+        python.current_dir(&root).arg("docs/verify_scorecard.py");
+        if let Some(m) = &mapping {
+            rust.arg("--positions-mapping").arg(m);
+            python.arg("--positions-mapping").arg(m);
+        }
+        python.arg(&doc).arg(&sig).arg(&pubkey);
+        let (rust, python) = (
+            rust.output().expect("run drill verify"),
+            python.output().expect("run docs/verify_scorecard.py"),
+        );
+        if rust.status.code() != Some(i(entry, "rust_exit") as i32) {
+            failures.push(format!(
+                "{id}: drill verify exited {:?}: {}",
+                rust.status.code(),
+                String::from_utf8_lossy(&rust.stderr).trim()
+            ));
+        }
+        if python.status.code() != Some(i(entry, "python_exit") as i32) {
+            failures.push(format!(
+                "{id}: verify_scorecard.py exited {:?}: {}",
+                python.status.code(),
+                String::from_utf8_lossy(&python.stderr).trim()
+            ));
+        }
+        let rust_err = String::from_utf8_lossy(&rust.stderr);
+        let rust_reason = strip(&rust_err, RUST_SCORECARD)
+            .or_else(|| strip(&rust_err, logweir::verify::MAPPING_REFUSED));
+        let python_reason = strip(&String::from_utf8_lossy(&python.stderr), PYTHON_PREFIX);
+        if want_reason.is_empty() {
+            let (r, p) = (mapping_lines(&rust), mapping_lines(&python));
+            if rust_reason.is_some() || python_reason.is_some() || r.is_empty() || r != p {
+                failures.push(format!(
+                    "{id}: an ACCEPT; refusals {rust_reason:?} / {python_reason:?}; lines\n        \
+                     rust:   {r:#?}\n        python: {p:#?}"
+                ));
+            }
+            continue;
+        }
+        match (&rust_reason, &python_reason) {
+            (Some(r), Some(p)) if r == p && r == want_reason => {}
+            _ => failures.push(format!(
+                "{id}: the refusals differ from each other or from the index\n        rust:   \
+                 {rust_reason:?}\n        python: {python_reason:?}\n        want:   \
+                 {want_reason:?}"
+            )),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the two readers disagree on {} point(s) over {} positions-mapping case(s):\n  - {}",
+        failures.len(),
+        entries.len(),
+        failures.join("\n  - ")
     );
 }

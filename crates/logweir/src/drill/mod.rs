@@ -2576,8 +2576,14 @@ fn execute_with_validated_approval(
     }
 
     // 7
-    let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run_after_restore(
+    // PROD-04.2: a complete verification of a point that captured consumer
+    // groups also probes their positions in its scan of the target.
+    let bound_positions = (c.spec.sample.coverage == logweir_core::spec::Coverage::Complete)
+        .then(|| phase7_verify::positions::fetch(&c.spec, &c.archive))
+        .flatten();
+    let probes = bound_positions.as_ref().map(|b| b.probes());
+    let (verified, position_scans) = record(&mut sc, 7, "verify", || {
+        phase7_verify::run_after_restore_with_probes(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -2595,6 +2601,7 @@ fn execute_with_validated_approval(
             // The engine's offset report, which phase 7 refuses when
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
+            probes.as_ref(),
         )
     })
     .map_err(torn_down)?;
@@ -2635,6 +2642,20 @@ fn execute_with_validated_approval(
     // Nothing assigns `sc.integrity.pass_rate_measured` here: phase 7's
     // `roll_up` is its only writer (see `phase8_score::decide`).
 
+    // PROD-04.2: the positions mapping, only over a passing complete
+    // verification, written before the scorecard that binds it is signed.
+    if let Some(bound) = &bound_positions {
+        attach_positions_mapping(
+            &mut sc,
+            &c.store,
+            run_id,
+            bound,
+            &admitted.topic_mapping,
+            &position_scans,
+            c.spec.restore.allow_transaction_markers,
+        );
+    }
+
     // 8
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
@@ -2668,6 +2689,65 @@ fn execute_with_validated_approval(
         topic_preflight,
         evidence,
     })
+}
+
+/// **PROD-04.2.** Maps the bound point's captured positions onto the target
+/// and binds the mapping into the scorecard about to be signed: only when the
+/// run passed a complete verification that covered every partition (08.1-A4).
+/// The document is put create-only BEFORE the scorecard is signed, so a signed
+/// block never names a document that is not there; a document over 4 MiB, or
+/// one whose put failed, is `omitted` with its counts. Nothing is committed:
+/// a `Switchover` applies a reviewed subset later.
+fn attach_positions_mapping(
+    sc: &mut Scorecard,
+    store: &Store,
+    run_id: &str,
+    bound: &phase7_verify::positions::BoundPositions,
+    topic_mapping: &std::collections::BTreeMap<String, String>,
+    scans: &phase7_verify::positions::Scans,
+    transactional: bool,
+) {
+    let passing_complete = sc.outcome == Outcome::Pass
+        && sc.integrity.verification.as_ref().is_some_and(|v| {
+            v.coverage == logweir_core::scorecard::COVERAGE_COMPLETE
+                && v.complete.as_ref().is_some_and(|c| c.covered)
+        });
+    if !passing_complete {
+        tracing::info!(
+            "consumer positions not mapped: the run is not a passing complete verification"
+        );
+        return;
+    }
+    let doc = bound.map(run_id, topic_mapping, scans, transactional);
+    let (mut block, bytes) = match doc.block() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("consumer positions not mapped: {e}");
+            return;
+        }
+    };
+    if let (Some(bytes), Some(d)) = (bytes, block.document.clone()) {
+        if let Err(e) = store.put_create_only(&d.key, &bytes) {
+            tracing::warn!(key = %d.key, "the positions mapping was not written: {e}");
+            block.document = None;
+            block.omitted = Some(logweir_core::positions_mapping::OMITTED_WRITE_FAILED.into());
+        } else {
+            println!("positions-mapping-key={}", d.key);
+        }
+    }
+    let c = block.counts;
+    println!(
+        "positions-mapping exact={} approximate={} unavailable={} groups={}",
+        c.exact, c.approximate, c.unavailable, block.groups
+    );
+    if let Some(v) = sc.integrity.verification.as_mut() {
+        v.positions_mapping = Some(block);
+        sc.format_version = logweir_core::scorecard::format_version_with_positions_mapping(
+            &sc.format_version,
+            true,
+        )
+        .to_string();
+    }
 }
 
 /// Everything ONE restore run produced. The scorecard is the signed evidence;

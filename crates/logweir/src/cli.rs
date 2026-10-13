@@ -468,6 +468,13 @@ pub enum DrillCmd {
         /// and the document is reported as not checked.
         #[arg(long)]
         consumer_positions: Option<PathBuf>,
+        /// **PROD-04.2.** With `--payload-type scorecard`: the
+        /// positions-mapping document a restore's scorecard binds
+        /// (`<run_id>.positions-mapping.json`, beside it in the evidence
+        /// store), checked against the verified scorecard by digest and by
+        /// its own arms; each mapped position is then printed.
+        #[arg(long)]
+        positions_mapping: Option<PathBuf>,
     },
 }
 

@@ -179,12 +179,14 @@ fn main() -> std::process::ExitCode {
             public_key,
             payload_type,
             consumer_positions,
-        }) => verify::run_with(
+            positions_mapping,
+        }) => verify::run_with_mapping(
             &scorecard,
             &signature,
             &public_key,
             &payload_type,
             consumer_positions.as_deref(),
+            positions_mapping.as_deref(),
         ),
         // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
         // same `RunArgs` through the same `From` impl and call

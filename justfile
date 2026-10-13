@@ -178,8 +178,8 @@ golden:
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new. The scorecard's format-1 file is named by
 # `scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL` the same way.
-scorecard_schema_version := "2.1.0"
-scorecard_format_1_schema_version := "1.9.0"
+scorecard_schema_version := "2.2.0"
+scorecard_format_1_schema_version := "1.10.0"
 receipt_schema_version := "1.8.0"
 catalog_schema_version := "1.7.0"
 

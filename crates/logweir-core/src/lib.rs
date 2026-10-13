@@ -81,6 +81,7 @@ pub mod schema;
 pub mod schema_dependency;
 pub mod scorecard;
 pub mod spec;
+pub mod switchover;
 /// Which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
