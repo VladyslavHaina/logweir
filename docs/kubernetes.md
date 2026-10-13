@@ -1177,12 +1177,18 @@ before its run Job exists. `status.clone` says where the clone is:
 | `Active` | The run passed; its topics are kept until `expiresAt` (the success the controller recorded plus `ttlSeconds`). The cleanup Job exists, suspended. |
 | `Removing` | At `expiresAt`, or at once when the `Restore` is deleted: the cleanup Job (`logweir-clone-cleanup-<uid>-<attempt>`) runs `logweir restore cleanup`. |
 | `Removed` | It deleted what the run's signed scorecard records (`target.creation`), on the cluster the scorecard records, each topic only while its ID is the recorded one. `status.teardown` lists `deleted`, the topics it left (`failed`, with why) and the signed attestation (`logweir/drills/<run_id>.cleanup.json`). The finalizer is released. |
-| `NotKept` | The run did not pass and exited: its own phase 9 tore down what it created at once (a run refused before any Job created nothing). The finalizer is released. |
-| `RemovalFailed` | The cleanup refused (exit 3, for example `CloneTargetClusterChanged`: the target answers with another cluster ID), failed three times five minutes apart, or the controller cannot settle the clone (a plan it cannot read, a recorded run Job gone before its outcome, a run that ended with no exit code). `status.clone.reason` says which. The finalizer stays. |
+| `NotKept` | The run did not pass and the runner exited with one of its own codes (1 to 4): its phase 9, or the teardown of a run that failed after creating, removed what it created at once and named anything it left in `status.teardown.failed`; a stopped creation step deletes nothing and names what it left in `status.targetTopicsAppeared`. A run refused before any Job created nothing. The finalizer is released. |
+| `RemovalFailed` | The cleanup refused (exit 3, for example `CloneTargetClusterChanged`: the target answers with another cluster ID), failed three times five minutes apart, or the controller cannot settle the clone (a plan it cannot read, a recorded run Job gone before its outcome, a run that ended with no exit code or was killed by a signal, 137 or 143, so its teardown never ran). `status.clone.reason` says which. The finalizer stays. |
 
 A topic recreated by someone else since the run is never deleted: it is left
 `CloneTargetReplaced` in `status.teardown.failed`, and the clone still reaches
-`Removed`. **On `RemovalFailed`**, check the target for topics with the clone's
+`Removed`. One window remains: the cleanup reads each topic's ID and then
+deletes by name, because librdkafka has no delete by topic ID, so a topic
+deleted and created again under a recorded name between that read and the
+delete request would be deleted. The cleanup verifies the run's scorecard with
+the installation's current signing key (and, for a plan bound to a recovery
+point, the evidence keyring); a signing key rotated during a clone's lifetime
+makes it refuse, `RemovalFailed`, and nothing is deleted. **On `RemovalFailed`**, check the target for topics with the clone's
 prefix, delete any the run created (`status.teardown.failed` and the scorecard's
 `target.creation` name them), then remove the finalizer:
 

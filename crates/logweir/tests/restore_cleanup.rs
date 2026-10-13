@@ -394,3 +394,32 @@ fn a_refusal_prints_its_reason_on_the_line_and_exits_3() {
         "{text}"
     );
 }
+
+/// **Review LOW-1: an ID that cannot be read now is retried even when every
+/// delete succeeded.** One topic's ID read fails, the other is deleted: the
+/// unreadable topic is not asked for, `retry` is set and the exit is 1, so
+/// the clone is never `Removed` with a topic the run created left behind.
+/// KILLS dropping the `unreadable` term from `retry`. CONTROL: the first row,
+/// where every ID reads and the cleanup exits 0.
+#[test]
+fn an_unreadable_id_alone_is_retried() {
+    let plan = plan_text("clone-", "{ttl_seconds: 300}");
+    let store = store_with(
+        &plan,
+        &[("clone-orders", Some(A)), ("clone-payments", Some(A))],
+        |d| d["target"]["topic_mapping_prefix"] = "clone-".into(),
+    );
+    let cluster = Cluster::new(&[
+        ("clone-orders", TopicIdRead::Id(A.into())),
+        ("clone-payments", TopicIdRead::Failed("timed out".into())),
+    ]);
+    let cleaned = run(&plan, &store, &cluster).unwrap();
+    assert_eq!(cluster.asked(), ["clone-orders"]);
+    assert_eq!(cleaned.report.deleted, ["clone-orders"]);
+    assert!(cleaned.retry, "an unreadable ID must be retried");
+    assert!(cleaned.report.left[0]
+        .reason
+        .starts_with("CloneTargetIdentityUnknown: "));
+    let mut out = Vec::new();
+    assert_eq!(finish(RUN, Ok(cleaned), &mut out) as u8, 1);
+}

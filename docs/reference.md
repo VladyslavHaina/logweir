@@ -126,7 +126,7 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 
 | Line | When | Read into |
 |---|---|---|
-| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Every exit but 4; on a refusal it carries `"refused":"<reason>"` instead, followed by the refusal's two lines | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). Not printed when the evidence store or the cluster did not answer (exit 1) or the attestation was not persisted (exit 4) | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
 | `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
 
 The evidence keys (interface I8) are the final lines of a run that signed a

@@ -320,6 +320,11 @@ pub fn clean(
     let mut deleted = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
     if !plan.delete.is_empty() {
+        // The IDs were read just above, on this same client, and nothing else
+        // runs between that read and this request. librdkafka deletes by name,
+        // so a topic deleted and created again under a recorded name inside
+        // that window would still be deleted; no delete-by-ID exists to close
+        // it (docs/kubernetes.md, "Safe clones").
         match deleter.delete_topics(&plan.delete) {
             Ok(results) => {
                 for (name, result) in results {

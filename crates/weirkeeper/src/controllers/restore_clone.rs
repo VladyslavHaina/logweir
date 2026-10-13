@@ -25,8 +25,8 @@
 //!    operator removes it.
 //!
 //! **The finalizer fails closed.** Once on, it is released ONLY on a settled
-//! clone phase (`Removed`; `NotKept`, which needs the runner's own exit or no
-//! run Job ever recorded) or on the recorded proof that no run Job was
+//! clone phase (`Removed`; `NotKept`, which needs the runner's own exit code,
+//! 1 to 4, or no run Job ever recorded) or on the recorded proof that no run Job was
 //! created: neither `status.jobRef` (written in the pass that creates the run
 //! Job) nor `status.exitCode`. The absence of a Job is never that proof. A
 //! plan this controller cannot read, a clone shape it refuses, a recorded run
@@ -334,19 +334,23 @@ pub fn step(restore: &Restore, ttl: u64, deleting: bool, now: DateTime<Utc>) -> 
     let passed =
         status.is_some_and(|s| s.phase.as_deref() == Some("Succeeded") && s.exit_code == Some(0));
     if !passed {
-        // Settled only by the runner's own exit (its teardown ran and named
-        // what it left), or by no run Job ever recorded. A run Job that ended
-        // with no exit code (a deadline, an eviction, a crash) never ran its
-        // teardown.
-        let exited = status.is_some_and(|s| s.exit_code.is_some());
+        // Settled only by the runner's own exit, one of its defined codes 1
+        // to 4 (its teardown ran and named what it left), or by no run Job
+        // ever recorded. A run Job that ended with no exit code, or with a
+        // code the runner never returns (137 for an OOM kill or SIGKILL, 143
+        // for SIGTERM on a drain or an eviction), never ran its teardown.
+        let exited = status.is_some_and(|s| s.exit_code.is_some_and(|c| (1..=4).contains(&c)));
         return if exited || !run_recorded(restore) {
             Step::NotKept
         } else {
+            let how = status.and_then(|s| s.exit_code).map_or_else(
+                || "without an exit code".to_string(),
+                |c| format!("with exit code {c}, which the runner never returns (a signal)"),
+            );
             Step::Fail(format!(
-                "the run ended without an exit code, so its own teardown did not run and \
-                 whatever it created is still on the target; nothing was deleted. Look for \
-                 topics with the clone's prefix, delete any this run created, then remove the \
-                 finalizer {FINALIZER}"
+                "the run ended {how}, so its own teardown did not run and whatever it created is \
+                 still on the target; nothing was deleted. Look for topics with the clone's \
+                 prefix, delete any this run created, then remove the finalizer {FINALIZER}"
             ))
         };
     }
@@ -392,16 +396,25 @@ pub fn ended(exit_code: Option<i32>, report: Option<CloneCleanupReport>) -> Ende
 /// `status.teardown` from a cleanup's report: what it deleted, what it left
 /// and why, and the attestation's key. Bounded by the CRD (256 entries, 256
 /// characters per reason).
+/// `earlier` is what earlier attempts already deleted (the stored
+/// `status.teardown.deleted`), kept so a later attempt's list does not
+/// replace it.
 #[must_use]
-pub fn teardown_value(report: &CloneCleanupReport) -> Value {
+pub fn teardown_value(report: &CloneCleanupReport, earlier: &[String]) -> Value {
     let bounded = |s: &str| -> String { s.chars().take(256).collect() };
     let mut t = serde_json::Map::new();
     if let Some(key) = &report.attestation_key {
         t.insert("attestationKey".into(), json!(key));
     }
+    let mut deleted: Vec<&String> = earlier.iter().collect();
+    for name in &report.deleted {
+        if !deleted.contains(&name) {
+            deleted.push(name);
+        }
+    }
     t.insert(
         "deleted".into(),
-        json!(report.deleted.iter().take(256).collect::<Vec<_>>()),
+        json!(deleted.into_iter().take(256).collect::<Vec<_>>()),
     );
     t.insert(
         "failed".into(),
@@ -649,7 +662,7 @@ async fn advance(
         Step::Until(at) => Ok(Requeue::After(seconds_until(at, now))),
         Step::Start(attempt) => {
             let started = if attempt == 1 {
-                resume(&jobs, &cleanup_job_name(&uid, 1)).await
+                resume(&jobs, &cleanup_job_name(&uid, 1)).await?
             } else {
                 build_attempt(restore, &jobs, &uid, attempt, false, image).await?
             };
@@ -757,13 +770,20 @@ async fn watch(
         }
         None => None,
     };
+    let earlier: Vec<String> = restore
+        .status
+        .as_ref()
+        .and_then(|s| s.teardown.as_ref())
+        .and_then(|t| t.deleted.clone())
+        .unwrap_or_default();
     match ended(exit_code, report) {
         Ended::Removed(report) => {
+            // `reason: null` clears an earlier attempt's reason.
             let stored = patch_clone(
                 &restores,
                 &name,
-                json!({"phase": PHASE_REMOVED}),
-                Some(teardown_value(&report)),
+                json!({"phase": PHASE_REMOVED, "reason": null}),
+                Some(teardown_value(&report, &earlier)),
             )
             .await?;
             if has_finalizer(&stored) {
@@ -782,7 +802,7 @@ async fn watch(
             Ok(Requeue::AwaitChange)
         }
         Ended::Failed(why, report) => {
-            let teardown = report.as_ref().map(teardown_value);
+            let teardown = report.as_ref().map(|r| teardown_value(r, &earlier));
             if attempts >= MAX_ATTEMPTS {
                 patch_clone(
                     &restores,
@@ -908,8 +928,10 @@ async fn build_attempt(
     Ok(Ok(name))
 }
 
-/// Resume the suspended attempt-1 Job.
-async fn resume(jobs: &Api<Job>, name: &str) -> Result<String, String> {
+/// Resume the suspended attempt-1 Job. A Job that is gone is a reason the
+/// clone records (`RemovalFailed`); any other error is the API's, and the
+/// next pass tries again.
+async fn resume(jobs: &Api<Job>, name: &str) -> Result<Result<String, String>, RestoreError> {
     match jobs
         .patch(
             name,
@@ -918,8 +940,13 @@ async fn resume(jobs: &Api<Job>, name: &str) -> Result<String, String> {
         )
         .await
     {
-        Ok(_) => Ok(name.to_string()),
-        Err(e) => Err(format!("the cleanup Job {name} could not be started: {e}")),
+        Ok(_) => Ok(Ok(name.to_string())),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(Err(format!(
+            "the suspended cleanup Job {name} is gone, so the cleanup cannot start; look for \
+             topics with the clone's prefix on the target, delete any its run created, then \
+             remove the finalizer {FINALIZER}"
+        ))),
+        Err(e) => Err(RestoreError::Api(e)),
     }
 }
 
@@ -1112,6 +1139,30 @@ mod tests {
             step(&ended_without_exit(false), 300, true, now),
             Step::NotKept
         );
+    }
+
+    /// **Review MEDIUM-1: a runner killed by a signal did not exit.** Exit 137
+    /// (an OOM kill, SIGKILL) and 143 (SIGTERM on a drain or an eviction) are
+    /// not runner codes, so its teardown never ran: `Fail`, the finalizer
+    /// kept. KILLS `exit_code.is_some()` as "exited". CONTROL: the runner's own
+    /// codes 1 to 4 settle the clone (`NotKept`).
+    #[test]
+    fn a_runner_killed_by_a_signal_keeps_the_finalizer() {
+        let now = t("2026-10-13T12:00:00Z");
+        for code in [137, 143, 9, 255] {
+            let mut r = ended_without_exit(true);
+            r.status.as_mut().unwrap().exit_code = Some(code);
+            assert!(
+                matches!(step(&r, 300, true, now), Step::Fail(why)
+                    if why.contains(&format!("exit code {code}"))),
+                "{code}"
+            );
+        }
+        for code in 1..=4 {
+            let mut r = ended_without_exit(true);
+            r.status.as_mut().unwrap().exit_code = Some(code);
+            assert_eq!(step(&r, 300, true, now), Step::NotKept, "{code}");
+        }
     }
 
     /// **Deleting a clone before its run ended releases it only on proof that
@@ -1314,9 +1365,15 @@ mod tests {
             refused: None,
         };
         assert_eq!(
-            teardown_value(&report),
+            teardown_value(&report, &[]),
             json!({"attestationKey": "logweir/drills/r.cleanup.json", "deleted": ["c-a"],
                    "failed": [{"topic": "c-b", "error": "CloneTargetReplaced: x"}]})
+        );
+        // An earlier attempt's deletions stay listed (review LOW-4); KILLS a
+        // later attempt's list replacing them.
+        assert_eq!(
+            teardown_value(&report, &["c-z".into(), "c-a".into()])["deleted"],
+            json!(["c-z", "c-a"])
         );
     }
 }

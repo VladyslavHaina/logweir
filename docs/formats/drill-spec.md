@@ -581,7 +581,8 @@ and plan hash first, and signs a teardown attestation (`teardown_policy: ttl`)
 at `logweir/drills/<run_id>.cleanup.json` (`.cleanup-N.json` for attempt N).
 Exit 0: every recorded topic deleted, already gone, or left for good by the ID
 rule; 1: a delete failed or an ID could not be read; 3: refused, nothing
-deleted; 4: the attestation was not persisted. Its last line is
+deleted; 4: the attestation was not persisted. Its line (exit 0, 1 and 3,
+not when the store or the cluster did not answer) is
 `clone-cleanup=<JSON>` (`runId`, `deleted`, `alreadyAbsent`, `left[{topic,
 reason}]`, `attestationKey` or `refused`).
 

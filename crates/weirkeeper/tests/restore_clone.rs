@@ -522,6 +522,11 @@ async fn a_recorded_run_job_that_is_gone_keeps_the_finalizer() {
 async fn a_run_without_an_exit_code_is_not_settled() {
     for (status, settled) in [
         (json!({"phase": "Failed", "jobRef": {"name": NAME}}), false),
+        // Review MEDIUM-1: an OOM-killed runner (137) did not exit.
+        (
+            json!({"phase": "Failed", "exitCode": 137, "jobRef": {"name": NAME}}),
+            false,
+        ),
         (
             json!({"phase": "Failed", "exitCode": 2, "jobRef": {"name": NAME}}),
             true,
@@ -597,4 +602,56 @@ async fn a_removing_clone_without_its_attempt_is_not_retried() {
     let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
     assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
     assert!(rec.lock().unwrap().iter().all(|r| !r.uri.contains("/jobs")));
+}
+
+/// **Review LOW-2: a transient API error at expiry is retried, not
+/// `RemovalFailed`.** Resuming the suspended cleanup Job answers 503: the pass
+/// returns the API error (the next pass tries again) and records nothing.
+/// CONTROL: a 404 (the suspended Job is gone) is `RemovalFailed`, finalizer
+/// kept.
+#[tokio::test]
+async fn a_transient_error_at_expiry_is_retried_and_a_gone_job_is_recorded() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z", "phase": "Active",
+                  "attempts": 0, "jobRef": {"name": CLEANUP_JOB}}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    for (code, recorded) in [(503u16, false), (404u16, true)] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/restores/{NAME}")),
+                status: 200,
+                body: value.to_string(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/jobs/{CLEANUP_JOB}")),
+                status: code,
+                body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                             "reason": if code == 404 { "NotFound" } else { "ServiceUnavailable" },
+                             "code": code, "message": "x"})
+                .to_string(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/restores/{NAME}/status")),
+                status: 200,
+                body: value.to_string(),
+            },
+        ]);
+        let result = around(&restore(&value), &client, now(), None, async {
+            Ok(outcome())
+        })
+        .await;
+        let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+        if recorded {
+            result.unwrap();
+            assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+        } else {
+            assert!(matches!(result, Err(RestoreError::Api(_))), "{code}");
+            assert!(status.is_empty(), "a transient error recorded {status:?}");
+        }
+        assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+    }
 }
