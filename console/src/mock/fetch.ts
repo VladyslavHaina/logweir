@@ -16,7 +16,6 @@ import {
   session,
   withPoint,
 } from "./data";
-import { declareRestore } from "./themeA";
 import { connectionsMock } from "./connections";
 import { destinationsMock } from "./destinations";
 import { schedulesMock } from "./schedules";
@@ -245,7 +244,6 @@ async function route(request: Request): Promise<Response> {
       operation: { state: "pending", terminal: false, verificationState: "pending", verifiedSuccess: false },
     };
     restores.unshift(created);
-    declareRestore(name, body.planBytes);
     liveSince.set(name, Date.now());
     return json(201, {
       item: created,

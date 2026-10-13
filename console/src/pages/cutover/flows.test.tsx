@@ -10,6 +10,8 @@ import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRou
 import restoreFixture from "../../../../ui/tests/fixtures/console/restore.json";
 import sessionFixture from "../../../../ui/tests/fixtures/console/session.json";
 import { cutoverRoutes } from "./routes";
+import { approvalRoutes } from "../approvals/routes";
+import { SessionGate } from "../../app/SessionGate";
 import { sha256 } from "../../components/hash";
 import { UNKNOWN_OUTCOME, mintNames, planDocument, reviewGroups, type DetailEntry, type Preflight, type Switchover } from "../../api/switchovers";
 
@@ -18,7 +20,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; key: string | null; body: unknown }[],
-  answer: (_r: Request, _path: string): Response | Promise<Response | null> | null => null,
+  answer: null as unknown as (r: Request, path: string) => Response | Promise<Response | null> | null,
 }));
 
 vi.mock("../../mock/fetch", () => ({
@@ -118,6 +120,7 @@ function serve(w: World) {
       const created = net.sent.filter((s) => s.method === "POST" && s.path === "/namespaces/team-a/switchovers").at(-1)?.body as { planBytes?: string } | undefined;
       return ok(w.switchover ?? switchover(created?.planBytes ? { planBytes: created.planBytes } : {}));
     }
+    if (r.method === "POST" && path === "/namespaces/team-a/switchovers/swo-1/console-approval") return json(201, { item: { name: "swo-approval-x" }, requestId: "r" });
     if (path === "/namespaces/team-a/switchovers/swo-1/approval-request") return w.request ? ok(w.request) : json(409, { code: "policy_mismatch", detail: "not two-person", requestId: "r" });
     return null;
   };
@@ -127,13 +130,13 @@ function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
   const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...cutoverRoutes(ns as never)])]),
+    routeTree: root.addChildren([ns.addChildren([...cutoverRoutes(ns as never), ...approvalRoutes(ns as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
   return router;
@@ -333,5 +336,46 @@ describe("the Switchover's page", () => {
     renderAt("/team-a/switchovers/swo-1");
     await screen.findByText(/--spec <the downloaded plan>/);
     expect(screen.queryByText(/curl evil/, { selector: "code, pre" })).toBeNull();
+  });
+});
+
+describe("the switchover's approval (R6's Approvals, subject kind Switchover)", () => {
+  const REQUEST = {
+    switchover: "swo-1",
+    switchoverUid: "s-uid",
+    namespace: "team-a",
+    approvalName: "swo-approval-x",
+    confirmationName: "swo-approval-x-confirmation",
+    confirmationSha256: sha("e"),
+    policy: "prod-pair",
+    policyDigest: sha("f"),
+    planHash: sha("d"),
+    state: "pending",
+    stateSentence: "Waiting for a second person to approve.",
+    approve: { offered: true, sentence: "Approving lets the controller run this switchover." },
+    scopeComplete: true,
+    scope: {
+      restore: { name: "orders-recovery", uid: "r-uid", planHash: sha("a"), scorecardSha256: sha("b"), mappingSha256: sha("c") },
+      groupsCount: 1,
+      positionsCount: 1,
+      groups: [{ source: "app", target: "app", topics: [{ topic: "r-orders", positions: [{ partition: 0, offset: 1200, approximate: false }] }] }],
+    },
+  };
+  it("shows every position, and one click sends only the hash of what was shown", async () => {
+    serve({ request: REQUEST });
+    renderAt("/team-a/approvals/switchover/swo-1");
+    await screen.findByRole("grid", { name: "Positions of app" });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await screen.findByText("Approved");
+    const sent = posts("/namespaces/team-a/switchovers/swo-1/console-approval");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toEqual({ confirmationSha256: sha("e") });
+  });
+  it("a request this login may not approve shows why, with no button (negative control)", async () => {
+    serve({ request: { ...REQUEST, approve: { offered: false, refusal: "requester", sentence: "You asked for this switchover; a second person approves it." } } });
+    renderAt("/team-a/approvals/switchover/swo-1");
+    await screen.findByText("You cannot approve your own request");
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(posts("/namespaces/team-a/switchovers/swo-1/console-approval")).toHaveLength(0);
   });
 });

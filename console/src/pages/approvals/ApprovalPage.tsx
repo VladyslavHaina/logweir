@@ -90,7 +90,7 @@ function usePlanHash(restore: Restore | null | undefined): string | undefined {
 }
 
 /** Why a two-person request is not offered to this sign-in, as a refusal title. */
-const REFUSAL_TITLE: Record<string, string> = {
+export const REFUSAL_TITLE: Record<string, string> = {
   requester: "You cannot approve your own request",
   notApprover: "Not offered to you",
   notSecondPerson: "You cannot approve this request",

@@ -14,6 +14,7 @@ const ACCEPTED: Record<ShellArgKind, string> = {
   storageKey: "logweir/backups/orders-hourly/r1.receipt.json",
   url: "https://minio.storage.svc:9000",
   region: "eu-west-1",
+  kafka: "orders_EU.v2:3",
 };
 
 describe("shellArg", () => {
@@ -31,6 +32,16 @@ describe("shellArg", () => {
     expect(shellArg("-west-1", "region")).toBe("<region>");
     // A placeholder is only ever placeholder-shaped.
     expect(shellArg("$(x)", "name", "<$(id)>")).toBe("<name>");
+    // The kinds R7's commands use: a capital is not a Kubernetes name, `..`/`/` is not a
+    // Kafka id; the controls are the plain values the cutover pages quote.
+    expect(shellArg(undefined, "name", "<p>")).toBe("<p>");
+    expect(shellArg("Orders", "name", "<p>")).toBe("<p>");
+    expect(shellArg("../x", "kafka", "<p>")).toBe("<p>");
+    expect(shellArg("", "kafka", "<p>")).toBe("<p>");
+    expect(shellArg("orders-clone-k3v9d", "name", "<p>")).toBe("'orders-clone-k3v9d'");
+    expect(shellArg("logweir/switchovers/01M3.record.json", "storageKey", "<p>")).toBe("'logweir/switchovers/01M3.record.json'");
+    expect(shellArg("x", "kafka", "<topic:partition>")).toBe("'x'");
+    expect(shellArg("a b", "kafka", "<topic:partition>")).toBe("<topic:partition>");
   });
 
   it("quotes an s3:// argument whole only when both parts have their shape", () => {

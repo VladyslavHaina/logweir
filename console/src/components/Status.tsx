@@ -12,7 +12,7 @@ import RedoIcon from "@patternfly/react-icons/dist/esm/icons/redo-icon";
 import UserIcon from "@patternfly/react-icons/dist/esm/icons/user-icon";
 import HistoryIcon from "@patternfly/react-icons/dist/esm/icons/history-icon";
 import type { Backup, OperationSummary } from "../api/types";
-import type { GroupOutcome, MappingClass, SwitchoverPhase, Verdict } from "../mock/themeA";
+import type { MappingClass, Verdict } from "../api/switchovers";
 
 export type Tone = "success" | "danger" | "warning" | "info" | "neutral" | "progress";
 
@@ -111,29 +111,6 @@ export function VerdictStatus({ verdict, title }: { verdict: Verdict; title?: st
   return <StatusLabel tone="danger" text="Blocked" title={title} />;
 }
 
-/** A Switchover's per-group outcome (§3.5); null while the group waits its turn. */
-export function OutcomeStatus({ outcome, reason }: { outcome: GroupOutcome | null; reason?: string }) {
-  if (outcome === null) return <StatusLabel tone="neutral" text="Waiting" />;
-  if (outcome === "applied") return <StatusLabel tone="success" text="Applied" title="applied" />;
-  if (outcome === "alreadyApplied") return <StatusLabel tone="info" text="Already applied" title="alreadyApplied" icon={<CheckDoubleIcon />} />;
-  if (outcome === "refused") return <StatusLabel tone="warning" text={`Refused${reason ? `: ${reason}` : ""}`} title={`refused: ${reason ?? ""}`} />;
-  return <StatusLabel tone="danger" text={`Failed${reason ? `: ${reason}` : ""}`} title={`failed: ${reason ?? ""}`} />;
-}
-
-export function PhaseStatus({ phase }: { phase: SwitchoverPhase }) {
-  switch (phase) {
-    case "Pending":
-      return <StatusLabel tone="neutral" text="Pending" title="phase Pending" />;
-    case "Running":
-      return <StatusLabel tone="progress" text="Running" title="phase Running" />;
-    case "Succeeded":
-      return <StatusLabel tone="success" text="Succeeded" title="phase Succeeded" />;
-    case "PartiallyApplied":
-      return <StatusLabel tone="warning" text="Partially applied" title="phase PartiallyApplied" />;
-    default:
-      return <StatusLabel tone="danger" text={phase} title={`phase ${phase}`} />;
-  }
-}
 
 // ------------------------------------------------------------ plain facts
 

@@ -47,8 +47,10 @@ import { StatusLabel } from "../../components/Status";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
-import { themeAOf } from "../../mock/themeA";
-import { CloneCard, MOCK_THEME_A, PositionsCard, TopicConfigCard } from "./themeA";
+import { CloneStatus } from "../cutover/CloneLifetime";
+import { TopicConfigurationResult } from "../cutover/TopicConfiguration";
+import { SwitchoverEntry } from "../cutover/SwitchoverEntry";
+import { cutoverRefusal } from "../cutover/Cutover";
 import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
 import { approvalRoute } from "./model";
 import {
@@ -299,7 +301,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   // A scorecard fact is a claim until the scorecard's signature verified, pass or not.
   const signed = op ? evidenceVerified(op) : verified;
   const failed = r.operation.terminal && (r.operation.state === "failed" || r.operation.state === "refused");
-  const t = MOCK_THEME_A ? themeAOf(r) : null;
+  // Theme A: a restore verified completely has positions to switch over (the review decides the rest).
+  const switchable = cutoverRefusal(r) === null;
   const complete = r.coverage?.requested === "complete";
   const scope = op?.verificationScope;
   const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
@@ -319,7 +322,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
             <Button variant="secondary" icon={<RedoIcon />} onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { retryOf: r.name } })} id="retry-fresh-target">
               Retry to a fresh target
             </Button>
-          ) : verified && t?.mapping === "written" ? (
+          ) : verified && switchable && caps?.restoreCreate !== false ? (
             <Button variant="primary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name } })}>
               Switch consumers over
             </Button>
@@ -366,7 +369,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                   : `${count(op.completion?.recordsSampledMatching)} of ${count(op.completion?.recordsSampled)} sampled records match the archive byte for byte.`}{" "}
                 The controller verified the signed scorecard.
               </p>
-              {t?.mapping === "written" && (
+              {switchable && (
                 <p>
                   <strong>Next:</strong> your consumer groups still point at their old positions. Review how each position translates to
                   the restored topics, then switch them over.
@@ -649,15 +652,31 @@ function Detail({ ns, name }: { ns: string; name: string }) {
               </CardBody>
             </Card>
           </GridItem>
-          {t && (
-            <>
-              <GridItem>{t.clone ? <CloneCard t={t} /> : <PositionsCard r={r} t={t} />}</GridItem>
-              {t.topicConfiguration && (
-                <GridItem>
-                  <TopicConfigCard r={r} t={t} />
-                </GridItem>
-              )}
-            </>
+          <GridItem>
+            {op?.clone ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle component="h2">Clone</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <CloneStatus clone={op.clone} teardown={op.teardown} restoreName={r.name} />
+                </CardBody>
+              </Card>
+            ) : (
+              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} />
+            )}
+          </GridItem>
+          {r.topicConfiguration && (
+            <GridItem>
+              <Card>
+                <CardHeader>
+                  <CardTitle component="h2">Topic configuration</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <TopicConfigurationResult tc={r.topicConfiguration} />
+                </CardBody>
+              </Card>
+            </GridItem>
           )}
         </Grid>
       </PageSection>

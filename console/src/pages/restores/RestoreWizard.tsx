@@ -37,7 +37,7 @@ import {
   useCreateRestore,
   useDestinationList,
 } from "../../api/restores";
-import { INSECURE_CONTEXT_SENTENCE, planHashAvailable, preparePlanDocument, renderPlanBytes, type PreparedPlan } from "./plan";
+import { INSECURE_CONTEXT_SENTENCE, NO_TOPIC_CONFIGURATION, planHashAvailable, preparePlanDocument, renderPlanBytes, type PreparedPlan } from "./plan";
 import { frozenDestinationProblem, isRecoveryPoint, recoveryPoints, refusalSentence, resolvePoint, type Resolution } from "./points";
 import { resolveBackup, resolveCatalogPoint, type Resolved } from "./resolve";
 import {
@@ -59,6 +59,8 @@ import {
 } from "./model";
 import { CheckStep, PointStep, ReviewStep, TargetStep, WhatStep, Resolution as ResolutionView, offerKeyOf, pointKeyOf, type ReadinessState } from "./WizardSteps";
 import { Coded, WriteProblem } from "./parts";
+import { TOPIC_CONFIGURATION_CHECK, TopicConfigurationPreview, topicPreviewLines } from "../cutover/TopicConfiguration";
+import { usePreflightDetails } from "../../api/switchovers";
 import "./restores.css";
 
 /** The wizard's address: `?backup=` (and `uid`) or `?catalog=&point=`, and `retryOf`. */
@@ -92,6 +94,8 @@ export const FIELD_STEP: Record<string, StepId> = {
   prefix: "target",
   noOwner: "target",
   scratch: "target",
+  cloneTtl: "target",
+  topicConfiguration: "target",
   replication: "target",
   evidenceDestination: "target",
   archiveSecret: "target",
@@ -134,6 +138,8 @@ const BLANK: WizardValues = {
   prefix: "",
   noOwner: false,
   scratch: false,
+  cloneTtl: null,
+  topicConfiguration: NO_TOPIC_CONFIGURATION,
   replication: "",
   evidenceDestination: "",
   archiveSecret: "",
@@ -411,6 +417,11 @@ function WizardBody({
   // and does make the verdict stale: it was about other objects.
   const movedUnder = readiness.result !== null && readiness.boundKey !== boundKey ? "The target, the evidence destination or the archive Secret changed since the check ran; it is not a verdict about this plan. Run it again." : null;
   const checkRefusal = canCheck ? (movedUnder ?? readinessRefusal(readiness.result, readiness.boundHash, hash)) : null;
+  // Theme A: the check's per-topic configuration preview, read once it is done.
+  const tcChosen = values.topicConfiguration?.transition != null;
+  const tcDetails = usePreflightDetails(ns, tcChosen && readiness.result ? readiness.result : undefined, TOPIC_CONFIGURATION_CHECK);
+  const ownersAsked = tcChosen && (topicPreviewLines(tcDetails.data ?? []).refusal ?? "").includes("TopicOwnerNotChecked");
+  const topicPreview = tcChosen && tcDetails.data ? <TopicConfigurationPreview entries={tcDetails.data} /> : undefined;
 
   // ------------------------------------------------------------ the submit
   const [submitError, setSubmitError] = useState<{ error: unknown; unmatched: string[] } | null>(null);
@@ -538,11 +549,12 @@ function WizardBody({
               destinations={evidenceOptions(point, resolved?.destination ?? null, destinations.data ?? [])}
               errors={errors}
               ns={ns}
+              ownersAsked={ownersAsked}
             />
           )}
         </WizardStep>
         <WizardStep name="Readiness check" id="check" isDisabled={!point}>
-          <CheckStep readiness={readiness} refusal={checkRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} />
+          <CheckStep readiness={readiness} refusal={checkRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} topicPreview={topicPreview} />
         </WizardStep>
         <WizardStep name="Review and create" id="review" isDisabled={!point}>
           {point && fields && replication && (

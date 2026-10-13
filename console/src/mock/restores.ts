@@ -10,6 +10,7 @@ import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";
 import { backups, connections, hex, pointOf, requestId, restores as baseRestores } from "./data";
 import { renderPlanBytes, type PlanFields } from "../pages/restores/plan";
 import { planBlockValue } from "../pages/restores/words";
+import { cloneOf, themeAPlanOf, topicConfigurationOf } from "./themeA";
 
 type S = components["schemas"];
 type Restore = S["Restore"];
@@ -144,6 +145,7 @@ function mockPlan(r: Restore, topics: string[], extra: Partial<PlanFields["sampl
       markerTopic: "logweir.scratch",
       replicationFactor: 3,
       teardown: "delete",
+      ...themeAPlanOf(r.name),
       ...(original ? { originalName: true, originalNameNoOwner: true } : {}),
     },
     sample: {
@@ -251,6 +253,13 @@ function live(k: Kept): Restore {
   };
 }
 
+/** One restore with theme A's topic configuration outcome, once it passed. */
+function withThemeA(k: Kept): Restore {
+  const r = live(k);
+  const tc = topicConfigurationOf(k.item.planBytes ?? undefined, r.newTopics, k.topics, r.operation.terminal && r.operation.verifiedSuccess);
+  return tc ? { ...r, topicConfiguration: tc } : r;
+}
+
 const list = (ns: string) => store.filter((k) => k.item.namespace === ns).sort((a, b) => b.createdMs - a.createdMs);
 const SIGNER = "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe";
 
@@ -276,6 +285,7 @@ function operationOf(k: Kept): OperationView {
   const since = k.createdMs;
   const e = (Date.now() - since) / 1000;
   const done = r.operation.terminal;
+  const clone = cloneOf(k.item.planBytes ?? undefined, done ? since + 27_000 : null);
   const succeeded = r.operation.state === "succeeded";
   const complete = r.coverage.requested === "complete";
   const stage = done ? "finished" : k.awaiting ? "admission" : (STAGES.find((s) => e < s.until)?.stage ?? "finished");
@@ -367,7 +377,9 @@ function operationOf(k: Kept): OperationView {
             newTopics: r.newTopics.map((name, i) => ({ name, partitions: PARTS[k.topics[i] ?? "orders"] ?? 3 })),
           }
         : undefined,
-    ...(r.target.mode === "scratch" && done ? { teardown: { deleted: r.newTopics, deletedTruncated: false, attestationKey: `logweir/drills/${r.uid.slice(0, 8)}.teardown.json` } } : {}),
+    ...(clone ? { clone } : {}),
+    // A clone's topics are deleted when it expires, not when the run ends.
+    ...(r.target.mode === "scratch" && done && (!clone || clone.phase === "Removed") ? { teardown: { deleted: r.newTopics, deletedTruncated: false, attestationKey: `logweir/drills/${r.uid.slice(0, 8)}.teardown.json` } } : {}),
   } as OperationView;
 }
 
@@ -614,7 +626,7 @@ export async function restoresMock(request: Request): Promise<Response | null> {
   if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/restores\/([^/:]+)$/))) {
     await ready;
     const k = list(m[1]!).find((x) => x.item.name === m![2]);
-    return k ? json(200, { item: live(k), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
+    return k ? json(200, { item: withThemeA(k), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
   }
   if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/restores\/([^/]+)\/approval-request$/))) {
     await ready;

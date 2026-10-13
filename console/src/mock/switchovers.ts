@@ -620,7 +620,7 @@ export async function switchoversMock(request: Request): Promise<Response | null
   if ((m = at(path, /^\/namespaces\/([^/]+)\/switchovers$/))) {
     const ns = m[1]!;
     if (method === "GET") {
-      const items = switchovers.filter((k) => k.ns === ns).map(switchoverNow).map(({ planBytes: _omit, ...rest }) => rest);
+      const items = switchovers.filter((k) => k.ns === ns).map(switchoverNow).map((s) => ({ ...s, planBytes: undefined }));
       return json(200, { items, page: { limit: 50, snapshot: String(67000 + items.length) }, requestId: requestId() });
     }
     if (method === "POST") return create(ns, request);

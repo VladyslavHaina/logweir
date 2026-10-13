@@ -8,23 +8,17 @@ import HistoryIcon from "@patternfly/react-icons/dist/esm/icons/history-icon";
 import { useCapabilities, useRestoreList, type Restore } from "../../api/restores";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
-import { exactUtc, relative } from "../../components/When";
+import { exactUtc } from "../../components/When";
 import { CompactList, useNarrow } from "../../components/CompactList";
-import { themeAOf } from "../../mock/themeA";
-import { MOCK_THEME_A } from "./themeA";
 import { Instant, RestoreStatus } from "./parts";
 import { coverageWords, selectionWords } from "./words";
 import "./restores.css";
 
 /** What kind of restore this is, in a few words: names, mode, coverage, selection. */
 export function restoreFacts(r: Restore): string {
-  // R7 (theme A) replaces the mock's clone facts with Restore.status.clone.
-  const clone = MOCK_THEME_A ? themeAOf(r).clone : undefined;
-  const kind = clone
-    ? clone.phase === "Removed"
-      ? "clone, removed"
-      : `clone, deletes ${relative(clone.expiresAt)}`
-    : r.target.mode === "scratch"
+  // A clone's expiry is on its operation view, not on the list item: its page shows it.
+  const kind =
+    r.target.mode === "scratch"
       ? "scratch rehearsal"
       : r.target.originalName
         ? "original names"

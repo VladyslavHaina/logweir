@@ -141,6 +141,8 @@ const BLANK: WizardValues = {
   prefix: "",
   noOwner: false,
   scratch: false,
+  cloneTtl: null,
+  topicConfiguration: { transition: null, noOwners: false },
   replication: "",
   evidenceDestination: "primary",
   archiveSecret: "",
@@ -518,6 +520,19 @@ describe("the create request", () => {
     const lv = { ...values, archiveSecret: "Bad_Name" };
     expect(validate(ctxFor(lp), lv, planFields(ctxFor(lp), lv), null)).toMatchObject({ archiveSecret: expect.any(String), evidenceBucket: expect.any(String) });
     expect(validate(ctx, values, planFields(ctx, values), null)).toEqual({});
+  });
+  it("theme A: a clone's lifetime and the topic configuration reach the plan only as chosen", () => {
+    const clone = { ...values, scratch: true, cloneTtl: 86_400, topicConfiguration: { transition: "afterVerification" as const, noOwners: true } };
+    const f = planFields(ctx, clone);
+    expect(f.target).toMatchObject({ mode: "scratch", teardownTtlSeconds: 86_400, topicConfiguration: { transition: "afterVerification", owners: [] } });
+    expect(renderPlanBytes(f)).toContain("  teardown:\n    ttl_seconds: 86400\n  topic_configuration:\n");
+    // Controls: the lifetime is dropped once scratch is off, and no choice is no block.
+    const kept = planFields(ctx, { ...clone, scratch: false });
+    expect(kept.target.teardownTtlSeconds).toBeUndefined();
+    expect(renderPlanBytes(planFields(ctx, values))).not.toMatch(/ttl_seconds|topic_configuration/);
+    // A lifetime out of its bounds is refused beside its field, before any plan is sent.
+    expect(validate(ctx, { ...clone, cloneTtl: 120 }, planFields(ctx, { ...clone, cloneTtl: 120 }), null).cloneTtl).toMatch(/CloneTtlOutOfRange/);
+    expect(validate(ctx, clone, f, null).cloneTtl).toBeUndefined();
   });
 });
 

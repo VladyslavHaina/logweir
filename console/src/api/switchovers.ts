@@ -9,8 +9,13 @@
 // Switchover Job repeats every check under its approval anyway.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "./schema";
-import { ApiError, api, createHeaders } from "./client";
-import type { Problem } from "./types";
+import { ApiError, LIST_PAGE_SIZE, api, call, createHeaders, listAll, mintKey } from "./client";
+import { keys } from "./queries";
+import { useCan } from "./session";
+import { hasShape, shellArg } from "../lib/shell";
+
+export { outcomeUnknown } from "./client";
+export { useApprovalPolicy } from "./approvals";
 
 type S = components["schemas"];
 
@@ -21,9 +26,7 @@ export type SwitchoverApprovalRequest = S["SwitchoverApprovalRequestView"];
 export type Preflight = S["Preflight"];
 export type CheckEntry = S["CheckEntryView"];
 export type DetailEntry = S["DetailEntryView"];
-export type ApprovalPolicy = S["ApprovalPolicyView"];
 export type Authorization = S["RestoreRoutingView"];
-export type FieldError = S["FieldError"];
 export type TopicConfiguration = S["TopicConfigurationView"];
 export type Clone = S["CloneView"];
 export type Restore = S["Restore"];
@@ -530,7 +533,7 @@ export function rollbackPlan(sw: Switchover, plan: ParsedPlan | null): RollbackP
           "# stopped, remove each with the broker's own tool (a <placeholder> marks a name to fill in by hand):",
           ...notRestorable.map(
             (r) =>
-              `kafka-consumer-groups.sh --bootstrap-server <bootstrap> --group ${shellArg(r.target, "kafka", "<group>")} --topic ${shellArg(topicPartition(r.topic, r.partition), "kafka", "<topic>:<partition>")} --delete-offsets`,
+              `kafka-consumer-groups.sh --bootstrap-server <bootstrap> --group ${shellArg(r.target, "kafka", "<group>")} --topic ${shellArg(topicPartition(r.topic, r.partition), "kafka", "<topic:partition>")} --delete-offsets`,
           ),
         ]
       : []),
@@ -547,108 +550,70 @@ function topicPartition(topic: string, partition: number): string {
   return Number.isInteger(partition) && partition >= 0 ? `${topic}:${partition}` : "";
 }
 
-/** What `shellArg` lets into a copyable command, by the kind of value. */
-const SHELL_ALLOW = {
-  /** A Kubernetes object name (DNS-1123 subdomain). */
-  name: (v: string) => v.length <= 253 && /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(v),
-  /** An object-storage key or a file name. */
-  key: (v: string) => v.length <= 1024 && /^[A-Za-z0-9._/-]+$/.test(v) && !v.startsWith("-"),
-  /** A Kafka topic or group id, optionally `topic:partition`. */
-  kafka: (v: string) => v.length <= 260 && /^[A-Za-z0-9._-]+(:\d+)?$/.test(v) && !v.startsWith("-"),
-} as const;
-
-/**
- * **One argument of a command the operator copies.** A value the kind's allowlist
- * accepts is single-quoted (`'\''` for a quote, which the allowlists exclude anyway);
- * anything else, a line break, `$(…)`, a backtick, a `;` or a leading `-` included,
- * becomes the placeholder, so no server-supplied string can add to the command.
- */
-export function shellArg(value: string | null | undefined, kind: keyof typeof SHELL_ALLOW, placeholder: string): string {
-  if (typeof value !== "string" || !SHELL_ALLOW[kind](value)) return placeholder;
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 /** A file name for a download: the server-supplied stem only when it is a plain name. */
 export function fileName(stem: string, suffix: string, fallback: string): string {
-  return SHELL_ALLOW.name(stem) ? `${stem}${suffix}` : fallback;
+  return hasShape(stem, "name") ? `${stem}${suffix}` : fallback;
 }
 
 // ------------------------------------------------------- errors and outcomes
-
-/** A refusal with the field errors the API names (`validation_failed`). */
-export class FieldApiError extends ApiError {
-  readonly fields: FieldError[];
-  constructor(status: number, problem: Partial<Problem> | undefined) {
-    super(status, problem);
-    this.fields = problem?.errors ?? [];
-  }
-}
-
-function unwrapFields<T>(result: { data?: T; error?: unknown; response: Response }): T {
-  if (result.data !== undefined && result.response.ok) return result.data;
-  throw new FieldApiError(result.response.status, result.error as Partial<Problem> | undefined);
-}
-
-/** Whether a failed write may still have happened: no answer, or the service failed. */
-export function outcomeUnknown(error: unknown): boolean {
-  return !(error instanceof ApiError) || error.status >= 500 || error.status === 0;
-}
 
 /** The sentence an unknown outcome reads as (one wording everywhere). */
 export const UNKNOWN_OUTCOME = "The service did not confirm the switchover. It may or may not exist; submitting again is safe, because it carries the same request key.";
 
 // --------------------------------------------------------------- queries
+// R1's keys and session: a list is [kind, ns], one object [kind, ns, name]; a Switchover is
+// read under `restoresRead` and created under `restoreCreate` (the API authorizes it as a
+// restore), and a read the session does not grant stays idle.
 
 const moving = (items: Switchover[] | undefined) => (items?.some((s) => !isTerminal(s)) ? LIVE_MS : false);
 
 export function useSwitchovers(ns: string) {
   return useQuery({
-    queryKey: ["switchovers", ns],
-    queryFn: async ({ signal }) => unwrapFields(await api.GET("/api/v1/namespaces/{ns}/switchovers", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("switchovers", ns),
+    enabled: useCan(ns, "restoresRead"),
+    queryFn: ({ signal }) =>
+      listAll("switchovers", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/switchovers", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
     refetchInterval: (q) => moving(q.state.data),
   });
 }
 
 export function useSwitchover(ns: string, name: string | undefined) {
+  const readable = useCan(ns, "restoresRead");
   return useQuery({
-    queryKey: ["switchovers", ns, name],
-    enabled: !!name,
+    queryKey: keys.item("switchovers", ns, name ?? ""),
+    enabled: readable && !!name,
     queryFn: async ({ signal }) =>
-      unwrapFields(await api.GET("/api/v1/namespaces/{ns}/switchovers/{name}", { params: { path: { ns, name: name! } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}", { params: { path: { ns, name: name! } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !isTerminal(q.state.data) ? LIVE_MS : false),
     retry: (n, error) => !(error instanceof ApiError && error.status === 404) && n < 2,
   });
 }
 
-export function useApprovalPolicy(ns: string) {
-  return useQuery({
-    queryKey: ["approval-policy", ns],
-    // The OpenAPI document names a `name` path parameter this route does not have (R6 reads it the same way).
-    queryFn: async ({ signal }) =>
-      unwrapFields(await api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns } as { ns: string; name: string } }, signal })).item,
-    staleTime: 30_000,
-  });
-}
-
-/** Start a switchover review of one restore (every group its mapping maps). */
+/** Start a switchover review of one restore (every group its mapping maps). Each click is a
+ *  new review, so each gets a fresh key. */
 export function useStartReview(ns: string) {
   return useMutation({
     mutationFn: async (restore: { name: string; uid: string }): Promise<Preflight> =>
-      unwrapFields(
-        await api.POST("/api/v1/namespaces/{ns}/preflights", {
-          params: { path: { ns }, header: createHeaders(`logweir-console.switchover-review.${crypto.randomUUID()}`) },
-          body: { operation: "switchover", switchover: { restoreName: restore.name, restoreUid: restore.uid } },
-        }),
+      (
+        await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/preflights", {
+            params: { path: { ns }, header: createHeaders(mintKey("switchover-review")) },
+            body: { operation: "switchover", switchover: { restoreName: restore.name, restoreUid: restore.uid } },
+          }),
+        )
       ).item,
   });
 }
 
 export function usePreflight(ns: string, id: string | undefined) {
+  const readable = useCan(ns, "preflight");
   return useQuery({
-    queryKey: ["preflights", ns, id],
-    enabled: !!id,
+    queryKey: keys.item("preflights", ns, id ?? ""),
+    enabled: readable && !!id,
     queryFn: async ({ signal }) =>
-      unwrapFields(await api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id! } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id! } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.terminal ? 1000 : false),
   });
 }
@@ -658,9 +623,9 @@ export async function readDetails(ns: string, id: string, check?: string, signal
   const out: DetailEntry[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 64; page += 1) {
-    const res = unwrapFields(
-      await api.GET("/api/v1/namespaces/{ns}/preflights/{id}/details", {
-        params: { path: { ns, id }, query: { limit: 200, ...(cursor ? { cursor } : {}), ...(check ? { check } : {}) } },
+    const res = await call(() =>
+      api.GET("/api/v1/namespaces/{ns}/preflights/{id}/details", {
+        params: { path: { ns, id }, query: { limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}), ...(check ? { check } : {}) } },
         signal,
       }),
     );
@@ -697,8 +662,8 @@ export function useCreateSwitchover(ns: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (c: CreateSwitchover) =>
-      unwrapFields(
-        await api.POST("/api/v1/namespaces/{ns}/switchovers", {
+      call(() =>
+        api.POST("/api/v1/namespaces/{ns}/switchovers", {
           params: { path: { ns }, header: createHeaders(c.key) },
           body: {
             planBytes: c.planBytes,
@@ -710,7 +675,7 @@ export function useCreateSwitchover(ns: string) {
           },
         }),
       ),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["switchovers", ns] }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("switchovers", ns) }),
   });
 }
 
@@ -729,11 +694,12 @@ export function mintNames(planHash: string, attempt: string): { key: string; app
 
 /** A two-person switchover request, as the second person is shown it. */
 export function useSwitchoverApprovalRequest(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "approvalsRead");
   return useQuery({
-    queryKey: ["switchover-approval-request", ns, name],
-    enabled,
+    queryKey: ["switchover-approval-requests", ns, name],
+    enabled: enabled && readable,
     queryFn: async ({ signal }) =>
-      unwrapFields(await api.GET("/api/v1/namespaces/{ns}/switchovers/{name}/approval-request", { params: { path: { ns, name } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item,
     retry: false,
   });
 }
@@ -743,15 +709,16 @@ export function useApproveSwitchover(ns: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (confirmationSha256: string) =>
-      unwrapFields(
-        await api.POST("/api/v1/namespaces/{ns}/switchovers/{name}/console-approval", {
+      call(() =>
+        api.POST("/api/v1/namespaces/{ns}/switchovers/{name}/console-approval", {
           params: { path: { ns, name }, header: { Origin: window.location.origin } },
           body: { confirmationSha256 },
         }),
       ),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["switchover-approval-request", ns, name] });
-      void client.invalidateQueries({ queryKey: ["switchovers", ns] });
+      void client.invalidateQueries({ queryKey: ["switchover-approval-requests", ns, name] });
+      void client.invalidateQueries({ queryKey: keys.list("switchovers", ns) });
+      void client.invalidateQueries({ queryKey: keys.list("approvals", ns) });
     },
   });
 }

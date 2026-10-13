@@ -14,6 +14,32 @@
 
 export const TIME_BASIS_PRODUCER_TIME = "producerTime";
 export const COVERAGE_COMPLETE = "complete";
+/** `target.teardown: {ttl_seconds}`'s bounds (`CloneTtlOutOfRange`). */
+export const CLONE_TTL_SECONDS = { min: 300, max: 2_592_000 } as const;
+
+/** Why a clone's lifetime is refused, or null (null itself: delete when the run ends). */
+export function cloneTtlError(seconds: number | null): string | null {
+  if (seconds === null) return null;
+  if (!Number.isInteger(seconds) || seconds < CLONE_TTL_SECONDS.min || seconds > CLONE_TTL_SECONDS.max) return "A clone is kept 5 minutes to 30 days (CloneTtlOutOfRange).";
+  return null;
+}
+
+/** The topic configuration choice (theme A, PROD-05.2), as the wizard holds it. */
+export interface TopicConfigurationValue {
+  /** `null`: no block; the topics are created with the target's defaults, as always. */
+  transition: "afterVerification" | "none" | null;
+  /** The requester states that no topic has a declarative owner (`owners: []`). */
+  noOwners: boolean;
+}
+
+export const NO_TOPIC_CONFIGURATION: TopicConfigurationValue = { transition: null, noOwners: false };
+
+/** The plan's `target.topic_configuration` value, or `null` for none. */
+export function topicConfigurationPlan(v: TopicConfigurationValue): { transition: "afterVerification" | "none"; owners?: [] } | null {
+  if (!v.transition) return null;
+  return { transition: v.transition, ...(v.noOwners ? { owners: [] as [] } : {}) };
+}
+
 /** `target.default_replication_factor` is an i16 in logweir_core::spec. */
 export const MAX_REPLICATION_FACTOR = 32767;
 /** The runner's TargetMode and the Restore CRD's enum, byte for byte. */
@@ -60,6 +86,10 @@ export interface PlanFields {
     markerTopic: string;
     replicationFactor: number;
     teardown: string;
+    /** A clone (theme A, PROD-11.1a): `teardown: {ttl_seconds: N}`, scratch mode only. */
+    teardownTtlSeconds?: number | null;
+    /** Theme A, PROD-05.2: `topic_configuration`, created from the point's model. */
+    topicConfiguration?: { transition: "afterVerification" | "none"; owners?: [] } | null;
     originalName?: boolean;
     originalNameNoOwner?: boolean;
   };
@@ -185,7 +215,29 @@ export function renderPlanBytes(fields: PlanFields): string {
   out.push(`  topic_mapping_prefix: ${quote(needed(target.topicMappingPrefix, "target.topicMappingPrefix"))}`);
   out.push(`  marker_topic: ${quote(needed(target.markerTopic, "target.markerTopic"))}`);
   out.push(`  default_replication_factor: ${replicationFactor(target.replicationFactor, "target.replicationFactor")}`);
-  out.push(`  teardown: ${quote(needed(target.teardown, "target.teardown"))}`);
+  const ttl = target.teardownTtlSeconds;
+  if (ttl !== undefined && ttl !== null) {
+    // The clone form, which every runner before theme A refuses at parse rather than keep
+    // the topics forever (decisions/PROD-04.2-cutover.md section 5).
+    if (target.mode !== "scratch") throw new TypeError("CloneTtlNeedsScratch: a clone's lifetime is set only in scratch mode");
+    const n = Number(integer(ttl, "target.teardownTtlSeconds"));
+    if (n < CLONE_TTL_SECONDS.min || n > CLONE_TTL_SECONDS.max) {
+      throw new TypeError(`CloneTtlOutOfRange: a clone is kept ${CLONE_TTL_SECONDS.min} to ${CLONE_TTL_SECONDS.max} seconds, not ${n}`);
+    }
+    out.push("  teardown:");
+    out.push(`    ttl_seconds: ${n}`);
+  } else {
+    out.push(`  teardown: ${quote(needed(target.teardown, "target.teardown"))}`);
+  }
+  const tc = target.topicConfiguration;
+  if (tc) {
+    if (tc.transition !== "afterVerification" && tc.transition !== "none") {
+      throw new TypeError(`target.topicConfiguration.transition must be afterVerification or none, not ${String(tc.transition)}`);
+    }
+    out.push("  topic_configuration:");
+    out.push(`    transition: ${quote(tc.transition)}`);
+    if (tc.owners) out.push("    owners: []");
+  }
 
   // The recovery point: the window's END only. Its start is the archive's own floor.
   out.push("restore:");

@@ -10,14 +10,16 @@
 import { Alert, Content, DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm, FormGroup, FormHelperText, FormSelect, FormSelectOption, HelperText, HelperTextItem, Radio } from "@patternfly/react-core";
 import InfoIcon from "@patternfly/react-icons/dist/esm/icons/info-circle-icon";
 import type { components } from "../../api/schema";
-import { shellArg, type Clone } from "../../api/switchovers";
+import { type Clone } from "../../api/switchovers";
+import { shellArg } from "../../lib/shell";
+import { CLONE_TTL_SECONDS, cloneTtlError } from "../restores/plan";
 import { StatusLabel } from "../../components/Status";
 import { When, duration, relative } from "../../components/When";
 
 type Teardown = components["schemas"]["TeardownView"];
 
-/** The bounds `CloneTtlOutOfRange` holds a lifetime to, in seconds. */
-export const CLONE_TTL = { min: 300, max: 2_592_000 } as const;
+/** The bounds `CloneTtlOutOfRange` holds a lifetime to, in seconds (the plan renderer's). */
+export const CLONE_TTL = CLONE_TTL_SECONDS;
 
 export const CLONE_CHOICES = [
   { seconds: 3600, words: "1 hour" },
@@ -27,12 +29,7 @@ export const CLONE_CHOICES = [
   { seconds: 30 * 86_400, words: "30 days" },
 ] as const;
 
-/** Why a lifetime is refused, or null. */
-export function cloneTtlError(seconds: number | null): string | null {
-  if (seconds === null) return null;
-  if (!Number.isInteger(seconds) || seconds < CLONE_TTL.min || seconds > CLONE_TTL.max) return "A clone is kept 5 minutes to 30 days (CloneTtlOutOfRange).";
-  return null;
-}
+export { cloneTtlError };
 
 /** The plan's `target.teardown` for a clone, or null to leave scratch mode's default. */
 export function cloneTeardown(seconds: number | null): { ttl_seconds: number } | null {

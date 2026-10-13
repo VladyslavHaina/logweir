@@ -15,11 +15,13 @@ import completeFields from "../../../../ui/tests/fixtures/plan-complete-fields.j
 import originalFields from "../../../../ui/tests/fixtures/plan-original-name-fields.json";
 import pointFields from "../../../../ui/tests/fixtures/plan-point-fields.json";
 import timeBasisFields from "../../../../ui/tests/fixtures/plan-time-basis-fields.json";
+import cloneFields from "../../../../ui/tests/fixtures/plan-clone-fields.json";
 import plainGolden from "../../../../ui/tests/fixtures/plan.golden.yaml?raw";
 import completeGolden from "../../../../ui/tests/fixtures/plan-complete.golden.yaml?raw";
 import originalGolden from "../../../../ui/tests/fixtures/plan-original-name.golden.yaml?raw";
 import pointGolden from "../../../../ui/tests/fixtures/plan-point.golden.yaml?raw";
 import timeBasisGolden from "../../../../ui/tests/fixtures/plan-time-basis.golden.yaml?raw";
+import cloneGolden from "../../../../ui/tests/fixtures/plan-clone.golden.yaml?raw";
 import {
   INSECURE_CONTEXT_SENTENCE,
   defaultTopicPrefix,
@@ -39,6 +41,7 @@ const GOLDENS: [string, unknown, string][] = [
   ["plan-original-name.golden.yaml", originalFields, originalGolden],
   ["plan-point.golden.yaml", pointFields, pointGolden],
   ["plan-time-basis.golden.yaml", timeBasisFields, timeBasisGolden],
+  ["plan-clone.golden.yaml", cloneFields, cloneGolden],
 ];
 
 const bytes = (s: string) => new TextEncoder().encode(s);
@@ -70,7 +73,33 @@ describe("the plan goldens", () => {
     expect(renderPlanBytes(fields(pointFields))).toContain('  point:\n    point_id: "lwp1-0123456789abcdef0123456789abcdef"\n');
     // The plain plan carries none of the opt-ins (the Rust arm asserts the same absence).
     const plain = renderPlanBytes(fields(plainFields));
-    for (const key of ["time_basis", "coverage:", "original_name", "  point:"]) expect(plain).not.toContain(key);
+    for (const key of ["time_basis", "coverage:", "original_name", "  point:", "ttl_seconds", "topic_configuration"]) expect(plain).not.toContain(key);
+  });
+
+  it("theme A: a clone's lifetime is the teardown map in scratch mode only, inside its bounds", () => {
+    const clone = renderPlanBytes(fields(cloneFields));
+    expect(clone).toContain('  teardown:\n    ttl_seconds: 86400\n  topic_configuration:\n    transition: "afterVerification"\n    owners: []\nrestore:');
+    const newTopic = fields(cloneFields);
+    newTopic.target.mode = "newTopic";
+    expect(() => renderPlanBytes(newTopic)).toThrow(/CloneTtlNeedsScratch/);
+    for (const ttl of [299, 2_592_001, 3600.5]) {
+      const bad = fields(cloneFields);
+      bad.target.teardownTtlSeconds = ttl;
+      expect(() => renderPlanBytes(bad)).toThrow(ttl === 3600.5 ? /whole number/ : /CloneTtlOutOfRange/);
+    }
+    // Controls: the bounds themselves pass, and no lifetime is the string policy.
+    for (const ttl of [300, 2_592_000]) {
+      const ok = fields(cloneFields);
+      ok.target.teardownTtlSeconds = ttl;
+      expect(renderPlanBytes(ok)).toContain(`    ttl_seconds: ${ttl}\n`);
+    }
+    const none = fields(cloneFields);
+    none.target.teardownTtlSeconds = null;
+    none.target.topicConfiguration = null;
+    expect(renderPlanBytes(none)).toContain('  teardown: "delete"\nrestore:');
+    const odd = fields(cloneFields);
+    odd.target.topicConfiguration = { transition: "later" as never };
+    expect(() => renderPlanBytes(odd)).toThrow(/afterVerification or none/);
   });
 });
 

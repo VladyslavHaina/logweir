@@ -31,6 +31,7 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { yamlString, type DetailEntry, type TopicConfiguration } from "../../api/switchovers";
 import { StatusLabel } from "../../components/Status";
 import { exactUtc, msValue } from "../../components/When";
+import { NO_TOPIC_CONFIGURATION, topicConfigurationPlan, type TopicConfigurationValue } from "../restores/plan";
 import { useSha256 } from "../../components/hash";
 import "./cutover.css";
 
@@ -39,20 +40,8 @@ export const TOPIC_CONFIGURATION_CHECK = "target.topicConfiguration";
 
 // ------------------------------------------------------------------ the choice
 
-export interface TopicConfigurationValue {
-  /** `null`: no block; the topics are created with the target's defaults, as always. */
-  transition: "afterVerification" | "none" | null;
-  /** The requester states that no topic has a declarative owner (`owners: []`). */
-  noOwners: boolean;
-}
-
-export const NO_TOPIC_CONFIGURATION: TopicConfigurationValue = { transition: null, noOwners: false };
-
-/** The plan's `target.topic_configuration` value for R5's renderer, or `null` for none. */
-export function topicConfigurationPlan(v: TopicConfigurationValue): { transition: "afterVerification" | "none"; owners?: [] } | null {
-  if (!v.transition) return null;
-  return { transition: v.transition, ...(v.noOwners ? { owners: [] as [] } : {}) };
-}
+// The value and its plan block are pure, in the plan renderer's module.
+export { NO_TOPIC_CONFIGURATION, topicConfigurationPlan, type TopicConfigurationValue };
 
 export function TopicConfigurationChoice({
   value,

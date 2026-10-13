@@ -1,7 +1,7 @@
 // The five steps of the restore wizard: the recovery point, topics and time, the
 // target, the readiness check, and review and create. Each step reads the one form
 // (react-hook-form) and the facts the page resolved; none of them sends anything.
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Controller, useWatch, type Control } from "react-hook-form";
 import {
@@ -33,6 +33,8 @@ import type { ApprovalPolicy, Backup, CatalogView, Connection, PointView, Prefli
 import { Coded, Commands, Facts, FieldHelp, Instant, shown } from "./parts";
 import { matchesQuery, pointHaystack, restorableWindow, rfc3339, type RecoveryPoint } from "./points";
 import type { PlanFields, PreparedPlan } from "./plan";
+import { CloneLifetime } from "../cutover/CloneLifetime";
+import { TopicConfigurationChoice } from "../cutover/TopicConfiguration";
 import {
   approvalRoute,
   completeChosen,
@@ -494,6 +496,7 @@ export function TargetStep({
   destinations,
   errors,
   ns,
+  ownersAsked = false,
 }: {
   control: Control<WizardValues>;
   point: RecoveryPoint;
@@ -506,6 +509,8 @@ export function TargetStep({
   destinations: { name: string; uid: string }[];
   errors: Errors;
   ns: string;
+  /** The readiness check's preview refused TopicOwnerNotChecked: ask for the owner statement. */
+  ownersAsked?: boolean;
 }) {
   const v = useWatch({ control }) as WizardValues;
   const original = originalNameChosen(v);
@@ -625,9 +630,23 @@ export function TargetStep({
         {v.scratch && connection && !connection.markerTopic && (
           <Alert variant="warning" isInline isPlain title={SCRATCH_MARKER_WARNING} />
         )}
-        {/* R7 (theme A) adds here: the clone's time to live, and the topic configuration
-            preview with its transition after verification (PROD-05.2, PROD-11.1a). */}
+        {v.scratch && (
+          <Controller
+            control={control}
+            name="cloneTtl"
+            render={({ field }) => (
+              <CloneLifetime value={field.value} onChange={field.onChange} target={connection?.name ?? "the target"} error={err(errors, "cloneTtl")} />
+            )}
+          />
+        )}
       </FormGroup>
+      <Controller
+        control={control}
+        name="topicConfiguration"
+        render={({ field }) => (
+          <TopicConfigurationChoice value={field.value} onChange={field.onChange} target={connection?.name ?? "the target"} ownersAsked={ownersAsked} />
+        )}
+      />
       <Controller
         control={control}
         name="replication"
@@ -724,6 +743,7 @@ export function CheckStep({
   connection,
   onStart,
   onCancel,
+  topicPreview,
 }: {
   readiness: ReadinessState;
   refusal: string | null;
@@ -733,6 +753,8 @@ export function CheckStep({
   connection: Connection | null;
   onStart: () => void;
   onCancel: () => void;
+  /** The topic configuration preview (theme A), once the check is done. */
+  topicPreview?: ReactNode;
 }) {
   const r = readiness.result;
   const running = r !== null && !r.terminal && readiness.stoppedAt === null;
@@ -808,6 +830,12 @@ export function CheckStep({
           )}
           {r && r.stale && <Content component="p" className="lw-subtle lw-small">Stale: {r.staleReasons.map(staleReasonLine).join("; ")}.</Content>}
           {running && rows.length === 0 && <LoadingRows rows={3} label="Checking" />}
+          {topicPreview && (
+            <>
+              <Title headingLevel="h3" size="lg" className="lw-gap-top">Topic configuration</Title>
+              {topicPreview}
+            </>
+          )}
         </>
       )}
       <Content component="p" className="lw-subtle lw-small lw-gap-top">{READINESS_CAVEAT_SENTENCE}</Content>

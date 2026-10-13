@@ -26,7 +26,8 @@ import {
 import { useRestore } from "../../api/queries";
 import { useCan } from "../../api/session";
 import { ApiError } from "../../api/client";
-import { fileName, isTerminal, reasonWords, shellArg, useApprovalPolicy, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
+import { shellArg } from "../../lib/shell";
+import { fileName, isTerminal, reasonWords, useApprovalPolicy, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
@@ -52,7 +53,7 @@ function ApprovalCard({ ns, sw }: { ns: string; sw: Switchover }) {
           <>
             <Content component="p">
               A second person approves this in{" "}
-              <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
+              <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: sw.name }}>
                 Approvals
               </Link>
               . This is what they are shown: every group and position, and nothing else is committed.
@@ -75,13 +76,13 @@ function ApprovalCard({ ns, sw }: { ns: string; sw: Switchover }) {
           <>
             <Content component="p">
               This namespace has no approval policy. An approver signs the plan and uploads both files in{" "}
-              <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
+              <Link to="/$ns/approvals" params={{ ns }}>
                 Approvals
               </Link>
               :
             </Content>
             <CodeBlock>
-              <CodeBlockCode>{`logweir drill approve --subject-kind Switchover --spec ${shellArg(fileName(sw.name, ".switchover-plan.yaml", ""), "key", "<the downloaded plan>")}`}</CodeBlockCode>
+              <CodeBlockCode>{`logweir drill approve --subject-kind Switchover --spec ${shellArg(fileName(sw.name, ".switchover-plan.yaml", ""), "storageKey", "<the downloaded plan>")}`}</CodeBlockCode>
             </CodeBlock>
           </>
         ) : (
@@ -89,7 +90,7 @@ function ApprovalCard({ ns, sw }: { ns: string; sw: Switchover }) {
             <Content component="p">
               An approver countersigns the console's request ({sw.approvalName}-confirmation) with their personal key and uploads the
               signature in{" "}
-              <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
+              <Link to="/$ns/approvals" params={{ ns }}>
                 Approvals
               </Link>
               :

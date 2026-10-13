@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "Theme A's clone (PROD-11.1a) with the source's topic configuration (PROD-05.2): the",
+    "argument to the console's renderPlanBytes for plan-clone.golden.yaml. A scratch restore",
+    "kept 24 hours (target.teardown: {ttl_seconds: 86400}), its topics created from the",
+    "point's configuration model with the held settings applied after verification, and the",
+    "requester's owner statement (owners: []). console/src/pages/restores/plan.test.ts renders",
+    "it byte for byte; crates/logweir/tests/console_plan.rs holds the golden to the runner."
+  ],
+  "name": "orders-clone-2207",
+  "backupSetRef": "01JB7Z0000000000000000000B",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "scratch",
+    "topicPrefix": "clone-",
+    "topicMappingPrefix": "clone-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete",
+    "teardownTtlSeconds": 86400,
+    "topicConfiguration": {
+      "transition": "afterVerification",
+      "owners": []
+    }
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  }
+}

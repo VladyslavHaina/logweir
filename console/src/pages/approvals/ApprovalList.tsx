@@ -32,11 +32,12 @@ import { StatusLabel } from "../../components/Status";
 import { ApprovalStatus, ErrorLine, principalShort } from "./parts";
 import "./approvals.css";
 
-/** Where an Approval's subject is decided. Restore here; theme A's Switchover (R7) adds its page. */
+/** Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A). */
 export function subjectHref(ns: string, approval: Approval): string | undefined {
   if (approval.subjectRef.kind === "Restore") {
     return `#/${ns}/approvals/${encodeURIComponent(approval.subjectRef.name)}?approval=${encodeURIComponent(approval.name)}`;
   }
+  if (approval.subjectRef.kind === "Switchover") return `#/${ns}/approvals/switchover/${encodeURIComponent(approval.subjectRef.name)}`;
   return undefined;
 }
 

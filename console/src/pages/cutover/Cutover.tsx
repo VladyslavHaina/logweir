@@ -39,8 +39,9 @@ import {
 } from "@patternfly/react-core";
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import { useRestore } from "../../api/queries";
+import { ApiError } from "../../api/client";
+import type { ApprovalPolicy } from "../../api/approvals";
 import {
-  FieldApiError,
   UNKNOWN_OUTCOME,
   chosenByDefault,
   evidenceDigests,
@@ -62,7 +63,6 @@ import {
   useStartReview,
   useSwitchover,
   verdictOf,
-  type ApprovalPolicy,
   type Preflight,
   type Restore,
   type ReviewGroup,
@@ -252,7 +252,7 @@ function Confirm({
   const target = restore.target.clusterRef.name;
   const doc = useMemo(
     () => (digests ? planDocument({ name: restore.name, uid: restore.uid, planHash: restore.planHash, ...digests }, chosen) : { refused: "The review did not state the scorecard's and the mapping's digests, so the console cannot bind a plan to them. Build it with logweir switchover plan." }),
-    [digests?.scorecardSha256, digests?.mappingSha256, restore.name, restore.uid, restore.planHash, chosen], // eslint-disable-line react-hooks/exhaustive-deps
+    [digests?.scorecardSha256, digests?.mappingSha256, restore.name, restore.uid, restore.planHash, chosen],
   );
   const bytes = "bytes" in doc ? doc.bytes : "";
   const hash = useSha256(bytes);
@@ -278,10 +278,10 @@ function Confirm({
   const created = chosen.filter((g) => g.absent);
   const partial = chosen.filter((g) => unavailablePositions(g).length > 0);
   const err = create.error;
-  const fieldErrors = err instanceof FieldApiError ? err.fields : [];
+  const fieldErrors = err instanceof ApiError ? err.fieldErrors : [];
   useEffect(() => {
     for (const f of fieldErrors) if (f.field === "ticket") form.setError("ticket", { message: f.message });
-  }, [err]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [err]);
 
   const submit = form.handleSubmit(async (values) => {
     if (!names || !("bytes" in doc)) return;
@@ -518,7 +518,7 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
               {policy.data?.operatorMode === "two-person"
                 ? "A second person approves it in Approvals, seeing every group and position. Nothing runs before that."
                 : "An approver signs it with their personal key and uploads the signature in Approvals. Nothing runs before that."}{" "}
-              <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
+              <Link to="/$ns/approvals" params={{ ns }}>
                 Approvals
               </Link>
             </Alert>
@@ -610,7 +610,7 @@ function CutoverFlow() {
       started.current = true;
       beginReview();
     }
-  }, [r, refusal, switchoverName]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [r, refusal, switchoverName]);
 
   const state = pf.data ? reviewState(pf.data) : null;
   const read = useMemo(() => (details.data ? reviewGroups(details.data) : null), [details.data]);

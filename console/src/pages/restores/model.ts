@@ -6,6 +6,9 @@ import type { components } from "../../api/schema";
 import {
   COVERAGE_COMPLETE,
   MAX_REPLICATION_FACTOR,
+  cloneTtlError,
+  topicConfigurationPlan,
+  type TopicConfigurationValue,
   TIME_BASIS_PRODUCER_TIME,
   defaultTopicPrefix,
   type PlanFields,
@@ -25,6 +28,7 @@ import {
   type Destination,
   type RecoveryPoint,
 } from "./points";
+
 
 type S = components["schemas"];
 export type Connection = S["Connection"];
@@ -50,6 +54,10 @@ export interface WizardValues {
   prefix: string;
   noOwner: boolean;
   scratch: boolean;
+  /** A scratch restore kept as a clone for this many seconds; null deletes it when the run ends. */
+  cloneTtl: number | null;
+  /** The topic configuration choice (theme A, PROD-05.2). */
+  topicConfiguration: TopicConfigurationValue;
   /** As typed; empty means the default. */
   replication: string;
   evidenceDestination: string;
@@ -410,6 +418,8 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
       markerTopic: MARKER_TOPIC,
       replicationFactor: choice.value,
       teardown: "delete",
+      ...(v.scratch && v.cloneTtl !== null ? { teardownTtlSeconds: v.cloneTtl } : {}),
+      ...(topicConfigurationPlan(v.topicConfiguration) ? { topicConfiguration: topicConfigurationPlan(v.topicConfiguration)! } : {}),
       ...(original ? { originalName: true, originalNameNoOwner: v.noOwner } : {}),
     },
     sample: {
@@ -441,6 +451,8 @@ export function validate(ctx: WizardContext, v: WizardValues, f: PlanFields, des
   const rf = replicationProblem(replicationChoice(ctx, v), ctx.brokers);
   if (rf) out.replication = rf;
   if (!ctx.connection) out.target = "choose the target connection this restore writes to";
+  const ttl = v.scratch ? cloneTtlError(v.cloneTtl) : null;
+  if (ttl) out.cloneTtl = ttl;
   if (originalNameChosen(v) && !v.noOwner) out.noOwner = "state that no declarative owner manages these names, or restore under a prefix";
   if (ctx.point.destinationName) {
     if (!evidenceStoreOf(ctx.evidence)) out.evidenceDestination = "choose the saved destination the evidence is written to";

@@ -17,7 +17,6 @@ import {
   reviewGroups,
   reviewState,
   rollbackPlan,
-  shellArg,
   verdictOf,
   yamlString,
   type CheckEntry,
@@ -251,21 +250,6 @@ describe("the rollback", () => {
 });
 
 describe("no server-supplied string reaches a command or a plan unguarded", () => {
-  const HOSTILE = ["a\nrm -rf ~", "$(curl evil)", "`id`", "x; reboot", "-rf", "a b", "it's", ""];
-
-  it("shellArg quotes what its allowlist accepts and puts a placeholder for anything else", () => {
-    for (const v of HOSTILE) {
-      for (const kind of ["name", "key", "kafka"] as const) expect(shellArg(v, kind, "<p>")).toBe("<p>");
-    }
-    expect(shellArg(undefined, "name", "<p>")).toBe("<p>");
-    expect(shellArg("Orders", "name", "<p>")).toBe("<p>"); // not a DNS-1123 name
-    expect(shellArg("../x", "kafka", "<p>")).toBe("<p>");
-    // Negative controls: plain values pass, single-quoted.
-    expect(shellArg("orders-clone-k3v9d", "name", "<p>")).toBe("'orders-clone-k3v9d'");
-    expect(shellArg("logweir/switchovers/01M3.record.json", "key", "<p>")).toBe("'logweir/switchovers/01M3.record.json'");
-    expect(shellArg("orders_EU.v2:3", "kafka", "<p>")).toBe("'orders_EU.v2:3'");
-  });
-
   it("the rollback text carries no server string in a comment, and none unguarded in a command", () => {
     const bad = "$(curl evil); `id`";
     const doc = planDocument(RESTORE, reviewGroups([line(bad, { topic: "t;rm" }), line("good"), line("nl")]).groups);
@@ -294,10 +278,10 @@ describe("no server-supplied string reaches a command or a plan unguarded", () =
     );
     for (const l of rb.text.split("\n")) {
       // Every line is one of the text's own comments, or a command whose names are quoted or placeholders.
-      expect(l === "" || l === "#" || (l.startsWith("# ") && !/curl|injected|--force|switchover run|`/.test(l)) || /^kafka-consumer-groups\.sh --bootstrap-server <bootstrap> --group ('[A-Za-z0-9._-]+'|<group>) --topic ('[A-Za-z0-9._-]+:\d+'|<topic>:<partition>) --delete-offsets$/.test(l)).toBe(true);
+      expect(l === "" || l === "#" || (l.startsWith("# ") && !/curl|injected|--force|switchover run|`/.test(l)) || /^kafka-consumer-groups\.sh --bootstrap-server <bootstrap> --group ('[A-Za-z0-9._-]+'|<group>) --topic ('[A-Za-z0-9._-]+:\d+'|<topic:partition>) --delete-offsets$/.test(l)).toBe(true);
     }
     for (const x of ["injected", "--force", "logweir switchover run", "curl", "t;rm", "`id`", "'z'"]) expect(rb.text).not.toContain(x);
-    expect(rb.text).toContain("--group <group> --topic <topic>:<partition>");
+    expect(rb.text).toContain("--group <group> --topic <topic:partition>");
     expect(rb.text).toContain("--group <group> --topic 'orders:0'");
     // Negative control: the clean group's command is there, quoted.
     expect(rb.text).toContain("--group 'good' --topic 'orders:0' --delete-offsets");

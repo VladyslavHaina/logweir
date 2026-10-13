@@ -4,6 +4,7 @@ import type { nsRoute } from "../../router";
 import type { RouteClaim } from "../../api/approvals";
 import { ApprovalList } from "./ApprovalList";
 import { ApprovalPage } from "./ApprovalPage";
+import { SwitchoverApprovalPage } from "./SwitchoverApprovalPage";
 
 /** What a link may claim about the Restore it names; the page refuses a claim that disagrees. */
 function claim(search: Record<string, unknown>): RouteClaim {
@@ -16,8 +17,9 @@ function claim(search: Record<string, unknown>): RouteClaim {
 export function approvalRoutes(parent: typeof nsRoute) {
   return [
     createRoute({ getParentRoute: () => parent, path: "approvals", component: ApprovalList }),
-    // One Restore's approval (subject kind Restore). Theme A's Switchover approvals
-    // (R7) add `approvals/switchover/$name` here, with their own page.
+    // A Switchover's approval (subject kind Switchover, theme A).
+    createRoute({ getParentRoute: () => parent, path: "approvals/switchover/$name", component: SwitchoverApprovalPage }),
+    // One Restore's approval (subject kind Restore).
     createRoute({ getParentRoute: () => parent, path: "approvals/$name", component: ApprovalPage, validateSearch: claim }),
   ] as const;
 }
