@@ -16,13 +16,13 @@ import {
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr, type ThProps } from "@patternfly/react-table";
 import SearchIcon from "@patternfly/react-icons/dist/esm/icons/search-icon";
 import CubesIcon from "@patternfly/react-icons/dist/esm/icons/cubes-icon";
-import { useBackups } from "../api/queries";
-import type { Backup } from "../api/types";
-import { PageHeader } from "../components/PageHeader";
-import { RunStatus, TriggerText } from "../components/Status";
-import { CompactList, useNarrow } from "../components/CompactList";
-import { Empty, ErrorState, LoadingRows } from "../components/States";
-import { When, count } from "../components/When";
+import { useBackups } from "../../api/queries";
+import type { Backup } from "../../api/types";
+import { PageHeader } from "../../components/PageHeader";
+import { RunStatus, TriggerText } from "../../components/Status";
+import { CompactList, useNarrow } from "../../components/CompactList";
+import { Empty, ErrorState, LoadingRows } from "../../components/States";
+import { When, count } from "../../components/When";
 
 type Filter = "all" | "verified" | "failed" | "running";
 

@@ -24,15 +24,15 @@ import {
   ProgressStepper,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
-import { useBackup, usePoints } from "../api/queries";
-import type { Backup, PointView } from "../api/types";
-import { PageHeader } from "../components/PageHeader";
-import { CaptureStatus, RunStatus, TriggerText } from "../components/Status";
-import { ErrorState, LoadingRows } from "../components/States";
-import { When, count } from "../components/When";
-import { Ident } from "../components/Ident";
-import { windowText } from "./Backups";
-import { CompactList, useNarrow } from "../components/CompactList";
+import { useBackup, usePoints } from "../../api/queries";
+import type { Backup, PointView } from "../../api/types";
+import { PageHeader } from "../../components/PageHeader";
+import { CaptureStatus, RunStatus, TriggerText } from "../../components/Status";
+import { ErrorState, LoadingRows } from "../../components/States";
+import { When, count } from "../../components/When";
+import { Ident } from "../../components/Ident";
+import { windowText } from "./BackupList";
+import { CompactList, useNarrow } from "../../components/CompactList";
 
 function Term({ term, children }: { term: string; children: React.ReactNode }) {
   return (

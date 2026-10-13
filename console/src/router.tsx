@@ -11,8 +11,8 @@ import {
 } from "@tanstack/react-router";
 import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
-import { Backups } from "./pages/Backups";
-import { BackupDetail } from "./pages/BackupDetail";
+import { Backups } from "./pages/backups/BackupList";
+import { BackupDetail } from "./pages/backups/BackupDetail";
 import { Restores } from "./pages/Restores";
 import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
