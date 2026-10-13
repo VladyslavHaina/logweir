@@ -56,7 +56,6 @@ use logweir_core::switchover::{SwitchoverPlan, SwitchoverRecord};
 use logweir_kafka::positions::{
     CommittedPosition, GroupListing, PartitionPosition, TopicPartition,
 };
-use logweir_kafka::reader::ClusterReader;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
