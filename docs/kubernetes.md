@@ -2662,10 +2662,10 @@ state off the `refusal-reason=` line (or `GuardRefusedUnknownReason`).
 
 #### The runner image must be at least as new as the controller
 
-The controller passes `--runner-line-token` to every `Restore`, `Backup` and
-`KafkaCluster` probe Job, and every runner image published before FX-43 (the
-released `v0.2.0` included) stops while parsing its arguments, before any
-work.
+The controller passes `--runner-line-token` to every runner Job (`Restore`,
+`Backup`, the `KafkaCluster` probe, the check Jobs and the `RetentionPolicy`
+Job), and every runner image published before FX-43 (the released `v0.2.0`
+included) stops while parsing its arguments, before any work.
 
 One `helm upgrade` of the packaged chart moves `controllerImage` and
 `runnerImage` together. The mixed pair comes from two pinned tags with one
@@ -2677,7 +2677,10 @@ under `IfNotPresent`), or from a `runnerImage` pinned apart.
 `exitReason: RunnerOlderThanController`, and the message names the flag and
 the chart value; a `BackupSchedule` does not retry it. A `KafkaCluster` says
 `Reachable=Unknown`, reason `RunnerOlderThanController`, with `reachable`
-cleared. The runner pod's log starts with
+cleared. A check (a `Preflight` row, a `TopicDiscovery`, a `RecoveryCatalog`
+sync) fails `CheckContractMismatch` with `RunnerOlderThanController` in its
+message. A `RetentionPolicy` run is refused before deleting anything:
+`Enforced=False`, `lastEnforcement.refusalCode: RunnerOlderThanController`. The runner pod's log starts with
 
 ```
 error: unexpected argument '--runner-line-token' found

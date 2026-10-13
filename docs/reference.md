@@ -101,14 +101,28 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 
 ### Sealed lines (FX-43)
 
-A `Restore`, `Backup` or `KafkaCluster` probe Job this controller builds
-carries a fresh line token as the runner container's last two arguments,
-`--runner-line-token <hex>` (40 lower-case hex digits, 160 bits from the
-operating system's random source). The runner then prints every line below
-twice: first sealed, `@<token> <line>`, then the line itself. Its last write
-is the sealed lines of its final block, ONE sealed `runner-exit=<code>`, and
-the plain lines, which stay last in the order the tables give. Every line is
-one line whatever it holds (`logweir_core::runner_line::one_line`).
+EVERY runner Job this controller builds carries a fresh line token as the
+runner container's last two arguments, `--runner-line-token <hex>` (40
+lower-case hex digits, 160 bits from the operating system's random source):
+`Restore`, `Backup`, the `KafkaCluster` probe, the check Jobs (`logweir check
+run`: `Preflight`, evidence fetch, `TopicDiscovery`, a dynamic `Backup`'s
+discovery, the `RecoveryCatalog` sync) and the `RetentionPolicy` Job
+(`logweir-retention`). The runner then prints every line below twice: first
+sealed, `@<token> <line>`, then the line itself. Its last write is the sealed
+lines of its final block, ONE sealed `runner-exit=<code>`, and the plain lines,
+which stay last in the order the tables give. Every line is one line whatever
+it holds (`logweir_core::runner_line::one_line`).
+
+- **A check seals two lines, not every frame:** the end frame and
+  `refusal-reason=`, each sealed before its plain copy, then the sealed
+  `runner-exit=`. The sealed end frame declares every stream's digest and the
+  topic lines' count and digest, so it binds the other frames; the
+  controller keeps the plain topic and part frames beside the sealed lines
+  (`runner_log::own_lines_binding`) and nothing else. A forged
+  `refusal-reason=`, or a forged complete relay when the runner printed none,
+  is not read.
+- **Retention** prints every `retention-*` line once, at the end, through the
+  same block, and its error text on one line.
 
 - **The controller reads only the lines sealed with its Job's token**
   (`weirkeeper::runner_log::own_lines`, constant-time comparison), wherever
@@ -117,18 +131,22 @@ one line whatever it holds (`logweir_core::runner_line::one_line`).
   got into the log, a plain line, a line sealed with another Job's token.
 - **A runner older than the controller is named.** A runner that predates
   the flag stops at argument parsing (`error: unexpected argument
-  '--runner-line-token' found`, exit 1) before any work. A Job with the flag
+  '--runner-line-token' found`, exit 1; the retention worker exits 3 with
+  `retention-refusal=UnknownArgument`) before any work. A Job with the flag
   whose runner exited 0 to 4 and printed no sealed `runner-exit=` is
   `exitReason: RunnerOlderThanController` (a probe: reason
-  `RunnerOlderThanController`, `reachable` cleared); nothing of its log is
-  read, and a schedule does not retry it.
+  `RunnerOlderThanController`, `reachable` cleared; a check:
+  `CheckContractMismatch` whose message names it; a retention run:
+  `lastEnforcement.refusalCode: RunnerOlderThanController`, nothing deleted);
+  nothing of its log is read, and a schedule does not retry it. A kill (137,
+  143) or a panic (101) is never named so.
 - **A Job an older controller built is read as that controller read it**:
   with FX-34's `--line-token`, only `refusal-detail=` by its JSON token; with
   no token, every reader's own rules over the whole tail.
 - A runner given `--line-token` prints exactly what an FX-34 runner printed,
   and one given neither flag (a run started by hand) prints the plain lines.
-  The two flags are exclusive. `logweir check run` and `logweir-retention`
-  take neither.
+  The two flags are exclusive. `logweir check run`, `logweir-retention` and
+  `cluster-probe` take only `--runner-line-token`.
 
 ### `logweir backup run`
 
@@ -244,8 +262,8 @@ and its sentence is cleaned again; a line that carries the token and fails one
 of those reads as no readable reason, and no other line is used in its place.
 `logweir_core::refusal_detail` implements both sides. A code added to a set is
 additive: a reader that predates it shows that the runner gave no readable
-reason. `logweir check run` and `logweir-retention` print no `refusal-detail=`
-and take no token.
+reason. `logweir check run` and `logweir-retention` print no `refusal-detail=`;
+they take `--runner-line-token` ([sealed lines](#sealed-lines-fx-43)).
 
 | Run | Codes |
 |---|---|
@@ -263,6 +281,7 @@ readable reason`, with `the pod is gone`, with `the pod log read answered HTTP
 
 ```
 argv: check run --plan /check/check-plan.json --check-contract-version 1
+      --runner-line-token <hex>
 env:  LOGWEIR_CHECK_CONTRACT_VERSION=1
       LOGWEIR_CHECK_PLAN_SHA256=sha256:<64 lowercase hex>
       LOGWEIR_CHECK_SUBJECT_UID=<uid>
@@ -344,6 +363,7 @@ per point; a summary line that arrives twice is an error.
 ```
 command: logweir-retention
 argv:    run --plan /retention/plan.json --retention-contract-version 1 [--dry-run]
+         --runner-line-token <hex>
 env:     LOGWEIR_RETENTION_PLAN_SHA256, _POLICY_UID, _POLICY_GENERATION,
          _SCOPE_PREFIX, _RUN_ID, _APPROVER (absent: unattended),
          _MAX_DELETIONS, _MAX_OBJECTS, _LOCATION

@@ -187,16 +187,19 @@ into one Deployment). These are the rules for the times they differ.
 ### The runner image must be at least as new as the controller
 
 **FX-43 makes this the contract, and names the pair when it is broken.** The
-controller passes `--runner-line-token` to every `Restore`, `Backup` and
-`KafkaCluster` probe Job it creates, and reads only the lines the runner seals
-with that token ([sealed lines](reference.md#sealed-lines-fx-43)). A runner
+controller passes `--runner-line-token` to every runner Job it creates
+(`Restore`, `Backup`, the `KafkaCluster` probe, the check Jobs and the
+`RetentionPolicy` Job), and reads only the lines the runner seals with that
+token ([sealed lines](reference.md#sealed-lines-fx-43)). A runner
 that does not know the flag (every runner image published before this change,
 the released `v0.2.0` included) stops while parsing its arguments, before any
 work: exit 1, stdout empty, stderr opening with `error: unexpected argument
 '--runner-line-token' found`. The object says so: `exitReason:
 RunnerOlderThanController` on a `Restore` or `Backup` (a schedule does not
 retry it), reason `RunnerOlderThanController` and `reachable` cleared on a
-`KafkaCluster`. The same name is given to any run whose runner exited 0 to 4
+`KafkaCluster`, `CheckContractMismatch` naming it on a check, and
+`lastEnforcement.refusalCode: RunnerOlderThanController` on a retention run
+(nothing deleted). The same name is given to any run whose runner exited 0 to 4
 and printed no sealed `runner-exit=` line. Upgrade the runner image to the
 controller's version; to roll back, move both together or the controller
 first. What it looks like and what to do are in
@@ -215,7 +218,8 @@ The other directions degrade to what they did before, never to trusting more:
   a run is never called `RunnerOlderThanController`.
 - *An older controller reading a Job this one created* (a rollback with runs
   in flight): it finds no flag it knows, reads the Job as untokened, and
-  reads the plain lines.
+  reads the plain lines. A check's plain end frame follows its sealed twin,
+  which an older decoder ignores as a non-frame line.
 - A code the controller does not know is not shown, while the state on
   `refusal-reason=` and the exit code are recorded as always.
 

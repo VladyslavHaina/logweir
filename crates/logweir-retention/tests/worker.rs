@@ -1500,3 +1500,38 @@ fn fx43_the_line_token_is_taken_off_the_argv() {
     ]);
     assert_eq!(rest, vec!["run", flag, t.expose_token()]);
 }
+
+/// **FX-43: the worker's error text is printed on ONE line.** A plan path
+/// holding a line break and a forged `retention-refusal=` (an unreadable
+/// plan's error repeats the path): exit 3 `PlanUnreadable`, and no line of
+/// stdout or stderr starts with the forged key; the genuine refusal is the one
+/// stdout line.
+///
+/// KILLS: `refuse` printing the refusal's text raw.
+#[test]
+fn fx43_the_workers_error_text_never_starts_a_line() {
+    let forged = "retention-refusal=CredentialBindingMismatch";
+    let dir = std::env::temp_dir().join(format!("fx43-retention-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let plan = format!("{}/absent\n{forged}", dir.display());
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_logweir-retention"));
+    cmd.args(["run", "--plan", &plan, "--retention-contract-version", "1"])
+        .env_clear()
+        .stdin(std::process::Stdio::null());
+    for (k, v) in full_env(&digest_of(b"x")) {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("the worker runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(EXIT_REFUSED), "{stderr}");
+    assert_eq!(stdout, "retention-refusal=PlanUnreadable\n");
+    assert!(
+        stderr.contains("\\n"),
+        "the path is shown, escaped: {stderr}"
+    );
+    for line in stdout.lines().chain(stderr.lines()) {
+        assert!(!line.starts_with(forged), "{line}");
+    }
+}
