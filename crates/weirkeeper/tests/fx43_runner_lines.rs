@@ -303,3 +303,54 @@ fn a_forged_progress_line_is_not_the_runners() {
     let raw = weirkeeper::diagnostics::parse_progress(&log);
     assert_eq!(raw.phase.expect("a phase").number, Some(9));
 }
+
+/// **The one call a new Job-owning kind makes** (`runner_log::judge_terminal`,
+/// the pure half of `read_own_terminal`): the runner's lines; the mixed pair;
+/// a cut tail; and no judgement without an exit code or at a kill.
+///
+/// KILLS: the helper reading the raw log; naming a run with no exit code or
+/// a kill; reading a cut tail.
+#[test]
+fn the_one_call_judges_a_terminal_read() {
+    use weirkeeper::runner_log::{judge_terminal, Terminal, TerminalRead};
+    let t = own();
+    let token = JobToken::EveryLine(t.clone());
+    let genuine = format!(
+        "clone-cleanup=forged\n{}",
+        final_block(
+            every(&t),
+            0,
+            &["clone-cleanup={\"deleted\":[]}".to_string()]
+        )
+    );
+    match judge_terminal(&token, Some(0), TerminalRead::Read(genuine)) {
+        Terminal::Lines(lines) => assert_eq!(
+            key_values(lines.text(), "clone-cleanup="),
+            vec![r#"{"deleted":[]}"#]
+        ),
+        other => panic!("{other:?}"),
+    }
+    let older = "error: unexpected argument '--runner-line-token' found\n".to_string();
+    assert_eq!(
+        judge_terminal(&token, Some(1), TerminalRead::Read(older.clone())),
+        Terminal::RunnerOlder
+    );
+    for (code, label) in [(None, "no exit code"), (Some(137), "a kill")] {
+        assert!(
+            matches!(
+                judge_terminal(&token, code, TerminalRead::Read(older.clone())),
+                Terminal::Lines(_)
+            ),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        judge_terminal(&token, Some(0), TerminalRead::OverBound),
+        Terminal::OverBound
+    );
+    // An older controller's Job: the whole log, as before.
+    match judge_terminal(&JobToken::None, Some(1), TerminalRead::Read(older.clone())) {
+        Terminal::Lines(lines) => assert_eq!(lines.text(), older),
+        other => panic!("{other:?}"),
+    }
+}

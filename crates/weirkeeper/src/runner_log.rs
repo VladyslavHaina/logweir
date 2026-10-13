@@ -314,6 +314,71 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
     }
 }
 
+/// What a finished Job's terminal read means, under the Job's token: the ONE
+/// call a Job-owning kind added after FX-43 makes ([`read_own_terminal`];
+/// the pure half is [`judge_terminal`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Terminal {
+    /// The lines the runner vouched for: read every key off
+    /// [`RunnerLines::text`].
+    Lines(RunnerLines),
+    /// The Job carries FX-43's token, the runner exited 0 to 4, and it printed
+    /// no sealed `runner-exit=`: the runner image is older than the
+    /// controller. Name it ([`RUNNER_OLDER_SENTENCE`]) and read nothing.
+    RunnerOlder,
+    /// The tail is longer than [`TERMINAL_LOG_LIMIT_BYTES`]: cut before its
+    /// end, so nothing is taken from it and nothing is said about the runner.
+    OverBound,
+}
+
+/// What a kind's status says beside `RunnerOlderThanController` when it has no
+/// sentence of its own.
+pub const RUNNER_OLDER_SENTENCE: &str = "the runner printed no line sealed with this Job's \
+     line token, which every runner at least as new as this controller does, so the runner \
+     image is older than the controller (an older one stops at the unknown argument \
+     `--runner-line-token`); nothing of its log was read. Upgrade the runner image to the \
+     controller's version (the chart's `runnerImage`)";
+
+/// [`read_own_terminal`]'s pure half: `read` judged under `token` at
+/// `exit_code` (`None`: no container exit code was read, so nothing is said
+/// about the runner).
+#[must_use]
+pub fn judge_terminal(
+    token: &crate::job::JobToken,
+    exit_code: Option<i32>,
+    read: TerminalRead,
+) -> Terminal {
+    let raw = match read {
+        TerminalRead::OverBound => return Terminal::OverBound,
+        TerminalRead::Read(raw) => raw,
+    };
+    let lines = own_lines(token, &raw);
+    if !raw.is_empty() && exit_code.is_some_and(vouches_for_exit) && lines.runner_is_older() {
+        return Terminal::RunnerOlder;
+    }
+    Terminal::Lines(lines)
+}
+
+/// **The one call** for a Job-owning kind's terminal read (FX-43): THE bound
+/// ([`TERMINAL`]), the Job's own token ([`crate::job::job_token`]), and the
+/// mixed-pair rule, in one.
+///
+/// # Errors
+///
+/// [`read`]'s: the caller decides whether a failed read is retried.
+pub async fn read_own_terminal(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    job: &Job,
+    exit_code: Option<i32>,
+) -> Result<Terminal, kube::Error> {
+    Ok(judge_terminal(
+        &crate::job::job_token(job),
+        exit_code,
+        read_terminal(pods, pod_name).await?,
+    ))
+}
+
 /// [`read`] as UTF-8 text, failing on any other body as `Api::logs` does.
 ///
 /// # Errors
