@@ -203,8 +203,12 @@ impl Eq for LineToken {}
 /// runner prints a detail line at EVERY exit 3.
 pub const NO_SENTENCE: &str = "the refusal carried no sentence";
 
-/// Which runner refused. Each kind of run has its OWN closed set of reason
-/// codes: a `Backup`'s log cannot put a restore-only code on a `Backup`.
+/// Which runner's log a line is read from: THE one closed-set type for every
+/// per-kind list (FX-43 folded FX-34's and PROD-15.1's two into it). Each kind
+/// of run has its OWN closed set of refusal codes
+/// ([`RefusingRun::reason_codes`]) and of `failure-reason=` states
+/// ([`RefusingRun::failure_reasons`]): a `Backup`'s log cannot put a
+/// restore-only code or state on a `Backup`, nor the reverse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusingRun {
     /// `logweir restore run` (and its alias `drill run`): a `Restore`'s Job.
@@ -267,6 +271,16 @@ impl RefusingRun {
     #[must_use]
     pub fn reason_code(self, code: &str) -> Option<&'static str> {
         self.reason_codes().iter().copied().find(|c| *c == code)
+    }
+
+    /// This kind's closed list of `(failure-reason= state, exit code)` pairs
+    /// (`crate::guard::failure_reason_for_exit`).
+    #[must_use]
+    pub const fn failure_reasons(self) -> &'static [(&'static str, i32)] {
+        match self {
+            Self::Restore => &crate::guard::RESTORE_FAILURE_REASONS,
+            Self::Backup => &crate::guard::BACKUP_FAILURE_REASONS,
+        }
     }
 }
 

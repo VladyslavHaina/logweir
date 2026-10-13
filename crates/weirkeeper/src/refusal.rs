@@ -15,16 +15,15 @@
 //!
 //! * **One line, and only when it carries this Job's token**
 //!   ([`runner_reason`]). Text the runner did not choose can start a line of
-//!   its own in this log: the runner escapes the line breaks in its own error
-//!   text (`logweir::exit::one_line`), but the Kafka client inside it logs to
-//!   the same stderr unescaped and can repeat a plan value holding a line
-//!   break. Nothing about where a line stands, or how well-formed it is, tells
-//!   the runner's line from text a plan's author got into the log. A value the
-//!   author could not have had does: the line token this controller made when
-//!   it built the Job ([`crate::job::new_line_token`]), gave the runner as an
-//!   argument, and reads back off the Job's pod template
-//!   ([`crate::job::line_token`]). A `refusal-detail=` line without it is not
-//!   read at all.
+//!   its own in this log. Nothing about where a line stands, or how
+//!   well-formed it is, tells the runner's line from text a plan's author got
+//!   into the log. A value the author could not have had does: the line token
+//!   this controller made when it built the Job
+//!   ([`crate::job::new_line_token`]), gave the runner as an argument, and
+//!   reads back off the Job's pod template ([`crate::job::job_token`]). Under
+//!   FX-43's flag only the lines the runner SEALED with it are read at all
+//!   ([`crate::runner_log::own_lines`]); under FX-34's, a `refusal-detail=`
+//!   line whose JSON lacks it is not read.
 //! * **Validated and cleaned before it is stored.**
 //!   [`RefusalDetail`](logweir_core::refusal_detail::RefusalDetail) cannot be
 //!   built any other way: a reason code that is a member of the CLOSED set of
@@ -35,11 +34,11 @@
 //! * **The token is never shown.** It is in the Job's pod template and in the
 //!   runner's own line and nowhere else: not in a status, a condition, an
 //!   event or a log line of this controller.
-//! * **A bounded read, once** ([`read`]). [`REFUSAL_LOG_TAIL_LINES`] lines and
-//!   [`REFUSAL_LOG_LIMIT_BYTES`] bytes, asked of the API server and enforced
-//!   again on the stream. It is made on the one pass that writes the terminal
-//!   status; a terminal object's pod is never read again (the reconcilers'
-//!   STEP 2b).
+//! * **A bounded read, once** ([`read`]): THE terminal read
+//!   ([`crate::runner_log::TERMINAL`]), the same bound every exit code takes,
+//!   asked of the API server and enforced again on the stream. It is made on
+//!   the one pass that writes the terminal status; a terminal object's pod is
+//!   never read again (the reconcilers' STEP 2b).
 //! * **A log that cannot be read is an answer, not an error.** The pod may
 //!   already be collected (404), or the read may be refused or fail (403,
 //!   500, a broken stream). Each becomes a [`RunnerReason`] the condition
@@ -52,7 +51,7 @@
 //!
 //! The reconcilers call [`read`] for exit 3 and for nothing else, and pass
 //! the result to their patch builders as `Some`. Every other exit code takes
-//! [`crate::runner_log::TERMINAL`] (the last 256 lines) and builds the
+//! the same bound through [`crate::runner_log::read_terminal`] and builds the
 //! message it always built.
 
 use futures::io::AsyncRead;
@@ -65,39 +64,7 @@ use logweir_core::refusal_detail::{
 };
 
 use crate::controllers::backup::REFUSAL_REASON_PREFIX;
-use crate::runner_log;
-
-/// How many trailing log lines the exit-3 read asks for.
-///
-/// Twice [`crate::controllers::backup::KEY_SCAN_TAIL_LINES`], and that number
-/// belongs to ONE of the two readers this body is handed to:
-///
-/// - [`crate::controllers::backup::refusal_state`], the reader of
-///   `refusal-reason=`, looks at the final sixteen NON-EMPTY lines. The API
-///   counts every line, and CRI stores a long line as several, so the read
-///   asks for twice as many. A refused run prints its two key lines last, so
-///   nothing that reader owes is further back than that.
-/// - [`runner_reason`], the reader of `refusal-detail=`, has no window of its
-///   own: it scans EVERY line of the body this read returned.
-///
-/// So the two can disagree about one log, on purpose and harmlessly: with
-/// more than sixteen non-empty lines after the runner's pair, the detail line
-/// is still found and shown, beside `exitReason: GuardRefusedUnknownReason`,
-/// because the state line is outside the other reader's window (the unit row
-/// `the_runners_line_is_shown_wherever_it_stands` puts 25 lines after the
-/// pair).
-pub const REFUSAL_LOG_TAIL_LINES: i64 = 32;
-
-/// The byte bound on the exit-3 read: 512 KiB.
-///
-/// `limitBytes` counts from the START of the lines `tailLines` selected, so a
-/// bound smaller than those lines would cut the END, where the keys are.
-/// 512 KiB is [`REFUSAL_LOG_TAIL_LINES`] times the 16 KiB at which CRI splits
-/// a container log line: on a default runtime the byte bound can never cut
-/// the tail the line bound selected. On a runtime that stores longer lines it
-/// can, and then nothing is read from the tail at all
-/// ([`RunnerReason::TailOverBound`]).
-pub const REFUSAL_LOG_LIMIT_BYTES: i64 = 512 * 1024;
+use crate::runner_log::{self, RunnerLines, TERMINAL_LOG_LIMIT_BYTES, TERMINAL_LOG_TAIL_LINES};
 
 /// What an exit-3 run's pod log said about why, or why it said nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,9 +81,17 @@ pub enum RunnerReason {
     /// its sentence, or a state line after it that contradicts it. Nothing
     /// from it is shown.
     Unreadable,
-    /// The end of the log is longer than [`REFUSAL_LOG_LIMIT_BYTES`], so the
-    /// lines that would carry the reason were not read.
+    /// The end of the log is longer than
+    /// [`TERMINAL_LOG_LIMIT_BYTES`](crate::runner_log::TERMINAL_LOG_LIMIT_BYTES),
+    /// so the lines that would carry the reason were not read.
     TailOverBound,
+    /// **FX-43's mixed pair, named**: the Job carries FX-43's token, the
+    /// runner exited through its own code, and no line of its log, read to
+    /// its end, is the sealed `runner-exit=` a runner at least as new as this
+    /// controller always prints ([`RunnerLines::runner_is_older`]). The
+    /// runner image is older than the controller, and nothing from its log
+    /// is read. At ANY exit code 0 to 4, not only 3.
+    RunnerOlderThanController,
     /// The pod is gone: the log read answered 404.
     PodGone,
     /// The log read was refused or failed. `status` is the HTTP status, or
@@ -148,9 +123,18 @@ impl RunnerReason {
                  not validate, so nothing from it is shown"
             ),
             Self::TailOverBound => format!(
-                "; the runner's reason could not be read: the last {REFUSAL_LOG_TAIL_LINES} \
+                "; the runner's reason could not be read: the last {TERMINAL_LOG_TAIL_LINES} \
                  lines of the pod log are over the {} KiB this controller reads",
-                REFUSAL_LOG_LIMIT_BYTES / 1024
+                TERMINAL_LOG_LIMIT_BYTES / 1024
+            ),
+            Self::RunnerOlderThanController => format!(
+                "; {}: the runner printed no line sealed with this Job's line token, which \
+                 every runner at least as new as this controller does, so the runner image is \
+                 older than the controller (an older one stops at the unknown argument `{}`). \
+                 Nothing from its log was read. Upgrade the runner image to the controller's \
+                 version (the chart's `runnerImage`), or roll the controller back with it",
+                logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
             ),
             Self::PodGone => {
                 "; the runner's reason could not be read because the pod is gone".to_string()
@@ -186,9 +170,9 @@ impl RunnerReason {
 ///    well-formed it is: before the runner's line, after it, alone at the
 ///    end of the log.
 /// 3. **No such line**: [`RunnerReason::NotStated`]. (A runner that does not
-///    know `--line-token` never gets this far under a Job that carries one:
-///    it stops on the flag at exit 1, and this function is asked about exit
-///    3 only. So this is a tail in which the runner's own line is missing.)
+///    know the Job's flag never gets this far: it stops on the flag at exit
+///    1. Under FX-43's flag a runner that prints no sealed end line is named
+///    before this function is asked ([`interpret`]).)
 /// 4. The runner's line is then held to what a line always was: a code of
 ///    `run`'s closed set and a cleaned, bounded sentence, and the
 ///    `refusal-reason=` line the runner wrote WITH it (the next one after it
@@ -235,14 +219,15 @@ pub fn runner_reason(run: RefusingRun, token: Option<&LineToken>, log: &str) -> 
     RunnerReason::NotStated
 }
 
-/// What [`read`] returns: the log body the other tail scanners read, and the
-/// runner's reason.
+/// What [`read`] returns: the log body, and the runner's reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefusalLog {
-    /// The bounded log tail, decoded lossily. EMPTY whenever the log was not
-    /// read, or not read to its end ([`RunnerReason::TailOverBound`],
-    /// [`RunnerReason::PodGone`], [`RunnerReason::LogUnreadable`]): such a log
-    /// is not scanned for anything.
+    /// The bounded log tail, decoded lossily, AS READ: the caller passes it
+    /// to [`runner_log::own_lines`] with the Job's token, like every other
+    /// terminal read. EMPTY whenever the log was not read, or not read to its
+    /// end ([`RunnerReason::TailOverBound`], [`RunnerReason::PodGone`],
+    /// [`RunnerReason::LogUnreadable`]): such a log is not scanned for
+    /// anything.
     pub body: String,
     /// The runner's reason, or why there is none.
     pub reason: RunnerReason,
@@ -257,39 +242,55 @@ impl RefusalLog {
     }
 }
 
-/// The bytes a log read returned, as the [`RefusalLog`] they mean — **pure**.
-///
-/// A body that reaches [`REFUSAL_LOG_LIMIT_BYTES`] was cut, by the server or
-/// by [`read`]'s own cap, and a cut body ends somewhere before the lines the
-/// runner printed last. Nothing is taken from it: the last line it shows is
-/// not the last line of the log, and the end of the log is where the runner's
-/// lines are. Bytes that are not UTF-8 decode to `U+FFFD` and the read goes
-/// on, so one stray byte elsewhere in the tail does not cost the reason.
+/// The runner's reason from the lines its Job's token vouches for
+/// ([`runner_log::own_lines`]), at an exit code `exit_code`: the mixed pair
+/// named ([`RunnerReason::RunnerOlderThanController`]) when the runner
+/// vouched for no exit it reached through its own code, else
+/// [`runner_reason`] over those lines. Pure.
 #[must_use]
-pub fn interpret(run: RefusingRun, token: Option<&LineToken>, bytes: &[u8]) -> RefusalLog {
-    if bytes.len() as u64 >= REFUSAL_LOG_LIMIT_BYTES as u64 {
-        return RefusalLog::without_body(RunnerReason::TailOverBound);
+pub fn reason_of(run: RefusingRun, exit_code: i32, lines: &RunnerLines) -> RunnerReason {
+    if runner_log::vouches_for_exit(exit_code) && lines.runner_is_older() {
+        return RunnerReason::RunnerOlderThanController;
     }
-    let body = String::from_utf8_lossy(bytes).into_owned();
-    let reason = runner_reason(run, token, &body);
-    RefusalLog { body, reason }
+    runner_reason(run, lines.token(), lines.text())
 }
 
-/// [`runner_log::read_capped`] at the exit-3 bound: at most
-/// [`REFUSAL_LOG_LIMIT_BYTES`] plus one bytes off `reader`.
+/// The bytes an exit-3 log read returned, as the [`RefusalLog`] they mean —
+/// **pure**. `token` is the Job's own ([`crate::job::job_token`]).
+///
+/// A body that reaches the terminal byte bound was cut, by the server or by
+/// [`read`]'s own cap, and a cut body ends somewhere before the lines the
+/// runner printed last. Nothing is taken from it. Bytes that are not UTF-8
+/// decode to `U+FFFD` and the read goes on, so one stray byte elsewhere in the
+/// tail does not cost the reason.
+#[must_use]
+pub fn interpret(run: RefusingRun, token: &crate::job::JobToken, bytes: &[u8]) -> RefusalLog {
+    match runner_log::interpret_terminal(bytes) {
+        runner_log::TerminalRead::OverBound => {
+            RefusalLog::without_body(RunnerReason::TailOverBound)
+        }
+        runner_log::TerminalRead::Read(body) => {
+            let reason = reason_of(run, 3, &runner_log::own_lines(token, &body));
+            RefusalLog { body, reason }
+        }
+    }
+}
+
+/// [`runner_log::read_capped`] at the terminal bound: at most
+/// [`TERMINAL_LOG_LIMIT_BYTES`] plus one bytes off `reader`.
 ///
 /// # Errors
 ///
 /// The reader's own error.
 pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec<u8>> {
-    runner_log::read_capped(reader, &runner_log::REFUSAL).await
+    runner_log::read_capped(reader, &runner_log::TERMINAL).await
 }
 
 /// Read a finished exit-3 run's bounded log tail and say what it means. `run`
 /// is the kind of run the pod belongs to: it selects the closed set of reason
 /// codes the line may carry. `token` is the line token of the Job the pod
-/// belongs to, read off that Job ([`crate::job::line_token`]); with `None`
-/// no line is read as a reason.
+/// belongs to, read off that Job ([`crate::job::job_token`]); with
+/// [`JobToken::None`](crate::job::JobToken::None) no line is read as a reason.
 ///
 /// # Errors
 ///
@@ -311,9 +312,9 @@ pub async fn read(
     namespace: &str,
     pod_name: &str,
     run: RefusingRun,
-    token: Option<&LineToken>,
+    token: &crate::job::JobToken,
 ) -> RefusalLog {
-    let bytes = match runner_log::read(pods, pod_name, &runner_log::REFUSAL).await {
+    let bytes = match runner_log::read(pods, pod_name, &runner_log::TERMINAL).await {
         Ok(bytes) => bytes,
         Err(kube::Error::Api(response)) if response.code == 404 => {
             debug!(
@@ -369,7 +370,7 @@ pub async fn read(
         RunnerReason::TailOverBound => debug!(
             namespace,
             pod = pod_name,
-            limit_bytes = REFUSAL_LOG_LIMIT_BYTES,
+            limit_bytes = TERMINAL_LOG_LIMIT_BYTES,
             "the end of the refused run's pod log is over the byte bound; nothing is read from it"
         ),
         _ => {}

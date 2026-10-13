@@ -334,13 +334,13 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
 /// Restore's `ExecutionAlreadyClaimed` on a `Restore`).
 #[test]
 fn a_failure_reason_is_lifted_only_beside_its_own_exit_code_and_only_for_its_own_kind() {
-    use logweir_core::guard::FailureReasonKind::{Backup, Restore};
     use logweir_core::guard::{
         failure_reason_for_exit, failure_reason_line, BACKUP_FAILURE_REASONS,
         RESTORE_FAILURE_REASONS, TERMINAL_STATE_CREATED_TOPICS_LEFT,
         TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN,
         TERMINAL_STATE_TARGET_TOPIC_APPEARED,
     };
+    use logweir_core::refusal_detail::RefusingRun::{Backup, Restore};
     assert_eq!(
         failure_reason_line(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED),
         "failure-reason=ExecutionAlreadyClaimed"

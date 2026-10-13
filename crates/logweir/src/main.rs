@@ -102,10 +102,11 @@ fn main() -> std::process::ExitCode {
             strimzi_cluster,
             consumer_groups,
             line_token,
+            runner_line_token,
         }) => {
-            // The Job's line token, held for the one line that carries
-            // it. Set here, once, before anything runs.
-            logweir::exit::set_line_token(line_token);
+            // The Job's line token, held for the lines that carry it. Set
+            // here, once, before anything runs.
+            logweir::exit::set_line_tokens(line_token, runner_line_token);
             logweir::backup::run(&logweir::backup::BackupRunArgs {
                 store_contract_version,
                 spec,
@@ -126,13 +127,19 @@ fn main() -> std::process::ExitCode {
             username,
             tls,
             marker_topic,
-        } => logweir::probe::run(&logweir::probe::ProbeArgs {
-            bootstrap,
-            auth_mode,
-            username,
-            tls,
-            marker_topic,
-        }),
+            runner_line_token,
+        } => {
+            // FX-43: the probe's two contract lines are sealed with the Job's
+            // token, and its end line is printed. Set once, before anything.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::probe::run(&logweir::probe::ProbeArgs {
+                bootstrap,
+                auth_mode,
+                username,
+                tls,
+                marker_topic,
+            })
+        }
         cli::Command::Doctor {
             spec,
             allowed_clusters,
@@ -194,11 +201,11 @@ fn main() -> std::process::ExitCode {
         // the alias — an alias that could behave differently is not an alias.
         cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
             // See the `backup run` arm.
-            logweir::exit::set_line_token(a.line_token.clone());
+            logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::Restore)
         }
         cli::Command::Drill(cli::DrillCmd::Run(a)) => {
-            logweir::exit::set_line_token(a.line_token.clone());
+            logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
         }
         // NO catch-all arm: with every variant named, a subcommand added to

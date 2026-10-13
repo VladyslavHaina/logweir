@@ -473,18 +473,6 @@ pub const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE: &str =
 /// the log's bounded tail.
 pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 
-/// Which runner's log a `failure-reason=` line is read from. **The closed
-/// set is PER KIND**: one list for both reconcilers would let a Backup's log
-/// lift a restore-only state onto a `Backup`, and a Restore's log a
-/// backup-only one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureReasonKind {
-    /// `logweir backup run`: RECEIPT-DUP's two execution-claim states.
-    Backup,
-    /// `logweir restore run`: the stopped creation step's two states.
-    Restore,
-}
-
 /// Every state a BACKUP's `failure-reason=` may carry, WITH the one exit code
 /// it may accompany. A CLOSED list in both directions: a controller lifts a
 /// value into `status.exitReason` only when the pair is on its kind's list,
@@ -503,31 +491,21 @@ pub const RESTORE_FAILURE_REASONS: [(&str, i32); 2] = [
     (TERMINAL_STATE_CREATED_TOPICS_LEFT, 1),
 ];
 
-impl FailureReasonKind {
-    /// This kind's closed list of `(state, exit code)` pairs.
-    #[must_use]
-    pub fn reasons(self) -> &'static [(&'static str, i32)] {
-        match self {
-            FailureReasonKind::Backup => &BACKUP_FAILURE_REASONS,
-            FailureReasonKind::Restore => &RESTORE_FAILURE_REASONS,
-        }
-    }
-}
-
 /// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.
 pub fn failure_reason_line(state: &str) -> String {
     format!("{FAILURE_REASON_PREFIX}{state}")
 }
 
-/// The state a `failure-reason=` VALUE names, if the value is on `kind`'s
+/// The state a `failure-reason=` VALUE names, if the value is on `run`'s
 /// closed list for THIS exit code; `None` otherwise — a state of the other
-/// kind included.
+/// kind included. The kind is the one closed-set type every per-kind list
+/// hangs off ([`crate::refusal_detail::RefusingRun`], FX-43).
 pub fn failure_reason_for_exit(
-    kind: FailureReasonKind,
+    run: crate::refusal_detail::RefusingRun,
     exit_code: i32,
     value: &str,
 ) -> Option<&'static str> {
-    kind.reasons()
+    run.failure_reasons()
         .iter()
         .find(|(state, code)| *code == exit_code && *state == value)
         .map(|(state, _)| *state)

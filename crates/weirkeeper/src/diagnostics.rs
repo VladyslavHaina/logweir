@@ -969,6 +969,10 @@ pub fn should_read_progress(
 /// this window carries no phase line: "nothing new" means the phase has not
 /// changed.
 ///
+/// Only the lines the runner sealed with the Job's token are read
+/// ([`crate::runner_log::own_lines`], FX-43): a progress line a plan string
+/// forged into the log is not this runner's.
+///
 /// # Errors
 ///
 /// Never. The channel is optional by contract and the pod may have just been
@@ -979,12 +983,16 @@ pub async fn read_progress(
     namespace: &str,
     pod_name: &str,
     stored: Option<&RunProgress>,
+    token: &crate::job::JobToken,
 ) -> Progress {
     let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
     match crate::runner_log::read_text(&pods, pod_name, &crate::runner_log::PROGRESS).await {
-        Ok(log) => {
-            let mut progress =
-                parse_progress_after(&log, stored.is_some_and(|p| p.runner_phase.is_some()));
+        Ok(raw) => {
+            let lines = crate::runner_log::own_lines(token, &raw);
+            let mut progress = parse_progress_after(
+                lines.text(),
+                stored.is_some_and(|p| p.runner_phase.is_some()),
+            );
             if progress.phase.is_none() {
                 // No new phase line in the window is not "no phase": carry the
                 // stored one so `runnerPhase` does not blink out.
@@ -1592,7 +1600,9 @@ pub async fn observe(
         now,
     });
     let progress = match (&pod_name, should_read_progress(stored, first.started, now)) {
-        (Some(name), true) => read_progress(client, namespace, name, stored).await,
+        (Some(name), true) => {
+            read_progress(client, namespace, name, stored, &crate::job::job_token(job)).await
+        }
         _ => Progress::carried(stored),
     };
     let derived = derive(&Facts {

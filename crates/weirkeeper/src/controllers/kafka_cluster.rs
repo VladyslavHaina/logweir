@@ -335,10 +335,35 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
     }
 }
 
+/// The verdict for a probe Job given FX-43's token whose runner vouched for
+/// no exit: the runner image is older than the controller. Nothing from its
+/// log is read, `reachable` is cleared (an older probe's lines are not this
+/// controller's to trust), and the reason names the pair.
+#[must_use]
+pub fn runner_older_verdict() -> Verdict {
+    Verdict {
+        status: "Unknown",
+        reason: crate::conditions::TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER.to_string(),
+        reachable: None,
+        cluster_id: None,
+    }
+}
+
 /// The condition MESSAGE for a verdict, naming the exit code the probe pod
 /// reported.
 #[must_use]
 pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
+    if v.reason == crate::conditions::TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER {
+        return format!(
+            "{}: the probe printed no line sealed with its Job's line token (pod exit \
+             {exit_code}), which every runner at least as new as this controller does, so the \
+             runner image is older than the controller (an older one stops at the unknown \
+             argument `{}`). Nothing from its log was read and `reachable` is cleared. Upgrade \
+             the runner image to the controller's version (the chart's `runnerImage`)",
+            v.reason,
+            logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+        );
+    }
     match v.reachable {
         Some(true) => format!(
             "the probe reached a broker and read cluster id {} (pod exit {exit_code})",
@@ -1362,7 +1387,20 @@ async fn reconcile_cluster_inner(
         // constant.
         spec.image = runner.image.clone();
         spec.image_pull_policy = runner.image_pull_policy.clone();
-        jobs.create(&PostParams::default(), &job::build(&spec))
+        let mut probe_job = job::build(&spec);
+        // FX-43: the probe seals its two contract lines and its end line with
+        // a fresh per-Job token, so a line the bootstrap list or a broker
+        // got into the log is never read as the probe's.
+        if !job::add_fresh_line_token(&mut probe_job) {
+            warn!(
+                cluster = %name,
+                namespace = %namespace,
+                job = %job_name,
+                "the random source gave no line token; the probe Job is created without one \
+                 and its log is read as a Job an older controller built"
+            );
+        }
+        jobs.create(&PostParams::default(), &probe_job)
             .await
             .map_err(KafkaClusterError::Api)?;
         info!(
@@ -1659,8 +1697,10 @@ async fn reconcile_cluster_inner(
     // route to a runner's stdout.
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    let log = match runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL).await {
-        Ok(log) => log,
+    let raw = match runner_log::read_terminal(&pods, &pod_name).await {
+        Ok(runner_log::TerminalRead::Read(raw)) => raw,
+        // Cut before its end: nothing is taken from it.
+        Ok(runner_log::TerminalRead::OverBound) => String::new(),
         // The pod went between the list and the read. Nothing was read, so
         // nothing is written: the next pass sees the Job as it now stands.
         Err(kube::Error::Api(e)) if e.code == 404 => {
@@ -1674,8 +1714,15 @@ async fn reconcile_cluster_inner(
         }
         Err(e) => return Err(KafkaClusterError::Api(e)),
     };
-    let report = probe_report(&log);
-    let v = verdict(&report);
+    // THE one answer to "whose line is it" (FX-43): only the lines the probe
+    // sealed with this Job's token.
+    let lines = runner_log::own_lines(&job::job_token(&job), &raw);
+    let v = if !raw.is_empty() && runner_log::vouches_for_exit(exit_code) && lines.runner_is_older()
+    {
+        runner_older_verdict()
+    } else {
+        verdict(&probe_report(lines.text()))
+    };
     let observed = observed_at(&job, Some(pod), now);
 
     // A reading too old to vouch for is not written as a verdict: no newer

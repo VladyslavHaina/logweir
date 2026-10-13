@@ -1,11 +1,29 @@
 //! A runner pod's log, the one way every controller reads it: one bounded
-//! read (the log's TAIL for every key reader; the check relay's head, see
-//! [`RELAY`]), one key scanner, and one TTL patch for the finished Job.
+//! terminal read ([`TERMINAL`], every exit code, every Job-owning kind; the
+//! check relay reads the head, see [`RELAY`]), ONE answer to "whose line is
+//! it" ([`own_lines`], FX-43), one key scanner, and one TTL patch for the
+//! finished Job.
 //!
-//! Only the plumbing is shared. What a reader may take from the log stays
-//! with that reader: the line token ([`crate::refusal`]), the place rule
-//! ([`crate::controllers::restore::creation_stop_state`]), the check frames
-//! ([`crate::check::relay`]) and each kind's own keys.
+//! # Whose line is it: the Job's token, for every line
+//!
+//! A pod log is one stream: the runner's own lines, the human error text,
+//! the Kafka client's log, the tracing events. Text a plan's author chose can
+//! reach it, and no rule about where a line stands tells the runner's line
+//! from that text. A Job this controller builds carries a fresh random token
+//! ([`crate::job::add_line_token`]); the runner seals every line a controller
+//! acts on with it (`logweir_core::runner_line`), and [`own_lines`] keeps
+//! exactly those lines. Every key reader then scans [`RunnerLines::text`].
+//!
+//! **How a Job-owning kind adopts it: one call.** At the terminal read,
+//! `let lines = runner_log::own_lines(&job::job_token(&job), &raw_log);`, then
+//! every reader of that kind scans `lines.text()`, and
+//! `lines.runner_is_older()` names a runner image older than this controller
+//! (`RunnerOlderThanController`) instead of reading anything. The runner side
+//! is `logweir::exit::FinalLines` (the lines printed last) and
+//! `logweir::exit::print_lines` (a line printed during the run).
+//!
+//! What a reader may take from its lines stays with that reader: a closed
+//! set, a grammar, the check frames ([`crate::check::relay`]).
 
 use futures::io::AsyncRead;
 use futures::AsyncReadExt as _;
@@ -42,23 +60,34 @@ impl Bound {
     }
 }
 
-/// The terminal read of a finished `Backup`, `Restore` or `KafkaCluster`
-/// probe at every exit code but 3: the last
-/// [`TERMINAL_LOG_TAIL_LINES`](crate::controllers::restore::TERMINAL_LOG_TAIL_LINES)
-/// lines. Every key those reconcilers read is in the last
-/// [`KEY_SCAN_TAIL_LINES`] non-empty lines.
+/// THE terminal read of a finished `Backup`, `Restore` or `KafkaCluster`
+/// probe, at every exit code (FX-43 folded FX-34's exit-3 read into it): the
+/// last [`TERMINAL_LOG_TAIL_LINES`] lines of the runner container, at most
+/// [`TERMINAL_LOG_LIMIT_BYTES`]. A body that reaches the byte bound was cut
+/// before its end, where the runner's lines are, and nothing is taken from it
+/// ([`TerminalRead::OverBound`]).
 pub const TERMINAL: Bound = Bound {
-    lines: Some(crate::controllers::restore::TERMINAL_LOG_TAIL_LINES),
-    bytes: None,
-    runner_container: false,
-};
-
-/// The exit-3 read ([`crate::refusal::read`]).
-pub const REFUSAL: Bound = Bound {
-    lines: Some(crate::refusal::REFUSAL_LOG_TAIL_LINES),
-    bytes: Some(crate::refusal::REFUSAL_LOG_LIMIT_BYTES),
+    lines: Some(TERMINAL_LOG_TAIL_LINES),
+    bytes: Some(TERMINAL_LOG_LIMIT_BYTES),
     runner_container: true,
 };
+
+/// `tailLines` on the terminal read. A runner's last block (the sealed lines,
+/// its end line and the plain lines) is under forty lines; the rest leaves
+/// room for the other stream's lines interleaved with it, and for a Job built
+/// by an older controller, whose readers keep the last
+/// [`KEY_SCAN_TAIL_LINES`] non-empty lines, blank ones between them.
+pub const TERMINAL_LOG_TAIL_LINES: i64 = 256;
+
+/// `limitBytes` on the terminal read: 4 MiB, which is
+/// [`TERMINAL_LOG_TAIL_LINES`] times the 16 KiB at which CRI splits a
+/// container log line, so on a default runtime the byte bound never cuts the
+/// tail the line bound selected. `limitBytes` counts from the START of those
+/// lines, so a smaller bound would cut the END, where the runner's lines are.
+pub const TERMINAL_LOG_LIMIT_BYTES: i64 = 4 * 1024 * 1024;
+
+const _: () = assert!(TERMINAL_LOG_TAIL_LINES as usize >= 16 * KEY_SCAN_TAIL_LINES);
+const _: () = assert!(TERMINAL_LOG_LIMIT_BYTES == TERMINAL_LOG_TAIL_LINES * 16 * 1024);
 
 /// D3 §2.4's progress read of a running Job ([`crate::diagnostics::read_progress`]).
 pub const PROGRESS: Bound = Bound {
@@ -116,6 +145,136 @@ pub async fn read_capped<R: AsyncRead + Unpin>(
     let mut bytes = Vec::new();
     reader.take(cap).read_to_end(&mut bytes).await?;
     Ok(bytes)
+}
+
+/// What one terminal read returned ([`read_terminal`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalRead {
+    /// The tail, read to its end, decoded lossily (a stray byte elsewhere in
+    /// the tail does not cost the lines after it).
+    Read(String),
+    /// The tail is longer than [`TERMINAL_LOG_LIMIT_BYTES`]: the body was cut
+    /// before its end, so nothing is taken from it.
+    OverBound,
+}
+
+/// The bytes a terminal read returned, as what they mean: **pure**.
+#[must_use]
+pub fn interpret_terminal(bytes: &[u8]) -> TerminalRead {
+    if bytes.len() as u64 >= TERMINAL_LOG_LIMIT_BYTES as u64 {
+        return TerminalRead::OverBound;
+    }
+    TerminalRead::Read(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The terminal read ([`TERMINAL`]) of `pod_name`.
+///
+/// # Errors
+///
+/// [`read`]'s.
+pub async fn read_terminal(pods: &Api<Pod>, pod_name: &str) -> Result<TerminalRead, kube::Error> {
+    Ok(interpret_terminal(&read(pods, pod_name, &TERMINAL).await?))
+}
+
+/// The lines of a finished (or running) Job's log that its runner vouched
+/// for, and whether it vouched for its exit: what [`own_lines`] returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerLines {
+    text: String,
+    token: Option<logweir_core::refusal_detail::LineToken>,
+    every_line: bool,
+    exit_vouched: bool,
+}
+
+impl RunnerLines {
+    /// What every key reader scans: under an FX-43 token, the sealed lines
+    /// with their seal removed, in log order, the `runner-exit=` line aside;
+    /// otherwise the whole log, as the Job's older controller read it.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The token a `refusal-detail=` line's JSON must carry
+    /// ([`crate::refusal::runner_reason`]), whichever flag gave it.
+    #[must_use]
+    pub fn token(&self) -> Option<&logweir_core::refusal_detail::LineToken> {
+        self.token.as_ref()
+    }
+
+    /// **The mixed pair, named.** True when the Job carries FX-43's token and
+    /// no line of the log sealed with it is the runner's `runner-exit=`: a
+    /// runner that knows the flag prints one at every exit it reaches, and one
+    /// that does not stops at argument parsing. Ask it only of a log read to
+    /// its end, of a runner that exited 0 to 4 ([`vouches_for_exit`]).
+    #[must_use]
+    pub fn runner_is_older(&self) -> bool {
+        self.every_line && !self.exit_vouched
+    }
+}
+
+/// Whether a container exit code is one a runner reaches through its own
+/// code (Global Constraint 11's 0 to 4), the only codes after which a runner
+/// that knows FX-43's flag has printed its end line. A kill (137, 143) or a
+/// panic (101) is not.
+#[must_use]
+pub fn vouches_for_exit(exit_code: i32) -> bool {
+    (0..=4).contains(&exit_code)
+}
+
+/// **THE answer to "whose line is it"** (FX-43), the one call every
+/// Job-owning kind makes on the log it read: `token` is the Job's own
+/// ([`crate::job::job_token`]).
+///
+/// - [`JobToken::EveryLine`](crate::job::JobToken::EveryLine): only the lines
+///   sealed with THIS token (`logweir_core::runner_line::unseal`, compared in
+///   constant time) are kept, wherever they stand; every other line, however
+///   well-formed (a forged key line from a plan string, the Kafka client's
+///   log, an older runner's plain lines, a line sealed with another Job's
+///   token) is not read at all.
+/// - [`JobToken::RefusalDetail`](crate::job::JobToken::RefusalDetail) and
+///   [`JobToken::None`](crate::job::JobToken::None): a Job an older
+///   controller built. The whole log, read as that controller read it, so an
+///   older pair degrades to what it did before, never to trusting more.
+#[must_use]
+pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
+    use crate::job::JobToken;
+    use logweir_core::runner_line::{unseal, RUNNER_EXIT_PREFIX};
+    match token {
+        JobToken::EveryLine(t) => {
+            let mut text = String::new();
+            let mut exit_vouched = false;
+            for line in log.lines().map(|l| l.trim_end_matches('\r')) {
+                let Some(own) = unseal(t, line) else {
+                    continue;
+                };
+                if own.starts_with(RUNNER_EXIT_PREFIX) {
+                    exit_vouched = true;
+                    continue;
+                }
+                text.push_str(own);
+                text.push('\n');
+            }
+            RunnerLines {
+                text,
+                token: Some(t.clone()),
+                every_line: true,
+                exit_vouched,
+            }
+        }
+        JobToken::RefusalDetail(t) => RunnerLines {
+            text: log.to_string(),
+            token: Some(t.clone()),
+            every_line: false,
+            exit_vouched: false,
+        },
+        JobToken::None => RunnerLines {
+            text: log.to_string(),
+            token: None,
+            every_line: false,
+            exit_vouched: false,
+        },
+    }
 }
 
 /// [`read`] as UTF-8 text, failing on any other body as `Api::logs` does.

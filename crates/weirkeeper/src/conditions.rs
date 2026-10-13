@@ -184,7 +184,15 @@ pub const TERMINAL_STATES: &[&str] = &[
     // could never rescue them.
     TERMINAL_STATE_APPROVAL_POLICY_MISMATCH,
     TERMINAL_STATE_AUTHORIZATION_EXPIRED,
+    // FX-43: a Job given the every-line token whose runner vouched for no
+    // exit: the runner image is older than the controller. Beside the exit
+    // code the older runner stopped with; never retried.
+    TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER,
 ];
+
+/// FX-43's mixed pair, named: `logweir_core::runner_line`'s spelling.
+pub const TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER: &str =
+    logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER;
 
 /// The Approval a `Restore` names was issued under a different approval
 /// policy, digest or mode than the namespace is bound to now: a v1 approval
