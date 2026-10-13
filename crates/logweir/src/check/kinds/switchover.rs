@@ -463,7 +463,7 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let created_ids = crate::switchover::created_topic_ids(&ev.scorecard_bytes);
+    let created_ids = crate::switchover::created_topic_ids(&ev.scorecard);
     match crate::switchover::target_is_the_restores(
         target.as_ref(),
         &ev.scorecard.target.cluster_id,

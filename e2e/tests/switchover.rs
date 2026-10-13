@@ -26,14 +26,13 @@
 //! | `an_absent_group_is_created_on_3_9` | C14, C2 (3.9) | absent target group created; a live classic group refused |
 //! | `the_review_reads_every_position_before_the_switchover` | §3.8 (K1's preview) | `logweir check run` over a `switchoverReadiness` plan: the restore's evidence and mapping verify, the target is the restore's, every group admissible, and the details list every partition `exact` at its mapped offset with no committed position; with a live member the groups row is `GroupActive`; over the scorecard without `target.creation` the target row is `TargetIdentityUnknown`; nothing is committed |
 //!
-//! # `target.creation` until PROD-11.1a joins
+//! # `target.creation`
 //!
 //! The switchover compares each target topic's ID with the one the restore
-//! recorded at creation (`target.creation`, PROD-11.1a, built in parallel).
-//! Until that block is in this branch's scorecards, [`creation_shim`] adds
-//! it — the topic IDs read right after the restore — and re-signs the
-//! scorecard with the fixture key at a second key; a scorecard that already
-//! carries the block is used as signed.
+//! recorded at creation (`target.creation`, PROD-11.1a), which every run that
+//! creates topics signs; [`own_scorecard`] asserts it is there. The review's
+//! `TargetIdentityUnknown` control re-signs the scorecard without it
+//! ([`without_creation`]).
 //!
 //! # Running it
 //!
@@ -741,41 +740,30 @@ fn restore(spec_text: &str, label: &str) -> Restore {
     }
 }
 
-/// **PROD-11.1a's `target.creation`, until it joins this branch**: a
-/// scorecard that does not carry the block gets it — each restored topic's
-/// ID read now, right after the restore — and is re-signed with the fixture
-/// key at `<key stem>-creation.json`. One that carries it is used as signed.
-fn creation_shim(r: &Restore) -> (String, Vec<u8>) {
-    if r.scorecard.pointer("/target/creation").is_some() {
-        return (r.scorecard_key.clone(), r.scorecard_bytes.clone());
-    }
-    let topics: Vec<String> = r.scorecard["integrity"]["verification"]["complete"]["partitions"]
-        .as_array()
-        .map(|ps| {
-            let mut t: Vec<String> = ps
-                .iter()
-                .filter_map(|p| p["target_topic"].as_str().map(str::to_string))
-                .collect();
-            t.sort();
-            t.dedup();
-            t
-        })
-        .unwrap_or_default();
-    let ids = reader().topic_ids(&topics).expect("topic ids");
-    let created: Vec<Value> = ids
-        .iter()
-        .map(|(name, id)| {
-            let id = match id {
-                logweir_kafka::topic_ids::TopicIdRead::Id(id) => Some(id.clone()),
-                _ => None,
-            };
-            json!({"name": name, "partitions": 0, "topic_id": id})
-        })
-        .collect();
+/// The restore's own signed scorecard. Every run that creates topics signs
+/// PROD-11.1a's `target.creation` (each topic's ID at creation), which the
+/// switchover compares with the target's.
+fn own_scorecard(r: &Restore) -> (String, Vec<u8>) {
+    assert!(
+        r.scorecard.pointer("/target/creation/topics").is_some(),
+        "the restore signs target.creation: {}",
+        r.scorecard
+    );
+    (r.scorecard_key.clone(), r.scorecard_bytes.clone())
+}
+
+/// The review's control for `TargetIdentityUnknown`: the restore's scorecard
+/// with `target.creation` removed, re-signed with the fixture key at
+/// `<key stem>-no-creation.json`.
+fn without_creation(r: &Restore) -> String {
     let mut sc = r.scorecard.clone();
-    sc["target"]["creation"] = json!({"topics": created, "lineage_headers": "kept"});
+    sc["target"]
+        .as_object_mut()
+        .expect("a target block")
+        .remove("creation")
+        .expect("the restore signs target.creation");
     let bytes = logweir_core::det_json::to_deterministic_json(&sc).expect("serialises");
-    let key = r.scorecard_key.replace(".json", "-creation.json");
+    let key = r.scorecard_key.replace(".json", "-no-creation.json");
     let sk = logweir_evidence::keys::SigningKey::from_pem_file(&signing_pem()).expect("the signer");
     let side = logweir_evidence::sign::sign_detached(
         &sk,
@@ -791,7 +779,7 @@ fn creation_shim(r: &Restore) -> (String, Vec<u8>) {
             &serde_json::to_vec(&side).unwrap(),
         )
         .expect("put sig");
-    (key, bytes)
+    key
 }
 
 struct Plan {
@@ -977,7 +965,7 @@ fn the_headline_a_paused_consumer_resumes_at_its_record() {
         "C9"
     );
 
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     let p = plan(&r, &sc_bytes, &[], "c1");
     // C17: an approval for the Restore cannot authorise the switchover.
     let restore_approval = approve(&p.path, "Restore", "c1-wrong-kind");
@@ -1106,7 +1094,7 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
     );
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     let target = restored_topic(&r, &topic);
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     let p = plan(&r, &sc_bytes, &[], "c2");
     let approval = approve(&p.path, "Switchover", "c2");
     // Live members on the TARGET group ids, and a group that moved since the plan.
@@ -1272,7 +1260,7 @@ fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
     );
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     let target = restored_topic(&r, &topic);
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     // An earlier cutover attempt left the target group at 30: the plan states
     // it as the precondition the approver sees.
     commit(&g, &[(&target, 0, 30)]);
@@ -1384,7 +1372,7 @@ fn a_recreated_target_topic_is_refused() {
     );
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     let target = restored_topic(&r, &topic);
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     let p = plan(&r, &sc_bytes, &[], "c10");
     let approval = approve(&p.path, "Switchover", "c10");
     // Deleted and recreated, with the same records.
@@ -1414,7 +1402,7 @@ fn a_recreated_target_topic_is_refused() {
         &restore_spec(&b, &topic, &format!("c10b-{n}-"), true, ""),
         "c10b",
     );
-    let (k2, b2) = creation_shim(&r2);
+    let (k2, b2) = own_scorecard(&r2);
     let p2 = plan(&r2, &b2, &[], "c10b");
     let a2 = approve(&p2.path, "Switchover", "c10b");
     let ok = switchover(&r2, &k2, &p2, &a2);
@@ -1450,9 +1438,9 @@ fn only_a_passing_complete_restore_maps_positions() {
         &restore_spec(&b, &topic, &format!("c11c-{n}-"), true, ""),
         "c11c",
     );
-    let (ck, cb) = creation_shim(&complete);
+    let (ck, cb) = own_scorecard(&complete);
     let mut p = plan(&complete, &cb, &[], "c11").plan;
-    let (sk, sb) = creation_shim(&sampled);
+    let (sk, sb) = own_scorecard(&sampled);
     p.restore.scorecard_sha256 = logweir_core::ids::sha256_prefixed(&sb);
     p.restore.plan_hash = sampled.scorecard["approval"]["plan_hash"]
         .as_str()
@@ -1492,7 +1480,7 @@ fn only_a_passing_complete_restore_maps_positions() {
         planted.mapping.is_none(),
         "C11: no mapping over a failing restore"
     );
-    let (pk, pb) = creation_shim(&planted);
+    let (pk, pb) = own_scorecard(&planted);
     let mut pp = plan(&complete, &cb, &[], "c11p").plan;
     pp.restore.scorecard_sha256 = logweir_core::ids::sha256_prefixed(&pb);
     pp.restore.plan_hash = planted.scorecard["approval"]["plan_hash"]
@@ -1789,7 +1777,7 @@ fn an_empty_streams_group_is_refused_by_type() {
         &restore_spec(&b, &topic, &format!("c12-{n}-"), true, ""),
         "c12",
     );
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     let streams = "logweir-e2e-streams-protocol";
     let _ = Command::new("bash")
         .arg("e2e/compose/groups.sh")
@@ -1936,7 +1924,7 @@ fn an_absent_group_is_created_on_3_9() {
     );
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     let target = restored_topic(&r, &topic);
-    let (sc_key, sc_bytes) = creation_shim(&r);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
     let created = format!("new39-{n}");
     let p = plan(&r, &sc_bytes, &[&format!("{g}={created}"), &live], "c14");
     let a = approve(&p.path, "Switchover", "c14");
@@ -2079,7 +2067,7 @@ fn the_review_reads_every_position_before_the_switchover() {
     assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
     let target = restored_topic(&r, &topic);
     let (_, mapping) = r.mapping.as_ref().expect("a mapping");
-    let (sc_key, _) = creation_shim(&r);
+    let (sc_key, _) = own_scorecard(&r);
 
     // 1. Every position, exact, nothing committed; the target is the restore's.
     let (out, relay) = review(&review_plan(&r, &sc_key), "review-ready");
@@ -2143,23 +2131,23 @@ fn the_review_reads_every_position_before_the_switchover() {
     );
     assert!(gr.message.starts_with("GroupActive"), "{}", gr.message);
 
-    // 3. The scorecard as the restore signed it, without `target.creation`.
-    let (_, relay) = review(&review_plan(&r, &r.scorecard_key), "review-no-creation");
+    // 3. The same scorecard without `target.creation` (re-signed).
+    let (_, relay) = review(
+        &review_plan(&r, &without_creation(&r)),
+        "review-no-creation",
+    );
     let tg = review_row(&relay, CheckId::SwitchoverTarget);
-    let no_creation = r.scorecard.pointer("/target/creation").is_none();
-    if no_creation {
-        assert_eq!(
-            (tg.state, tg.code),
-            (CheckState::NotReady, CheckCode::TargetNotTheRestores),
-            "{}",
-            tg.message
-        );
-        assert!(
-            tg.message.starts_with("TargetIdentityUnknown"),
-            "{}",
-            tg.message
-        );
-    }
+    assert_eq!(
+        (tg.state, tg.code),
+        (CheckState::NotReady, CheckCode::TargetNotTheRestores),
+        "{}",
+        tg.message
+    );
+    assert!(
+        tg.message.starts_with("TargetIdentityUnknown"),
+        "{}",
+        tg.message
+    );
     write_evidence(
         "review",
         &json!({
@@ -2168,7 +2156,7 @@ fn the_review_reads_every_position_before_the_switchover() {
                      "groupsActive": gr.message},
             "details": lines,
             "committedAfter": committed(&app, &target, 3),
-            "withoutCreation": if no_creation { tg.message } else { "n/a".to_string() },
+            "withoutCreation": tg.message,
         }),
     );
 }

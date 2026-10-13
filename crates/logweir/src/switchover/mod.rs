@@ -95,8 +95,8 @@ struct Verified {
     plan_hash: String,
     restore_spec: logweir_core::spec::DrillSpec,
     scorecard: Scorecard,
-    /// `target.creation.topics[]`'s `(name, topic_id)` (PROD-11.1a's block,
-    /// read from the signed bytes).
+    /// `target.creation.topics[]`'s `(name, topic_id)` (PROD-11.1a's block of
+    /// the verified scorecard).
     created_ids: BTreeMap<String, Option<String>>,
     approval: so::ApprovalSummary,
 }
@@ -308,25 +308,20 @@ pub fn restore_evidence(
     })
 }
 
-/// `target.creation.topics[]` from the scorecard's signed bytes: PROD-11.1a's
-/// block (design §5), read through its interface. Absent: no topic has a
-/// recorded identity.
+/// `target.creation.topics[]` of the verified scorecard: PROD-11.1a's
+/// [`logweir_core::target_creation::TargetCreation`], each created topic's ID
+/// at creation, or `None` where the run recorded the reason there is none
+/// (TCR-4). Absent block: no topic has a recorded identity.
 #[must_use]
-pub fn created_topic_ids(scorecard_bytes: &[u8]) -> BTreeMap<String, Option<String>> {
-    let json: serde_json::Value = serde_json::from_slice(scorecard_bytes).unwrap_or_default();
-    json.pointer("/target/creation/topics")
-        .and_then(serde_json::Value::as_array)
-        .map(|topics| {
-            topics
+pub fn created_topic_ids(scorecard: &Scorecard) -> BTreeMap<String, Option<String>> {
+    scorecard
+        .target
+        .creation
+        .as_ref()
+        .map(|c| {
+            c.topics
                 .iter()
-                .filter_map(|t| {
-                    let name = t.get("name")?.as_str()?.to_string();
-                    let id = t
-                        .get("topic_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    Some((name, id))
-                })
+                .map(|t| (t.name.clone(), t.topic_id.clone()))
                 .collect()
         })
         .unwrap_or_default()
@@ -482,10 +477,7 @@ fn verify_inputs(
     // 3. The restore's evidence (shared with the `switchoverReadiness` check).
     let read = |k: &str, cap: u64| store_read(store, k, cap);
     let RestoreEvidence {
-        scorecard,
-        scorecard_bytes: sc_bytes,
-        mapping,
-        ..
+        scorecard, mapping, ..
     } = restore_evidence(
         &read,
         keyring,
@@ -539,7 +531,7 @@ fn verify_inputs(
         plan_hash: logweir_core::ids::sha256_prefixed(plan_bytes),
         plan,
         restore_spec,
-        created_ids: created_topic_ids(&sc_bytes),
+        created_ids: created_topic_ids(&scorecard),
         scorecard,
         approval,
     })
