@@ -5,7 +5,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Alert, Button, Card, Content, PageSection } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import CloudUploadAltIcon from "@patternfly/react-icons/dist/esm/icons/cloud-upload-alt-icon";
-import { useGrant } from "../../api/connections";
+import { mayStart, useGrant } from "../../api/connections";
 import { DEFAULT_ANNOTATION_RESIDUAL, NOT_JUDGED_SENTENCE, useDestinationList, type DestinationSummary } from "../../api/destinations";
 import { PageHeader } from "../../components/PageHeader";
 import { CompactList, useNarrow } from "../../components/CompactList";
@@ -38,7 +38,7 @@ export function DestinationList() {
   const list = useDestinationList(ns, readable);
   const narrow = useNarrow();
   const [adding, setAdding] = useState(false);
-  const mayAdd = grant.known && Boolean(grant.can?.destinations) && Boolean(grant.can?.credentialWrite) && grant.mayOperate;
+  const mayAdd = mayStart(grant, "destinations") && Boolean(grant.can?.credentialWrite);
   const items = [...(list.data?.items ?? [])].sort((a, b) => a.name.localeCompare(b.name));
   const add = (
     <Button variant="primary" onClick={() => setAdding(true)}>

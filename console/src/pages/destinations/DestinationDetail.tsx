@@ -20,7 +20,7 @@ import {
   PageSection,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
-import { useFollowedPreflight, useGrant, useIntentKey } from "../../api/connections";
+import { mayStart, useFollowedPreflight, useGrant, useIntentKey } from "../../api/connections";
 import {
   ABSENT_GRANT_MEANING,
   DESTINATION_TEST_SENTENCE,
@@ -180,7 +180,13 @@ function TestAccess({ ns, d, mayTest }: { ns: string; d: Destination; mayTest: b
       setLocal(refusal);
       return;
     }
-    test.mutate({ key, roles }, { onSuccess: (item) => setStarted(item.id), onSettled: () => intent.settle() });
+    test.mutate({ key, roles }, {
+        // The key is held until the check exists: a resend after a lost answer replays it rather than starting a second.
+        onSuccess: (item) => {
+          intent.settle();
+          setStarted(item.id);
+        },
+      });
   };
   return (
     <Card>
@@ -318,7 +324,7 @@ export function DestinationDetail() {
     );
   }
   const d = destination.data;
-  const mayManage = Boolean(grant.can?.destinations) && grant.mayOperate;
+  const mayManage = mayStart(grant, "destinations");
   const unjudged = d.status.valid === null || d.status.valid === undefined;
   return (
     <>

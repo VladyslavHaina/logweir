@@ -50,6 +50,16 @@ export function grantFor(session: Session | undefined, ns: string): Grant {
   return { known: true, can: grant.capabilities, mayOperate };
 }
 
+/** Add a connection: the create flag, the write-only credential flag, and an operating role. */
+export function mayAddConnection(g: Grant): boolean {
+  return g.known && Boolean(g.can?.connectionCreate) && Boolean(g.can?.credentialWrite) && g.mayOperate;
+}
+
+/** Start a check or a discovery: the domain is served and readable here, and the role may operate. */
+export function mayStart(g: Grant, domain: "preflight" | "topicDiscovery" | "destinations"): boolean {
+  return Boolean(g.can?.[domain]) && g.mayOperate;
+}
+
 export function useGrant(ns: string): Grant {
   return grantFor(useSession().data, ns);
 }
@@ -410,7 +420,9 @@ export function forgetConnectionCredential(body: CreateConnectionRequest): void 
 // ----------------------------------------------------------------- reads
 
 const LIST_LIMIT = 200;
+/** While a probe is in flight the page re-reads every 4 s, for at most the probe Job's two-minute deadline. */
 const PROBE_RE_READ_MS = 4000;
+const PROBE_RE_READS = 30;
 
 function probing(c: Connection | undefined): boolean {
   return c?.reachability.reason === PROBE_RUNNING_REASON;
@@ -426,7 +438,7 @@ export function useConnectionList(ns: string, enabled = true) {
       return { items: page.items, more: Boolean(page.page.nextCursor) };
     },
     enabled,
-    refetchInterval: (q) => (q.state.data?.items.some(probing) ? PROBE_RE_READ_MS : false),
+    refetchInterval: (q) => (q.state.data?.items.some(probing) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
   });
 }
 
@@ -436,7 +448,7 @@ export function useConnection(ns: string, name: string, enabled = true) {
     queryFn: async ({ signal }) =>
       unwrap(await api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal })).item,
     enabled,
-    refetchInterval: (q) => (probing(q.state.data) ? PROBE_RE_READ_MS : false),
+    refetchInterval: (q) => (probing(q.state.data) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
 }
@@ -660,4 +672,51 @@ export function useTopicPage(ns: string, id: string | null, filters: TopicFilter
     enabled: id !== null,
     placeholderData: (previous) => previous,
   });
+}
+
+// ------------------------------------------------- choosing a saved connection
+
+/**
+ * A saved connection as a form holds it. The UID decides; the name is for
+ * reading and for refusals. A connection deleted and recreated under the same
+ * name is a different set of brokers with a different credential.
+ */
+export interface Selection {
+  uid: string;
+  name: string;
+}
+
+export type Resolved =
+  | { state: "none" }
+  | { state: "selected"; connection: Connection; pinned: boolean; renamedFrom: string }
+  | { state: "recreated"; uid: string; name: string; recreatedUid: string }
+  | { state: "missing"; uid: string; name: string };
+
+/** Every saved connection, by name. No role filter, ever: the role travels with each option and only decides the default. */
+export function savedConnections(list: readonly Connection[]): Connection[] {
+  return [...list].filter((c) => c.name.length > 0).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The connection a fresh form starts on: the first with the preferred role, else the first. A default, not a decision. */
+export function preferredConnection(list: readonly Connection[], prefer?: string): Connection | null {
+  const all = savedConnections(list);
+  return all.find((c) => c.role === prefer) ?? all[0] ?? null;
+}
+
+/**
+ * What a held selection resolves to. A name-only selection (one written
+ * before UIDs were held) resolves and is pinned to the UID that answered it;
+ * a UID that is gone is refused, never moved onto whatever now has the name.
+ */
+export function resolveSelection(list: readonly Connection[], selection: Partial<Selection> | null | undefined): Resolved {
+  const uid = selection?.uid?.trim() ?? "";
+  const name = selection?.name?.trim() ?? "";
+  if (!uid && !name) return { state: "none" };
+  const all = savedConnections(list);
+  const found = all.find((c) => (uid ? c.uid === uid : c.name === name));
+  if (!found) {
+    const impostor = uid && name ? all.find((c) => c.name === name) : undefined;
+    return impostor ? { state: "recreated", uid, name, recreatedUid: impostor.uid } : { state: "missing", uid, name };
+  }
+  return { state: "selected", connection: found, pinned: !uid, renamedFrom: uid && name && name !== found.name ? name : "" };
 }

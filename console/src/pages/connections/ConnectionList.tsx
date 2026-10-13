@@ -6,7 +6,7 @@ import { Alert, Button, Card, Content, PageSection, SearchInput, Toolbar, Toolba
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import PlugIcon from "@patternfly/react-icons/dist/esm/icons/plug-icon";
 import SearchIcon from "@patternfly/react-icons/dist/esm/icons/search-icon";
-import { AUTH_WORDS, PROBE_SENTENCE, probeState, useConnectionList, useGrant, type Connection } from "../../api/connections";
+import { AUTH_WORDS, PROBE_SENTENCE, mayAddConnection, probeState, useConnectionList, useGrant, type Connection } from "../../api/connections";
 import { PageHeader } from "../../components/PageHeader";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
@@ -54,7 +54,7 @@ export function ConnectionList() {
   const narrow = useNarrow();
   const [search, setSearch] = useState("");
   const [adding, setAdding] = useState(false);
-  const mayAdd = grant.known && grant.can !== null && grant.can.connectionCreate && grant.can.credentialWrite && grant.mayOperate;
+  const mayAdd = mayAddConnection(grant);
 
   const rows = useMemo(() => (list.data?.items ?? []).filter((c) => matches(c, search.trim())).sort((a, b) => a.name.localeCompare(b.name)), [list.data, search]);
   const add = (

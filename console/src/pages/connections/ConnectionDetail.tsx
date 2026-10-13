@@ -24,6 +24,7 @@ import {
   PROBE_FRESH_SECONDS,
   PROBE_SENTENCE,
   REFUSAL_GLOSS,
+  mayStart,
   probeState,
   useConnection,
   useFollowedPreflight,
@@ -123,7 +124,7 @@ function Settings({ c }: { c: Connection }) {
 }
 
 /** Test connection: the started check's own rows, or the newest recorded one as a summary. */
-function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: Connection; mayStart: boolean; readable: boolean }) {
+export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: Connection; mayStart: boolean; readable: boolean }) {
   const start = useStartConnectionCheck(ns, c.name);
   const intent = useIntentKey("connection-check");
   const [started, setStarted] = useState<string | null>(null);
@@ -141,7 +142,13 @@ function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: Connect
       setLocal(refusal);
       return;
     }
-    start.mutate(key, { onSuccess: (item) => setStarted(item.id), onSettled: () => intent.settle() });
+    start.mutate(key, {
+        // The key is held until the check exists: a resend after a lost answer replays it rather than starting a second.
+        onSuccess: (item) => {
+          intent.settle();
+          setStarted(item.id);
+        },
+      });
   };
 
   return (
@@ -250,10 +257,10 @@ export function ConnectionDetail() {
             <Settings c={c} />
           </GridItem>
           <GridItem>
-            <ConnectionCheck ns={ns} c={c} readable={can?.preflight !== false} mayStart={Boolean(can?.preflight) && grant.mayOperate} />
+            <ConnectionCheck ns={ns} c={c} readable={can?.preflight !== false} mayStart={mayStart(grant, "preflight")} />
           </GridItem>
           <GridItem>
-            <Discovery ns={ns} name={c.name} readable={can?.topicDiscovery !== false} mayStart={Boolean(can?.topicDiscovery) && grant.mayOperate} />
+            <Discovery ns={ns} name={c.name} readable={can?.topicDiscovery !== false} mayStart={mayStart(grant, "topicDiscovery")} />
           </GridItem>
         </Grid>
       </PageSection>

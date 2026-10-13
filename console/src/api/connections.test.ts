@@ -17,10 +17,15 @@ import {
   followGap,
   forgetConnectionCredential,
   grantFor,
+  mayAddConnection,
+  mayStart,
   mintKey,
   outcomeOf,
   placeProblems,
+  preferredConnection,
   probeState,
+  resolveSelection,
+  savedConnections,
   stoppedFor,
   type Connection,
   type ConnectionValues,
@@ -239,6 +244,17 @@ describe("who may operate", () => {
     const oidcOperator: S["SessionResponse"] = { ...viewer, namespaces: viewer.namespaces.map((g) => ({ ...g, roles: ["operator"] })) };
     expect(grantFor(oidcOperator, "team-a").mayOperate).toBe(true);
   });
+
+  it("offers Add, Test and Discover by flag and role together", () => {
+    const viewer = grantFor(fixture<S["SessionResponse"]>("session-viewer.json"), "team-a");
+    const admin = grantFor(fixture<S["SessionResponse"]>("session.json"), "team-a");
+    expect([mayAddConnection(viewer), mayStart(viewer, "preflight"), mayStart(viewer, "destinations")]).toEqual([false, false, false]);
+    expect([mayAddConnection(admin), mayStart(admin, "preflight"), mayStart(admin, "destinations")]).toEqual([true, true, true]);
+    // A role that may operate still needs the domain's flag (a domain this build does not serve is false).
+    const unserved = { ...admin, can: { ...admin.can!, credentialWrite: false, topicDiscovery: false } };
+    expect(mayAddConnection(unserved)).toBe(false);
+    expect(mayStart(unserved, "topicDiscovery")).toBe(false);
+  });
 });
 
 describe("following a check", () => {
@@ -257,5 +273,34 @@ describe("following a check", () => {
   it("asks a discovery about named topics only when some are given", () => {
     expect(discoveryBody({ includeInternal: false, expectedTopics: "" })).toEqual({});
     expect(discoveryBody({ includeInternal: true, expectedTopics: "orders, payments\nrefunds" })).toEqual({ includeInternal: true, expectedTopics: ["orders", "payments", "refunds"] });
+  });
+});
+
+describe("choosing a saved connection", () => {
+  const list = () => fixture<S["ConnectionList"]>("connections-list.json").items as Connection[];
+
+  it("offers every connection by name, and prefers a role without filtering by it", () => {
+    expect(savedConnections(list()).map((c) => c.name)).toEqual(["orders-prod", "orders-scratch"]);
+    expect(preferredConnection(list(), "target")?.name).toBe("orders-scratch");
+    expect(preferredConnection(list(), "nobody")?.name).toBe("orders-prod");
+    expect(preferredConnection([], "target")).toBeNull();
+  });
+
+  it("resolves by UID, pins a name-only reference, and follows a rename", () => {
+    const [prod] = list() as [Connection];
+    expect(resolveSelection(list(), null)).toEqual({ state: "none" });
+    expect(resolveSelection(list(), { uid: prod.uid, name: prod.name })).toMatchObject({ state: "selected", pinned: false, renamedFrom: "" });
+    expect(resolveSelection(list(), { uid: "", name: "orders-prod" })).toMatchObject({ state: "selected", pinned: true });
+    expect(resolveSelection(list(), { uid: prod.uid, name: "orders-old" })).toMatchObject({ state: "selected", renamedFrom: "orders-old" });
+  });
+
+  it("refuses a recreated connection and a missing one, and never moves the choice onto another object", () => {
+    const recreated = list();
+    recreated[0] = { ...recreated[0]!, uid: "ffffffff-0000-4000-9000-000000000000" };
+    const held = { uid: "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9", name: "orders-prod" };
+    expect(resolveSelection(recreated, held)).toEqual({ state: "recreated", ...held, recreatedUid: "ffffffff-0000-4000-9000-000000000000" });
+    expect(resolveSelection(recreated.slice(1), held)).toEqual({ state: "missing", ...held });
+    // Control: with the original object in place the same choice resolves.
+    expect(resolveSelection(list(), held).state).toBe("selected");
   });
 });

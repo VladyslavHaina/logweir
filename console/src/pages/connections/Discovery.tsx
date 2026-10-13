@@ -310,8 +310,11 @@ export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: 
     start.mutate(
       { key, request: { includeInternal, expectedTopics: expected } },
       {
-        onSuccess: (answer) => setReused(answer.reused === true),
-        onSettled: () => intent.settle(),
+        // The key is held until the discovery exists: a resend after a lost answer replays it.
+        onSuccess: (answer) => {
+          intent.settle();
+          setReused(answer.reused === true);
+        },
       },
     );
   };
