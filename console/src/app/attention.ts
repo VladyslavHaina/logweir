@@ -1,12 +1,68 @@
-// What needs the operator, worked out once for the Overview and the navigation's counts.
+// What the Overview and the navigation's counts show, worked out once from the lists the
+// API publishes (protection policies, backups, restores, connections). Pure functions
+// of the documents and `now`, so the rows in attention.test.ts pin every number.
 import { useBackups, useConnections, useProtection } from "../api/queries";
+import { useCan } from "../api/session";
 import type { Backup, Connection, ProtectionPolicy } from "../api/types";
+import { duration } from "../components/When";
 
 export const DAY_MS = 86_400_000;
 
 export type Attention = { key: string; tone: "danger" | "warning"; title: string; detail: string; to: string; action: string };
 
-export function attentionItems(ns: string, policies: ProtectionPolicy[], backups: Backup[], connections: Connection[]): Attention[] {
+function ms(value: string | null | undefined): number {
+  const t = value ? Date.parse(value) : NaN;
+  return Number.isFinite(t) ? t : NaN;
+}
+
+/** How old a policy's newest available point is now: from its capture start when
+ *  recorded, else the age the controller computed at evaluation. Undefined: no point. */
+export function pointAgeSeconds(p: ProtectionPolicy, now: number): number | undefined {
+  const point = p.lastAvailablePoint;
+  if (!point) return undefined;
+  const at = ms(point.recoveryPointAt);
+  if (Number.isFinite(at)) return Math.max(0, (now - at) / 1000);
+  return typeof point.ageSeconds === "number" ? point.ageSeconds : undefined;
+}
+
+/** "Verified" only when the controller verified the point's signed evidence. */
+export function pointVerified(p: ProtectionPolicy): boolean {
+  const evidence = p.lastAvailablePoint?.evidence;
+  return evidence === "Valid" || evidence === "ValidHistorical";
+}
+
+const HEALTH_TITLE: Record<string, { tone: Attention["tone"]; says: string }> = {
+  Unprotected: { tone: "danger", says: "is not protected" },
+  Stale: { tone: "danger", says: "is past its objective" },
+  AtRisk: { tone: "warning", says: "is at risk" },
+  Unknown: { tone: "warning", says: "could not be evaluated" },
+};
+
+function policyDetail(p: ProtectionPolicy, now: number): string {
+  const failed = p.consecutiveFailedRuns ?? 0;
+  const age = pointAgeSeconds(p, now);
+  const objective = p.objectives.maxRecoveryPointAgeSeconds;
+  const parts: string[] = [];
+  if (age === undefined) parts.push("No recovery point is available.");
+  else if (age > objective) parts.push(`The newest recovery point is ${duration(age)} old; the objective is ${duration(objective)}.`);
+  if (failed > 0) {
+    parts.push(`${failed} ${failed === 1 ? "backup" : "backups in a row"} failed; the objective allows ${p.objectives.maxConsecutiveFailedRuns}.`);
+  }
+  if (parts.length === 0) {
+    // The controller's own words for what it found (a suspended schedule, a missed slot, an unread catalog).
+    const why = p.conditions?.find((c) => c.type === "Protected")?.message;
+    parts.push(why || "Open the policy for what the controller found.");
+  }
+  return parts.join(" ");
+}
+
+export function attentionItems(
+  ns: string,
+  policies: ProtectionPolicy[],
+  backups: Backup[],
+  connections: Connection[],
+  now = Date.now(),
+): Attention[] {
   const items: Attention[] = [];
   for (const c of connections.filter((x) => x.reachability.state === "unreachable")) {
     items.push({
@@ -18,17 +74,21 @@ export function attentionItems(ns: string, policies: ProtectionPolicy[], backups
       action: "Open connections",
     });
   }
-  for (const p of policies.filter((x) => x.health && x.health !== "Healthy")) {
+  for (const p of policies) {
+    const health = p.health ? HEALTH_TITLE[p.health] : undefined;
+    if (!health) continue;
     items.push({
       key: `policy-${p.name}`,
-      tone: p.health === "Unprotected" ? "danger" : "warning",
-      title: `${p.name} is ${p.health === "Unprotected" ? "not protected" : "at risk"}`,
-      detail: `${p.consecutiveFailedRuns ?? 0} backups in a row failed; the objective allows ${p.objectives.maxConsecutiveFailedRuns}.`,
-      to: `/${ns}/backups`,
-      action: "See the failed runs",
+      tone: health.tone,
+      title: `${p.name} ${health.says}`,
+      detail: policyDetail(p, now),
+      to: (p.consecutiveFailedRuns ?? 0) > 0 ? `/${ns}/backups` : `/${ns}/protection`,
+      action: (p.consecutiveFailedRuns ?? 0) > 0 ? "See the failed runs" : "Open protection",
     });
   }
-  const retried = failedLastDay(backups).filter((b) => backups.some((r) => r.trigger?.retryOf?.name === b.name && r.operation.verifiedSuccess));
+  const retried = failedLastDay(backups, now).filter((b) =>
+    backups.some((r) => r.trigger?.retryOf?.name === b.name && r.operation.verifiedSuccess),
+  );
   if (retried.length > 0) {
     items.push({
       key: "retried",
@@ -42,22 +102,33 @@ export function attentionItems(ns: string, policies: ProtectionPolicy[], backups
   return items;
 }
 
-export function failedLastDay(backups: Backup[]): Backup[] {
-  return backups.filter((b) => b.operation.state === "failed" && Date.now() - Date.parse(String(b.createdAt)) < DAY_MS);
+export function lastDay(backups: Backup[], now = Date.now()): Backup[] {
+  return backups.filter((b) => now - ms(b.createdAt) < DAY_MS);
+}
+
+export function failedLastDay(backups: Backup[], now = Date.now()): Backup[] {
+  return lastDay(backups, now).filter((b) => b.operation.state === "failed");
 }
 
 export type NavCount = { n: number; tone: "danger" | "warning" | "brand"; text: string };
 
-/** The navigation's counts: needs attention (Overview) and failed backups in 24 hours (Backups).
- *  Approvals waiting for you would join them in a two-person namespace; in a
- *  one-person namespace (team-a, OD-8's default) nothing can wait for anyone. */
+/** Whether the session may read everything "needs attention" is worked out from. A partial
+ *  answer would say "nothing needs you" about what the role cannot see. */
+export function useAttentionReadable(ns: string): boolean {
+  return useCan(ns, "protection") && useCan(ns, "connectionsRead") && useCan(ns, "backupsRead");
+}
+
+/** The navigation's counts: needs attention (Overview) and failed backups in 24 hours (Backups),
+ *  from the same queries the Overview reads. Approvals waiting for you join them with the
+ *  approvals page (R6). */
 export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
   const backups = useBackups(ns);
   const protection = useProtection(ns);
   const connections = useConnections(ns);
-  const runs = backups.data ?? [];
-  const attention = attentionItems(ns, protection.data ?? [], runs, connections.data ?? []);
-  const failed = failedLastDay(runs).length;
+  const readable = useAttentionReadable(ns);
+  const ready = readable && protection.data && connections.data && backups.data;
+  const attention = ready ? attentionItems(ns, protection.data!, backups.data!, connections.data!) : [];
+  const failed = backups.data ? failedLastDay(backups.data).length : 0;
   return {
     "": attention.length
       ? {

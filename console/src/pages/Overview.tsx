@@ -1,5 +1,5 @@
 // The first page: is this namespace recoverable right now, and what needs you?
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
@@ -37,22 +37,52 @@ import type { Backup, ProtectionPolicy, Restore, Schedule } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
 import { HealthStatus, RunStatus } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
-import { When, duration } from "../components/When";
+import { When, duration, useNow } from "../components/When";
 import { CompactList, useNarrow } from "../components/CompactList";
-import { DAY_MS, attentionItems, type Attention } from "../app/attention";
+import { attentionItems, pointAgeSeconds, useAttentionReadable, type Attention } from "../app/attention";
+import { ApiError } from "../api/client";
+import { can, useSessionDoc } from "../api/session";
+import { activity, backupDay, freshestPoint, protectionCount, strip } from "./overviewData";
 import { GettingStarted } from "./GettingStarted";
 
 function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
   const [open, setOpen] = useState(false);
   const backUp = useBackUpNow(ns);
-  const [started, setStarted] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ variant: "info" | "danger"; title: string; body: string } | null>(null);
+  // A request with no answer may or may not have created the run: the next click for the
+  // same schedule sends the same Idempotency-Key, so it names that run, never a second one.
+  const unanswered = useRef(new Map<string, string>());
+  const start = (schedule: string) => {
+    const key = unanswered.current.get(schedule) ?? `logweir-console.backup.${crypto.randomUUID()}`;
+    backUp.mutate(
+      { schedule, key },
+      {
+        onSuccess: (b) => {
+          unanswered.current.delete(schedule);
+          setToast({ variant: "info", title: `Backup ${b.name} started`, body: "It appears under Recent activity and updates as it runs." });
+        },
+        onError: (error) => {
+          const noAnswer = !(error instanceof ApiError) || error.status === 0 || error.status >= 500;
+          if (noAnswer) unanswered.current.set(schedule, key);
+          else unanswered.current.delete(schedule);
+          setToast({
+            variant: "danger",
+            title: noAnswer ? `${schedule}: the backup may or may not have started` : `${schedule}: the backup was not started`,
+            body: noAnswer
+              ? `${error.message} Backing up ${schedule} again is safe: it names the same run.`
+              : error.message,
+          });
+        },
+      },
+    );
+  };
   return (
     <>
       <Dropdown
         isOpen={open}
         onOpenChange={setOpen}
         toggle={(ref) => (
-          <MenuToggle ref={ref} onClick={() => setOpen(!open)} isExpanded={open} isDisabled={schedules.length === 0}>
+          <MenuToggle ref={ref} onClick={() => setOpen(!open)} isExpanded={open} isDisabled={schedules.length === 0 || backUp.isPending}>
             Back up now
           </MenuToggle>
         )}
@@ -61,10 +91,10 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
           {schedules.map((s) => (
             <DropdownItem
               key={s.name}
-              description={`${s.topics.length} topics from ${s.sourceRef.name}`}
+              description={`${s.topics.length ? `${s.topics.length} topics` : "all user topics"} from ${s.sourceRef.name}`}
               onClick={() => {
                 setOpen(false);
-                backUp.mutate(s.name, { onSuccess: (b) => setStarted(b.name) });
+                start(s.name);
               }}
             >
               {s.name}
@@ -72,16 +102,16 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
           ))}
         </DropdownList>
       </Dropdown>
-      {started && (
+      {toast && (
         <AlertGroup isToast isLiveRegion>
           <Alert
-            variant="info"
-            title={`Backup ${started} started`}
-            timeout={6000}
-            onTimeout={() => setStarted(null)}
-            actionClose={<AlertActionCloseButton onClose={() => setStarted(null)} />}
+            variant={toast.variant}
+            title={toast.title}
+            timeout={toast.variant === "info" ? 6000 : false}
+            onTimeout={() => setToast(null)}
+            actionClose={<AlertActionCloseButton onClose={() => setToast(null)} />}
           >
-            It appears under Recent activity and updates as it runs.
+            {toast.body}
           </Alert>
         </AlertGroup>
       )}
@@ -109,16 +139,23 @@ function Stat({ title, value, detail, tone }: { title: string; value: string; de
   );
 }
 
-function ageVsObjective(p: ProtectionPolicy) {
-  const age = p.lastAvailablePoint?.ageSeconds;
+function ageVsObjective(p: ProtectionPolicy, now: number) {
+  const age = pointAgeSeconds(p, now);
   const objective = p.objectives.maxRecoveryPointAgeSeconds;
-  if (typeof age !== "number") return { percent: 100, variant: ProgressVariant.danger, text: "No recovery point" };
+  if (age === undefined) return { percent: 100, variant: ProgressVariant.danger, text: "No recovery point" };
   const percent = Math.min(100, Math.round((age / objective) * 100));
   const variant = percent >= 100 ? ProgressVariant.danger : percent >= 75 ? ProgressVariant.warning : ProgressVariant.success;
   return { percent, variant, text: `${duration(age)} of ${duration(objective)}` };
 }
 
-function PolicyTable({ policies }: { policies: ProtectionPolicy[] }) {
+function topicsOf(p: ProtectionPolicy): string {
+  // Absent means "the topics of the newest matching point" (the API's own reading).
+  if (!p.protects.topics) return "topics of its newest point";
+  const n = p.protects.topics.length;
+  return `${n} ${n === 1 ? "topic" : "topics"}`;
+}
+
+function PolicyTable({ policies, now }: { policies: ProtectionPolicy[]; now: number }) {
   return (
     <Table aria-label="Protection policies" variant="compact" gridBreakPoint="grid-md">
       <Thead>
@@ -131,12 +168,12 @@ function PolicyTable({ policies }: { policies: ProtectionPolicy[] }) {
       </Thead>
       <Tbody>
         {policies.map((p) => {
-          const age = ageVsObjective(p);
+          const age = ageVsObjective(p, now);
           return (
             <Tr key={p.name}>
               <Td dataLabel="Policy">
-                <strong>{p.name}</strong>
-                <div className="lw-subtle">{p.protects.topics?.length ?? 0} topics</div>
+                <strong className="lw-break">{p.name}</strong>
+                <div className="lw-subtle">{topicsOf(p)}</div>
               </Td>
               <Td dataLabel="Status">
                 <HealthStatus health={p.health} />
@@ -153,7 +190,9 @@ function PolicyTable({ policies }: { policies: ProtectionPolicy[] }) {
                   {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : "None yet"} · objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}
                 </div>
               </Td>
-              <Td dataLabel="Source">{p.protects.sourceRef.name}</Td>
+              <Td dataLabel="Source" className="lw-break">
+                {p.protects.sourceRef.name}
+              </Td>
             </Tr>
           );
         })}
@@ -191,48 +230,41 @@ function NeedsAttention({ items }: { items: Attention[] }) {
 }
 
 function RunStrip({ ns, schedule, runs }: { ns: string; schedule: string; runs: Backup[] }) {
-  const last = runs.filter((r) => r.trigger?.kind !== "Retry").slice(0, 24).reverse();
-  const outcome = (b: Backup) => {
-    const retry = runs.find((r) => r.trigger?.retryOf?.name === b.name);
-    if (b.operation.state === "failed" && retry?.operation.verifiedSuccess) return { cls: "retried", word: "failed, then verified on retry", target: retry };
-    if (!b.operation.terminal) return { cls: "running", word: "in progress", target: b };
-    if (b.operation.verifiedSuccess) return { cls: "ok", word: "verified", target: b };
-    return { cls: "failed", word: b.operation.state, target: b };
-  };
+  const cells = strip(runs, schedule);
   return (
     <div className="lw-strip">
       <div className="lw-strip__name">
-        <strong>{schedule}</strong>
-        <span className="lw-subtle"> · last {last.length} runs</span>
+        <strong className="lw-break">{schedule}</strong>
+        <span className="lw-subtle"> · {cells.length ? `last ${cells.length} ${cells.length === 1 ? "run" : "runs"}` : "no runs yet"}</span>
       </div>
-      <ol className="lw-strip__cells" aria-label={`${schedule}: last ${last.length} runs, oldest first`}>
-        {last.map((b) => {
-          const o = outcome(b);
-          const when = new Date(String(b.createdAt)).toISOString().slice(11, 16);
-          return (
-            <li key={b.name}>
+      {cells.length > 0 && (
+        <ol className="lw-strip__cells" aria-label={`${schedule}: last ${cells.length} runs, oldest first`}>
+          {cells.map((c) => (
+            <li key={c.backup.name}>
               <Link
                 to="/$ns/backups/$name"
-                params={{ ns, name: o.target.name }}
-                className={`lw-strip__cell lw-strip__cell--${o.cls}`}
-                title={`${when} UTC: ${o.word}`}
-                aria-label={`${when} UTC, ${o.word}`}
+                params={{ ns, name: c.target.name }}
+                className={`lw-strip__cell lw-strip__cell--${c.cls}`}
+                title={`${c.at}: ${c.word}`}
+                aria-label={`${c.at}, ${c.word}`}
               />
             </li>
-          );
-        })}
-      </ol>
+          ))}
+        </ol>
+      )}
     </div>
   );
 }
 
 function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; restores: Restore[] }) {
-  const rows = [
-    ...backups.map((b) => ({ kind: "Backup" as const, name: b.name, at: String(b.createdAt), op: b.operation })),
-    ...restores.map((r) => ({ kind: "Restore" as const, name: r.name, at: String(r.createdAt), op: r.operation })),
-  ]
-    .sort((a, b) => b.at.localeCompare(a.at))
-    .slice(0, 6);
+  const rows = activity(backups, restores);
+  if (rows.length === 0) {
+    return (
+      <Content component="p" className="lw-subtle">
+        No backups or restores yet.
+      </Content>
+    );
+  }
   return (
     <CompactList
       flush
@@ -253,7 +285,7 @@ function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; re
 }
 
 /** Phones: a policy is one row, its name, its status and the newest point's age. */
-function PolicyList({ ns, policies }: { ns: string; policies: ProtectionPolicy[] }) {
+function PolicyList({ ns, policies, now }: { ns: string; policies: ProtectionPolicy[]; now: number }) {
   return (
     <CompactList
       flush
@@ -262,26 +294,52 @@ function PolicyList({ ns, policies }: { ns: string; policies: ProtectionPolicy[]
         key: p.name,
         href: `#/${ns}/protection`,
         title: p.name,
-        meta: `${ageVsObjective(p).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
+        meta: `${ageVsObjective(p, now).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
         status: <HealthStatus health={p.health} />,
       }))}
     />
   );
 }
 
+/** Fetching for the first time; a read the session does not grant is idle, never pending. */
+function loading(q: { isLoading: boolean }) {
+  return q.isLoading;
+}
+
+function Empty({ text }: { text: string }) {
+  return (
+    <Content component="p" className="lw-subtle">
+      {text}
+    </Content>
+  );
+}
+
 export function Overview() {
   const { ns } = useParams({ from: "/$ns/" });
   const navigate = useNavigate();
+  const session = useSessionDoc();
   const protection = useProtection(ns);
   const backups = useBackups(ns);
   const restores = useRestores(ns);
   const connections = useConnections(ns);
   const schedules = useSchedules(ns);
   const narrow = useNarrow();
+  const now = useNow();
+
+  // What this role may read here decides which numbers and cards exist (docs/api.md, role table).
+  const may = {
+    protection: can(session, ns, "protection"),
+    backups: can(session, ns, "backupsRead"),
+    restores: can(session, ns, "restoresRead"),
+    connections: can(session, ns, "connectionsRead"),
+    schedules: can(session, ns, "schedulesRead"),
+    backUp: can(session, ns, "manualBackupCreate") && can(session, ns, "schedulesRead"),
+    restore: can(session, ns, "restoreCreate"),
+  };
+  const attentionReadable = useAttentionReadable(ns);
 
   const queries = [protection, backups, restores, connections, schedules];
   const failed = queries.find((q) => q.isError);
-  const loading = queries.some((q) => q.isPending);
 
   const empty = connections.data?.length === 0;
   const header = (
@@ -289,13 +347,16 @@ export function Overview() {
       title="Overview"
       description={`Whether ${ns} can be recovered right now, and what needs you.`}
       actions={
-        empty ? undefined :
-        <Flex gap={{ default: "gapSm" }}>
-          <BackUpNow ns={ns} schedules={schedules.data ?? []} />
-          <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} })}>
-            Restore
-          </Button>
-        </Flex>
+        empty || !(may.backUp || may.restore) ? undefined : (
+          <Flex gap={{ default: "gapSm" }}>
+            {may.backUp && <BackUpNow ns={ns} schedules={schedules.data ?? []} />}
+            {may.restore && (
+              <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} })}>
+                Restore
+              </Button>
+            )}
+          </Flex>
+        )
       }
     />
   );
@@ -310,7 +371,7 @@ export function Overview() {
       </>
     );
   }
-  if (loading) {
+  if (queries.some(loading)) {
     return (
       <>
         {header}
@@ -332,7 +393,7 @@ export function Overview() {
   const policies = protection.data ?? [];
   const runs = backups.data ?? [];
   const conns = connections.data ?? [];
-  if (conns.length === 0) {
+  if (may.connections && conns.length === 0) {
     return (
       <>
         {header}
@@ -341,110 +402,139 @@ export function Overview() {
     );
   }
 
-  const protectedCount = policies.filter((p) => p.health === "Healthy").length;
-  const freshestPolicy = policies
-    .filter((p) => p.lastAvailablePoint)
-    .sort((a, b) => String(b.lastAvailablePoint?.recoveryPointAt).localeCompare(String(a.lastAvailablePoint?.recoveryPointAt)))[0];
-  const freshest = freshestPolicy?.lastAvailablePoint;
-  const lastDay = runs.filter((b) => Date.now() - Date.parse(String(b.createdAt)) < DAY_MS);
-  const verified = lastDay.filter((b) => b.operation.verifiedSuccess).length;
-  const failedRuns = lastDay.filter((b) => b.operation.state === "failed").length;
-  const running = runs.filter((b) => !b.operation.terminal).length;
-  const attention = attentionItems(ns, policies, runs, conns);
+  const count = protectionCount(policies);
+  const freshest = freshestPoint(policies, now);
+  const day = backupDay(runs, now);
+  const attention = attentionReadable ? attentionItems(ns, policies, runs, conns, now) : [];
+  const scheduleNames = (schedules.data ?? []).map((s) => s.name);
 
   return (
     <>
       {header}
       <PageSection>
         <Gallery hasGutter minWidths={{ default: "150px", sm: "220px" }}>
-          <Stat
-            title="Protection"
-            value={`${protectedCount} of ${policies.length}`}
-            tone={protectedCount === policies.length ? "success" : "danger"}
-            detail="policies meet their objective"
-          />
-          <Stat
-            title="Newest recovery point"
-            value={freshest ? `${duration(freshest.ageSeconds ?? 0)} old` : "None"}
-            tone={freshest ? "success" : "danger"}
-            detail={
-              freshestPolicy
-                ? `${freshestPolicy.name}: verified, objective ${duration(freshestPolicy.objectives.maxRecoveryPointAgeSeconds)}`
-                : "No verified point yet"
-            }
-          />
-          <Stat
-            title="Backups, last 24 hours"
-            value={`${verified} verified`}
-            tone={failedRuns > 0 ? "warning" : "success"}
-            detail={`${failedRuns} failed${running ? ` · ${running} running` : ""}`}
-          />
-          <Stat
-            title="Needs attention"
-            value={String(attention.length)}
-            tone={attention.some((a) => a.tone === "danger") ? "danger" : attention.length ? "warning" : "success"}
-            detail={attention.length ? "items, listed below" : "Nothing right now"}
-          />
+          {may.protection && (
+            <Stat
+              title="Protection"
+              value={count.total ? `${count.healthy} of ${count.total}` : "None"}
+              tone={count.total === 0 ? undefined : count.healthy === count.total ? "success" : "danger"}
+              detail={count.total ? "policies meet their objective" : "No protection policy yet"}
+            />
+          )}
+          {may.protection && (
+            <Stat
+              title="Newest recovery point"
+              value={freshest ? `${duration(freshest.ageSeconds)} old` : "None"}
+              tone={freshest ? (freshest.withinObjective ? "success" : "danger") : count.total ? "danger" : undefined}
+              detail={
+                freshest
+                  ? `${freshest.policy.name}: ${freshest.verified ? "verified" : "not verified"}, objective ${duration(freshest.policy.objectives.maxRecoveryPointAgeSeconds)}`
+                  : "No available point yet"
+              }
+            />
+          )}
+          {may.backups && (
+            <Stat
+              title="Backups, last 24 hours"
+              value={`${day.verified} verified`}
+              tone={day.failed > 0 ? "warning" : day.verified > 0 ? "success" : undefined}
+              detail={`${day.failed} failed${day.running ? ` · ${day.running} running` : ""}`}
+            />
+          )}
+          {attentionReadable && (
+            <Stat
+              title="Needs attention"
+              value={String(attention.length)}
+              tone={attention.some((a) => a.tone === "danger") ? "danger" : attention.length ? "warning" : "success"}
+              detail={attention.length ? "items, listed below" : "Nothing right now"}
+            />
+          )}
         </Gallery>
       </PageSection>
-      <PageSection>
-        <Card>
-          <CardHeader>
-            <CardTitle component="h2">Needs attention</CardTitle>
-          </CardHeader>
-          <CardBody>
-            <NeedsAttention items={attention} />
-          </CardBody>
-        </Card>
-      </PageSection>
+      {attentionReadable && (
+        <PageSection>
+          <Card>
+            <CardHeader>
+              <CardTitle component="h2">Needs attention</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <NeedsAttention items={attention} />
+            </CardBody>
+          </Card>
+        </PageSection>
+      )}
       <PageSection>
         <Grid hasGutter>
-          <GridItem lg={7} xl={8}>
-            <Stack hasGutter>
-              <Card>
+          {(may.protection || (may.schedules && may.backups)) && (
+            <GridItem lg={7} xl={8}>
+              <Stack hasGutter>
+                {may.protection && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle component="h2">Protection policies</CardTitle>
+                    </CardHeader>
+                    <CardBody>
+                      {policies.length === 0 ? (
+                        <Empty text="No protection policy names an objective for this namespace yet." />
+                      ) : narrow ? (
+                        <PolicyList ns={ns} policies={policies} now={now} />
+                      ) : (
+                        <PolicyTable policies={policies} now={now} />
+                      )}
+                    </CardBody>
+                    <CardFooter>
+                      <Link to="/$ns/$section" params={{ ns, section: "protection" }}>
+                        All protection policies <ArrowRightIcon />
+                      </Link>
+                    </CardFooter>
+                  </Card>
+                )}
+                {may.schedules && may.backups && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle component="h2">Recent runs per schedule</CardTitle>
+                    </CardHeader>
+                    <CardBody>
+                      {scheduleNames.length === 0 ? (
+                        <Empty text="No schedule yet." />
+                      ) : (
+                        <>
+                          {scheduleNames.map((name) => (
+                            <RunStrip key={name} ns={ns} schedule={name} runs={runs} />
+                          ))}
+                          <ul className="lw-legend" aria-label="Legend">
+                            <li><span className="lw-strip__cell lw-strip__cell--ok" /> Verified</li>
+                            <li><span className="lw-strip__cell lw-strip__cell--retried" /> Verified on retry</li>
+                            <li><span className="lw-strip__cell lw-strip__cell--failed" /> Failed</li>
+                            <li><span className="lw-strip__cell lw-strip__cell--running" /> In progress</li>
+                          </ul>
+                        </>
+                      )}
+                    </CardBody>
+                  </Card>
+                )}
+              </Stack>
+            </GridItem>
+          )}
+          {(may.backups || may.restores) && (
+            <GridItem lg={may.protection || (may.schedules && may.backups) ? 5 : 12} xl={may.protection || (may.schedules && may.backups) ? 4 : 12}>
+              <Card isFullHeight>
                 <CardHeader>
-                  <CardTitle component="h2">Protection policies</CardTitle>
-                </CardHeader>
-                <CardBody>{narrow ? <PolicyList ns={ns} policies={policies} /> : <PolicyTable policies={policies} />}</CardBody>
-                <CardFooter>
-                  <Link to="/$ns/$section" params={{ ns, section: "protection" }}>
-                    All protection policies <ArrowRightIcon />
-                  </Link>
-                </CardFooter>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle component="h2">Recent runs per schedule</CardTitle>
+                  <CardTitle component="h2">Recent activity</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  {(schedules.data ?? []).map((s) => (
-                    <RunStrip key={s.name} ns={ns} schedule={s.name} runs={runs.filter((b) => b.schedule === s.name || b.scheduleRef?.name === s.name)} />
-                  ))}
-                  <ul className="lw-legend" aria-label="Legend">
-                    <li><span className="lw-strip__cell lw-strip__cell--ok" /> Verified</li>
-                    <li><span className="lw-strip__cell lw-strip__cell--retried" /> Verified on retry</li>
-                    <li><span className="lw-strip__cell lw-strip__cell--failed" /> Failed</li>
-                    <li><span className="lw-strip__cell lw-strip__cell--running" /> In progress</li>
-                  </ul>
+                  <Activity ns={ns} backups={runs} restores={restores.data ?? []} />
                 </CardBody>
+                {may.backups && (
+                  <CardFooter>
+                    <Link to="/$ns/backups" params={{ ns }}>
+                      All backups <ArrowRightIcon />
+                    </Link>
+                  </CardFooter>
+                )}
               </Card>
-            </Stack>
-          </GridItem>
-          <GridItem lg={5} xl={4}>
-            <Card isFullHeight>
-              <CardHeader>
-                <CardTitle component="h2">Recent activity</CardTitle>
-              </CardHeader>
-              <CardBody>
-                <Activity ns={ns} backups={runs} restores={restores.data ?? []} />
-              </CardBody>
-              <CardFooter>
-                <Link to="/$ns/backups" params={{ ns }}>
-                  All backups <ArrowRightIcon />
-                </Link>
-              </CardFooter>
-            </Card>
-          </GridItem>
+            </GridItem>
+          )}
         </Grid>
       </PageSection>
     </>

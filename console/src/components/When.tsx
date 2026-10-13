@@ -24,7 +24,7 @@ export function relative(value: string | number, now = Date.now()): string {
 }
 
 /** Re-renders every 30 s so "2 min ago" stays true while the page is open. */
-function useMinuteTick(): number {
+export function useNow(): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -34,7 +34,7 @@ function useMinuteTick(): number {
 }
 
 export function When({ value, exact = false }: { value: string | number | null | undefined; exact?: boolean }) {
-  const now = useMinuteTick();
+  const now = useNow();
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
   const iso = new Date(value).toISOString();
   return (

@@ -2,19 +2,23 @@
   "name": "logweir-console",
   "private": true,
   "version": "0.0.0-prototype",
-  "description": "PROD-18.1 prototype of the rebuilt Logweir console (mock data; not served or shipped).",
+  "description": "PROD-18.1: the rebuilt Logweir console. Served by logweir-api at /ui/next/ until step R8 moves it to /ui/.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
   },
   "scripts": {
     "gen:api": "openapi-typescript ../schemas/logweir-api-v1.openapi.json --default-non-nullable false -o src/api/schema.d.ts",
     "check:api": "openapi-typescript ../schemas/logweir-api-v1.openapi.json --default-non-nullable false -o src/api/schema.d.ts --check",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
     "build": "tsc --noEmit && vite build",
     "build:single": "tsc --noEmit && vite build --mode single",
+    "check:dist": "node scripts/check-dist.mjs",
+    "check:licences": "node scripts/check-licences.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -31,11 +35,18 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.1",
+    "eslint": "10.11.0",
+    "jsdom": "29.1.1",
     "openapi-typescript": "7.13.0",
     "typescript": "5.9.3",
-    "vite": "8.3.1"
+    "typescript-eslint": "8.70.1",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
   }
 }

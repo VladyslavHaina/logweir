@@ -1,0 +1,97 @@
+// A page the navigation names but this build does not draw. In the mock builds it is a
+// screen the prototype left out; in a live build it is a page whose rebuild run
+// (R2-R7) has not landed yet, so it points at the same page in the current console.
+import { useParams, useRouterState } from "@tanstack/react-router";
+import { Button, Card, PageSection } from "@patternfly/react-core";
+import CubesIcon from "@patternfly/react-icons/dist/esm/icons/cubes-icon";
+import { MOCK } from "../api/client";
+import { NAV } from "../app/Shell";
+import { PageHeader } from "../components/PageHeader";
+import { Empty } from "../components/States";
+
+const PLANNED: Record<string, string> = {
+  schedules: "Schedules: list, guided create with a cadence preview, suspend and resume, retention.",
+  protection: "Protection policies: objective, newest point, alerts, and the schedules behind each.",
+  approvals: "Approvals: requests waiting for you, the two-person Approve page, and the history.",
+  catalog: "The recovery catalog: every point in the archive, its availability and its verification.",
+  trust: "Trust: the keys the controller accepts, read-only.",
+  connections: "Connections: add a Kafka cluster (the credential typed once), check it, discover topics.",
+  destinations: "Destinations: saved buckets, access rotation, an access test, and what uses each.",
+};
+
+/** The current console's address for the same page (ui/README.md "Routes"). */
+export function currentConsoleHref(ns: string, segments: string[]): string {
+  const [section = "", name] = segments;
+  const q = `ns=${encodeURIComponent(ns)}`;
+  const one = (route: string) => `/ui/#/${route}?${q}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
+  switch (section) {
+    case "backups":
+      return one("backups");
+    case "restores":
+      return name === "new" ? `/ui/#/restore?${q}` : one("history");
+    case "connections":
+      return one("clusters");
+    case "trust":
+      return "/ui/#/keys";
+    case "schedules":
+    case "protection":
+    case "approvals":
+    case "catalog":
+    case "destinations":
+      return one(section);
+    default:
+      return `/ui/#/clusters?${q}`;
+  }
+}
+
+export function Planned() {
+  const { ns = "" } = useParams({ strict: false });
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const segments = pathname.split("/").filter(Boolean).slice(1);
+  const section = segments[0] ?? "";
+  const entry = NAV.flatMap((g) => g.items).find((i) => i.path === section);
+  const known = Boolean(entry);
+  return (
+    <>
+      <PageHeader title={entry?.label ?? section} />
+      <PageSection>
+        <Card>
+          {MOCK ? (
+            <Empty
+              title="Not in the prototype"
+              icon={entry?.icon ?? CubesIcon}
+              actions={
+                <Button component="a" href={`#/${ns}`} variant="secondary">
+                  Back to the overview
+                </Button>
+              }
+            >
+              {PLANNED[section] ?? "This page does not exist."} The prototype draws the overview, backups, the restore wizard,
+              restores and the cutover review.
+            </Empty>
+          ) : (
+            <Empty
+              title={known ? "Not in the new console yet" : "This page does not exist"}
+              icon={entry?.icon ?? CubesIcon}
+              actions={
+                known ? (
+                  <Button component="a" href={currentConsoleHref(ns, segments)} variant="primary">
+                    Open it in the current console
+                  </Button>
+                ) : (
+                  <Button component="a" href={`#/${ns}`} variant="secondary">
+                    Back to the overview
+                  </Button>
+                )
+              }
+            >
+              {known
+                ? "This preview of the rebuilt console has the overview so far. The page you asked for is still in the current console, with the same session."
+                : "Nothing in the console has this address."}
+            </Empty>
+          )}
+        </Card>
+      </PageSection>
+    </>
+  );
+}

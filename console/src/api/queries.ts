@@ -1,38 +1,63 @@
-// Every read and write the pages make, as TanStack Query hooks over the typed
-// client. A list that holds a run still in progress re-reads itself; in the
-// built console the operation stream (EventSource) pushes into the same cache.
+// Every read and write the pages make, as TanStack Query hooks over the typed client.
+//
+// Query keys: [kind, ns] for a list, [kind, ns, name] for one object, and
+// ["operations", ns, kind, name] for a run's operation view, so invalidating
+// [kind, ns] refreshes a list and its items together. A read the session does
+// not grant in `ns` is never sent: its hook stays idle (`fetchStatus: "idle"`,
+// no data), and the page shows what it can.
+//
+// Lists read every page (client.listAll) and hand back newest first. A list
+// holding a run still in progress re-reads itself; an open run's operation is
+// pushed into the cache by the event stream (stream.ts).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, createHeaders, unwrap } from "./client";
+import { LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
+import { useCan } from "./session";
 import type { Backup, CreateRestoreRequest, Restore } from "./types";
 
 const LIVE_MS = 1500;
+
+export const keys = {
+  session: ["session"] as const,
+  list: (kind: string, ns: string) => [kind, ns] as const,
+  item: (kind: string, ns: string, name: string) => [kind, ns, name] as const,
+  operation: (ns: string, kind: "backup" | "restore", name: string) => ["operations", ns, kind, name] as const,
+};
 
 function moving(items: { operation: { terminal: boolean } }[] | undefined): number | false {
   return items?.some((i) => !i.operation.terminal) ? LIVE_MS : false;
 }
 
-export function useSession() {
-  return useQuery({
-    queryKey: ["session"],
-    queryFn: async () => unwrap(await api.GET("/api/v1/session")),
-    staleTime: Infinity,
-  });
+function createdMs(item: { createdAt?: string | null }): number {
+  const ms = item.createdAt ? Date.parse(item.createdAt) : NaN;
+  return Number.isFinite(ms) ? ms : 0;
 }
+
+/** Newest first, by creation time; an object with no recorded time sorts last. */
+export function newestFirst<T extends { createdAt?: string | null; name: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => createdMs(b) - createdMs(a) || a.name.localeCompare(b.name));
+}
+
+const path = (ns: string) => ({ path: { ns } });
 
 export function useBackups(ns: string) {
   return useQuery({
-    queryKey: ["backups", ns],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/backups", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("backups", ns),
+    enabled: useCan(ns, "backupsRead"),
+    queryFn: ({ signal }) =>
+      listAll("backups", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/backups", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
+    select: newestFirst,
     refetchInterval: (q) => moving(q.state.data),
   });
 }
 
 export function useBackup(ns: string, name: string) {
   return useQuery({
-    queryKey: ["backups", ns, name],
+    queryKey: keys.item("backups", ns, name),
+    enabled: useCan(ns, "backupsRead"),
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/backups/{name}", { params: { path: { ns, name } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/backups/{name}", { params: { path: { ns, name } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? LIVE_MS : false),
     retry: (count, error) => !(error instanceof Error && "status" in error && error.status === 404) && count < 2,
   });
@@ -40,85 +65,107 @@ export function useBackup(ns: string, name: string) {
 
 export function useRestores(ns: string) {
   return useQuery({
-    queryKey: ["restores", ns],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/restores", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("restores", ns),
+    enabled: useCan(ns, "restoresRead"),
+    queryFn: ({ signal }) =>
+      listAll("restores", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/restores", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
+    select: newestFirst,
     refetchInterval: (q) => moving(q.state.data),
   });
 }
 
 export function useRestore(ns: string, name: string) {
   return useQuery({
-    queryKey: ["restores", ns, name],
+    queryKey: keys.item("restores", ns, name),
+    enabled: useCan(ns, "restoresRead"),
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? LIVE_MS : false),
   });
 }
 
-export function useRestoreOperation(ns: string, name: string) {
+/** One run's operation view. While `streaming` (stream.ts holds the run's event stream
+ *  open) the stream writes this key and the poll stands down. */
+export function useOperation(ns: string, kind: "backup" | "restore", name: string, streaming = false) {
   return useQuery({
-    queryKey: ["operations", ns, "restore", name],
+    queryKey: keys.operation(ns, kind, name),
+    enabled: useCan(ns, "operationsRead"),
     queryFn: async ({ signal }) =>
-      unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", {
-          params: { path: { ns, kind: "restore", name } },
-          signal,
-        }),
+      (
+        await call(() =>
+          api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind, name } }, signal }),
+        )
       ).item,
-    refetchInterval: (q) => (q.state.data && !q.state.data.terminal ? 1000 : false),
+    refetchInterval: (q) => (!streaming && q.state.data && !q.state.data.terminal ? 1000 : false),
   });
 }
 
 export function useConnections(ns: string) {
   return useQuery({
-    queryKey: ["connections", ns],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/connections", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("connections", ns),
+    enabled: useCan(ns, "connectionsRead"),
+    queryFn: ({ signal }) =>
+      listAll("connections", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/connections", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
   });
 }
 
 export function useSchedules(ns: string) {
   return useQuery({
-    queryKey: ["schedules", ns],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/schedules", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("schedules", ns),
+    enabled: useCan(ns, "schedulesRead"),
+    queryFn: ({ signal }) =>
+      listAll("schedules", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/schedules", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
   });
 }
 
 export function useProtection(ns: string) {
   return useQuery({
-    queryKey: ["protection", ns],
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/protection-policies", { params: { path: { ns } }, signal })).items,
+    queryKey: keys.list("protection", ns),
+    enabled: useCan(ns, "protection"),
+    queryFn: ({ signal }) =>
+      listAll("protection policies", (cursor) =>
+        call(() =>
+          api.GET("/api/v1/namespaces/{ns}/protection-policies", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
+        ),
+      ),
     refetchInterval: 15_000,
   });
 }
 
 export function usePoints(ns: string, catalog = "primary") {
   return useQuery({
-    queryKey: ["points", ns, catalog],
+    queryKey: keys.item("points", ns, catalog),
+    enabled: useCan(ns, "catalogs"),
     queryFn: async ({ signal }) =>
-      unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-          params: { path: { ns, name: catalog } },
-          signal,
-        }),
+      (
+        await call(() =>
+          api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", { params: { path: { ns, name: catalog } }, signal }),
+        )
       ).items,
   });
 }
 
+/** Back up now from a schedule. `key` is the Idempotency-Key: the caller keeps it for a
+ *  retry after an unknown outcome, so a second click names the same run. */
 export function useBackUpNow(ns: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async (schedule: string): Promise<Backup> =>
-      unwrap(
-        await api.POST("/api/v1/namespaces/{ns}/backups", {
-          params: { path: { ns }, header: createHeaders(`logweir-console.backup.${crypto.randomUUID()}`) },
-          body: { scheduleRef: { name: schedule } },
-        }),
+    mutationFn: async ({ schedule, key }: { schedule: string; key: string }): Promise<Backup> =>
+      (
+        await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/backups", {
+            params: { path: { ns }, header: createHeaders(key) },
+            body: { scheduleRef: { name: schedule } },
+          }),
+        )
       ).item,
-    onSuccess: () => client.invalidateQueries({ queryKey: ["backups", ns] }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("backups", ns) }),
   });
 }
 
@@ -126,12 +173,14 @@ export function useCreateRestore(ns: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (body: CreateRestoreRequest): Promise<Restore> =>
-      unwrap(
-        await api.POST("/api/v1/namespaces/{ns}/restores", {
-          params: { path: { ns }, header: createHeaders(body.planHash) },
-          body,
-        }),
+      (
+        await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/restores", {
+            params: { path: { ns }, header: createHeaders(body.planHash) },
+            body,
+          }),
+        )
       ).item,
-    onSuccess: () => client.invalidateQueries({ queryKey: ["restores", ns] }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("restores", ns) }),
   });
 }

@@ -7,6 +7,7 @@ import {
   EmptyStateBody,
   EmptyStateFooter,
   Skeleton,
+  type EmptyStateProps,
   Stack,
   StackItem,
 } from "@patternfly/react-core";
@@ -67,7 +68,7 @@ export function Empty({
 }: {
   title: string;
   children: ReactNode;
-  icon?: React.ComponentType<any>;
+  icon?: EmptyStateProps["icon"];
   actions?: ReactNode;
 }) {
   return (

@@ -436,7 +436,7 @@ export function withPoint(policy: ProtectionPolicy, newest: Backup | undefined):
       ageSeconds: Math.round((Date.now() - at) / 1000),
       topics: newest.topics,
       topicsTruncated: false,
-      evidence: "Verified",
+      evidence: "Valid",
     },
   };
 }

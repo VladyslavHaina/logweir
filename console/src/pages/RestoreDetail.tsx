@@ -27,14 +27,15 @@ import {
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import DownloadIcon from "@patternfly/react-icons/dist/esm/icons/download-icon";
-import { useRestore, useRestoreOperation } from "../api/queries";
+import { useOperation, useRestore } from "../api/queries";
+import { useOperationStream } from "../api/stream";
 import type { OperationStage, OperationView } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
 import { RunStatus } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
 import { When, count, exactUtc, msValue, relative } from "../components/When";
 import { Ident } from "../components/Ident";
-import { PROTOTYPE } from "../api/client";
+import { MOCK } from "../api/client";
 import type { Restore } from "../api/types";
 import { DURING_RESTORE, TOPIC_CONFIG, mappingFor, themeAOf, type RestoreThemeA } from "../mock/themeA";
 import { StatusLabel } from "../components/Status";
@@ -229,7 +230,7 @@ function TopicConfigCard({ r, t }: { r: Restore; t: RestoreThemeA }) {
               <Ident value={tc.desiredStateKey} label="desired-state document key" />
             </FlexItem>
             <FlexItem>
-              <Button variant="secondary" icon={<DownloadIcon />} isDisabled={PROTOTYPE}>
+              <Button variant="secondary" icon={<DownloadIcon />} isDisabled={MOCK}>
                 KafkaTopic YAML
               </Button>
             </FlexItem>
@@ -244,7 +245,10 @@ export function RestoreDetail() {
   const { ns, name } = useParams({ from: "/$ns/restores/$name" });
   const navigate = useNavigate();
   const restore = useRestore(ns, name);
-  const operation = useRestoreOperation(ns, name);
+  // The run's event stream feeds the operation's cache entry while the run moves.
+  const restoreDone = restore.data?.operation.terminal === true;
+  const streaming = useOperationStream(ns, "restore", name, !restoreDone);
+  const operation = useOperation(ns, "restore", name, streaming);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">

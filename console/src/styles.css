@@ -459,6 +459,20 @@ body {
 .lw-breadcrumb {
   margin-bottom: var(--pf-t--global--spacer--sm);
 }
+/* The session gate's full pages: signed out, unavailable, no namespace. */
+.lw-gate {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--lw-page);
+  padding: var(--pf-t--global--spacer--lg);
+}
+.lw-gate > .pf-v6-l-bullseye {
+  flex: 1 1 auto;
+}
+.lw-gate:focus {
+  outline: none;
+}
 .lw-error-meta {
   display: block;
   margin-top: var(--pf-t--global--spacer--sm);

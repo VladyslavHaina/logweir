@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState, type ComponentType } from "react";
 import { Outlet, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import {
+  Card,
   Divider,
   Dropdown,
   DropdownGroup,
@@ -23,6 +24,7 @@ import {
   NavItem,
   NavList,
   Page,
+  PageSection,
   PageSidebar,
   PageSidebarBody,
   PageToggleButton,
@@ -51,43 +53,48 @@ import SunIcon from "@patternfly/react-icons/dist/esm/icons/sun-icon";
 import MoonIcon from "@patternfly/react-icons/dist/esm/icons/moon-icon";
 import FlaskIcon from "@patternfly/react-icons/dist/esm/icons/flask-icon";
 import SignOutAltIcon from "@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon";
-import { useSession } from "../api/queries";
-import { PROTOTYPE, setCsrfToken } from "../api/client";
+import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
+import { MOCK, signOut } from "../api/client";
+import { grantOf, useSessionDoc, type Flag } from "../api/session";
 import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "./theme";
 import { useNavCounts, type NavCount } from "./attention";
+import { PageHeader } from "../components/PageHeader";
+import { Empty } from "../components/States";
 
-type Entry = { path: string; label: string; icon: ComponentType };
+/** A navigation entry, shown when the session grants `flag` in the namespace (in any
+ *  namespace, for `anyNamespace`), as the current console's tabs are. */
+type Entry = { path: string; label: string; icon: ComponentType; flag?: Flag; anyNamespace?: boolean };
 
 export const NAV: { group: string | null; items: Entry[] }[] = [
   { group: null, items: [{ path: "", label: "Overview", icon: TachometerAltIcon }] },
   {
     group: "Protect",
     items: [
-      { path: "backups", label: "Backups", icon: ArchiveIcon },
-      { path: "schedules", label: "Schedules", icon: OutlinedClockIcon },
-      { path: "protection", label: "Protection", icon: ShieldAltIcon },
+      { path: "backups", label: "Backups", icon: ArchiveIcon, flag: "backupsRead" },
+      { path: "schedules", label: "Schedules", icon: OutlinedClockIcon, flag: "schedulesRead" },
+      { path: "protection", label: "Protection", icon: ShieldAltIcon, flag: "protection" },
     ],
   },
   {
     group: "Recover",
     items: [
-      { path: "restores", label: "Restores", icon: HistoryIcon },
-      { path: "approvals", label: "Approvals", icon: UserCheckIcon },
+      { path: "restores", label: "Restores", icon: HistoryIcon, flag: "restoresRead" },
+      { path: "approvals", label: "Approvals", icon: UserCheckIcon, flag: "approvalsRead" },
     ],
   },
   {
     group: "Evidence",
     items: [
-      { path: "catalog", label: "Recovery catalog", icon: CatalogIcon },
-      { path: "trust", label: "Trust", icon: KeyIcon },
+      { path: "catalog", label: "Recovery catalog", icon: CatalogIcon, flag: "catalogs" },
+      { path: "trust", label: "Trust", icon: KeyIcon, flag: "trustPoliciesRead", anyNamespace: true },
     ],
   },
   {
     group: "Settings",
     items: [
-      { path: "connections", label: "Connections", icon: PlugIcon },
-      { path: "destinations", label: "Destinations", icon: CloudUploadAltIcon },
+      { path: "connections", label: "Connections", icon: PlugIcon, flag: "connectionsRead" },
+      { path: "destinations", label: "Destinations", icon: CloudUploadAltIcon, flag: "destinations" },
     ],
   },
 ];
@@ -146,15 +153,18 @@ function initials(name: string): string {
 }
 
 /** The user's name, roles here, the appearance choice and Sign out, in one menu. */
-function UserMenu() {
+function UserMenu({ ns }: { ns: string }) {
   const [open, setOpen] = useState(false);
-  const session = useSession();
+  const [leaving, setLeaving] = useState(false);
+  const session = useSessionDoc();
   const { choice, setChoice } = useTheme();
-  const { ns } = useParams({ strict: false });
-  const actor = session.data?.actor;
-  const grant = session.data?.namespaces.find((g) => g.name === ns);
-  const name = actor?.displayName ?? "Signed in";
-  const via = session.data?.authenticationMode === "oidc" ? "single sign-on" : "local admin";
+  const actor = session.actor;
+  const grant = grantOf(session, ns);
+  const name = actor.displayName || actor.subject;
+  // A localAdmin console has no sign-in and so no sign-out: its one actor is the
+  // administrator who started it on loopback, holding every action (docs/api.md).
+  const local = session.authenticationMode === "localAdmin";
+  const via = local ? "local administrator" : "single sign-on";
   return (
     <Dropdown
       isOpen={open}
@@ -172,20 +182,22 @@ function UserMenu() {
           <span className="lw-avatar" aria-hidden="true">
             {initials(name)}
           </span>
-          <span className="lw-hide-sm">{name}</span>
+          <span className="lw-hide-sm lw-user-toggle__name">{name}</span>
         </MenuToggle>
       )}
     >
       <div className="lw-user-head">
         <div>
-          <strong>{name}</strong>
+          <strong className="lw-break">{name}</strong>
         </div>
-        <div className="lw-subtle lw-small">
-          {actor?.subject ?? ""} · {via}
+        <div className="lw-subtle lw-small lw-break">
+          {actor.subject} · {via}
         </div>
         <div className="lw-user-head__roles">
           <div className="lw-subtle lw-small">Roles in {ns}</div>
-          {grant?.roles.length ? (
+          {local ? (
+            <span className="lw-small">Every action (local administrator)</span>
+          ) : grant?.roles.length ? (
             <LabelGroup numLabels={4}>
               {grant.roles.map((r) => (
                 <Label key={r} isCompact variant="outline">
@@ -215,13 +227,49 @@ function UserMenu() {
           ))}
         </DropdownList>
       </DropdownGroup>
-      <Divider component="li" />
-      <DropdownList>
-        <DropdownItem icon={<SignOutAltIcon />} isDisabled={PROTOTYPE} description={PROTOTYPE ? "Not in the prototype" : undefined}>
-          Sign out
-        </DropdownItem>
-      </DropdownList>
+      {!local && (
+        <>
+          <Divider component="li" />
+          <DropdownList>
+            <DropdownItem
+              icon={<SignOutAltIcon />}
+              isDisabled={MOCK || leaving}
+              description={MOCK ? "Not in the prototype" : undefined}
+              onClick={() => {
+                setLeaving(true);
+                // Whatever the answer, reload: the next session read shows the sign-in page.
+                void signOut().finally(() => window.location.reload());
+              }}
+            >
+              Sign out
+            </DropdownItem>
+          </DropdownList>
+        </>
+      )}
     </Dropdown>
+  );
+}
+
+/** A namespace in the address that the session holds no role in. */
+function NoAccess({ ns, names }: { ns: string; names: string[] }) {
+  return (
+    <>
+      <PageHeader title={ns} />
+      <PageSection>
+        <Card>
+          <Empty title={`You hold no role in ${ns}`} icon={LockIcon}>
+            The session grants you {names.length === 1 ? "one namespace" : `${names.length} namespaces`}:{" "}
+            {names.map((n, i) => (
+              <span key={n}>
+                {i > 0 && ", "}
+                <a href={`#/${n}`}>{n}</a>
+              </span>
+            ))}
+            . Ask an administrator for a role in {ns} if you need one.
+          </Empty>
+        </Card>
+      </PageSection>
+    </>
   );
 }
 
@@ -249,17 +297,15 @@ function NavEntry({ ns, entry, current, rail, count }: { ns: string; entry: Entr
 }
 
 export function Shell() {
-  const { ns = "team-a" } = useParams({ strict: false });
+  const { ns = "" } = useParams({ strict: false });
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const session = useSession();
+  const session = useSessionDoc();
+  const grant = grantOf(session, ns);
   const counts = useNavCounts(ns);
   // PatternFly's own rule: below its xl breakpoint (1200 px) the navigation is a drawer.
   const [mobile, setMobile] = useState(() => window.innerWidth < 1200);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [rail, setRail] = useState(false);
-
-  // The CSRF token comes with the session document and lives only in memory.
-  useEffect(() => setCsrfToken(session.data?.csrfToken ?? undefined), [session.data]);
 
   // The drawer: Escape closes it and gives focus back to the menu button; the
   // page behind it is inert while it is open, so focus stays in the menu.
@@ -287,7 +333,9 @@ export function Shell() {
   }, [drawer]);
 
   const section = pathname.split("/")[2] ?? "";
-  const names = session.data?.namespaces.map((g) => g.name) ?? [ns];
+  const names = session.namespaces.map((g) => g.name);
+  const shown = (entry: Entry) =>
+    !entry.flag || (entry.anyNamespace ? session.capabilities[entry.flag] === true : grant?.capabilities[entry.flag] === true);
 
   const masthead = (
     <Masthead display={{ default: "inline" }}>
@@ -311,10 +359,10 @@ export function Shell() {
         <Toolbar isFullHeight isStatic>
           <ToolbarContent>
             <ToolbarItem>
-              <NamespaceSelect ns={ns} names={names} />
+              <NamespaceSelect ns={ns} names={grant ? names : [ns, ...names]} />
             </ToolbarItem>
             <ToolbarGroup align={{ default: "alignEnd" }} gap={{ default: "gapMd" }} alignItems="center">
-              {PROTOTYPE && (
+              {MOCK && (
                 <ToolbarItem visibility={{ default: "hidden", lg: "visible" }}>
                   <Label isCompact variant="outline" icon={<FlaskIcon />} className="lw-prototype">
                     Prototype · mock data
@@ -322,7 +370,7 @@ export function Shell() {
                 </ToolbarItem>
               )}
               <ToolbarItem>
-                <UserMenu />
+                <UserMenu ns={ns} />
               </ToolbarItem>
             </ToolbarGroup>
           </ToolbarContent>
@@ -342,7 +390,9 @@ export function Shell() {
             }}
           >
             {NAV.map((group) => {
-              const items = group.items.map((entry) => (
+              const visible = group.items.filter(shown);
+              if (visible.length === 0) return null;
+              const items = visible.map((entry) => (
                 <NavEntry
                   key={entry.path}
                   ns={ns}
@@ -392,7 +442,7 @@ export function Shell() {
         }
       }}
     >
-      <Outlet />
+      {grant ? <Outlet /> : <NoAccess ns={ns} names={names} />}
     </Page>
   );
 }

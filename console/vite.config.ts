@@ -1,16 +1,35 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
+// Node's, read at build time; the console's own code has no `process` (no @types/node).
+declare const process: { env: Record<string, string | undefined> };
+
 // Two builds from one source:
 //   `vite build`               -> dist/: index.html plus hashed files under assets/,
-//                                 the shape logweir-api would serve under /ui/.
+//                                 what logweir-api serves at /ui/next/. It talks to the
+//                                 product API on its own origin ("live").
 //   `vite build --mode single` -> dist-single/index.html: every script, style and
-//                                 font inlined, for showing the prototype as one page.
-export default defineConfig(({ mode }) => {
+//                                 font inlined, on the in-page mock, for showing the
+//                                 design as one page.
+// `vite dev` and the tests run on the mock unless VITE_LOGWEIR_API=live is set; with
+// it, `vite dev` proxies /api and /auth to a logweir-api on 127.0.0.1:8484.
+export default defineConfig(({ command, mode }) => {
   const single = mode === "single";
+  const api = single ? "mock" : (process.env.VITE_LOGWEIR_API ?? (command === "build" ? "live" : "mock"));
+  if (api !== "live" && api !== "mock") throw new Error(`VITE_LOGWEIR_API is "live" or "mock", not "${api}"`);
   return {
     base: "./",
+    define: { "import.meta.env.VITE_LOGWEIR_API": JSON.stringify(api) },
     plugins: single ? [react(), inlineIntoHtml()] : [react()],
+    server: {
+      // The API checks Host and, on writes, Origin against its own public origin.
+      proxy: Object.fromEntries(
+        ["/api", "/auth"].map((path) => [
+          path,
+          { target: "http://127.0.0.1:8484", changeOrigin: true, headers: { origin: "http://127.0.0.1:8484" } },
+        ]),
+      ),
+    },
     build: single
       ? {
           outDir: "dist-single",
@@ -24,6 +43,9 @@ export default defineConfig(({ mode }) => {
           assetsDir: "assets",
           sourcemap: false,
           modulePreload: { polyfill: false },
+          // The mock's modules only define data. Saying so lets a live build drop them
+          // whole once nothing reads them (scripts/check-dist.mjs holds it to that).
+          rolldownOptions: { treeshake: { moduleSideEffects: [{ test: /\/src\/mock\//, sideEffects: false }] } },
         },
   };
 });
