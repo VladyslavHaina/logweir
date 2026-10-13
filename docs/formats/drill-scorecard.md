@@ -297,10 +297,10 @@ window.
 `replay selection: every partition of every restored topic, from epoch-ms S
 (the plan's stated window start, inclusive) to epoch-ms E (inclusive); no
 record before the start was expected`, and under the sampled lane goes on
-`; a sampled check does not prove that none was restored` and names the one
-limit a start adds (an in-window record held in a segment whose last record
-is before the start is not found by a sampled check; `sample.coverage:
-complete` finds it). The note is written before phase 7 judges anything, so
+`; a sampled check does not prove that none was restored`. Before PROD-01.1b
+it also named the one limit a start added (an in-window record held in a
+segment whose last record is before the start, which the engine skips); a
+runner since refuses that window before it writes anything. The note is written before phase 7 judges anything, so
 it never says that no record before the start was RESTORED. A complete
 block's `window.start_ms` is the stated start, and `sample.window_start` is
 never earlier than it (for a sampled document that is the sample window,

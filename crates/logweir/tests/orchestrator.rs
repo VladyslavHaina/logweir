@@ -2404,8 +2404,11 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
         "{}",
         sc.sample.coverage_note
     );
+    // Since PROD-01.1b a segment the engine skips while it holds an
+    // in-window record is refused before phase 2, so the note names no such
+    // limit.
     assert!(
-        sc.sample
+        !sc.sample
             .coverage_note
             .contains("a sampled check does not find an in-window record held in a segment"),
         "{}",

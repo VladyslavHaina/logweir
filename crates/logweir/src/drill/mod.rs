@@ -2361,23 +2361,12 @@ fn execute_with_validated_approval(
     .to_string();
     // A narrowed restore's existing `sample.coverage_note` opens with its
     // window, so a reader that predates `source.selection` reads what was
-    // restored; under the sampled lane it also names the one limit a start
-    // adds. Both version steps are monotonic, so the 1.7.0 chosen with the
-    // block stands.
+    // restored. Both version steps are monotonic, so the 1.7.0 chosen with the
+    // block stands. (The limit a start added, an in-window record in a segment
+    // the engine skips, is refused before phase 2 since PROD-01.1b.)
     if let Some(label) = &sc.source.selection {
-        // The engine's segment rule at a start: only a plan that states one
-        // has it; a subset from the archive's floor does not.
-        let limit = if c.spec.sample.coverage == logweir_core::spec::Coverage::Sampled
-            && label.window_start_ms.is_some()
-        {
-            "; a sampled check does not find an in-window record held in a segment whose last \
-             record is before the start (the engine skips that segment); sample.coverage: \
-             complete does"
-        } else {
-            ""
-        };
         sc.sample.coverage_note = format!(
-            "{}{limit}; {}",
+            "{}; {}",
             label.coverage_note(c.spec.sample.coverage),
             sc.sample.coverage_note
         );
