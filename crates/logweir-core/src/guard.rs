@@ -149,10 +149,24 @@ pub const STORAGE_REGION_INVALID: &str = "StorageRegionInvalid";
 ///
 /// The message names the field and never the value: a region crafted as a
 /// userinfo could carry a credential.
+///
+/// **FX-43, channel (b):** the same call holds the location's text to a
+/// grammar: a bucket, prefix, account, container or path holding a control
+/// character or a line or paragraph separator is refused too
+/// ([`crate::runner_line::holds_line_breaking_or_control`]). The evidence keys
+/// a runner prints are built from it, and a key holding a line break would be
+/// an object no run wrote.
 pub fn reject_invalid_storage_region(
     field: &str,
     storage: &crate::engine::StorageUrl,
 ) -> Result<(), GuardRefusal> {
+    if let Some(part) = storage.line_breaking_part() {
+        return Err(GuardRefusal(format!(
+            "{field}.{part} holds a control character or a line break; the evidence keys this \
+             run prints are built from it, so it is refused before anything runs and the value \
+             is not repeated here. No client was built."
+        )));
+    }
     if storage.has_invalid_region() {
         return Err(GuardRefusal(format!(
             "{STORAGE_REGION_INVALID}: {field}.region is not an S3 region name: it must match \
@@ -163,6 +177,32 @@ pub fn reject_invalid_storage_region(
         )));
     }
     Ok(())
+}
+
+/// **FX-43, channel (a).** Refuses a spec's bootstrap server entry holding a
+/// control character or a line or paragraph separator
+/// ([`crate::runner_line::holds_line_breaking_or_control`]), before any client
+/// exists: the Kafka client logs a server it cannot reach by name, and such an
+/// entry would start a line of the pod log a controller reads by key. The
+/// `KafkaCluster` CRD refuses the same entries at admission, and
+/// `logweir cluster-probe` at its argument.
+///
+/// The message names the field and the entry's position, never the value.
+pub fn reject_line_breaking_bootstrap_servers(
+    field: &str,
+    servers: &[String],
+) -> Result<(), GuardRefusal> {
+    match servers
+        .iter()
+        .position(|s| crate::runner_line::holds_line_breaking_or_control(s))
+    {
+        Some(at) => Err(GuardRefusal(format!(
+            "{field}[{at}] holds a control character or a line break; a bootstrap server is a \
+             host:port, so it is refused before any client is built and the value is not \
+             repeated here"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// **SASL/PLAIN only over TLS.** Refuses a spec's auth block whose

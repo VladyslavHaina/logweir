@@ -287,6 +287,12 @@ pub fn run_with_original_name(
     // `execute` already refused it before the client was built; this is the
     // same rule for every caller that reaches phase 0 another way.
     logweir_core::guard::reject_auth_without_required_tls("target.auth", &spec.target.auth)?;
+    // Purely local: a bootstrap server holding a control character or a line
+    // break is refused, exit 3, before any client logs it (FX-43).
+    logweir_core::guard::reject_line_breaking_bootstrap_servers(
+        "target.bootstrap_servers",
+        &spec.target.bootstrap_servers,
+    )?;
 
     // Original-name condition 1, purely local: an `original_name` block is
     // legal only in `newTopic` mode and only beside `prefix: ""` (the identity

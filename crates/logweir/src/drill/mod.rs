@@ -1876,6 +1876,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         "target.auth",
         &authenticated_spec.target.auth,
     )?;
+    // A bootstrap server holding a control character or a line break, before
+    // `context` builds the client that would log it raw (FX-43). Phase 0
+    // repeats the check.
+    logweir_core::guard::reject_line_breaking_bootstrap_servers(
+        "target.bootstrap_servers",
+        &authenticated_spec.target.bootstrap_servers,
+    )?;
     // A plan that still names a notification sink is refused here, exit 3,
     // before the point binding reads the archive and before `context` dials.
     // Phase 0 repeats the check.

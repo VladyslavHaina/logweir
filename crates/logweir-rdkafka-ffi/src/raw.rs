@@ -226,6 +226,13 @@ impl Queue {
         self.0.as_ptr()
     }
 
+    /// A handle that polls this queue from another thread
+    /// ([`crate::logs::LogPumped`]'s pump thread). Its owner joins that thread
+    /// before this queue is destroyed: see [`QueuePoller::poll`].
+    pub(crate) fn poller(&self) -> QueuePoller {
+        QueuePoller(self.0)
+    }
+
     /// Waits at most `timeout_ms` for one event.
     pub(crate) fn poll(&self, timeout_ms: c_int) -> Option<Event> {
         // SAFETY: the queue is live (owned by `self`); `timeout_ms` is finite
@@ -246,6 +253,36 @@ impl Drop for Queue {
         // and a result arriving later is destroyed by librdkafka on enqueue
         // (`:440`). No pointer to the queue is kept anywhere else.
         unsafe { rd::rd_kafka_queue_destroy(self.0.as_ptr()) }
+    }
+}
+
+/// A [`Queue`]'s pointer, moved to the one thread that polls it.
+///
+/// It destroys nothing: the [`Queue`] it came from stays the owner.
+pub(crate) struct QueuePoller(NonNull<rd::rd_kafka_queue_t>);
+
+// SAFETY: librdkafka's queues are thread-safe: `rd_kafka_queue_poll` locks the
+// queue (`rd_kafka_q_pop_serve`, `rdkafka_queue.c`), and an application may
+// poll a queue from any thread. The pointer is moved to exactly one thread,
+// which only polls it, and the owner of the queue joins that thread before
+// the queue is destroyed (`crate::logs::LogPumped`'s `Drop`), so no poll can
+// reach a destroyed queue.
+unsafe impl Send for QueuePoller {}
+
+impl QueuePoller {
+    /// Waits at most `timeout_ms` for one event, on the calling thread.
+    ///
+    /// # Safety
+    ///
+    /// The [`Queue`] this poller came from must not have been destroyed: its
+    /// owner keeps it alive until every thread that holds this poller has been
+    /// joined, and `timeout_ms` is finite and positive so each wait ends.
+    pub(crate) unsafe fn poll(&self, timeout_ms: c_int) -> Option<Event> {
+        // SAFETY: by this function's contract the queue is live; the wait is
+        // bounded. The result is NULL or an event the application owns and
+        // must destroy, which `Event` takes at once, on this thread.
+        let raw = unsafe { rd::rd_kafka_queue_poll(self.0.as_ptr(), timeout_ms) };
+        NonNull::new(raw).map(Event)
     }
 }
 

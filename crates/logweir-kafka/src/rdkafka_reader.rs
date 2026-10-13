@@ -21,6 +21,50 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
 
+/// **FX-43, channel (a): a client's own log lines, on one line each.**
+///
+/// rust-rdkafka 0.36.2 installs no log callback, so librdkafka's default
+/// logger prints a client's lines RAW on stderr, where a bootstrap address or
+/// a broker's message holding a line break starts a line of the pod log a
+/// controller reads by key. Every client this crate builds for a runner is
+/// created with `log.queue=true` ([`RdKafkaReader::client_config`],
+/// `inventory`'s twin) and wrapped by [`pumped`], so its lines reach
+/// [`print_client_log`] instead, escaped.
+///
+/// # Errors
+///
+/// The text of `logweir_rdkafka_ffi`'s refusal (a handle built without
+/// `log.queue=true`, a thread that could not start).
+pub(crate) fn pumped<C: logweir_rdkafka_ffi::logs::OwnsClient>(
+    client: C,
+) -> Result<logweir_rdkafka_ffi::logs::LogPumped<C>, String> {
+    logweir_rdkafka_ffi::logs::LogPumped::new(client, print_client_log)
+        .map_err(|e| format!("the client's log could not be routed: {e:?}"))
+}
+
+/// One client log line as this process prints it: `librdkafka:
+/// %<level>|<facility>| <message>`, on ONE line whatever it holds
+/// (`logweir_core::runner_line::one_line`). Pure.
+#[must_use]
+pub fn client_log_line(line: &logweir_rdkafka_ffi::logs::LogLine) -> String {
+    let text = |t: &logweir_rdkafka_ffi::CText| match t {
+        logweir_rdkafka_ffi::CText::Utf8(s) => s.clone(),
+        logweir_rdkafka_ffi::CText::NotUtf8(b) => String::from_utf8_lossy(b).into_owned(),
+        logweir_rdkafka_ffi::CText::Null => String::new(),
+    };
+    logweir_core::runner_line::one_line(&format!(
+        "librdkafka: %{}|{}| {}",
+        line.level,
+        text(&line.facility),
+        text(&line.message)
+    ))
+}
+
+/// The sink every runner client's log lines go to: stderr, one line each.
+fn print_client_log(line: &logweir_rdkafka_ffi::logs::LogLine) {
+    eprintln!("{}", client_log_line(line));
+}
+
 /// **How long the BROKER may take over `CreateTopics` before it answers, set
 /// explicitly BELOW the client's request timeout [`T`].**
 ///
@@ -49,8 +93,8 @@ const _: () = assert!(
 );
 
 pub struct RdKafkaReader {
-    consumer: BaseConsumer,
-    admin: AdminClient<DefaultClientContext>,
+    consumer: logweir_rdkafka_ffi::logs::LogPumped<BaseConsumer>,
+    admin: logweir_rdkafka_ffi::logs::LogPumped<AdminClient<DefaultClientContext>>,
     /// The connection `connect` dialled with ([`RdKafkaReader::client_config`]),
     /// kept so [`RdKafkaReader::committed_positions`] and
     /// [`RdKafkaReader::commit_positions`] can open a per-group handle on the
@@ -128,6 +172,9 @@ impl RdKafkaReader {
         let mut base = ClientConfig::new();
         base.set("bootstrap.servers", bootstrap.join(","))
             .set("client.id", "logweir-drill")
+            // FX-43: the client QUEUES its log lines, which [`pumped`] prints
+            // escaped; librdkafka's default logger would print them raw.
+            .set("log.queue", "true")
             // Explicit rather than relying on the default: librdkafka's own
             // docs note the consumer default (false) already differs from
             // the producer default (true) and from the Java consumer
@@ -262,9 +309,11 @@ impl RdKafkaReader {
         let consumer: BaseConsumer = consumer_cfg
             .create()
             .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let consumer = pumped(consumer).map_err(KafkaError::Client)?;
         let admin: AdminClient<DefaultClientContext> = base
             .create()
             .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let admin = pumped(admin).map_err(KafkaError::Client)?;
         Ok(Self {
             consumer,
             admin,

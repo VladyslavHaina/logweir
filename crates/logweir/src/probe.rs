@@ -458,6 +458,13 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
             "--bootstrap named no address; it takes a comma-separated list of host:port".into(),
         )));
     }
+    // FX-43: an address holding a control character or a line break is
+    // refused before any client exists, so none logs it.
+    if let Err(refusal) =
+        logweir_core::guard::reject_line_breaking_bootstrap_servers("--bootstrap", &servers)
+    {
+        return outcome(&Err(KafkaError::Client(refusal.0)));
+    }
     let spec = match auth_spec(&args.auth_mode, args.username.as_deref(), args.tls) {
         Ok(s) => s,
         Err(e) => return outcome(&Err(e)),

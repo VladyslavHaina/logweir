@@ -170,8 +170,9 @@ spec:
                 - message: auth.clientCertificate is required when auth.mode is mtls and refused for every other mode
                   rule: (self.mode == 'mtls') == has(self.clientCertificate)
               bootstrapServers:
-                description: The broker bootstrap addresses, `host:port`.
+                description: 'The broker bootstrap addresses, `host:port`. An entry holding a control character or a line or paragraph separator is refused at admission (FX-43): the Kafka client logs an address by name, and such an entry would start a line of a pod log a controller reads by key.'
                 items:
+                  pattern: ^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$
                   type: string
                 type: array
               markerTopic:
