@@ -12,6 +12,7 @@ import type {
   Session,
 } from "../api/types";
 import { DAY, HOUR, MINUTE, NOW, iso, slot, slotName } from "./clock";
+import { APPROVAL_DEMO_GRANTS } from "./approvalNamespaces";
 
 let counter = 0;
 export function requestId(): string {
@@ -84,6 +85,7 @@ export const session: Session = {
   namespaces: [
     { name: "team-a", roles: ["operator", "approver"], capabilities: ALL },
     { name: "team-b", roles: ["operator"], capabilities: ALL },
+    ...APPROVAL_DEMO_GRANTS,
   ],
   requestId: requestId(),
 };

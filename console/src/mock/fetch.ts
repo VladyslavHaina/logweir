@@ -17,6 +17,7 @@ import {
   withPoint,
 } from "./data";
 import { declareRestore } from "./themeA";
+import { approvalsMock } from "./approvals";
 
 const LATENCY_MS = 350;
 
@@ -169,6 +170,7 @@ async function route(request: Request): Promise<Response> {
   let p: RegExpMatchArray | null;
 
   if (method === "GET" && path === "/session") return json(200, session);
+  { const approvals = await approvalsMock(request, method, path); if (approvals) return approvals; }
 
   if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
     return json(200, page(forNamespace(p[1]!, backups).map(backupNow)));
