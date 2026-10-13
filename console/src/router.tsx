@@ -16,7 +16,7 @@ import { BackupDetail } from "./pages/BackupDetail";
 import { Restores } from "./pages/Restores";
 import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
-import { Cutover } from "./pages/Cutover";
+import { cutoverRoutes } from "./pages/cutover/routes";
 import { NotInPrototype } from "./pages/NotInPrototype";
 
 const root = createRootRoute({ component: Outlet });
@@ -43,12 +43,11 @@ const restoreNew = createRoute({
     typeof search.backup === "string" ? { backup: search.backup } : {},
 });
 const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
-const cutover = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name/cutover", component: Cutover });
 const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: NotInPrototype });
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, planned]),
+  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, ...cutoverRoutes(nsRoute), planned]),
 ]);
 
 export const router = createRouter({

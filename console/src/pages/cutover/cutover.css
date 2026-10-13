@@ -1,0 +1,11 @@
+/* The cutover pages' few additions to styles.css (PROD-18.1 R7). */
+.lw-gap-below {
+  margin-bottom: var(--pf-t--global--spacer--md);
+}
+.lw-scope-group + .lw-scope-group {
+  margin-top: var(--pf-t--global--spacer--md);
+}
+.lw-yaml .pf-v6-c-code-block__code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
