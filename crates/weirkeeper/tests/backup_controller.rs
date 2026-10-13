@@ -1997,8 +1997,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        47,
-        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
+        48,
+        "the forty-eight terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2039,7 +2039,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
          name the connection the Job was built for), plus PROD-01.1a's \
          `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
-         markers under a plan that does not allow them); \
+         markers under a plan that does not allow them), plus PROD-05.1a's \
+         `OwnerDetectionFailed` (a Backup of a KafkaCluster naming its Strimzi cluster whose \
+         KafkaTopic list was refused or is not served); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -15501,5 +15503,236 @@ async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_recei
         if let Some((_, reason, _)) = condition_named(s, "Complete") {
             assert_eq!(reason, "Ok", "{s}");
         }
+    }
+}
+
+/// **PROD-05.1a, row C28 (the mock API).** The `KafkaCluster` with
+/// `spec.strimzi` set, and the KafkaTopic list the API server answers.
+mod strimzi_owner_detection {
+    use super::*;
+
+    const KAFKA_TOPICS: &str = "/apis/kafka.strimzi.io/v1beta2/namespaces/kafka/kafkatopics";
+
+    fn strimzi_cluster_json() -> String {
+        let mut cluster: Value = serde_json::from_str(&kafka_cluster_json()).unwrap();
+        cluster["spec"]["strimzi"] =
+            serde_json::json!({"namespace": "kafka", "cluster": "prod-kafka"});
+        cluster.to_string()
+    }
+
+    /// Three `KafkaTopic`s labelled for the cluster: one names `orders`
+    /// (by `spec.topicName`), one an unplanned topic, one `payments` but
+    /// unmanaged.
+    fn kafka_topic_list() -> String {
+        serde_json::json!({
+            "apiVersion": "kafka.strimzi.io/v1beta2",
+            "kind": "KafkaTopicList",
+            "metadata": {"resourceVersion": "1"},
+            "items": [
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "orders-kt", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"}},
+                 "spec": {"topicName": "orders", "partitions": 3}},
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "clicks", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"}},
+                 "spec": {}},
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "payments", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"},
+                              "annotations": {"strimzi.io/managed": "false"}},
+                 "spec": {}}
+            ]
+        })
+        .to_string()
+    }
+
+    fn routes_with(list: Option<(u16, String)>) -> Vec<Route> {
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        for r in &mut routes {
+            if r.path_suffix == "/kafkaclusters/prod" {
+                r.body = strimzi_cluster_json();
+            }
+        }
+        if let Some((status, body)) = list {
+            routes.push(Route {
+                method: "GET",
+                path_suffix: KAFKA_TOPICS,
+                status,
+                body,
+            });
+        }
+        routes
+    }
+
+    /// The listed `KafkaTopic`s reach the execution inputs and the plan, and
+    /// the runner is told to read them: its receipt then records
+    /// `owner_detection: [kafkaTopicResources]`. KILLS: the listing dropped;
+    /// an unmanaged or unplanned resource passed on; the argv flag missing.
+    #[tokio::test]
+    async fn the_listed_kafka_topics_reach_the_inputs_and_the_runner() {
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(routes_with(Some((200, kafka_topic_list()))));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(outcome.created, "{outcome:?}");
+        let listed = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "GET" && path(&r.uri).ends_with(KAFKA_TOPICS))
+            .map(|r| r.uri.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(
+            listed[0].contains("labelSelector=strimzi.io%2Fcluster%3Dprod-kafka"),
+            "listed by the cluster label: {}",
+            listed[0]
+        );
+        let bodies = bodies.lock().unwrap();
+        let cm: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps"))
+                .expect("the plan ConfigMap was posted")
+                .body,
+        )
+        .unwrap();
+        let inputs: Value =
+            serde_json::from_str(cm["data"]["execution-inputs.json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            inputs["kafkaTopicResources"],
+            serde_json::json!({
+                "cluster": "prod-kafka",
+                "namespace": "kafka",
+                "resources": [{"name": "orders-kt", "topicName": "orders"}]
+            })
+        );
+        let doc = cm["data"]["kafka-topic-resources.yaml"]
+            .as_str()
+            .expect("the resources document is in the plan");
+        let parsed = logweir_core::topic_configuration::parse_resource_documents(doc).unwrap();
+        let owners = logweir_core::topic_configuration::strimzi_owners(
+            &parsed,
+            &["orders".to_string(), "payments".to_string()],
+            Some("prod-kafka"),
+        );
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners["orders"].reference, "kafka/orders-kt");
+        let job: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let args: Vec<String> = serde_json::from_value(
+            job["spec"]["template"]["spec"]["containers"][0]["args"].clone(),
+        )
+        .unwrap();
+        let at = args
+            .iter()
+            .position(|a| a == "--kafka-topic-resources")
+            .expect("the runner is given the resources");
+        assert_eq!(args[at + 1], "/plan/kafka-topic-resources.yaml");
+        assert_eq!(args[at + 2..at + 4], ["--strimzi-cluster", "prod-kafka"]);
+    }
+
+    /// A refused list fails the backup closed, before anything is created.
+    /// KILLS: a 403 read as "no owner"; a Job created anyway.
+    #[tokio::test]
+    async fn a_refused_list_is_owner_detection_failed() {
+        let forbidden = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"kafkatopics.kafka.strimzi.io is forbidden","reason":"Forbidden","code":403}"#;
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(routes_with(Some((403, forbidden.to_string()))));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+        assert!(!outcome.created);
+        assert!(!seen.lock().unwrap().iter().any(|r| r.method == "POST"));
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
+        assert!(message.contains("strimzi.readKafkaTopics"), "{message}");
+    }
+
+    /// A resource no version of which is served fails closed too.
+    #[tokio::test]
+    async fn an_unserved_resource_is_owner_detection_failed() {
+        let mut routes = routes_with(Some((404, not_found_body("kafkatopics", ""))));
+        routes.push(Route {
+            method: "GET",
+            path_suffix: "/apis/kafka.strimzi.io/v1/namespaces/kafka/kafkatopics",
+            status: 404,
+            body: not_found_body("kafkatopics", ""),
+        });
+        let (client, _seen, _bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+    }
+
+    /// Without `spec.strimzi` nothing is listed (the mock refuses any route it
+    /// was not given) and the plan carries no block.
+    #[tokio::test]
+    async fn without_the_field_nothing_is_listed() {
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(outcome.created);
+        assert!(!seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.uri.contains("kafkatopics")));
+        let bodies = bodies.lock().unwrap();
+        let cm: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert!(cm["data"].get("kafka-topic-resources.yaml").is_none());
+        assert!(!cm["data"]["execution-inputs.json"]
+            .as_str()
+            .unwrap()
+            .contains("kafkaTopicResources"));
     }
 }
