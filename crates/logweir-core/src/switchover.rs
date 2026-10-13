@@ -367,8 +367,11 @@ pub fn validate(plan: &SwitchoverPlan) -> Result<(), String> {
 /// **[`PLAN_DISAGREES_WITH_MAPPING`]'s check**: every planned position of a
 /// forward plan is the mapping document's, mapped (`exact` or `approximate`,
 /// never `unavailable`), for the plan group's SOURCE group, at the restored
-/// topic and partition the plan names; `approximate` lists exactly the
-/// approximate ones; and a forward plan expects `none`.
+/// topic and partition the plan names, and `approximate` lists exactly the
+/// approximate ones. `expected` is only a precondition, never an offset to
+/// commit: `logweir switchover plan` writes `none`, and an operator may state
+/// the positions a target group already holds (an earlier cutover attempt's),
+/// which the approver sees and the compare holds the group to.
 ///
 /// # Errors
 ///
@@ -382,12 +385,6 @@ pub fn check_against_mapping(
             return Err(format!("group {:?} is not in the mapping", g.source));
         };
         for (topic, t) in &g.topics {
-            if !matches!(t.expected, Expected::Word(_)) {
-                return Err(format!(
-                    "group {:?} {topic}: a forward plan expects no committed position (none)",
-                    g.source
-                ));
-            }
             for (p, offset) in &t.offsets {
                 let entry = m.entries.iter().find(|e| {
                     e.target_topic.as_deref() == Some(topic.as_str()) && e.partition == *p
@@ -624,11 +621,14 @@ pub fn rollback_plan(
         }
     }
     if groups.is_empty() {
-        return Err(
-            "the record applied no position that had a prior one, so there is nothing a \
-             rollback plan can restore"
-                .to_string(),
-        );
+        let mut why = "the record applied no position that had a prior one, so there is \
+                       nothing a rollback plan can restore"
+            .to_string();
+        for n in &notes {
+            why.push_str("\n  note: ");
+            why.push_str(n);
+        }
+        return Err(why);
     }
     let plan = SwitchoverPlan {
         format_version: PLAN_FORMAT_VERSION.to_string(),
@@ -1123,8 +1123,8 @@ mod tests {
     }
 
     /// PlanDisagreesWithMapping: another offset, an unavailable entry, a
-    /// wrong approximate list, a group the mapping lacks, a forward plan that
-    /// expects positions.
+    /// wrong approximate list, a group the mapping lacks; an expected map is
+    /// a precondition and accepted.
     #[test]
     fn a_plan_that_disagrees_with_the_mapping_is_refused() {
         let m = mapping();
@@ -1143,10 +1143,14 @@ mod tests {
         })
         .contains("not a mapped position"));
         assert!(edit(&|t| t.approximate.clear()).contains("approximate list"));
-        assert!(
-            edit(&|t| t.expected = Expected::Positions([(0, 1), (1, 1)].into()))
-                .contains("expects no committed position")
-        );
+        // An expected map is a precondition, never an offset: accepted.
+        let mut expecting = plan.clone();
+        expecting.groups[0]
+            .topics
+            .get_mut("r-orders")
+            .unwrap()
+            .expected = Expected::Positions([(0, 1), (1, 1)].into());
+        check_against_mapping(&expecting, &m).expect("a precondition the approver sees");
         let mut other = plan.clone();
         other.groups[0].source = "other".into();
         assert!(check_against_mapping(&other, &m)
@@ -1365,7 +1369,11 @@ mod tests {
         // A record with no prior anywhere has nothing to roll back.
         let mut none = r.clone();
         none.groups[0].partitions.retain(|p| p.prior.is_none());
-        assert!(rollback_plan(&none, record_key_ref()).is_err());
+        let why = rollback_plan(&none, record_key_ref()).unwrap_err();
+        assert!(
+            why.contains("--delete-offsets"),
+            "the absent priors are listed: {why}"
+        );
     }
 
     fn record_key_ref() -> RecordRef {

@@ -2372,13 +2372,102 @@ A partition with no committed offset is counted, never offset 0.
 - **Set only with `kubectl`.** The API's create bodies refuse
   `consumerGroups`, and the console neither sets nor shows it; a console edit
   leaves a `kubectl`-set selection alone.
-- **Nothing here resets a group.** To read positions with the source gone, see
+- **Nothing here resets a group.** A restore maps the positions; only a
+  [`Switchover`](#switching-consumer-groups-over) applies them. To read
+  positions with the source gone, see
   [the receipt format](formats/backup-receipt.md#recovering-positions-with-the-source-offline).
 - A schedule that names groups changes its `runPolicySha256`. An older
   controller ignores `consumerGroups` on a run it has not frozen yet (it records
   no positions) and refuses a run whose frozen inputs carry it
   (`PlanConfigMapConflict`): let such runs finish, or remove the field, before
   rolling back.
+
+## Switching consumer groups over
+
+A restore writes the data under new offsets; a consumer that resumes from its
+old position would skip or re-read records. Logweir translates the positions a
+backup captured and applies them, reviewed, to **stopped** groups on the
+restore's target. Nothing commits a position automatically after a restore.
+
+1. **Back up with groups** (`spec.consumerGroups`, above).
+2. **Restore with `coverage: complete`**, bound to that point. When the run
+   passes and covered every partition, phase 7 maps every captured position
+   onto the target and writes `logweir/drills/<run_id>.positions-mapping.json`
+   beside the scorecard, bound by digest in
+   `integrity.verification.positions_mapping` (scorecard 1.10.0, or 2.2.0 for
+   a partition subset). Each entry is `exact`, `approximate` (the restore's own
+   selection excluded records the group had not read; `skipped` counts them) or
+   `unavailable` with a reason (`ArchiveGap`, `PartitionNotRestored`,
+   `TransactionalArchive`, `BeforeLogStart`, `NotCaptured: …`, …). A sampled
+   or failing restore writes no mapping.
+3. **Plan.** `logweir switchover plan --scorecard S --positions-mapping M
+   --restore-name R --restore-uid U [--group src[=target]]… --out plan.yaml`
+   plans every mapped entry (unavailable ones are listed, never planned) with
+   `expected: none`. An operator may replace `expected` with the positions a
+   target group already holds (an earlier attempt's); the approver sees it and
+   the run holds the group to it.
+4. **Approve and create** a `Switchover` (operators create, approvers approve):
+
+   ```yaml
+   apiVersion: logweir.dev/v1alpha1
+   kind: Switchover
+   metadata: {name: orders-cutover}
+   spec:
+     planBytes: |          # the plan file, verbatim
+       ...
+     approvalRef: {name: orders-cutover}
+     restoreRef: {name: incident-4471, uid: 6f1c…}
+     deadlineSeconds: 900
+   ```
+
+   The `Approval` names `subjectRef: {kind: Switchover, name: orders-cutover}`;
+   `logweir drill approve --subject-kind Switchover --spec plan.yaml` mints a v1
+   document, and a namespace bound to an approval policy takes its normal mode
+   (confirm, two-person or strict). An approval for the `Restore` cannot
+   authorise it (`SubjectKindMismatch`).
+5. **Admission.** The controller refuses a plan that is not its
+   `restoreRef`'s, a `Restore` that did not succeed with a `Valid` verdict
+   (`RestoreNotSucceeded`), a scratch restore (`RestoreIsScratch`) and a second
+   switchover of the same restore while one runs (`SwitchoverInProgress`), then
+   creates one Job (`logweir switchover run`) with the restore's target
+   connection and evidence grant.
+6. **The run** verifies the approval, the scorecard's signature and plan hash,
+   a passing complete verification (`VerificationNotComplete`, naming the
+   field), the mapping's digest, every plan entry against the mapping
+   (`PlanDisagreesWithMapping`), the target's cluster id
+   (`TargetClusterChanged`) and each restored topic's ID against the one
+   recorded at creation (`TargetGenerationChanged`, `TargetIdentityUnknown`).
+   Then, per group, independently: a group with members is `GroupActive`; a
+   share or streams group `TargetGroupTypeUnsupported`; one the principal
+   cannot see `TargetNotVisible`; an offset outside the partition now
+   `BelowTargetLogStart`/`AboveTargetEnd`; the committed positions are read
+   (the priors) and compared — `applied` when they are what the plan expects,
+   `alreadyApplied` when they are the plan's, `TargetPositionsChanged`
+   otherwise — and the commit is Logweir's own non-member commit, which the
+   broker refuses while the group has a member. Each group is read back.
+7. **The result.** `status.phase` is `Succeeded`, `PartiallyApplied`, `Failed`
+   or `Refused`; `status.groups[]` one outcome per group;
+   `status.evidence.recordKey` the signed record
+   `logweir/switchovers/<run_id>.record.json` (+ `.sig`; verify it with
+   `logweir drill verify --payload-type switchover-record`, signature only).
+
+**Retry and rollback.** The same plan in a new `Switchover` (and a new
+approval) is safe: applied groups read `alreadyApplied`, refused ones are tried
+again, moved ones are `TargetPositionsChanged`. `logweir switchover
+rollback-plan --record R` builds `offsets := prior, expected := applied`; a
+group whose consumers ran since is refused, naming how many records they read,
+and a prior that was absent cannot be restored through a commit — it is listed
+with the `kafka-consumer-groups.sh --delete-offsets` command to run.
+
+**Permissions.** The runner's target principal needs Describe on the cluster
+(a complete group listing), Describe and Read on each target group, and
+Describe on the restored topics. The controller needs `get, list, watch` on
+`switchovers` and `patch` on `switchovers/status` (the chart grants them).
+
+**Upgrade and rollback.** An older controller ignores `Switchover` objects
+(nothing is applied); a Helm rollback leaves the CRD and its objects inert. An
+older verifier ignores `positions_mapping` and refuses the switchover record's
+payload type.
 
 ## Protection health
 
