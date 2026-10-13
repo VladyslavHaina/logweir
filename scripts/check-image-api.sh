@@ -8,10 +8,13 @@
 #      AArch64 ELF. Every other check here is architecture-independent, so this
 #      one runs first or a wrong-variant image passes for the wrong reason.
 #   1. /ui is the twenty-six shipped files, sha256 for sha256, and NOTHING else,
-#      against the one `ui/` directory in this tree.
+#      against the one `ui/` directory in this tree; and /ui/next, the rebuilt
+#      console's preview (PROD-18.1), is this tree's `console/dist`, sha256 for
+#      sha256 and nothing else (build it first: `just console`).
 #   2. The three licences are present, non-empty and at the path both compiling
 #      images use; `THIRD_PARTY_NOTICES.md` is REQUIRED here (this image ships a
-#      statically linked Rust binary).
+#      statically linked Rust binary). So is `console-third-party.md`, the
+#      licences of the npm packages bundled into /ui/next.
 #   3. The absences: no kafka-backup MIT notice, no org-root anchor, no engine.
 #   4. The entrypoint is `/usr/local/bin/logweir-api` and there is no CMD: the
 #      console's MODE comes from the chart's ConfigMap and from nowhere else.
@@ -94,6 +97,14 @@ if [ ! -d ui ]; then
   fail "check-image-api: there is no ui/ directory in $(pwd)." \
        "  Check 1 compares the image's /ui against the tree's ui/; without it" \
        "  this gate would be comparing the image against nothing."
+fi
+# The console build is reproducible across hosts (same hashed names on macOS and
+# Linux), so the tree's own build is the reference for the image's /ui/next.
+if [ ! -s console/dist/index.html ] || [ ! -s console/dist/.vite/license.md ]; then
+  fail "check-image-api: there is no console/dist/index.html or .vite/license.md in $(pwd)." \
+       "  Check 1 compares the image's /ui/next with this tree's console build;" \
+       "  without it this gate would be comparing the preview against nothing." \
+       "  Build it first: \`just console\` (or \`cd console && npm ci && npx vite build\`)."
 fi
 if [ ! -s LICENSE ] || [ ! -s NOTICE ] || [ ! -s THIRD_PARTY_NOTICES.md ]; then
   fail "check-image-api: LICENSE, NOTICE or THIRD_PARTY_NOTICES.md is missing or" \
@@ -247,7 +258,7 @@ while IFS= read -r f; do
   sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
   printf '%s  %s\n' "${f#"$work"/ui/}" "$sum" >> "$image_list"
   image_count=$((image_count + 1))
-done < <(find "$work/ui" -type f | LC_ALL=C sort)
+done < <(find "$work/ui" -type f ! -path "$work/ui/next/*" | LC_ALL=C sort)
 
 # TWENTY-SIX, NAMED. A gate whose expected count came from the tree alone would
 # stay green if someone deleted seven files from both sides at once.
@@ -258,7 +269,7 @@ if [ "$tree_count" -ne 26 ]; then
        "  crates/logweir/tests/chart_lint.rs. Fix the tree, never this number."
 fi
 if [ "$image_count" -ne 26 ]; then
-  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty-six." \
+  fail "check 1 (the page): $ref's /ui holds $image_count file(s) outside next/, not twenty-six." \
        "  It must hold the twenty-six shipped files and NOTHING else: no README.md," \
        "  no tests/ (a throwaway keypair and fixtures naming a developer's compose" \
        "  stack), no key material of any kind (Global Constraint 28)." \
@@ -277,6 +288,42 @@ if [ "$rc" -ne 0 ]; then
        "  stale one."
 fi
 echo "   ok: twenty-six files, sha256 for sha256, and nothing else under /ui"
+
+# THE PREVIEW, /ui/next (PROD-18.1 R1): `Dockerfile.console`'s console stage
+# copies `vite build`'s output there, and `assets.rs` serves it at `/ui/next/`.
+echo "-- check 1 (the preview): /ui/next is this tree's console/dist, sha256 for sha256, and nothing else"
+if [ ! -d "$work/ui/next" ]; then
+  fail "check 1 (the preview): $ref carries no /ui/next directory." \
+       "  \`Dockerfile.console\`'s console stage builds console/ and COPYs dist there."
+fi
+next_tree="$work/next-tree.sha256"
+next_image="$work/next-image.sha256"
+: > "$next_tree"
+: > "$next_image"
+next_count=0
+while IFS= read -r f; do
+  sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
+  printf '%s  %s\n' "${f#console/dist/}" "$sum" >> "$next_tree"
+  next_count=$((next_count + 1))
+done < <(find console/dist -type f ! -path 'console/dist/.vite/*' | LC_ALL=C sort)
+while IFS= read -r f; do
+  sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
+  printf '%s  %s\n' "${f#"$work"/ui/next/}" "$sum" >> "$next_image"
+done < <(find "$work/ui/next" -type f | LC_ALL=C sort)
+if [ "$next_count" -lt 2 ]; then
+  fail "check 1 (the preview): console/dist holds $next_count file(s); a build is" \
+       "  index.html and its hashed files under assets/."
+fi
+rc=0
+diff -u "$next_tree" "$next_image" > "$work/next.diff" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$work/next.diff" >&2
+  fail "check 1 (the preview): $ref's /ui/next is NOT this tree's console build." \
+       "  The diff above is console/dist's \`<path>  <sha256>\` list (-) against the" \
+       "  image's /ui/next (+). Rebuild both from this tree: \`just console\`, then" \
+       "  \`just image-console\`."
+fi
+echo "   ok: $next_count files, sha256 for sha256, and nothing else under /ui/next"
 
 # =========================================================================
 # CHECK 2 — THE LICENCES: three present, three byte-identical.
@@ -302,6 +349,20 @@ for f in LICENSE NOTICE THIRD_PARTY_NOTICES.md; do
   fi
 done
 echo "   ok: three licence files, byte-identical to the tree's"
+# The npm packages bundled into /ui/next (PROD-18.1) carry their own notices,
+# which the console build writes and Dockerfile.console moves here.
+if ! cp_out /usr/share/licenses/logweir/console-third-party.md "$work/console-third-party.md"; then
+  fail "check 2 (licence): $ref is missing /usr/share/licenses/logweir/console-third-party.md," \
+       "  the licences of the npm packages bundled into /ui/next (MIT requires them)."
+fi
+rc=0
+diff -u console/dist/.vite/license.md "$work/console-third-party.md" > "$work/lic-console.diff" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$work/lic-console.diff" >&2
+  fail "check 2 (licence): $ref's console-third-party.md is not this tree's console" \
+       "  build's .vite/license.md. Rebuild both: \`just console\`, then \`just image-console\`."
+fi
+echo "   ok: the console's bundled-package licences, byte-identical to the tree's build"
 
 # =========================================================================
 # CHECK 3 — THE ABSENCES. Each one is a claim this image must not make.

@@ -33,7 +33,8 @@ scripts off (`.npmrc`).
 
 `Dockerfile.console`'s `console` stage runs `npm ci`, `npm run check:api`,
 `npx vite build` and `scripts/check-dist.mjs`, then copies `dist/` to
-`/ui/next`. `scripts/check-image-api.sh` holds the image's `/ui/next` to this
+`/ui/next` and the bundled packages' licences (`dist/.vite/license.md`, never
+served) to `/usr/share/licenses/logweir/console-third-party.md`. `scripts/check-image-api.sh` holds the image's `/ui/next` to this
 tree's `dist/`, sha256 for sha256, so run `just console` before
 `just smoke-console`.
 

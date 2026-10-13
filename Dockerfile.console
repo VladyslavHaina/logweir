@@ -133,6 +133,30 @@ RUN set -eux; \
     cp "target/$triple/release/logweir-api" /out/logweir-api
 
 # ---------------------------------------------------------------------------
+# THE CONSOLE STAGE (PROD-18.1 R1)
+# ---------------------------------------------------------------------------
+# The rebuilt console (`console/`), served at `/ui/next/` beside the page below
+# until step R8 moves it to `/ui/` (`docs/to-do/decisions/PROD-18.1-console.md`).
+# Its output is JavaScript, CSS, fonts and images, the same bytes on every
+# platform, so the stage runs natively on `$BUILDPLATFORM`: no emulation
+# (STANDING RULE 10). The Node image is pinned by its index digest and moves
+# with the Rust bases.
+#
+# `npm ci` installs exactly the committed lockfile, with install scripts off
+# (`console/.npmrc`). `check:api` fails when the committed API types have
+# drifted from `schemas/logweir-api-v1.openapi.json`; `check-dist.mjs` fails
+# when the output is not the shape `assets.rs` serves, or carries the mock.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS console
+WORKDIR /src/console
+COPY console/package.json console/package-lock.json console/.npmrc ./
+RUN npm ci
+COPY schemas/logweir-api-v1.openapi.json /src/schemas/
+COPY console/ ./
+RUN npm run check:api && npx vite build && node scripts/check-dist.mjs
+# The bundled packages' licences go with the licences below, not into /ui/next.
+RUN mkdir /licenses && mv dist/.vite/license.md /licenses/console-third-party.md && rmdir dist/.vite
+
+# ---------------------------------------------------------------------------
 # THE RUNTIME STAGE
 # ---------------------------------------------------------------------------
 # `debian:bookworm-slim`, Global Constraint 10 — the same base the runner and
@@ -165,7 +189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 LABEL org.opencontainers.image.base.name="debian:bookworm-slim"
 LABEL org.opencontainers.image.title="logweir-console"
-LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the twenty-six static page files it serves at /ui/. Not a Kubernetes proxy."
+LABEL org.opencontainers.image.description="The Logweir product API (logweir-api), the twenty-six static page files it serves at /ui/, and the rebuilt console's preview at /ui/next/. Not a Kubernetes proxy."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api
@@ -184,6 +208,10 @@ COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api
 COPY ui/*.html ui/*.js ui/*.css /ui/
 COPY ui/pages /ui/pages
 
+# The rebuilt console's preview: `index.html` and its hashed files under
+# `assets/`, which `assets.rs` serves at `/ui/next/` and nothing else of.
+COPY --from=console /src/console/dist /ui/next
+
 # ---------------------------------------------------------------------------
 # THE LICENCES — Global Constraint 15, spec §16 clause 5
 # ---------------------------------------------------------------------------
@@ -195,6 +223,9 @@ COPY ui/pages /ui/pages
 # by `scripts/gen-third-party-notices.sh`.
 
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
+# The licences of the npm packages bundled into the console at /ui/next (Vite's
+# `build.license`), generated from the same build.
+COPY --from=console /licenses/console-third-party.md /usr/share/licenses/logweir/
 
 # THE SAME NON-ROOT UID AS BOTH OTHER IMAGES AND AS the chart's PodSpec
 # (`runAsUser: 65532`, `runAsNonRoot: true`). The kubelet enforces

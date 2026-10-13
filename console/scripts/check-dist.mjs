@@ -1,7 +1,9 @@
 // What `vite build` wrote is what crates/logweir-api/src/assets.rs serves at /ui/next/,
 // and nothing else: index.html, plus hashed scripts, styles, fonts and images directly in
 // assets/, under the server's 8 MiB bound, referenced relatively, and with none of the
-// in-page mock (a live build talks to the product API only).
+// in-page mock (a live build talks to the product API only). Beside them, never served,
+// .vite/license.md: the bundled packages' licences, which Dockerfile.console moves to
+// /usr/share/licenses/logweir/.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -13,7 +15,10 @@ const MOCK_MARKERS = ["logweir.invalid", "The prototype has no mock for", "Alice
 const problems = [];
 
 const top = readdirSync(dist).sort();
-if (top.join(",") !== "assets,index.html") problems.push(`dist/ holds ${top.join(", ")}; expected assets/ and index.html`);
+if (top.join(",") !== ".vite,assets,index.html") problems.push(`dist/ holds ${top.join(", ")}; expected .vite/, assets/ and index.html`);
+const vite = top.includes(".vite") ? readdirSync(join(dist, ".vite")).sort() : [];
+if (vite.join(",") !== "license.md") problems.push(`dist/.vite/ holds ${vite.join(", ")}; expected license.md`);
+else if (!readFileSync(join(dist, ".vite/license.md"), "utf8").includes("## react - ")) problems.push(".vite/license.md does not list the bundled packages");
 const files = ["index.html", ...readdirSync(join(dist, "assets")).map((f) => `assets/${f}`)];
 for (const file of files) {
   const path = join(dist, file);

@@ -43,6 +43,9 @@ export default defineConfig(({ command, mode }) => {
           assetsDir: "assets",
           sourcemap: false,
           modulePreload: { polyfill: false },
+          // The licences of every package bundled into the page, for the image's
+          // /usr/share/licenses/logweir/ (Dockerfile.console); never served.
+          license: true,
           // The mock's modules only define data. Saying so lets a live build drop them
           // whole once nothing reads them (scripts/check-dist.mjs holds it to that).
           rolldownOptions: { treeshake: { moduleSideEffects: [{ test: /\/src\/mock\//, sideEffects: false }] } },
