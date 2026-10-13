@@ -2196,6 +2196,164 @@ mod topic_configuration_tests {
         assert!(validate_or_name_the_key(&target, &ok, "at creation").is_ok());
     }
 
+    /// **Phase 0 judges the set the transition will apply, too.** The
+    /// source's `cleanup.policy=compact` is deferred: the topic is created
+    /// with `delete` (accepted), and a target that refuses only `compact`
+    /// stops the restore before anything is created, naming the stage and the
+    /// key. CONTROL: a target that refuses nothing admits the same plan.
+    /// KILLS: phase 0 validating the creation set only (mutant L2).
+    #[test]
+    fn a_target_refusing_only_the_transition_set_is_refused_at_admission() {
+        use logweir_core::backup_receipt as r;
+        struct Refuses(Option<(&'static str, &'static str)>, Mutex<usize>);
+        impl TopicCreator for Refuses {
+            fn create_topics(
+                &self,
+                _: &[NewTopicSpec],
+            ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+                *self.1.lock().unwrap() += 1;
+                Ok(Vec::new())
+            }
+            fn validate_create_topics(
+                &self,
+                topics: &[NewTopicSpec],
+            ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+                Ok(topics
+                    .iter()
+                    .map(|t| {
+                        let refused = self.0.is_some_and(|(k, v)| {
+                            t.configs.iter().any(|(ck, cv)| ck == k && cv == v)
+                        });
+                        let verdict = if refused {
+                            Err("InvalidConfig".to_string())
+                        } else {
+                            Ok(())
+                        };
+                        (t.name.clone(), verdict)
+                    })
+                    .collect())
+            }
+        }
+        struct Broker;
+        impl ClusterReader for Broker {
+            fn cluster_id(&self) -> Result<String, KafkaError> {
+                unreachable!()
+            }
+            fn list_topics(&self) -> Result<Vec<logweir_kafka::reader::TopicMeta>, KafkaError> {
+                unreachable!()
+            }
+            fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+                unreachable!()
+            }
+            fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!()
+            }
+            fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+                Ok(BTreeMap::new())
+            }
+            fn consume_range(
+                &self,
+                _: &str,
+                _: i32,
+                _: i64,
+                _: usize,
+            ) -> Result<Vec<logweir_kafka::reader::ConsumedRecord>, KafkaError> {
+                unreachable!()
+            }
+        }
+        let mut spec: DrillSpec =
+            serde_yaml::from_str(include_str!("../../../../examples/restore.yaml"))
+                .expect("the example parses");
+        spec.target.topic_configuration =
+            Some(logweir_core::topic_transition::TopicConfigurationPlan {
+                transition: logweir_core::topic_transition::Transition::AfterVerification,
+                owners: None,
+            });
+        let model = BTreeMap::from([(
+            "orders".to_string(),
+            r::TopicConfiguration {
+                partitions: Some(1),
+                replication_factor: Some(1),
+                entries: Some(BTreeMap::from([(
+                    "cleanup.policy".to_string(),
+                    r::ConfigEntry {
+                        value: Some("compact".into()),
+                        source: "dynamicTopicConfig".into(),
+                        portability: logweir_core::topic_configuration::PORTABLE.into(),
+                    },
+                )])),
+                owner: None,
+            },
+        )]);
+        let receipt = r::BackupReceipt {
+            format_version: r::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION.into(),
+            run_id: "r".into(),
+            backup_id: "b".into(),
+            requested_at: chrono::Utc::now(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            exit_code: 0,
+            triggered_by: String::new(),
+            source: r::ReceiptSource {
+                cluster_id: "c".into(),
+                bootstrap_servers: vec![],
+                auth: r::ReceiptAuth {
+                    mode: "plaintext".into(),
+                    username: None,
+                },
+                topics: vec!["orders".into()],
+            },
+            engine: r::ReceiptEngine {
+                id: "e".into(),
+                version: "v".into(),
+                digest: "d".into(),
+            },
+            archive: r::ReceiptArchive {
+                manifest_key: "k".into(),
+                manifest_sha256: "s".into(),
+                manifest_version_id: None,
+                prefix: "p".into(),
+            },
+            records: BTreeMap::from([("orders".to_string(), 1)]),
+            covered: r::ReceiptCovered {
+                from_ms: 1,
+                to_ms: 2,
+            },
+            config_coverage: None,
+            topic_configuration: Some(model),
+            owner_detection: Some(vec!["declared".into()]),
+            consumer_positions: None,
+            schema_dependency: None,
+            generations: None,
+            source_watermarks: None,
+        };
+        let coverage = r::SourceConfigCoverage::from_receipt(&receipt);
+        let mapping = BTreeMap::from([("orders".to_string(), "r-orders".to_string())]);
+        let refusing = Refuses(Some(("cleanup.policy", "compact")), Mutex::new(0));
+        let msg = admit_topic_configuration(&spec, &coverage, &mapping, &Broker, &refusing)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("TopicConfigRefusedByTarget: "), "{msg}");
+        assert!(msg.contains("`r-orders`"), "{msg}");
+        assert!(msg.contains("after verification"), "{msg}");
+        assert!(msg.contains("`cleanup.policy=compact`"), "{msg}");
+        assert_eq!(*refusing.1.lock().unwrap(), 0, "nothing is created");
+        // CONTROL: a target that refuses nothing admits the same plan, and the
+        // topic is created with `delete` and transitioned to `compact`.
+        let admitted = admit_topic_configuration(
+            &spec,
+            &coverage,
+            &mapping,
+            &Broker,
+            &Refuses(None, Mutex::new(0)),
+        )
+        .expect("admitted")
+        .expect("the block is present");
+        let t = &admitted.topics["r-orders"];
+        assert_eq!(t.created_overrides()["cleanup.policy"], "delete");
+        assert_eq!(t.final_overrides()["cleanup.policy"], "compact");
+    }
+
     #[test]
     fn a_plan_without_the_block_asks_the_target_nothing() {
         let spec: DrillSpec =
