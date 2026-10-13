@@ -26,7 +26,7 @@ function Covering({ policy }: { policy: RetentionPolicy }) {
   const enforced = condition(policy, "Enforced");
   const words = policy.enforcement ? ENFORCEMENT_WORDS[policy.enforcement] : undefined;
   return (
-    <>
+    <div>
       <Content component="p">
         <strong>{policy.name}</strong> governs this destination. {words ?? `It reports what is happening as ${policy.enforcement ?? "not recorded"}.`}
         {policy.mode === "Enforce" && policy.enforcement !== "LogweirWorker" ? " It is asked to enforce, but is not enforcing now." : ""}
@@ -65,7 +65,7 @@ function Covering({ policy }: { policy: RetentionPolicy }) {
           Approving a plan authorises deletion of the archive objects it names. Deletion cannot be undone.
         </Content>
       )}
-    </>
+    </div>
   );
 }
 

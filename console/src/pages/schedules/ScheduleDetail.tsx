@@ -164,7 +164,9 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
         <Content component="p" className="lw-subtle">
           {uid
             ? "This schedule has made no run yet. Its first one starts at its next slot, or use Back up now."
-            : "This schedule no longer exists, so no run can be placed as its own; the runs that name it are below."}
+            : groups.earlier.length + groups.legacy.length > 0
+              ? "This schedule no longer exists, so no run is placed as its own; the runs that name it are below, by schedule identity."
+              : "No run in this namespace names this schedule."}
         </Content>
       ) : (
         <>
