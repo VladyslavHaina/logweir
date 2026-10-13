@@ -2755,3 +2755,116 @@ for name in ca1-under-1.8.0 ca1-under-2.0.0 ca2-mode ca3-same ca3-case ca3-issue
     echo "check-verifier-parity: scorecard/console-$name  rust=$rust_rc python=$py_rc  ok  (console approval refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_CONSOLE_APPROVAL_VERSION and $SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION console-approved scorecards, say the same about who approved and how, and refuse each of CA-1 to CA-8 and ON-5's two new statements with the same words"
+
+# ---------------------------------------------------------------------------
+# POSITIONS MAPPING LOOP (PROD-04.2): the scorecard's
+# `integrity.verification.positions_mapping` (arms PM-1 to PM-5) and the
+# mapping document handed over with `--positions-mapping` (arms PMD-1 to
+# PMD-7), on FULL refusal text (`positions-mapping-index.json`, the corpus
+# `crates/logweir/tests/two_reader_parity_receipt.rs` walks too). Each case's
+# scorecard is signed here with the throwaway fixture key under the scorecard
+# media type. On an accepted case both readers print the SAME
+# `positions_mapping` lines and, with the document, those lines name every
+# entry the DOCUMENT lists — read from the document here, so a reader that
+# dropped or invented a position fails even when the other agrees with it.
+# ---------------------------------------------------------------------------
+RUST_MAPPING_PREFIX="SIGNATURE VALID but the positions-mapping document is refused: "
+RUST_INVARIANT_PREFIX="${RUST_PREFIX}scorecard invariant violated: "
+mkdir -p "$tmp/mapping"
+"$PY" - "$CORPUS" "$tmp/mapping" "$SC_PT" > "$tmp/mapping-cases.tsv" <<'PYEOF'
+import base64, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+corpus, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+key = serialization.load_pem_private_key(
+    (corpus.parent / "signed" / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+entries = json.loads((corpus / "positions-mapping-index.json").read_text())
+if not entries:
+    raise SystemExit("positions-mapping-index.json is empty; a walk over nothing proves nothing")
+for e in entries:
+    payload = (corpus / e["scorecard"]).read_bytes()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{e['id']}.json").write_bytes(payload)
+    (out / f"{e['id']}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+    has = 0
+    if e.get("mapping"):
+        (out / f"{e['id']}.mapping.json").write_bytes((corpus / e["mapping"]).read_bytes())
+        has = 1
+    if "\t" in e["reason"] or "\n" in e["reason"]:
+        raise SystemExit(f"{e['id']}: `reason` must be a single TAB-free line")
+    print(f"{e['id']}\t{e['rust_exit']}\t{e['python_exit']}\t{has}\t{e['reason']}")
+PYEOF
+
+mapping_count=0
+mapping_accepted=0
+mapping_listed=0
+while IFS=$'\t' read -r name want_rust want_py has reason; do
+    [ -n "$name" ] || continue
+    mapping_count=$((mapping_count + 1))
+    doc="$tmp/mapping/$name.json"
+    extra=()
+    if [ "$has" = "1" ]; then
+        extra=(--positions-mapping "$tmp/mapping/$name.mapping.json")
+    fi
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$tmp/mapping/$name.sig" \
+        --public-key "$FIX/public.pem" ${extra[@]+"${extra[@]}"} >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    "$PY" "$VERIFIER" ${extra[@]+"${extra[@]}"} "$doc" "$tmp/mapping/$name.sig" "$FIX/public.pem" \
+        >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq "$want_rust" ] || { cat "$tmp/rust.err" >&2; fail "mapping/$name: drill verify exited $rust_rc, expected $want_rust"; }
+    [ "$py_rc" -eq "$want_py" ] || { cat "$tmp/py.err" >&2; fail "mapping/$name: verify_scorecard.py exited $py_rc, expected $want_py"; }
+    rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_MAPPING_PREFIX")"
+    [ -n "$rust_msg" ] || rust_msg="$(refusal_text "$tmp/rust.err" "$RUST_INVARIANT_PREFIX")"
+    py_msg="$(refusal_text "$tmp/py.err" "$PY_PREFIX")"
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$reason" ]; then
+        fail "mapping/$name: the positions-mapping refusals differ.
+  rust:   $rust_msg
+  python: $py_msg
+  index:  $reason"
+    fi
+    if [ -z "$reason" ]; then
+        mapping_accepted=$((mapping_accepted + 1))
+        rust_pm="$(grep -oE 'positions_mapping(\[|:).*' "$tmp/rust.out" || true)"
+        py_pm="$(grep -oE 'positions_mapping(\[|:).*' "$tmp/py.out" || true)"
+        [ -n "$rust_pm" ] || fail "mapping/$name: an accepted mapping block printed no positions_mapping line"
+        [ "$rust_pm" = "$py_pm" ] || fail "mapping/$name: the two readers print DIFFERENT positions_mapping lines.
+  rust:
+$rust_pm
+  python:
+$py_pm"
+        if [ "$has" = "1" ]; then
+            mapping_listed=$((mapping_listed + 1))
+            want_at="$("$PY" -c 'import json, sys
+doc = json.load(open(sys.argv[1]))
+for g in sorted(doc["groups"]):
+    grp = doc["groups"][g]
+    if grp.get("reason"):
+        print("positions_mapping[" + json.dumps(g) + "]")
+        continue
+    for e in grp["entries"]:
+        print("positions_mapping[" + json.dumps(g) + "][" + json.dumps(e["topic"]) + ":" + str(e["partition"]) + "]")' "$tmp/mapping/$name.mapping.json")"
+            got_at="$(printf '%s\n' "$rust_pm" | sed -n 's/^\(positions_mapping\[[^]]*\]\(\[[^]]*\]\)\{0,1\}\): .*/\1/p')"
+            [ "$got_at" = "$want_at" ] || fail "mapping/$name: the position lines do not name exactly the document's entries.
+  want:
+$want_at
+  got:
+$rust_pm"
+        fi
+    fi
+    echo "check-verifier-parity: mapping/$name  rust=$rust_rc python=$py_rc  ok  (positions mapping)"
+done <<< "$(cat "$tmp/mapping-cases.tsv")"
+[ "$mapping_count" -gt 0 ] || fail "walked zero positions-mapping cases"
+[ "$mapping_listed" -ge 1 ] || fail "positions-mapping-index.json must carry at least one accepted case with its document"
+echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $mapping_count positions-mapping cases ($mapping_accepted accepted, $mapping_listed with every entry named)"
