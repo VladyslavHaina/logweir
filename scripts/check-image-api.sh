@@ -525,7 +525,8 @@ if [ "${bin_version#logweir-api }" != "$want_version" ]; then
 fi
 
 echo
-echo "ok: the twenty-six shipped files byte for byte at /ui and nothing else, three licences,"
+echo "ok: the twenty-six shipped files byte for byte at /ui and nothing else, the console"
+echo "    preview at /ui/next byte for byte with this tree's build, four licence files,"
 echo "    no MIT notice, no org-root anchor and no engine, the entrypoint logweir-api with no"
 echo "    CMD and USER 65532, no key-shaped path anywhere, and the binary runs by bare name"
 echo "    reporting $bin_version — in $ref"
