@@ -24,6 +24,17 @@
 //!    `RemovalFailed`. The finalizer stays on a `RemovalFailed` clone until an
 //!    operator removes it.
 //!
+//! **The finalizer fails closed.** Once on, it is released ONLY on a settled
+//! clone phase (`Removed`; `NotKept`, which needs the runner's own exit or no
+//! run Job ever recorded) or on the recorded proof that no run Job was
+//! created: neither `status.jobRef` (written in the pass that creates the run
+//! Job) nor `status.exitCode`. The absence of a Job is never that proof. A
+//! plan this controller cannot read, a clone shape it refuses, a recorded run
+//! Job that is gone before its outcome, or a run that ended with no exit code
+//! is `RemovalFailed` with the reason and the manual step, and keeps the
+//! finalizer. A finalizer on a plan that parses and is not a clone is
+//! released on deletion.
+//!
 //! THE CONTROLLER DELETES NO TOPIC. It starts a runner Job; the runner
 //! deletes only what the run's signed scorecard records, on the cluster it
 //! records, while each topic's ID is the recorded one.
@@ -60,29 +71,107 @@ pub const PHASE_REMOVAL_FAILED: &str = "RemovalFailed";
 /// The run did not pass: its own run tore the topics down at once.
 pub const PHASE_NOT_KEPT: &str = "NotKept";
 
-/// The clone's lifetime, when the approved plan is a TTL clone (scratch mode,
-/// `target.teardown: {ttl_seconds}`); `None` for every other `Restore`.
+/// What the approved plan says this `Restore` is, as far as clones go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// The plan parses and is not a clone (`target.teardown` is a policy).
+    NotClone,
+    /// A TTL clone: a scratch plan with `target.teardown: {ttl_seconds: N}`
+    /// within its bounds.
+    Clone(u64),
+    /// The plan declares the clone form in a shape the runner refuses
+    /// (`CloneTtlOutOfRange`, `CloneTtlNeedsScratch`), in the runner's words.
+    Refused(String),
+    /// The plan does not parse in this controller (version skew, a decode
+    /// change): whether it is a clone is NOT known.
+    Unreadable(String),
+}
+
+/// Classify the approved plan. Pure. `Unreadable` and `Refused` are never
+/// read as "not a clone": a finalizer put there because the object WAS a
+/// clone is never released on them.
 #[must_use]
-pub fn clone_ttl(restore: &Restore) -> Option<u64> {
-    let plan = parse_plan(restore).ok()?;
-    if plan.target.mode != TargetMode::Scratch {
-        return None;
+pub fn classify(restore: &Restore) -> Plan {
+    let plan = match parse_plan(restore) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return Plan::Unreadable(format!(
+                "spec.planBytes does not parse in this controller ({e})"
+            ))
+        }
+    };
+    let Some(ttl) = plan.target.teardown.ttl_seconds() else {
+        return Plan::NotClone;
+    };
+    match logweir_core::target_creation::refuse_teardown_shape(&plan) {
+        Some(why) => Plan::Refused(why),
+        None if plan.target.mode == TargetMode::Scratch => Plan::Clone(ttl),
+        None => Plan::Refused("the clone form outside scratch mode".to_string()),
     }
-    plan.target.teardown.ttl_seconds()
 }
 
 /// The clone shape the runner refuses at phase 0, refused here before any
 /// Job exists, in the runner's words.
-fn shape_refusal(restore: &Restore) -> Option<RestoreError> {
-    let plan = parse_plan(restore).ok()?;
-    let why = logweir_core::target_creation::refuse_teardown_shape(&plan)?;
-    Some(RestoreError::Refused(
+fn shape_refusal(why: &str) -> RestoreError {
+    RestoreError::Refused(
         crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
         format!(
             "{why}; no Job was created. spec is immutable and the approval binds the plan \
              bytes — create a new Restore with a plan the runner accepts"
         ),
-    ))
+    )
+}
+
+/// **Whether the controller ever recorded a run Job for this `Restore`.**
+/// `status.jobRef` is written in the pass that creates the run Job (and by
+/// every later pass that observes it), and `status.exitCode` only from a
+/// Job's pod. Neither recorded is the positive proof that no run Job was
+/// created; the ABSENCE OF A JOB is never that proof (it may have been
+/// deleted, or collected by a foreground deletion of this object).
+#[must_use]
+pub fn run_recorded(restore: &Restore) -> bool {
+    restore
+        .status
+        .as_ref()
+        .is_some_and(|s| s.job_ref.is_some() || s.exit_code.is_some())
+}
+
+/// What a clone being deleted before its run's outcome is recorded may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnDelete {
+    /// No run Job was ever recorded and none exists: nothing was created, so
+    /// the finalizer is released.
+    Release,
+    /// The run Job exists: the reconcile observes it end, then the clone's
+    /// lifetime decides.
+    Observe,
+    /// A run Job was recorded and is gone before its outcome was: whether it
+    /// created topics is unknown. `RemovalFailed`, finalizer kept.
+    Hold(String),
+}
+
+/// **The release decision for a clone deleted before its run ended.** Pure;
+/// `run_job_exists` is the API server's answer for the run Job (a read that
+/// failed is an error, never "absent").
+#[must_use]
+pub fn on_delete(restore: &Restore, run_job_exists: bool) -> OnDelete {
+    if run_job_exists {
+        OnDelete::Observe
+    } else if !run_recorded(restore) {
+        OnDelete::Release
+    } else {
+        OnDelete::Hold(format!(
+            "the Restore was deleted before its run's outcome was recorded, and its run Job \
+             {} is gone, so whether the run created topics is unknown; nothing was deleted. \
+             Look for topics with the clone's prefix on the target, delete any this run \
+             created, then remove the finalizer {FINALIZER}",
+            restore
+                .status
+                .as_ref()
+                .and_then(|s| s.job_ref.as_ref())
+                .map_or_else(|| restore.name_any(), |r| r.name.clone())
+        ))
+    }
 }
 
 /// The cleanup Job's name for one attempt: `logweir-clone-cleanup-<uid>-<n>`,
@@ -205,8 +294,13 @@ pub fn cleanup_job(
 pub enum Step {
     /// The run has not ended: nothing yet.
     Wait,
-    /// The run did not pass: record `NotKept` and release the finalizer.
+    /// The run did not pass and its runner settled what it created (it
+    /// exited, tearing down and naming what it left), or no run Job was ever
+    /// recorded: record `NotKept` and release the finalizer.
     NotKept,
+    /// The clone cannot be settled: record `RemovalFailed` with this reason;
+    /// the finalizer stays.
+    Fail(String),
     /// The run passed and nothing is recorded: keep it until this instant.
     Keep(DateTime<Utc>),
     /// Kept, and not due before this instant.
@@ -240,7 +334,21 @@ pub fn step(restore: &Restore, ttl: u64, deleting: bool, now: DateTime<Utc>) -> 
     let passed =
         status.is_some_and(|s| s.phase.as_deref() == Some("Succeeded") && s.exit_code == Some(0));
     if !passed {
-        return Step::NotKept;
+        // Settled only by the runner's own exit (its teardown ran and named
+        // what it left), or by no run Job ever recorded. A run Job that ended
+        // with no exit code (a deadline, an eviction, a crash) never ran its
+        // teardown.
+        let exited = status.is_some_and(|s| s.exit_code.is_some());
+        return if exited || !run_recorded(restore) {
+            Step::NotKept
+        } else {
+            Step::Fail(format!(
+                "the run ended without an exit code, so its own teardown did not run and \
+                 whatever it created is still on the target; nothing was deleted. Look for \
+                 topics with the clone's prefix, delete any this run created, then remove the \
+                 finalizer {FINALIZER}"
+            ))
+        };
     }
     let Some(expires_at) = clone.and_then(|c| c.expires_at) else {
         let ttl = i64::try_from(ttl).unwrap_or(i64::MAX);
@@ -356,42 +464,89 @@ where
     };
     let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
     let deleting = restore.meta().deletion_timestamp.is_some();
-    // The clone shape the runner refuses, refused before any Job exists.
-    if !status_is_terminal(restore) {
-        if let Some(refusal) = shape_refusal(restore) {
-            if !deleting {
-                return Err(refusal);
-            }
-            if has_finalizer(restore) {
+    let terminal = status_is_terminal(restore);
+    let ttl = match classify(restore) {
+        Plan::Clone(ttl) => ttl,
+        // Not a clone, and the plan says so: a finalizer left from anywhere
+        // never blocks its deletion.
+        Plan::NotClone => {
+            if deleting && has_finalizer(restore) {
                 set_finalizer(&restores, restore, false).await?;
             }
-            return Ok(handled(&name, Requeue::AwaitChange));
+            return inner.await;
         }
-    }
-    let Some(ttl) = clone_ttl(restore) else {
-        // Not a clone: a finalizer left from anywhere never blocks a
-        // deletion here.
-        if deleting && has_finalizer(restore) {
-            set_finalizer(&restores, restore, false).await?;
+        // A shape the runner refuses, or a plan this controller cannot read.
+        // Without the finalizer it is the ordinary refusal (the reconcile
+        // refuses an unreadable plan itself). WITH it, the object was
+        // admitted as a clone: fail closed in both directions — nothing is
+        // deleted, the finalizer stays, and the status says why.
+        Plan::Refused(why) | Plan::Unreadable(why) => {
+            if has_finalizer(restore) {
+                let recorded = restore
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.clone.as_ref())
+                    .and_then(|c| c.phase.as_deref())
+                    == Some(PHASE_REMOVAL_FAILED);
+                if recorded {
+                    return if deleting {
+                        Ok(handled(&name, Requeue::AwaitChange))
+                    } else {
+                        inner.await
+                    };
+                }
+                patch_clone(
+                    &restores,
+                    &name,
+                    json!({"phase": PHASE_REMOVAL_FAILED, "reason": bounded_reason(&format!(
+                        "{why}; this controller cannot tell what the clone owes, so nothing \
+                         was deleted. Look for topics with the clone's prefix on the target, \
+                         delete any its run created, then remove the finalizer {FINALIZER}"))}),
+                    None,
+                )
+                .await?;
+                if deleting {
+                    return Ok(handled(&name, Requeue::AwaitChange));
+                }
+                return inner.await;
+            }
+            if deleting {
+                return Ok(handled(&name, Requeue::AwaitChange));
+            }
+            return match classify(restore) {
+                Plan::Refused(why) if !terminal => Err(shape_refusal(&why)),
+                _ => inner.await,
+            };
         }
-        return inner.await;
     };
-    if deleting && !status_is_terminal(restore) {
+    if deleting && !terminal {
         let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
-        if jobs
+        let exists = jobs
             .get_opt(&name)
             .await
             .map_err(RestoreError::Api)?
-            .is_none()
-        {
-            // The run never started: nothing was created and nothing is owed.
-            if has_finalizer(restore) {
-                set_finalizer(&restores, restore, false).await?;
+            .is_some();
+        match on_delete(restore, exists) {
+            OnDelete::Observe => {}
+            OnDelete::Release => {
+                if has_finalizer(restore) {
+                    set_finalizer(&restores, restore, false).await?;
+                }
+                return Ok(handled(&name, Requeue::AwaitChange));
             }
-            return Ok(handled(&name, Requeue::AwaitChange));
+            OnDelete::Hold(why) => {
+                patch_clone(
+                    &restores,
+                    &name,
+                    json!({"ttlSeconds": i64::try_from(ttl).unwrap_or(i64::MAX),
+                           "phase": PHASE_REMOVAL_FAILED, "reason": bounded_reason(&why)}),
+                    None,
+                )
+                .await?;
+                return Ok(handled(&name, Requeue::AwaitChange));
+            }
         }
-        // The run is under way: let the reconcile observe it end.
-    } else if !deleting && !has_finalizer(restore) && !status_is_terminal(restore) {
+    } else if !deleting && !has_finalizer(restore) && !terminal {
         // At admission, before the run Job exists. The patch moves the
         // object's version, which the reconcile's status writes are
         // preconditioned on, so this pass ends here and the watch event of
@@ -480,6 +635,17 @@ async fn advance(
             patch_clone(&restores, &name, clone, None).await?;
             Ok(Requeue::After(seconds_until(expires_at, now)))
         }
+        Step::Fail(why) => {
+            patch_clone(
+                &restores,
+                &name,
+                json!({"ttlSeconds": ttl_i64, "phase": PHASE_REMOVAL_FAILED,
+                       "reason": bounded_reason(&why)}),
+                None,
+            )
+            .await?;
+            Ok(Requeue::AwaitChange)
+        }
         Step::Until(at) => Ok(Requeue::After(seconds_until(at, now))),
         Step::Start(attempt) => {
             let started = if attempt == 1 {
@@ -527,11 +693,24 @@ async fn watch(
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
     let name = restore.name_any();
     let clone = restore.status.as_ref().and_then(|s| s.clone.as_ref());
-    let attempts = clone.and_then(|c| c.attempts).unwrap_or(1);
-    let Some(job_name) = clone
-        .and_then(|c| c.job_ref.as_ref())
-        .map(|r| r.name.clone())
-    else {
+    // A `Removing` clone always records its attempt and its Job; one that
+    // does not is not retried on a guess.
+    let (Some(attempts), Some(job_name)) = (
+        clone.and_then(|c| c.attempts),
+        clone
+            .and_then(|c| c.job_ref.as_ref())
+            .map(|r| r.name.clone()),
+    ) else {
+        patch_clone(
+            &restores,
+            &name,
+            json!({"phase": PHASE_REMOVAL_FAILED, "reason": bounded_reason(&format!(
+                "the clone is Removing with no recorded attempt or cleanup Job, so the cleanup \
+                 is not retried; look for topics with the clone's prefix on the target, delete \
+                 any its run created, then remove the finalizer {FINALIZER}"))}),
+            None,
+        )
+        .await?;
         return Ok(Requeue::AwaitChange);
     };
     let Some(job) = jobs.get_opt(&job_name).await.map_err(RestoreError::Api)? else {
@@ -565,14 +744,16 @@ async fn watch(
         Some(pod) => {
             let pods: Api<k8s_openapi::api::core::v1::Pod> =
                 Api::namespaced(client.clone(), namespace);
-            crate::runner_log::read_text(&pods, &pod.name_any(), &crate::runner_log::TERMINAL)
-                .await
-                .ok()
-                .and_then(|log| {
-                    crate::runner_log::key_values(&log, CLONE_CLEANUP_PREFIX)
-                        .pop()
-                        .and_then(CloneCleanupReport::parse)
-                })
+            // A log the API did not hand over is an error this pass retries,
+            // never "the cleanup printed nothing", which would spend an
+            // attempt.
+            let log =
+                crate::runner_log::read_text(&pods, &pod.name_any(), &crate::runner_log::TERMINAL)
+                    .await
+                    .map_err(RestoreError::Api)?;
+            crate::runner_log::key_values(&log, CLONE_CLEANUP_PREFIX)
+                .pop()
+                .and_then(CloneCleanupReport::parse)
         }
         None => None,
     };
@@ -869,6 +1050,10 @@ mod tests {
             Step::NotKept
         );
         assert_eq!(
+            step(&terminal("Failed", 1, None), 300, false, now),
+            Step::NotKept
+        );
+        assert_eq!(
             step(&terminal("Succeeded", 0, None), 300, false, now),
             Step::Keep(t("2026-10-13T12:05:00Z"))
         );
@@ -900,6 +1085,84 @@ mod tests {
             let r = terminal("Succeeded", 0, clone(phase, "2026-10-13T12:05:00Z", 1));
             assert_eq!(step(&r, 300, true, now), want, "{phase}");
         }
+    }
+
+    fn ended_without_exit(job_ref: bool) -> Restore {
+        let mut r = terminal("Failed", 0, None);
+        let status = r.status.as_mut().unwrap();
+        status.exit_code = None;
+        status.job_ref = job_ref.then(|| crate::crds::LocalRef { name: "c1".into() });
+        r
+    }
+
+    /// **The release decision fails closed** (the commit review's three
+    /// findings). A run that did not pass is settled only by its runner's own
+    /// exit or by no run Job ever recorded; a run Job that ended with no exit
+    /// code keeps the finalizer. KILLS: `NotKept` for every run that did not
+    /// pass (the review's state drift); a settlement that ignores `jobRef`.
+    #[test]
+    fn a_run_that_ended_without_an_exit_code_keeps_the_finalizer() {
+        let now = t("2026-10-13T12:00:00Z");
+        assert!(matches!(
+            step(&ended_without_exit(true), 300, true, now),
+            Step::Fail(why) if why.contains("without an exit code")
+        ));
+        // CONTROL: refused before any run Job was recorded.
+        assert_eq!(
+            step(&ended_without_exit(false), 300, true, now),
+            Step::NotKept
+        );
+    }
+
+    /// **Deleting a clone before its run ended releases it only on proof that
+    /// no run Job was ever recorded.** KILLS: releasing because the Job is
+    /// absent (it may have been deleted after creating topics); releasing with
+    /// a recorded `jobRef` or exit code; holding a Job that exists.
+    #[test]
+    fn a_deletion_before_the_outcome_releases_only_on_recorded_proof() {
+        let pending = restore_with(Some(RestoreStatus {
+            phase: Some("Pending".into()),
+            ..RestoreStatus::default()
+        }));
+        assert_eq!(on_delete(&pending, false), OnDelete::Release);
+        assert_eq!(on_delete(&pending, true), OnDelete::Observe);
+        let mut ran = pending.clone();
+        ran.status.as_mut().unwrap().job_ref = Some(crate::crds::LocalRef { name: "c1".into() });
+        assert!(matches!(on_delete(&ran, false), OnDelete::Hold(why) if why.contains("c1")));
+        let mut exited = pending.clone();
+        exited.status.as_mut().unwrap().exit_code = Some(1);
+        assert!(matches!(on_delete(&exited, false), OnDelete::Hold(_)));
+        assert!(!run_recorded(&pending) && run_recorded(&ran) && run_recorded(&exited));
+    }
+
+    fn plan_bytes(teardown: &str, mode: &str) -> String {
+        format!(
+            "source:\n  storage: {{backend: s3, bucket: b, prefix: p, region: us-east-1}}\n  \
+             backup: latestCompleted\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [\"k:9092\"]\n  mode: {mode}\n  \
+             topic_mapping_prefix: \"c-\"\n  teardown: {teardown}\n\
+             sample:\n  window_start: \"2026-10-13T00:00:00Z\"\n  \
+             window_end: \"2026-10-13T01:00:00Z\"\n\
+             objectives: {{}}\n\
+             evidence: {{backend: s3, bucket: e, prefix: logweir/, region: us-east-1}}\n"
+        )
+    }
+
+    /// **A plan this controller cannot read, or a clone shape it refuses, is
+    /// never "not a clone".** KILLS: `parse_plan(..).ok()?` read as not a
+    /// clone (the review's first finding).
+    #[test]
+    fn an_unreadable_or_refused_plan_is_never_not_a_clone() {
+        let mut r = restore_with(None);
+        assert!(matches!(classify(&r), Plan::Unreadable(_)), "planBytes `x`");
+        r.spec.plan_bytes = plan_bytes("{ttl_seconds: 300}", "scratch");
+        assert_eq!(classify(&r), Plan::Clone(300));
+        r.spec.plan_bytes = plan_bytes("{ttl_seconds: 10}", "scratch");
+        assert!(matches!(classify(&r), Plan::Refused(w) if w.starts_with("CloneTtlOutOfRange")));
+        r.spec.plan_bytes = plan_bytes("{ttl_seconds: 300}", "newTopic");
+        assert!(matches!(classify(&r), Plan::Refused(w) if w.starts_with("CloneTtlNeedsScratch")));
+        r.spec.plan_bytes = plan_bytes("delete", "scratch");
+        assert_eq!(classify(&r), Plan::NotClone);
     }
 
     /// The cleanup argv: the run's plan, key, keyring and store contract, its

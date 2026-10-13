@@ -373,3 +373,228 @@ async fn a_cleanup_that_succeeded_is_removed_and_releases_the_finalizer() {
     let finalizer = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}"));
     assert_eq!(finalizer[0]["metadata"]["finalizers"], json!([]));
 }
+
+// ---- The commit review's fail-open findings: the finalizer is released only
+// on a settled clone phase or recorded proof that no run Job was created. ----
+
+fn not_found() -> String {
+    json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+           "reason": "NotFound", "code": 404, "message": "not found"})
+    .to_string()
+}
+
+fn deleting(mut value: Value) -> Value {
+    value["metadata"]["deletionTimestamp"] = json!("2026-10-13T11:59:00Z");
+    value
+}
+
+/// **Finding 1: a plan this controller cannot parse never releases the
+/// finalizer.** The status says `RemovalFailed` with why and the manual step;
+/// nothing is deleted and the deleting object is not reconciled. KILLS:
+/// `parse_plan(..).ok()?` read as "not a clone". CONTROL: a plan that parses
+/// and is not a clone releases a finalizer left on it.
+#[tokio::test]
+async fn an_unreadable_plan_keeps_the_finalizer_and_says_why() {
+    let value = deleting(restore_value("not: [a, plan", &[FINALIZER], Value::Null));
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![Route {
+        method: "PATCH",
+        path_suffix: leak(format!("/restores/{NAME}/status")),
+        status: 200,
+        body: value.to_string(),
+    }]);
+    let mut ran = false;
+    around(&restore(&value), &client, now(), None, async {
+        ran = true;
+        Ok(outcome())
+    })
+    .await
+    .unwrap();
+    assert!(!ran);
+    let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+    assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+    let reason = status[0]["status"]["clone"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("does not parse") && reason.contains("remove the finalizer"),
+        "{reason}"
+    );
+    assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+
+    // CONTROL.
+    let value = deleting(restore_value(
+        &plan("delete", "scratch"),
+        &[FINALIZER],
+        Value::Null,
+    ));
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![Route {
+        method: "PATCH",
+        path_suffix: leak(format!("/restores/{NAME}")),
+        status: 200,
+        body: value.to_string(),
+    }]);
+    around(&restore(&value), &client, now(), None, async {
+        Ok(outcome())
+    })
+    .await
+    .unwrap();
+    let released = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}"));
+    assert_eq!(released[0]["metadata"]["finalizers"], json!([]));
+}
+
+/// **Finding 2: a clone shape refused while deleting never releases the
+/// finalizer**, even with a run Job in place (an upgrade that changed the
+/// shape rules after the run started). KILLS: the release on a shape
+/// refusal.
+#[tokio::test]
+async fn a_refused_shape_while_deleting_keeps_the_finalizer() {
+    let value = deleting(restore_value(
+        &plan("{ttl_seconds: 10}", "scratch"),
+        &[FINALIZER],
+        json!({"phase": "Running", "jobRef": {"name": NAME}}),
+    ));
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![Route {
+        method: "PATCH",
+        path_suffix: leak(format!("/restores/{NAME}/status")),
+        status: 200,
+        body: value.to_string(),
+    }]);
+    around(&restore(&value), &client, now(), None, async {
+        Ok(outcome())
+    })
+    .await
+    .unwrap();
+    let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+    assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+    assert!(status[0]["status"]["clone"]["reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("CloneTtlOutOfRange: "));
+    assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+}
+
+/// **Finding 3: a missing run Job is not proof that nothing was created.**
+/// Deleted before its outcome, with a run Job recorded (`jobRef`) and gone:
+/// `RemovalFailed`, the finalizer kept, nothing reconciled. KILLS: the release
+/// on `get_opt(..).is_none()`. CONTROL:
+/// `deleting_a_clone_before_its_run_releases_it_without_starting_the_run`,
+/// where no run Job was ever recorded.
+#[tokio::test]
+async fn a_recorded_run_job_that_is_gone_keeps_the_finalizer() {
+    let value = deleting(restore_value(
+        &plan("{ttl_seconds: 300}", "scratch"),
+        &[FINALIZER],
+        json!({"phase": "Running", "jobRef": {"name": NAME}}),
+    ));
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/jobs/{NAME}")),
+            status: 404,
+            body: not_found(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/restores/{NAME}/status")),
+            status: 200,
+            body: value.to_string(),
+        },
+    ]);
+    let mut ran = false;
+    around(&restore(&value), &client, now(), None, async {
+        ran = true;
+        Ok(outcome())
+    })
+    .await
+    .unwrap();
+    assert!(!ran);
+    let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+    assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+    assert!(status[0]["status"]["clone"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("whether the run created topics is unknown"));
+    assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+}
+
+/// **A run that ended with no exit code is not settled**: its runner's
+/// teardown never ran, so the clone is `RemovalFailed` and the finalizer
+/// kept. CONTROL: a run that exited (2) is `NotKept` and released.
+#[tokio::test]
+async fn a_run_without_an_exit_code_is_not_settled() {
+    for (status, settled) in [
+        (json!({"phase": "Failed", "jobRef": {"name": NAME}}), false),
+        (
+            json!({"phase": "Failed", "exitCode": 2, "jobRef": {"name": NAME}}),
+            true,
+        ),
+    ] {
+        let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+        let (client, _rec, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/restores/{NAME}")),
+                status: 200,
+                body: value.to_string(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/restores/{NAME}/status")),
+                status: 200,
+                body: value.to_string(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/restores/{NAME}")),
+                status: 200,
+                body: value.to_string(),
+            },
+        ]);
+        around(&restore(&value), &client, now(), None, async {
+            Ok(outcome())
+        })
+        .await
+        .unwrap();
+        let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+        let released = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}"));
+        if settled {
+            assert_eq!(status[0]["status"]["clone"]["phase"], "NotKept");
+            assert_eq!(released[0]["metadata"]["finalizers"], json!([]));
+        } else {
+            assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+            assert!(released.is_empty(), "the finalizer was released");
+        }
+    }
+}
+
+/// **A `Removing` clone that records no attempt is not retried on a guess**
+/// (the class the review named "+1 more": `watch`'s default attempt): it is
+/// `RemovalFailed`, with no Job created and the finalizer kept.
+#[tokio::test]
+async fn a_removing_clone_without_its_attempt_is_not_retried() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z", "phase": "Removing",
+                  "jobRef": {"name": CLEANUP_JOB}}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    let (client, rec, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/restores/{NAME}")),
+            status: 200,
+            body: value.to_string(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/restores/{NAME}/status")),
+            status: 200,
+            body: value.to_string(),
+        },
+    ]);
+    around(&restore(&value), &client, now(), None, async {
+        Ok(outcome())
+    })
+    .await
+    .unwrap();
+    let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+    assert_eq!(status[0]["status"]["clone"]["phase"], "RemovalFailed");
+    assert!(rec.lock().unwrap().iter().all(|r| !r.uri.contains("/jobs")));
+}

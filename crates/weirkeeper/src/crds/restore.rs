@@ -1120,8 +1120,12 @@ pub struct RestoreCompletion {
 /// is the recorded one. `Removed` copies what it deleted to
 /// `status.teardown`. At most three attempts, five minutes apart; then
 /// `RemovalFailed`, and the finalizer stays until an operator removes it. A
-/// clone whose run did not pass was torn down at once by its own run
-/// (`NotKept`).
+/// clone whose run did not pass and exited was torn down at once by its own
+/// run (`NotKept`). Anything the controller cannot settle (a plan it cannot
+/// read, a recorded run Job gone before its outcome, a run that ended with no
+/// exit code) is `RemovalFailed` with the reason: check the target for topics
+/// with the clone's prefix, delete any the run created, then remove the
+/// finalizer by hand.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloneStatus {
