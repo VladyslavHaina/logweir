@@ -863,6 +863,10 @@ fn coverage_row(
          epoch-ms {pit}",
         req.backup_id, w.oldest_ms, w.newest_ms
     );
+    // PROD-01.1b: the run decodes what this manifest-only preview does not.
+    // Last, so the 512-character cap cuts it before anything above.
+    const RECORD_TIMES: &str = "; before writing, the run also refuses a window whose \
+         out-of-order record sits in a segment the engine skips (PointInTimeSelectionIncomplete)";
     // The plan's replay selection, resolved through the SAME function
     // execution binds and restores it with (`ReplaySelection::resolve`), over
     // the same manifest.
@@ -870,7 +874,7 @@ fn coverage_row(
         Ok(s) if !s.is_full() => s,
         _ => {
             return ready(CheckId::ArchiveCoverage, CheckCode::PointInTimeCovered, now)
-                .with_message(&covered)
+                .with_message(&format!("{covered}{RECORD_TIMES}"))
         }
     };
     match selection.resolve(&archive::topic_facts(manifest)) {
@@ -885,7 +889,7 @@ fn coverage_row(
                 &format!(
                     "{covered}; the plan selects {} partition(s) of {} topic(s) ({with_data} \
                      with archived segments in the window) from epoch-ms {} ({}) to epoch-ms \
-                     {}, restored by {} engine run(s)",
+                     {}, restored by {} engine run(s){RECORD_TIMES}",
                     r.partitions.len(),
                     topics.len(),
                     r.start_ms,

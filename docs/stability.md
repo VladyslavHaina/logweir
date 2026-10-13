@@ -518,8 +518,10 @@ transaction-marker check makes, which now runs under
   point or start that reads it. There is no override: choose that point or
   start;
 - a segment the restore reads and the runner cannot decode refuses the run, as
-  before, and now under the marker override too; one it does not read and
-  cannot read is counted in `sample.coverage_note`, never refused.
+  before, and now under the marker override too; one it does not read that the
+  store does not hold, or that the runner cannot decode, is counted in
+  `sample.coverage_note`, never refused (any other store error stops the run,
+  exit 1).
 
 The three rows of `e2e/tests/record_semantics.rs`
 ([decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment))
@@ -528,7 +530,8 @@ correct point-in-time restore passes, and the skipped record is refused before
 any write. **Upgrade:** a `Restore` or a `RehearsalSchedule` slot over such an
 archive that used to run, and could sign a pass with a record left out, is now
 refused; an archive in timestamp order restores exactly as before. The restore
-preview reads the manifest only and does not show this refusal. Rolling the
+preview reads the manifest only: its `archive.coverage` row says the run may
+refuse so, and cannot say whether it will. Rolling the
 runner back restores the old selection. The engine itself still selects by
 first and last; reading minimum and maximum from the manifest is PROD-00.3b.
 

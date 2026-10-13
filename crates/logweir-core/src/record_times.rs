@@ -248,9 +248,9 @@ pub fn unread_note(n: usize) -> String {
 pub fn unreadable_refusal(key: &str, topic: &str, partition: i32, why: &str) -> String {
     format!(
         "the runner could not read archive segment `{key}` of topic `{topic}` partition \
-         {partition} ({why}), which the restore reads, so it cannot check it for transaction \
-         markers or bound the window by its records' own timestamps. The run stopped before any \
-         target topic was created."
+         {partition} ({why}), which the restore reads, so it cannot bound the window by its \
+         records' own timestamps (nor, unless the plan allows them, check it for transaction \
+         markers). The run stopped before any target topic was created."
     )
 }
 
@@ -482,6 +482,18 @@ mod tests {
         let earlier = window(Some(T + s0 - 80), T + s0 + 5000);
         let times = times_of(&recs, &earlier);
         assert_eq!(skipped(&facts, &times, &earlier, floor), vec![]);
+        // The in-window record FIRST in its segment (`[S+50, S-90, S-80]`,
+        // last before `S`): still named. KILLS: `SegmentTimes::add` dropping
+        // the first record's selection (review L1).
+        let (facts, recs) = archive(&[(0, &[&[s0 + 50, s0 - 90, s0 - 80], &[s0 + 100]])]);
+        let times = times_of(&recs, &sel);
+        let s = skipped(&facts, &times, &sel, T + s0 - 90);
+        assert_eq!(
+            s.iter()
+                .map(|s| (s.key.as_str(), s.selected))
+                .collect::<Vec<_>>(),
+            vec![("t/0/0", 1)]
+        );
     }
 
     /// An archive in order is unchanged, and a segment the pass did not read

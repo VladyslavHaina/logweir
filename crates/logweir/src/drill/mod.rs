@@ -2227,6 +2227,15 @@ fn execute_with_validated_approval(
     // min/max (`record_times::widen`): the floor G-WIN binds is the oldest
     // archived record and the count bounds are true bounds. `manifest_facts`
     // is the archive as described, which the engine selects segments by.
+    //
+    // The replay selection first, over the manifest as described (as the
+    // preview resolves it), so its cheap refusals come before the pass: a
+    // window outside the archive's coverage or a subset naming an unlisted
+    // partition is refused exit 3 with no target topic created and no engine
+    // started. `None` for a plan that states no selection. The same function
+    // binds the window in `build_plan` and previews it in the restore
+    // preflight (`logweir_core::replay_selection`).
+    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
     let window = logweir_core::replay_selection::ReplaySelection {
         topics: selected.iter().cloned().collect(),
         ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
@@ -2253,14 +2262,6 @@ fn execute_with_validated_approval(
         logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
             .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
     sc.source = source_info(&facts, time_basis);
-    // The replay selection, resolved against the archive before phase 2: a
-    // window outside the archive's coverage or a subset naming an unlisted
-    // partition is refused exit 3 with no target topic created and no engine
-    // started. `None` for a plan that states no selection. The same function
-    // binds the window in `build_plan` and previews it in the restore
-    // preflight (`logweir_core::replay_selection`).
-    // Over the manifest as described, as the preview resolves it.
-    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &manifest_facts)?;
     // The selection is signed (`source.selection`) in every document this run
     // writes from here on: format 1.7.0 for a window start only, 2.0.0 for a
     // partition subset, which older readers refuse as an unsupported major.

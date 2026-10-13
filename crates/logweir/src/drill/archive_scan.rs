@@ -14,8 +14,9 @@
 //!   restore, whose preflight names it; one it reads and the pass cannot decode
 //!   refuses the run (`GuardRefused`), with or without the marker override;
 //! - a segment the restore does not read (after the window's end, or ending
-//!   before a stated start) that cannot be read never refuses: it is counted in
-//!   the scorecard's note.
+//!   before a stated start) that the store does not hold, or that the pass
+//!   cannot decode, never refuses: it is counted in the scorecard's note. Any
+//!   other store error is exit 1, as for a segment the restore reads.
 
 use crate::drill::DrillError;
 use logweir_core::engine::BackupSetFacts;
@@ -88,7 +89,9 @@ pub fn run(
                 };
                 let bytes = match archive.get_capped(&seg.key, caps::SEGMENT) {
                     Ok((bytes, _)) => bytes,
-                    Err(_) if !read_by_restore => {
+                    // Absent only: any other store error is an I/O failure
+                    // (exit 1, below), never a note (review L4).
+                    Err(StoreError::NotFound(_)) if !read_by_restore => {
                         unread(&mut scan);
                         continue;
                     }
