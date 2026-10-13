@@ -224,7 +224,10 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     assert!(logweir_core::scorecard::defines_console_approval(
         &sc.format_version
     ));
-    assert_eq!(sc.format_version, FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION);
+    assert_eq!(
+        sc.format_version,
+        FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
+    );
     assert!(sc
         .source
         .selection
