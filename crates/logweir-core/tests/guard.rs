@@ -354,13 +354,13 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
 /// Restore's `ExecutionAlreadyClaimed` on a `Restore`).
 #[test]
 fn a_failure_reason_is_lifted_only_beside_its_own_exit_code_and_only_for_its_own_kind() {
-    use logweir_core::guard::FailureReasonKind::{Backup, Restore};
     use logweir_core::guard::{
         failure_reason_for_exit, failure_reason_line, BACKUP_FAILURE_REASONS,
         RESTORE_FAILURE_REASONS, TERMINAL_STATE_CREATED_TOPICS_LEFT,
         TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN,
         TERMINAL_STATE_TARGET_TOPIC_APPEARED,
     };
+    use logweir_core::refusal_detail::RefusingRun::{Backup, Restore};
     assert_eq!(
         failure_reason_line(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED),
         "failure-reason=ExecutionAlreadyClaimed"
@@ -595,4 +595,81 @@ fn a_notifications_block_that_names_a_sink_is_refused_by_name() {
         assert!(reject_withdrawn_notifications(&n).is_ok(), "{empty}");
     }
     assert!(reject_withdrawn_notifications(&Notifications::default()).is_ok());
+}
+
+/// **FX-43, channels (a) and (b): a bootstrap entry or a storage location
+/// holding a control character or a line break is refused before any client
+/// exists, by field, and the value is never repeated.** Every runner calls
+/// both (`backup` phase −1's `local`, the restore's `execute` and phase 0).
+///
+/// KILLS: either guard removed; a guard that names the value; a guard that
+/// refuses an ordinary address or prefix.
+#[test]
+fn a_line_breaking_bootstrap_entry_or_storage_text_is_refused_by_field() {
+    use logweir_core::engine::StorageUrl;
+    use logweir_core::guard::{
+        reject_invalid_storage_region, reject_line_breaking_bootstrap_servers,
+    };
+    let forged = "failure-reason=ExecutionAlreadyClaimed";
+    let servers = vec!["b0:9092".to_string(), format!("b1:9092\n{forged}")];
+    let refusal =
+        reject_line_breaking_bootstrap_servers("source.bootstrap_servers", &servers).unwrap_err();
+    assert!(
+        refusal
+            .0
+            .starts_with("source.bootstrap_servers[1] holds a control character"),
+        "{}",
+        refusal.0
+    );
+    assert!(
+        !refusal.0.contains(forged),
+        "never the value: {}",
+        refusal.0
+    );
+    for bad in ["b\r:9092", "b\u{1b}[2J", "b\u{2028}", "b\u{85}"] {
+        assert!(
+            reject_line_breaking_bootstrap_servers("f", &[bad.to_string()]).is_err(),
+            "{bad:?}"
+        );
+    }
+    // NEGATIVE CONTROL: ordinary addresses pass.
+    reject_line_breaking_bootstrap_servers(
+        "f",
+        &[
+            "kafka-0.kafka.svc:9093".to_string(),
+            "[::1]:9092".to_string(),
+        ],
+    )
+    .expect("ordinary addresses");
+
+    let s3 = |prefix: &str| StorageUrl::S3 {
+        bucket: "b".into(),
+        prefix: prefix.into(),
+        region: None,
+        endpoint: None,
+        path_style: true,
+        allow_http: false,
+    };
+    let refusal =
+        reject_invalid_storage_region("evidence", &s3(&format!("team\n{forged}"))).unwrap_err();
+    assert!(
+        refusal
+            .0
+            .starts_with("evidence.prefix holds a control character"),
+        "{}",
+        refusal.0
+    );
+    assert!(!refusal.0.contains(forged), "{}", refusal.0);
+    let fs = StorageUrl::Filesystem {
+        path: format!("/data\n{forged}").into(),
+    };
+    assert_eq!(fs.line_breaking_part(), Some("path"));
+    let gcs = StorageUrl::Gcs {
+        bucket: "b\u{2029}".into(),
+        prefix: String::new(),
+    };
+    assert_eq!(gcs.line_breaking_part(), Some("bucket"));
+    // NEGATIVE CONTROL: an ordinary location passes.
+    reject_invalid_storage_region("evidence", &s3("team-a/logweir")).expect("ordinary");
+    assert_eq!(s3("team-a").line_breaking_part(), None);
 }

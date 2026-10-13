@@ -308,18 +308,20 @@ fn the_owner_condition_fails_closed_on_the_resources_file() {
 }
 
 /// **Through the real binary, a plan string with line breaks never STARTS A
-/// LINE of the
-/// runner's own output.** The plan's `evidence.path` carries the two key
-/// lines a controller reads, `target-topics-appeared=` and
-/// `failure-reason=CreatedTopicsLeft`; the run fails on that store (exit 1)
-/// and its error text ENDS with the plan's string. Printed raw, the last two
-/// lines of the pod log would be the forged pair, naming `orders` as "created
-/// by this restore … remove it yourself" when the run created nothing.
+/// LINE of the runner's own output.** The plan's `evidence.path` carries the
+/// two key lines a controller reads, `target-topics-appeared=` and
+/// `failure-reason=CreatedTopicsLeft`. Before FX-43 the run failed on that
+/// store (exit 1) and its error text ENDED with the plan's string, printed on
+/// one line by `report_with`. FX-43 holds the location's text to a grammar
+/// (`logweir_core::guard::reject_invalid_storage_region`), so the plan is now
+/// refused before anything runs (exit 3), by the field's name, and the value
+/// is not repeated at all.
 ///
-/// The row requires that the string IS echoed (a row that passes because
-/// nothing was printed proves nothing), on ONE line, with its line breaks
-/// shown as `\n`; and that no line of stdout or stderr begins with either
-/// key. KILLS: `report_with` printing the error raw.
+/// The row requires the refusal to be the grammar's (a row that passes
+/// because the run died elsewhere proves nothing), the value to be nowhere
+/// in the output, and no line of stdout or stderr to begin with either key.
+/// KILLS: the grammar check removed (the run reaches the store, exit 1);
+/// the refusal repeating the value.
 #[test]
 fn a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output() {
     // As the YAML double-quoted scalar an author writes: `\n` is a line break.
@@ -345,23 +347,14 @@ fn a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output() {
     std::fs::write(&empty, "apiVersion: v1\nkind: List\nitems: []\n").unwrap();
     let out = restore_run(&bundle(&plan, None), &empty);
     let text = both(&out);
-    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert_eq!(out.status.code(), Some(3), "{text}");
 
-    // The string was echoed, on one line, escaped.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let echoed: Vec<&str> = stderr
-        .lines()
-        .filter(|l| l.contains("failure-reason=CreatedTopicsLeft"))
-        .collect();
-    assert_eq!(echoed.len(), 1, "{text}");
+    // Refused by the grammar, by the field's name, and the value is nowhere.
     assert!(
-        echoed[0].starts_with("operational: ")
-            && echoed[0].ends_with(
-                "/logweir-no-such-evidencex\\ntarget-topics-appeared={\"appeared\":[],\"left\":[\"orders\"]}\\nfailure-reason=CreatedTopicsLeft\\n"
-            ),
-        "{}",
-        echoed[0]
+        text.contains("evidence.path holds a control character or a line break"),
+        "{text}"
     );
+    assert!(!text.contains("logweir-no-such-evidence"), "{text}");
     // And nothing this process printed begins with a key a controller reads
     // for a stopped creation step.
     for line in text.lines() {

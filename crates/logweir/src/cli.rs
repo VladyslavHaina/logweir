@@ -112,6 +112,11 @@ pub enum Command {
         /// Accepted and NEVER asserted — see this subcommand's description.
         #[arg(long)]
         marker_topic: Option<String>,
+        /// See `restore run`'s flag of the same name: the controller's per-Job
+        /// token, which seals the two contract lines and the end line
+        /// (FX-43).
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
@@ -244,6 +249,13 @@ pub enum CheckCmd {
         /// do less than the controller believes it did.
         #[arg(long)]
         check_contract_version: u32,
+        /// **FX-43.** The controller's per-Job token. The end frame and
+        /// `refusal-reason=` are printed sealed with it before their plain
+        /// copies (the end frame binds every other frame by digest), and the
+        /// run ends with a sealed `runner-exit=`. A runner that predates the
+        /// flag stops at it, and the controller says so.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 
@@ -696,6 +708,21 @@ pub struct RestoreRunArgs {
     /// no value, so `{:?}` of this struct does not either.
     #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
     pub line_token: Option<logweir_core::refusal_detail::LineToken>,
+    /// **FX-43.** The Job's line token, as `--line-token`'s is, with a wider
+    /// promise: EVERY line a controller reads off this run's log is printed
+    /// sealed with it (`@<token> <line>`) before the plain line, and every
+    /// exit this process reaches prints a sealed `runner-exit=<code>` line, so
+    /// the controller can tell this runner's lines from anything else in the
+    /// log and can tell a runner that predates the flag (which stops at
+    /// argument parsing) from one that ran. The controller writes it; a run
+    /// started by hand needs none.
+    #[arg(
+        long,
+        value_name = "HEX",
+        value_parser = parse_line_token,
+        conflicts_with = "line_token"
+    )]
+    pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -810,6 +837,14 @@ pub enum BackupCmd {
         /// See `restore run`'s flag of the same name.
         #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
         line_token: Option<logweir_core::refusal_detail::LineToken>,
+        /// See `restore run`'s flag of the same name (FX-43).
+        #[arg(
+            long,
+            value_name = "HEX",
+            value_parser = parse_line_token,
+            conflicts_with = "line_token"
+        )]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 

@@ -1470,11 +1470,16 @@ const STARTUP_MAY_CALL: [&str; 25] = [
 /// is itself pure: the stderr subscriber, the deadline's clock and the stdout
 /// handle a refusal is printed through (D2 §4.2 requires that line on exit 3).
 /// Separate from [`STARTUP_MAY_CALL`], which lists what steps 1-4 call.
-const STARTUP_HELPERS_MAY_CALL: [&str; 9] = [
+const STARTUP_HELPERS_MAY_CALL: [&str; 11] = [
     "Instant::now",
     "Duration::from_secs",
     "std::io::stdout",
     "lock",
+    // FX-43: the stdout writer that seals the end frame and the refusal with
+    // the Job's token, and the sealed `runner-exit=` line. Both write to
+    // stdout and open nothing.
+    "crate::exit::SealingLines::new",
+    "crate::exit::print_end",
     "tracing_subscriber::fmt",
     "json",
     "with_writer",

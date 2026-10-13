@@ -24,10 +24,9 @@ impl From<ExitCode> for std::process::ExitCode {
     }
 }
 
-/// **The one printer of a guard refusal** (interface I9): both
-/// lines an exit 3 prints, on STDOUT, as the process's last two stdout lines:
-/// `refusal-detail=<one JSON object>` and then
-/// `refusal-reason=<TerminalState>`, which stays the FINAL one.
+/// **The guard refusal's two lines** (interface I9): `refusal-detail=<one
+/// JSON object>` and then `refusal-reason=<TerminalState>`, which stays the
+/// FINAL one of the pair.
 ///
 /// # Why stdout, and why last (I9)
 ///
@@ -35,64 +34,52 @@ impl From<ExitCode> for std::process::ExitCode {
 /// {pod}/log` returns the container's stdout and stderr interleaved into one
 /// stream with no marker saying which byte came from which, so **nothing a
 /// runner writes on stderr is distinguishable by a controller** (spec §7
-/// amendment 4). A refusal reason on stderr is therefore not a
-/// machine-readable channel at all — it is a string in a blob a human reads.
-/// Being LAST is the other half: a controller tailing the log reads the final
-/// line, so the reason must come after the `drill finished` tracing line and
-/// after any summary line, which is why the call sits at the end of
-/// `crate::drill::exiting` rather than at the refusal site.
+/// amendment 4). Being LAST is the other half: the pair is pushed into the
+/// run's [`FinalLines`], which the terminal path prints after the
+/// `drill finished` tracing line and after any summary line, in one write.
 ///
 /// The state is derived, never passed in: `logweir_core::guard::
 /// refusal_reason_line` owns the mapping from a refusal message to a terminal
 /// state, so a caller cannot invent a fourth state or spell an existing one
-/// differently. `logweir-core` does no I/O, which is why the write is here
-/// and the strings are there.
-///
-/// Rust's `Stdout` is a `LineWriter`, so the newline flushes; this shares the
-/// one global stdout handle with the tracing subscriber's writer, which is
-/// what makes "after the tracing line" an ordering and not a race.
+/// differently.
 ///
 /// # Why a second line, and why it is first
 ///
 /// `refusal-reason=` names a state from a closed list, and most refusals have
-/// none: the sentence that says WHY was only on the human line, in a pod log
-/// that is gone with the pod. The detail line carries the reason code and
-/// that sentence in a form a controller can validate before it stores them,
-/// and it goes BEFORE the state line so every reader of "the final line",
-/// this build's or an older one's, still finds the state there.
+/// none: the sentence that says WHY was only on the human line. The detail
+/// line carries the reason code and that sentence in a form a controller can
+/// validate before it stores them, and it goes BEFORE the state line so every
+/// reader of "the final line", this build's or an older one's, still finds
+/// the state there.
 ///
-/// # The line carries the Job's token, when this process was given one
+/// # Whose line it is: the Job's token
 ///
-/// Text this process did not write can start a line of its own in a pod log.
-/// [`one_line`] escapes every line break in the error text the runner prints
-/// itself, but the Kafka client inside this process logs to the same stderr
-/// by itself, unescaped, and what it logs can repeat a plan value that holds a
-/// line break. Nothing about where a line stands tells
-/// the two apart in one merged log, so a controller honours a
-/// `refusal-detail=` line only when it carries the token that controller
-/// made for this Job and passed as `--line-token` ([`set_line_token`]). The
-/// plan was written before the Job existed and cannot hold it. A run started
-/// by hand has no token and prints the line without one.
-///
-/// Both lines go out in ONE write, at EVERY exit 3 (a refusal that says
-/// nothing prints `logweir_core::refusal_detail::NO_SENTENCE`), and the
-/// callers (`drill::exiting`, `backup::exiting`) print nothing after them.
-/// The human line on stderr and the tracing lines are unchanged.
+/// The detail line carries the token this process was given, FX-34's
+/// `--line-token` or FX-43's `--runner-line-token` ([`set_line_tokens`]), in
+/// its JSON; under FX-43's flag the pair is ALSO sealed like every other line
+/// a controller acts on (`logweir_core::runner_line`). A run started by hand
+/// has no token and prints the pair without one.
 ///
 /// # There is no printer of the state line alone
 ///
 /// An exit-3 path that could print `refusal-reason=` by itself would print a
 /// state line and no detail line, so no such printer exists.
-pub fn print_refusal(run: logweir_core::refusal_detail::RefusingRun, message: &str) {
-    // `expect`-free: a closed stdout is not a reason to change the exit code,
-    // which GC11 has already decided by the time this is reached.
-    let _ = print_refusal_to(&mut std::io::stdout().lock(), run, line_token(), message);
+#[must_use]
+pub fn refusal_lines(
+    run: logweir_core::refusal_detail::RefusingRun,
+    token: Option<&logweir_core::refusal_detail::LineToken>,
+    message: &str,
+) -> [String; 2] {
+    [
+        logweir_core::refusal_detail::refusal_detail_line(run, token, message),
+        logweir_core::guard::refusal_reason_line(message),
+    ]
 }
 
-/// The writer seam [`print_refusal`] prints through, so a test asserts the
-/// exact bytes instead of trusting a `println!` nobody can observe: the
-/// detail line (with `token` in it when there is one), the state line, each
-/// with its newline, in one `write_all`.
+/// The writer seam over [`refusal_lines`], so a test asserts the exact bytes
+/// of the pair an FX-34 runner (or a run with no token) prints: the detail
+/// line (with `token` in it when there is one), the state line, each with its
+/// newline, in one `write_all`.
 ///
 /// It is `pub` rather than `#[cfg(test)]` deliberately: the assertions that
 /// matter live in integration tests (`crates/logweir/tests/refusal_detail.rs`,
@@ -105,116 +92,268 @@ pub fn print_refusal_to<W: std::io::Write>(
     token: Option<&logweir_core::refusal_detail::LineToken>,
     message: &str,
 ) -> std::io::Result<()> {
-    let both = format!(
-        "{}\n{}\n",
-        logweir_core::refusal_detail::refusal_detail_line(run, token, message),
-        logweir_core::guard::refusal_reason_line(message)
-    );
-    w.write_all(both.as_bytes())
+    let [detail, state] = refusal_lines(run, token, message);
+    w.write_all(format!("{detail}\n{state}\n").as_bytes())
 }
 
-/// The line token this process was started with, if any.
+/// **The lines a terminal path owes a controller**, printed LAST and in ONE
+/// write ([`FinalLines::print`]).
+///
+/// The terminal paths (`drill::exiting`, `backup::exiting`, the probe) push
+/// every line a controller reads by key, in the order they always printed
+/// them, and print the block once. Under FX-43's `--runner-line-token` the
+/// block is every line SEALED with the Job's token, then the sealed
+/// `runner-exit=<code>`, then the plain lines
+/// (`logweir_core::runner_line::final_block`); otherwise it is the plain
+/// lines, the bytes this runner always printed. Every line goes out on one
+/// line whatever it holds (a key built from a plan's storage prefix included).
+#[derive(Debug, Default)]
+pub struct FinalLines {
+    lines: Vec<String>,
+    vouched: Vec<String>,
+}
+
+impl FinalLines {
+    /// One line a controller reads.
+    pub fn push(&mut self, line: impl Into<String>) {
+        self.lines.push(line.into());
+    }
+
+    /// A line whose plain copy this process prints elsewhere (the probe's
+    /// binding refusal, on stderr): under FX-43's flag it is sealed in the
+    /// block with the others, and it adds nothing to the plain lines.
+    pub fn vouch(&mut self, line: impl Into<String>) {
+        self.vouched.push(line.into());
+    }
+
+    /// Several, in order.
+    pub fn extend(&mut self, lines: impl IntoIterator<Item = String>) {
+        self.lines.extend(lines);
+    }
+
+    /// I9's pair for a guard refusal of `run` ([`refusal_lines`]), carrying
+    /// this process's token in the detail line when it was given one.
+    pub fn refusal(&mut self, run: logweir_core::refusal_detail::RefusingRun, message: &str) {
+        self.extend(refusal_lines(run, line_token(), message));
+    }
+
+    /// The block's bytes for exit `code`: pure, for the tests.
+    #[must_use]
+    pub fn render(&self, code: ExitCode) -> String {
+        let sealed: Vec<String> = self.lines.iter().chain(&self.vouched).cloned().collect();
+        logweir_core::runner_line::final_block_with(
+            scoped_token(),
+            code as u8,
+            &sealed,
+            &self.lines,
+        )
+    }
+
+    /// Print the block on stdout, in one write. `expect`-free: a closed stdout
+    /// is not a reason to change the exit code, which GC11 has already
+    /// decided by the time this is reached.
+    pub fn print(self, code: ExitCode) {
+        use std::io::Write as _;
+        let _ = std::io::stdout()
+            .lock()
+            .write_all(self.render(code).as_bytes());
+    }
+}
+
+/// **The check runner's stdout under FX-43's flag** (`logweir check run`): a
+/// writer that passes every line through and, before a line that opens with
+/// one of `sealed`'s prefixes (the end frame, `refusal-reason=`), writes that
+/// line's sealed twin. The check's other frames are not sealed one by one:
+/// the end frame declares every stream's digest and the topic lines' count
+/// and digest, so the sealed end frame binds them, and sealing each would cost
+/// 42 bytes a line against a relay read bounded in bytes. Without the token it
+/// is the bytes it was given. [`print_end`] prints the end line after it.
+pub struct SealingLines<W: std::io::Write> {
+    inner: W,
+    sealed: &'static [&'static str],
+    token: Option<logweir_core::refusal_detail::LineToken>,
+    pending: Vec<u8>,
+}
+
+impl<W: std::io::Write> SealingLines<W> {
+    /// Seal the lines opening with one of `sealed` written through `inner`,
+    /// with this process's FX-43 token ([`set_line_tokens`]).
+    pub fn new(inner: W, sealed: &'static [&'static str]) -> Self {
+        let token = match scoped_token() {
+            Some((t, logweir_core::runner_line::LineScope::EveryLine)) => Some(t.clone()),
+            _ => None,
+        };
+        Self::with_token(inner, sealed, token)
+    }
+
+    /// [`SealingLines::new`] with the token given (`None`: pass through).
+    pub fn with_token(
+        inner: W,
+        sealed: &'static [&'static str],
+        token: Option<logweir_core::refusal_detail::LineToken>,
+    ) -> Self {
+        Self {
+            inner,
+            sealed,
+            token,
+            pending: Vec::new(),
+        }
+    }
+
+    fn emit(&mut self, line: &[u8]) -> std::io::Result<()> {
+        if let Some(token) = &self.token {
+            let text = String::from_utf8_lossy(line);
+            let text = text.trim_end_matches(['\n', '\r']);
+            if self.sealed.iter().any(|p| text.starts_with(p)) {
+                let twin = logweir_core::runner_line::sealed(token, text);
+                self.inner.write_all(twin.as_bytes())?;
+                self.inner.write_all(b"\n")?;
+            }
+        }
+        self.inner.write_all(line)
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for SealingLines<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        while let Some(at) = self.pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=at).collect();
+            self.emit(&line)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() {
+            let rest = std::mem::take(&mut self.pending);
+            self.emit(&rest)?;
+        }
+        self.inner.flush()
+    }
+}
+
+impl<W: std::io::Write> Drop for SealingLines<W> {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
+}
+
+/// The sealed `runner-exit=<code>` line alone, on stdout, under FX-43's flag
+/// (nothing otherwise): the end of a run whose lines were printed as they
+/// were produced (`logweir check run`).
+pub fn print_end(code: ExitCode) {
+    use std::io::Write as _;
+    if let Some((token, logweir_core::runner_line::LineScope::EveryLine)) = scoped_token() {
+        let line = logweir_core::runner_line::sealed(
+            token,
+            &logweir_core::runner_line::runner_exit_line(code as u8),
+        );
+        let _ = std::io::stdout()
+            .lock()
+            .write_all(format!("{line}\n").as_bytes());
+    }
+}
+
+/// Print lines a controller reads DURING a run (a progress line, a teardown
+/// line), each sealed directly before itself under FX-43's flag, in one write
+/// (`logweir_core::runner_line::inline_lines`).
+pub fn print_lines(lines: &[String]) {
+    use std::io::Write as _;
+    let text = logweir_core::runner_line::inline_lines(scoped_token(), lines);
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+}
+
+/// The line token this process was started with, and by which flag.
 ///
 /// # Why a process-wide value, set once
 ///
 /// The token is a fact about the PROCESS (the Job it is the runner of), read
-/// off the command line before anything runs, and used at exactly one place,
-/// the last thing a refused run prints. Carrying it there as a parameter
-/// would thread it through `report_with`, `report` and both `exiting`s for
-/// one use. Set once and never changed: [`set_line_token`] after the first is
-/// ignored.
-static LINE_TOKEN: std::sync::OnceLock<Option<logweir_core::refusal_detail::LineToken>> =
-    std::sync::OnceLock::new();
+/// off the command line before anything runs, and used wherever a line a
+/// controller reads is printed. Set once and never changed:
+/// [`set_line_tokens`] after the first is ignored.
+static LINE_TOKEN: std::sync::OnceLock<
+    Option<(
+        logweir_core::refusal_detail::LineToken,
+        logweir_core::runner_line::LineScope,
+    )>,
+> = std::sync::OnceLock::new();
 
-/// Hold `--line-token`'s value for [`print_refusal`]. `main` calls it once,
-/// before dispatch, for the two commands that take the flag. A later call
-/// changes nothing.
-pub fn set_line_token(token: Option<logweir_core::refusal_detail::LineToken>) {
-    let _ = LINE_TOKEN.set(token);
+/// Hold the token of `--line-token` (FX-34: the `refusal-detail=` line only)
+/// or of `--runner-line-token` (FX-43: every line a controller acts on, and a
+/// sealed `runner-exit=` at the end). clap lets at most one through. `main`
+/// calls it once, before dispatch, for the commands that take the flags. A
+/// later call changes nothing.
+pub fn set_line_tokens(
+    refusal_detail: Option<logweir_core::refusal_detail::LineToken>,
+    every_line: Option<logweir_core::refusal_detail::LineToken>,
+) {
+    use logweir_core::runner_line::LineScope;
+    let scoped = every_line
+        .map(|t| (t, LineScope::EveryLine))
+        .or_else(|| refusal_detail.map(|t| (t, LineScope::RefusalDetail)));
+    let _ = LINE_TOKEN.set(scoped);
 }
 
 fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
-    LINE_TOKEN.get().and_then(Option::as_ref)
+    LINE_TOKEN.get().and_then(Option::as_ref).map(|(t, _)| t)
 }
 
-/// **One line, whatever the text holds**: every
-/// line-breaking code point in `text` becomes a visible escape, so a string
-/// this process did not write — a plan's `source.backup`, a broker's error, an
-/// object key — can never START A LINE of the pod log.
-///
-/// # Why it matters
-///
-/// A controller reads a runner's log by KEY at the start of a line
-/// (`refusal-reason=`, `failure-reason=`, `target-topics-appeared=`, the
-/// evidence keys), and the pod log API has no stream selector, so stderr is
-/// in the same stream, and an error text printed raw with a line break in it
-/// could carry a forged key line (`failure-reason=` inside a plan string).
-///
-/// # What is escaped
-///
-/// Every code point some reader treats as a line boundary: `\n`, `\r`,
-/// vertical tab, form feed, the three information separators U+001C to
-/// U+001E, NEL (U+0085), and the line and paragraph separators U+2028 and
-/// U+2029. `\n` and `\r` are written as those two characters; the others as
-/// `\u{…}`. Nothing else is touched, so an ordinary message is the bytes it
-/// was. A backslash is not doubled: this is a display form for a person, not
-/// an encoding anything decodes.
-#[must_use]
-pub fn one_line(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\u{b}' | '\u{c}' | '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{85}' | '\u{2028}'
-            | '\u{2029}' => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out
+fn scoped_token() -> Option<(
+    &'static logweir_core::refusal_detail::LineToken,
+    logweir_core::runner_line::LineScope,
+)> {
+    LINE_TOKEN
+        .get()
+        .and_then(Option::as_ref)
+        .map(|(t, scope)| (t, *scope))
 }
+
+/// **One line, whatever the text holds** (`logweir_core::runner_line::one_line`):
+/// every line-breaking code point becomes a visible escape, so a string this
+/// process did not write (a plan's `source.backup`, a broker's error, an
+/// object key) can never START A LINE of the pod log a controller reads by key.
+pub use logweir_core::runner_line::one_line;
 
 #[cfg(test)]
-mod one_line_tests {
-    use super::one_line;
+mod sealing_lines_tests {
+    use super::SealingLines;
+    use std::io::Write as _;
 
-    /// KILLS: printing an error text raw; escaping `\n` only (a bare `\r`
-    /// overwrites the line on a terminal, and other readers split on the
-    /// rest); touching an ordinary message.
+    /// **The check runner's stdout under FX-43's flag**: only the lines
+    /// opening with a sealed prefix get a sealed twin, directly before them;
+    /// every byte written is passed through unchanged, split writes and an
+    /// unterminated last line included. Without a token: the bytes alone.
+    /// KILLS: a twin after the line (an older reader's "frame after the end
+    /// frame"); every frame sealed; the last line lost.
     #[test]
-    fn no_line_breaking_code_point_survives_and_nothing_else_changes() {
-        let plain = "operational: the archive holds no backup set with id `nightly`; refusing";
-        assert_eq!(one_line(plain), plain);
-        assert_eq!(one_line(""), "");
-        // Two forged key lines inside a plan string.
-        let hostile = "no backup set with id `x\ntarget-topics-appeared={\"left\":[\"payments-prod\"]}\nfailure-reason=CreatedTopicsLeft\n`; refusing";
-        let escaped = one_line(hostile);
-        assert_eq!(escaped.lines().count(), 1, "{escaped}");
-        assert!(
-            escaped.contains("`x\\ntarget-topics-appeared={")
-                && escaped.contains("\\nfailure-reason="),
-            "{escaped}"
-        );
-        // Every boundary some reader splits on: Rust's `lines`, Python's
-        // `splitlines`, a terminal's carriage return.
-        for breaker in [
-            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
-            '\u{2029}',
-        ] {
-            let text = format!("a{breaker}failure-reason=CreatedTopicsLeft");
-            let escaped = one_line(&text);
-            assert!(!escaped.contains(breaker), "{:?}", breaker);
-            assert!(
-                escaped.starts_with("a\\") && escaped.ends_with("failure-reason=CreatedTopicsLeft"),
-                "{escaped}"
+    fn only_the_sealed_kinds_get_a_twin_directly_before_them() {
+        let t = logweir_core::refusal_detail::LineToken::parse(&"7f".repeat(20))
+            .expect("forty hex digits");
+        let input = "logweir-check-topic=a\tb\nlogweir-check-end={\"x\":1}\nrefusal-reason=X";
+        let mut out = Vec::new();
+        {
+            let mut w = SealingLines::with_token(
+                &mut out,
+                &["logweir-check-end=", "refusal-reason="],
+                Some(t.clone()),
             );
+            for chunk in input.as_bytes().chunks(7) {
+                w.write_all(chunk).expect("a Vec takes it");
+            }
         }
-        assert_eq!(one_line("a\r\nb"), "a\\r\\nb");
-        assert_eq!(one_line("a\u{2028}b"), "a\\u{2028}b");
-        // Not line breaks: left alone.
-        assert_eq!(
-            one_line("tab\there, caf\u{e9}, \\n typed"),
-            "tab\there, caf\u{e9}, \\n typed"
+        let text = String::from_utf8(out).expect("utf-8");
+        let want = format!(
+            "logweir-check-topic=a\tb\n{}\nlogweir-check-end={{\"x\":1}}\n{}\nrefusal-reason=X",
+            logweir_core::runner_line::sealed(&t, "logweir-check-end={\"x\":1}"),
+            logweir_core::runner_line::sealed(&t, "refusal-reason=X"),
         );
+        assert_eq!(text, want);
+        let mut plain = Vec::new();
+        {
+            let mut w = SealingLines::with_token(&mut plain, &["refusal-reason="], None);
+            w.write_all(input.as_bytes()).expect("a Vec takes it");
+        }
+        assert_eq!(String::from_utf8(plain).expect("utf-8"), input);
     }
 }

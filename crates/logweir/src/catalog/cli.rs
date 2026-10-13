@@ -723,7 +723,7 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
     let url = match evidence_url(&args.location) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             return ExitCode::Operational;
         }
     };
@@ -732,7 +732,7 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
         match VerifyingKey::from_pem_file(path) {
             Ok(k) => trust.push(k),
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", crate::exit::one_line(&e.to_string()));
                 return ExitCode::Operational;
             }
         }
@@ -741,7 +741,7 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
     // location this process was built for is refused FIRST — before the signer
     // is even opened, and before the store exists.
     if let Err(refusal) = crate::credential_binding::check_store_bindings() {
-        eprintln!("{refusal}");
+        eprintln!("{}", crate::exit::one_line(&refusal.to_string()));
         return ExitCode::GuardRefused;
     }
     // Signing is a PREREQUISITE, resolved and self-verified before the store
@@ -751,14 +751,14 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
     let signer = match crate::backup::phase_run::load_signer(&args.signing_key) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             return ExitCode::SigningOrLock;
         }
     };
     let evidence = match Store::from_url(&url) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             return ExitCode::Operational;
         }
     };
@@ -777,7 +777,9 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
         }
         Err(e) => {
             match &e {
-                SyncError::Operational(m) | SyncError::Signing(m) => eprintln!("{m}"),
+                SyncError::Operational(m) | SyncError::Signing(m) => {
+                    eprintln!("{}", crate::exit::one_line(m));
+                }
             }
             ExitCode::from(&e)
         }
@@ -792,10 +794,15 @@ pub fn run_sync(args: &SyncArgs) -> ExitCode {
 /// rather than "the cursor was empty".
 pub fn print_sync_report(r: &SyncReport) {
     for (receipt, id, outcome) in &r.points {
+        // On one line: the receipt's object key and the point id come from
+        // the store, not from this process.
         println!(
-            "catalog-point={} state={} receipt={receipt}",
-            if id.is_empty() { "-" } else { id },
-            outcome.as_str()
+            "{}",
+            crate::exit::one_line(&format!(
+                "catalog-point={} state={} receipt={receipt}",
+                if id.is_empty() { "-" } else { id },
+                outcome.as_str()
+            ))
         );
     }
     println!("catalog-scanned={}", r.scanned);
@@ -807,7 +814,7 @@ pub fn print_sync_report(r: &SyncReport) {
     println!("catalog-unreadable={}", r.unreadable);
     println!("catalog-empty-capture={}", r.empty_capture);
     if let Some(next) = &r.next {
-        println!("catalog-next={next}");
+        println!("{}", crate::exit::one_line(&format!("catalog-next={next}")));
     }
 }
 
@@ -819,18 +826,18 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
     let url = match evidence_url(&args.location) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             return ExitCode::Operational;
         }
     };
     if let Err(refusal) = crate::credential_binding::check_store_bindings() {
-        eprintln!("{refusal}");
+        eprintln!("{}", crate::exit::one_line(&refusal.to_string()));
         return ExitCode::GuardRefused;
     }
     let store = match Store::from_url(&url) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             return ExitCode::Operational;
         }
     };
@@ -842,7 +849,7 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
             ExitCode::Ok
         }
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             ExitCode::Operational
         }
     }
@@ -859,7 +866,8 @@ pub fn run_list(args: &ListArgs) -> ExitCode {
 /// which this listing must never be.
 pub fn print_list(report: &ListReport) {
     for e in &report.rows {
-        println!(
+        // On one line: every field but the counts comes from the store.
+        let row = format!(
             "{}  {}  covered [{}, {})  backup={} run={}  {}",
             e.point_id,
             chrono::DateTime::from_timestamp_millis(e.recovery_point_at_ms)
@@ -871,6 +879,7 @@ pub fn print_list(report: &ListReport) {
             e.run_id,
             e.record_key
         );
+        println!("{}", crate::exit::one_line(&row));
     }
     println!("catalog-listed={}", report.rows.len());
     // WHAT WAS SKIPPED, ALWAYS PRINTED. Refusal is per

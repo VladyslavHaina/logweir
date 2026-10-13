@@ -61,12 +61,13 @@ impl RdKafkaReader {
     /// log end and never a transaction's last stable offset: a committed
     /// position above the stable offset is not "beyond the end". It never
     /// subscribes, assigns or commits.
-    fn marks_handle(&self) -> Result<BaseConsumer, String> {
+    fn marks_handle(&self) -> Result<logweir_rdkafka_ffi::logs::LogPumped<BaseConsumer>, String> {
         let mut cfg = self.base_config().clone();
         cfg.set("group.id", "logweir-marks-do-not-commit")
             .set("enable.auto.commit", "false")
             .set("isolation.level", "read_uncommitted");
-        cfg.create().map_err(|e| format!("the marks handle: {e}"))
+        let handle: BaseConsumer = cfg.create().map_err(|e| format!("the marks handle: {e}"))?;
+        crate::rdkafka_reader::pumped(handle)
     }
 
     /// The marks of exactly `partitions` of `topic`, each bounded by `bound`,

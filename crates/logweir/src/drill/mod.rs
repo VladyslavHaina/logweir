@@ -186,14 +186,16 @@ pub fn record<T>(
 
 /// Print one `progress-phase=` line, or nothing (D3 §2.4).
 ///
-/// The only `println!` of a progress line in this crate. `progress_phase_line`
+/// The only printer of a progress line in this crate. `progress_phase_line`
 /// is a filter: a name outside `[a-z0-9-]`, an over-long name or a phase
 /// outside `-1..=9` renders nothing, so a credential, a broker error or a
 /// newline never reaches the channel a controller reads. Absence is not an
 /// error. `crates/logweir/tests/progress_channel.rs` pins both halves.
 pub fn print_progress_phase(phase: i8, name: &str) {
     if let Some(line) = logweir_core::execution_contract::progress_phase_line(phase, name) {
-        println!("{line}");
+        // Sealed with the Job's token under FX-43's flag
+        // (`crate::exit::print_lines`).
+        crate::exit::print_lines(&[line]);
     }
 }
 
@@ -954,12 +956,9 @@ pub fn run_with(
     // where the contract-aware line is emitted, so it announces the version
     // this BUILD implements — which is the only true answer for an invocation
     // that was handed its handles instead of a controller's environment.
-    println!(
-        "{}",
-        logweir_core::execution_contract::progress_contract_line(
-            logweir_core::execution_contract::ContractVersion::V2
-        )
-    );
+    crate::exit::print_lines(&[logweir_core::execution_contract::progress_contract_line(
+        logweir_core::execution_contract::ContractVersion::V2,
+    )]);
     let outcome = execute_with_outcome(args, run_id, c);
     report(args, run_id, outcome)
 }
@@ -1098,14 +1097,18 @@ fn exiting(
         }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
-    // [I9] After the tracing line, so the reason is the last thing on stdout:
-    // a controller reads the pod log's final line, and the pod log API has no
-    // stream selector. Every guard refusal prints it (Global Constraint 11).
-    // `print_refusal` writes `refusal-detail=` first, so the state line stays
-    // last. `unwrap_or("")` is fail-safe: an empty message classifies as
-    // `GuardRefused`.
+    // Every line below goes into ONE block, printed last and in one write
+    // (`crate::exit::FinalLines`): after the tracing line, because a
+    // controller reads the pod log's bounded tail and the pod log API has no
+    // stream selector. Under FX-43's `--runner-line-token` the block is the
+    // sealed lines, the sealed `runner-exit=`, then these plain lines, which
+    // stay in the order and place an older reader expects.
+    let mut last = crate::exit::FinalLines::default();
+    // [I9] Every guard refusal prints its pair (Global Constraint 11):
+    // `refusal-detail=` first, so the state line stays last. `unwrap_or("")`
+    // is fail-safe: an empty message classifies as `GuardRefused`.
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal(
+        last.refusal(
             logweir_core::refusal_detail::RefusingRun::Restore,
             refusal_message.unwrap_or(""),
         );
@@ -1113,11 +1116,9 @@ fn exiting(
     // The stopped creation step, named. Exit 1 like any operational failure,
     // but the controller lifts `failure-reason=` onto `status.exitReason` and
     // the bounded line before it onto `status.targetTopicsAppeared`. The
-    // reason is the last line (`print_creation_stop_to`).
+    // reason is the last line (`creation_stop_lines`).
     if let (ExitCode::Operational, Some(race)) = (code, race) {
-        // A closed stdout is not a reason to change the exit code, which
-        // GC11 has already decided.
-        let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);
+        last.extend(creation_stop_lines(race));
     }
     // [I8], and the order is the contract: `scorecard-key=`, `sidecar-key=`,
     // `offset-report-key=` are the final stdout lines of a run that signed a
@@ -1135,11 +1136,11 @@ fn exiting(
     // they stay the final lines. Only on exit 0: a refused or crashed run has
     // no completed phase 0 to report.
     if let (ExitCode::Ok, Some(p)) = (code, topic_preflight) {
-        println!(
+        last.push(format!(
             "{}{}",
             phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX,
             p.status_line_value()
-        );
+        ));
     }
     // D3 §2.4's `teardown-key=`, before I8's keys for the same reason: readers
     // scan a bounded tail by prefix, so a line in front costs nothing and a
@@ -1151,46 +1152,54 @@ fn exiting(
     // but kept structural. The note it reads was pushed after phase 8 signed.
     if code != ExitCode::GuardRefused {
         if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
-            println!(
+            last.push(format!(
                 "{}{key}",
                 logweir_core::execution_contract::TEARDOWN_KEY_PREFIX
-            );
+            ));
         }
     }
     if let (ExitCode::Ok | ExitCode::DrillNotPass, Some(e)) = (code, evidence) {
-        println!("scorecard-key={}", e.scorecard_key);
-        println!("sidecar-key={}", e.sidecar_key);
+        last.push(format!("scorecard-key={}", e.scorecard_key));
+        last.push(format!("sidecar-key={}", e.sidecar_key));
         if let Some(k) = &e.offset_report_key {
-            println!("offset-report-key={k}");
+            last.push(format!("offset-report-key={k}"));
         }
     }
+    last.print(code);
     code
 }
 
-/// The stopped creation step's two stdout lines, through a writer seam like
-/// `crate::exit::print_refusal_to`'s: they carry everything a controller
-/// learns about the stop.
+/// The stopped creation step's two stdout lines: they carry everything a
+/// controller learns about the stop.
 ///
-/// EXACTLY these bytes, in this order, each ended by one newline:
+/// EXACTLY these lines, in this order:
 ///
 /// ```text
 /// target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],…}
 /// failure-reason=<TargetTopicAppeared|CreatedTopicsLeft>
 /// ```
 ///
-/// `failure-reason=` is LAST: the controller lifts the pair only when it is
-/// the log's last non-empty line with the lists on the line before it, so
-/// nothing may be printed between them or after them on exit 1.
+/// `failure-reason=` is LAST: a controller reading a Job with no FX-43 token
+/// lifts the pair only when it is the log's last non-empty line with the lists
+/// on the line before it, so nothing may be printed between them or after
+/// them on exit 1 (`crate::exit::FinalLines` prints the plain lines last).
+#[must_use]
+pub fn creation_stop_lines(stop: &phase0_admit::CreationStop) -> [String; 2] {
+    [
+        stop.lists().line(),
+        logweir_core::guard::failure_reason_line(stop.reason),
+    ]
+}
+
+/// [`creation_stop_lines`] through a writer seam, as a run with no token
+/// prints them, so a test asserts the bytes.
 pub fn print_creation_stop_to<W: std::io::Write>(
     w: &mut W,
     stop: &phase0_admit::CreationStop,
 ) -> std::io::Result<()> {
-    writeln!(w, "{}", stop.lists().line())?;
-    writeln!(
-        w,
-        "{}",
-        logweir_core::guard::failure_reason_line(stop.reason)
-    )
+    let [lists, reason] = creation_stop_lines(stop);
+    writeln!(w, "{lists}")?;
+    writeln!(w, "{reason}")
 }
 
 /// The scorecard file is written by `write_scorecard_artifact` from the bytes
@@ -1827,15 +1836,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     // D3 §2.4's channel version, once, before the first phase line. No such
     // line means a runner that predates the channel, which is not an error. A
     // standalone invocation announces the version this build implements.
-    println!(
-        "{}",
-        logweir_core::execution_contract::progress_contract_line(
-            contract
-                .as_ref()
-                .map_or(logweir_core::execution_contract::ContractVersion::V2, |c| c
-                    .version)
-        )
-    );
+    crate::exit::print_lines(&[logweir_core::execution_contract::progress_contract_line(
+        contract
+            .as_ref()
+            .map_or(logweir_core::execution_contract::ContractVersion::V2, |c| {
+                c.version
+            }),
+    )]);
     // First: a projected credential whose binding does not name the
     // connection this Job was built for is refused before it is validated
     // (`CredentialBindingMismatch`, exit 3).
@@ -1870,6 +1877,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     logweir_core::guard::reject_auth_without_required_tls(
         "target.auth",
         &authenticated_spec.target.auth,
+    )?;
+    // A bootstrap server holding a control character or a line break, before
+    // `context` builds the client that would log it raw (FX-43). Phase 0
+    // repeats the check.
+    logweir_core::guard::reject_line_breaking_bootstrap_servers(
+        "target.bootstrap_servers",
+        &authenticated_spec.target.bootstrap_servers,
     )?;
     // A plan that still names a notification sink is refused here, exit 3,
     // before the point binding reads the archive and before `context` dials.
@@ -3915,12 +3929,14 @@ mod pod_log_lines_pin {
     }
 
     /// **`exiting` prints the stopped creation step's two lines
-    /// through the seam, on exit 1 only, and nothing else in this file prints
-    /// a `failure-reason=`.** The bytes are pinned by
+    /// through the one terminal block, on exit 1 only, and nothing else in
+    /// this file builds a `failure-reason=`.** The bytes are pinned by
     /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
-    /// this pins that the terminal path calls it. KILLS: `exiting` no longer
-    /// printing the pair (the Restore would be a generic `Failed`, with the
-    /// left topics named nowhere durable); a second printer.
+    /// this pins that the terminal path pushes them, and prints the block
+    /// once, last (FX-43: `crate::exit::FinalLines`). KILLS: `exiting` no
+    /// longer printing the pair (the Restore would be a generic `Failed`,
+    /// with the left topics named nowhere durable); a second printer; the
+    /// block printed before a line is pushed.
     #[test]
     fn exiting_prints_the_stopped_creation_step_through_its_seam() {
         let drill = include_str!("mod.rs");
@@ -3929,35 +3945,39 @@ mod pod_log_lines_pin {
             .next()
             .expect("the production half");
         let exiting = fn_body(production, "exiting");
-        let call = "let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);";
+        let call = "last.extend(creation_stop_lines(race));";
         let guard = "if let (ExitCode::Operational, Some(race)) = (code, race) {";
         let at = exiting.find(guard).expect("on exit 1, with a stop");
         assert!(
-            exiting[at..]
-                .trim_start_matches(guard)
-                .trim_start()
-                .starts_with("// A closed stdout"),
-            "the guard's body is the seam call"
+            exiting[at + guard.len()..].trim_start().starts_with(call),
+            "the guard's body pushes the pair"
         );
         assert_eq!(exiting.matches(call).count(), 1);
-        // The definition is generic (`…_to<W: …>(`), so this counts calls.
         assert_eq!(
-            production.matches("print_creation_stop_to(").count(),
-            1,
-            "called from exactly one place"
+            production.matches("creation_stop_lines(").count(),
+            3,
+            "the definition, the writer seam over it, and `exiting`"
         );
-        // One printer of the reason in this command, inside the seam.
+        // ONE print of the block, after every push.
+        assert_eq!(exiting.matches("last.print(code);").count(), 1);
+        let printed = exiting.find("last.print(code);").expect("the block");
+        assert!(
+            exiting.rfind("last.push(").is_some_and(|p| p < printed)
+                && exiting.rfind("last.extend(").is_some_and(|p| p < printed),
+            "every line is pushed before the one print"
+        );
+        // One builder of the reason in this command, inside the pair.
         assert_eq!(production.matches("failure_reason_line(").count(), 1);
         let seam = production
-            .find("pub fn print_creation_stop_to<W: std::io::Write>(")
-            .expect("the seam");
+            .find("pub fn creation_stop_lines(")
+            .expect("the pair");
         let seam = &production[seam..];
-        let seam = &seam[..seam.find("\n}\n").expect("the seam ends")];
+        let seam = &seam[..seam.find("\n}\n").expect("the pair ends")];
         let lists = seam.find("stop.lists().line()").expect("the lists' line");
         let reason = seam
             .find("failure_reason_line(stop.reason)")
             .expect("the reason");
-        assert!(reason > lists, "the reason is printed LAST");
+        assert!(reason > lists, "the reason is LAST");
     }
 }
 

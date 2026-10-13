@@ -28,6 +28,8 @@ use crate::{sys, CText, CallError};
 use rdkafka::bindings as rd;
 use rdkafka::client::{Client, ClientContext};
 use std::os::raw::{c_char, c_int};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The shortest quiet period [`drain_logs`] accepts.
@@ -190,6 +192,231 @@ pub fn drain_logs<C: ClientContext>(
     Ok(Drained { lines, quiet })
 }
 
+/// How long the pump thread waits for one line before it looks at its stop
+/// flag again.
+const PUMP_POLL_MS: c_int = 100;
+
+/// The most lines the pump hands on after it is told to stop: what was queued
+/// before the stop, bounded, so a client that never stops logging cannot keep
+/// the drop waiting.
+const PUMP_DRAIN_AFTER_STOP: usize = 1_000;
+
+/// The pump's loop, over any source of events. It looks at `stop` before
+/// EVERY wait: once it is set, it hands on at most [`PUMP_DRAIN_AFTER_STOP`]
+/// more events without waiting (a `None` ends the drain) and returns, however
+/// fast the source produces them. Pure of librdkafka, so it is tested over a
+/// source that never runs dry.
+fn pump_loop<E>(
+    mut poll: impl FnMut(c_int) -> Option<E>,
+    stop: &AtomicBool,
+    mut hand: impl FnMut(E),
+) {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            for _ in 0..PUMP_DRAIN_AFTER_STOP {
+                match poll(0) {
+                    Some(event) => hand(event),
+                    None => break,
+                }
+            }
+            return;
+        }
+        if let Some(event) = poll(PUMP_POLL_MS) {
+            hand(event);
+        }
+    }
+}
+
+/// Where a pumped client's log lines go. A plain function: the caller decides
+/// how a line is written (`logweir-kafka` escapes it onto one line, FX-43);
+/// this crate interprets nothing.
+pub type LogSink = fn(&LogLine);
+
+/// A value that owns a librdkafka client handle: the clients
+/// [`LogPumped`] wraps.
+pub trait OwnsClient {
+    /// The client's context.
+    type Context: ClientContext;
+    /// The client.
+    fn native_client(&self) -> &Client<Self::Context>;
+}
+
+impl<C: ClientContext> OwnsClient for rdkafka::admin::AdminClient<C> {
+    type Context = C;
+    fn native_client(&self) -> &Client<C> {
+        self.inner()
+    }
+}
+
+impl<C: rdkafka::consumer::ConsumerContext> OwnsClient for rdkafka::consumer::BaseConsumer<C> {
+    type Context = C;
+    fn native_client(&self) -> &Client<C> {
+        rdkafka::consumer::Consumer::client(self)
+    }
+}
+
+impl<C: rdkafka::producer::ProducerContext> OwnsClient for rdkafka::producer::BaseProducer<C> {
+    type Context = C;
+    fn native_client(&self) -> &Client<C> {
+        rdkafka::producer::Producer::client(self)
+    }
+}
+
+/// The pump thread and the private queue it polls.
+struct Pump {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Held for its `Drop` alone: destroyed after the thread is joined.
+    _queue: PumpQueue,
+}
+
+/// The pump's private queue, held only so it is destroyed, once, after the
+/// thread that polls it is joined. It has no method: nothing reaches the
+/// queue through it.
+struct PumpQueue(#[allow(dead_code)] Queue);
+
+// SAFETY: a `PumpQueue` gives no access to its queue, so sharing a reference
+// to it across threads shares nothing (`Sync`). Moving it to another thread
+// moves only the right to destroy the queue (`Send`), which
+// `rd_kafka_queue_destroy` allows from any thread: librdkafka's queues are
+// thread-safe, and the one thread that polled it has been joined by then
+// (`LogPumped`'s `Drop`). This is what lets a `LogPumped` client be held by a
+// `Send + Sync` reader, as the clients it wraps are.
+unsafe impl Send for PumpQueue {}
+// SAFETY: see the `Send` impl above: no `&PumpQueue` method exists.
+unsafe impl Sync for PumpQueue {}
+
+/// **A client whose own log lines go to a [`LogSink`] and never to
+/// librdkafka's default logger** (FX-43).
+///
+/// rust-rdkafka 0.36.2 installs no log callback, so a client's lines go to
+/// librdkafka's default logger, which prints them RAW on the process's stderr:
+/// a bootstrap address or a broker's message holding a line break then starts
+/// a line of a pod log a controller reads by key. A client created with
+/// `log.queue=true` queues its lines instead; this forwards that queue to a
+/// private one and polls it on a thread this value owns, handing each line to
+/// the sink. No callback is installed, so no librdkafka thread ever enters
+/// Rust code.
+///
+/// Dropping it first lowers the client's log level to 0, so the client logs
+/// nothing more (a consumer's close would otherwise log through librdkafka's
+/// raw default logger once the queue is handed back, `rdkafka.c`'s
+/// `rd_kafka_poll_cb`); then it stops the thread (which hands on at most
+/// [`PUMP_DRAIN_AFTER_STOP`] lines already queued), joins it, forwards the
+/// logs back to the main queue and destroys the private queue, in that order,
+/// and only then drops the client: [`Drop`] here runs before the fields drop.
+pub struct LogPumped<T: OwnsClient> {
+    pump: Option<Pump>,
+    inner: T,
+}
+
+impl<T: OwnsClient> LogPumped<T> {
+    /// Pump `inner`'s log lines to `sink`.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::Call`] with [`crate::code::NOT_CONFIGURED`] when the
+    /// client was not created with `log.queue=true`, and
+    /// [`CallError::Options`] when the queue or the thread could not be
+    /// made. The client is dropped with the error.
+    pub fn new(inner: T, sink: LogSink) -> Result<Self, CallError> {
+        let queue = Queue::new(inner.native_client())?;
+        let rk = inner.native_client().native_ptr();
+        // SAFETY: `rk` is the live `rd_kafka_t` that `inner` owns for this
+        // whole call, and `queue` is a live queue of that handle; librdkafka
+        // takes its own reference to the queue (`rd_kafka_q_keep`). The code
+        // is read as an integer (T12).
+        let code = unsafe { sys::set_log_queue(rk, queue.as_ptr()) };
+        if code != 0 {
+            return Err(CallError::Call {
+                code,
+                message: CText::Utf8(
+                    "rd_kafka_set_log_queue refused: the client was not created with \
+                     log.queue=true"
+                        .to_string(),
+                ),
+            });
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = queue.poller();
+        let flag = Arc::clone(&stop);
+        let spawned = std::thread::Builder::new()
+            .name("rdkafka-log-pump".to_string())
+            .spawn(move || {
+                pump_loop(
+                    // SAFETY: the queue this poller came from is owned by the
+                    // `Pump` that owns this thread's handle, and `LogPumped`'s
+                    // `Drop` joins this thread before that queue is destroyed;
+                    // every wait is bounded (`PUMP_POLL_MS`, or 0 to drain).
+                    |ms| unsafe { poller.poll(ms) },
+                    &flag,
+                    |event| {
+                        if event.event_type() == rd::RD_KAFKA_EVENT_LOG {
+                            if let Some(line) = log_line(&event) {
+                                sink(&line);
+                            }
+                        }
+                    },
+                );
+            });
+        match spawned {
+            Ok(thread) => Ok(Self {
+                pump: Some(Pump {
+                    stop,
+                    thread: Some(thread),
+                    _queue: PumpQueue(queue),
+                }),
+                inner,
+            }),
+            Err(e) => {
+                // SAFETY: as above; NULL forwards the logs back to the main
+                // queue before `queue` is destroyed at the end of this arm.
+                let _ = unsafe {
+                    sys::set_log_queue(inner.native_client().native_ptr(), std::ptr::null_mut())
+                };
+                Err(CallError::Options {
+                    code: -1,
+                    message: format!("the log pump thread could not start: {e}"),
+                })
+            }
+        }
+    }
+}
+
+impl<T: OwnsClient> std::ops::Deref for LogPumped<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: OwnsClient> Drop for LogPumped<T> {
+    fn drop(&mut self) {
+        let Some(mut pump) = self.pump.take() else {
+            return;
+        };
+        let rk = self.inner.native_client().native_ptr();
+        // SAFETY: `rk` is the live `rd_kafka_t` `self.inner` owns (fields drop
+        // after this body); the call only stores the level. From here the
+        // client logs nothing more, so no line of its close reaches the raw
+        // default logger after the queue is handed back below.
+        unsafe { rd::rd_kafka_set_log_level(rk, 0) };
+        pump.stop.store(true, Ordering::Release);
+        if let Some(thread) = pump.thread.take() {
+            // A sink that panicked ended the thread early; there is nothing
+            // to do about it here but go on with the teardown.
+            let _ = thread.join();
+        }
+        // SAFETY: `self.inner` still owns its live `rd_kafka_t` (fields drop
+        // after this body). NULL forwards the logs back to the main queue,
+        // dropping librdkafka's reference to the private queue, which `pump`
+        // destroys when it drops at the end of this body; the thread that
+        // polled it has been joined above.
+        let _ = unsafe { sys::set_log_queue(rk, std::ptr::null_mut()) };
+        drop(pump);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +510,96 @@ mod tests {
             "the second drain read the first drain's lines again: {repeated} of {}",
             first.lines.len()
         );
+    }
+
+    /// Every line a pumped client logs reaches the sink, and none reaches
+    /// librdkafka's default logger; a handle without `log.queue=true` is
+    /// refused. KILLS: a pump that never forwards the log queue (the sink sees
+    /// nothing); one that drops the lines queued before it started.
+    #[test]
+    fn a_pumped_clients_lines_reach_the_sink() {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Vec<LogLine>> = Mutex::new(Vec::new());
+        fn sink(line: &LogLine) {
+            SEEN.lock().expect("not poisoned").push(line.clone());
+        }
+        let p = LogPumped::new(queued_logs_client(), sink).expect("a queued-logs handle pumps");
+        let _ = p.client().fetch_metadata(None, Duration::from_millis(200));
+        drop(p);
+        let seen = SEEN.lock().expect("not poisoned").clone();
+        assert!(
+            !seen.is_empty(),
+            "librdkafka logs its start-up under debug=generic"
+        );
+        assert!(seen.iter().all(|l| (0..=7).contains(&l.level)), "{seen:?}");
+        // NEGATIVE CONTROL: a handle that prints to the default logger cannot
+        // be pumped.
+        match LogPumped::new(crate::test_support::offline_client(), sink) {
+            Err(CallError::Call { code: c, .. }) => assert_eq!(c, code::NOT_CONFIGURED),
+            Err(other) => panic!("expected NOT_CONFIGURED, got {other:?}"),
+            Ok(_) => panic!("a handle without log.queue was pumped"),
+        }
+    }
+
+    /// **The pump looks at its stop flag before every wait, and drains at
+    /// most a bounded number of lines after it**, so a client that never
+    /// stops logging cannot keep `LogPumped`'s drop waiting (review L2).
+    /// KILLS: the flag read only on an empty poll (the loop never returns
+    /// here); an unbounded drain.
+    #[test]
+    fn the_pump_returns_over_a_source_that_never_runs_dry() {
+        let stop = AtomicBool::new(false);
+        let mut polls = 0usize;
+        let mut handed = 0usize;
+        pump_loop(
+            |_| {
+                polls += 1;
+                if polls == 5 {
+                    stop.store(true, Ordering::Release);
+                }
+                Some(())
+            },
+            &stop,
+            |()| handed += 1,
+        );
+        assert_eq!(polls, 5 + PUMP_DRAIN_AFTER_STOP, "{polls}");
+        assert_eq!(handed, polls);
+        // A source that runs dry after the stop ends the drain at once.
+        let stop = AtomicBool::new(true);
+        let mut left = 3;
+        let mut handed = 0;
+        pump_loop(
+            |ms| {
+                assert_eq!(ms, 0, "no wait after the stop");
+                (left > 0).then(|| left -= 1)
+            },
+            &stop,
+            |()| handed += 1,
+        );
+        assert_eq!(handed, 3);
+    }
+
+    /// **After the drop, the client logs nothing more**: its level is set
+    /// to 0 BEFORE the pump stops and before the queue is handed back, so a
+    /// consumer's close cannot reach librdkafka's raw default logger (review
+    /// L1). A source pin: the raw logger writes to this process's stderr,
+    /// which a unit test cannot capture. KILLS: the level left as it was; the
+    /// level lowered after the queue is handed back.
+    #[test]
+    fn the_drop_lowers_the_log_level_before_the_queue_goes_back() {
+        let src = include_str!("logs.rs");
+        let drop_at = src
+            .find("impl<T: OwnsClient> Drop for LogPumped<T>")
+            .expect("the drop");
+        let body = &src[drop_at..];
+        let level = body
+            .find("rd_kafka_set_log_level(rk, 0)")
+            .expect("the level");
+        let handed_back = body
+            .find("sys::set_log_queue(rk, std::ptr::null_mut())")
+            .expect("the queue handed back");
+        let stopped = body.find("pump.stop.store(true").expect("the stop");
+        assert!(level < stopped && stopped < handed_back);
     }
 
     /// A drain that hits its time bound says it did not end by quiet.

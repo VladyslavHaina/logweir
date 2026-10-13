@@ -143,8 +143,15 @@ pub struct ProbeOutcome {
     /// written to stdout by this subcommand.
     pub stdout: String,
     /// The one line written to stderr, when there is something to say. `None`
-    /// on the reachable arm: a probe that worked has no diagnostic.
+    /// on the reachable arm: a probe that worked has no diagnostic. Written
+    /// on ONE line whatever it holds ([`crate::exit::one_line`]): its text
+    /// can repeat a broker address or a broker's message.
     pub diagnostic: Option<String>,
+    /// `refusal-reason=CredentialBindingMismatch` when the credential's
+    /// binding was refused: written on stderr after the diagnostic, as its own
+    /// line, and sealed with the Job's token beside the two contract lines
+    /// under FX-43's flag.
+    pub refusal: Option<String>,
     /// `0` when a broker answered, `1` when none did — Global Constraint 11's
     /// `Ok` and `Operational`.
     pub code: ExitCode,
@@ -177,11 +184,13 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
         Ok(id) => ProbeOutcome {
             stdout: format!("{CLUSTER_ID_LINE}{id}\n{REACHABLE_LINE}true\n"),
             diagnostic: None,
+            refusal: None,
             code: ExitCode::Ok,
         },
         Err(e) => ProbeOutcome {
             stdout: format!("{CLUSTER_ID_LINE}\n{REACHABLE_LINE}false\n"),
             diagnostic: Some(format!("cluster-probe: no cluster id was read: {e}")),
+            refusal: None,
             code: ExitCode::Operational,
         },
     }
@@ -198,10 +207,8 @@ pub fn refused_by_binding(
     refusal: &logweir_core::connection::CredentialBindingRefusal,
 ) -> ProbeOutcome {
     let mut o = outcome(&Err(KafkaError::Client(refusal.to_string())));
-    o.diagnostic = Some(format!(
-        "{}\n{}",
-        o.diagnostic.unwrap_or_default(),
-        logweir_core::guard::refusal_reason_line(&refusal.to_string())
+    o.refusal = Some(logweir_core::guard::refusal_reason_line(
+        &refusal.to_string(),
     ));
     o
 }
@@ -258,12 +265,33 @@ pub fn write_outcome<O: Write, E: Write>(
         // this process writes. A pod log merges the streams and a
         // controller scans a bounded tail; putting the diagnostic ahead of the
         // contract keeps both lines inside that tail however long the
-        // diagnostic is.
-        writeln!(err, "{d}")?;
-        err.flush()?;
+        // diagnostic is. On ONE line: the error text can repeat a broker
+        // address or a broker's message, and a line break in it would start a
+        // line a controller reads by key.
+        writeln!(err, "{}", crate::exit::one_line(d))?;
     }
-    out.write_all(o.stdout.as_bytes())?;
+    if let Some(r) = o.refusal.as_deref() {
+        writeln!(err, "{r}")?;
+    }
+    err.flush()?;
+    out.write_all(o.final_lines().render(o.code).as_bytes())?;
     out.flush()
+}
+
+impl ProbeOutcome {
+    /// The lines a controller reads, for [`crate::exit::FinalLines`]: the two
+    /// contract lines, and the binding refusal sealed beside them (its plain
+    /// line is on stderr). With no FX-43 token the block is exactly
+    /// [`ProbeOutcome::stdout`].
+    #[must_use]
+    pub fn final_lines(&self) -> crate::exit::FinalLines {
+        let mut last = crate::exit::FinalLines::default();
+        last.extend(self.stdout.lines().map(str::to_string));
+        if let Some(r) = &self.refusal {
+            last.vouch(r.clone());
+        }
+        last
+    }
 }
 
 /// `--bootstrap <csv>` split into addresses.
@@ -429,6 +457,13 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         return outcome(&Err(KafkaError::Client(
             "--bootstrap named no address; it takes a comma-separated list of host:port".into(),
         )));
+    }
+    // FX-43: an address holding a control character or a line break is
+    // refused before any client exists, so none logs it.
+    if let Err(refusal) =
+        logweir_core::guard::reject_line_breaking_bootstrap_servers("--bootstrap", &servers)
+    {
+        return outcome(&Err(KafkaError::Client(refusal.0)));
     }
     let spec = match auth_spec(&args.auth_mode, args.username.as_deref(), args.tls) {
         Ok(s) => s,

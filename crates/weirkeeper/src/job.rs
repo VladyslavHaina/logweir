@@ -659,6 +659,7 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
 }
 
 use logweir_core::refusal_detail::{LineToken, LINE_TOKEN_ARG};
+use logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG;
 
 /// How many random bytes a line token is made of: 20, which is 160 bits and
 /// 40 lower-case hex digits.
@@ -674,10 +675,10 @@ pub const LINE_TOKEN_BYTES: usize = 20;
 /// A fresh line token, from the operating system's random source.
 ///
 /// A pod log merges stdout and stderr, and whoever wrote a plan can start a
-/// line of their own in it, so the controller honours a runner's
-/// `refusal-detail=` line only when it carries a value the plan's author could
-/// not have had: this one, made when the Job is built and given to the runner
-/// as an argument ([`add_line_token`]). A plan is older than its Job.
+/// line of their own in it, so the controller honours a runner's lines only
+/// when they carry a value the plan's author could not have had: this one,
+/// made when the Job is built and given to the runner as an argument
+/// ([`add_line_token`]). A plan is older than its Job.
 ///
 /// The bytes come from `rustls`'s `ring` provider (`ring::rand::SystemRandom`,
 /// the kernel's generator, with no seed this process holds), never from a
@@ -695,7 +696,13 @@ pub fn new_line_token() -> Option<LineToken> {
 }
 
 /// Give `job`'s runner `token`, as the LAST two arguments of the container
-/// named [`CONTAINER_NAME`]: [`LINE_TOKEN_ARG`] and the token.
+/// named [`CONTAINER_NAME`]: [`RUNNER_LINE_TOKEN_ARG`] and the token.
+///
+/// **FX-43's flag, not FX-34's.** Under it the runner seals EVERY line this
+/// controller acts on and ends every run with a sealed `runner-exit=` line
+/// (`logweir_core::runner_line`). A runner that predates the flag stops at
+/// argument parsing, before any work, and the reconciler names that
+/// (`RunnerOlderThanController`) instead of reading its log.
 ///
 /// An ARGUMENT, not an environment variable: the engine the runner starts
 /// inherits the runner's environment and expands `${NAME}` over its
@@ -714,7 +721,7 @@ pub fn add_line_token(job: &mut Job, token: &LineToken) {
         .and_then(|pod| pod.containers.iter_mut().find(|c| c.name == CONTAINER_NAME));
     if let Some(runner) = runner {
         let args = runner.args.get_or_insert_with(Vec::new);
-        args.push(LINE_TOKEN_ARG.to_string());
+        args.push(RUNNER_LINE_TOKEN_ARG.to_string());
         args.push(token.expose_token().to_string());
     }
 }
@@ -734,30 +741,82 @@ pub fn add_fresh_line_token(job: &mut Job) -> bool {
     }
 }
 
+/// `job` with a fresh FX-43 line token ([`add_fresh_line_token`]), for the
+/// reconcilers that build a Job and create it in one expression. When the
+/// random source fails the Job is returned without one, and a `warn` names
+/// the Job: its log is then read as a Job an older controller built.
+#[must_use]
+pub fn tokened(mut job: Job) -> Job {
+    if !add_fresh_line_token(&mut job) {
+        tracing::warn!(
+            job = job.metadata.name.as_deref().unwrap_or_default(),
+            "the random source gave no line token; the Job is created without one and its log \
+             is read as a Job an older controller built"
+        );
+    }
+    job
+}
+
 /// The line token `job`'s runner was given, read back off the Job's own pod
-/// template: the LAST two arguments of the container named
-/// [`CONTAINER_NAME`], when they are [`LINE_TOKEN_ARG`] and a well-formed
-/// token.
-///
-/// `None` for a Job built without one (an older controller's, or one whose
-/// random source failed). By POSITION IN THE ARGV, which is this controller's
-/// own structure and not a log: [`add_line_token`] appends, so whatever the
-/// arguments before it hold, the last two are what it wrote.
+/// template, whichever flag carried it ([`job_token`]).
 #[must_use]
 pub fn line_token(job: &Job) -> Option<LineToken> {
-    let args = job
+    job_token(job).token().cloned()
+}
+
+/// Which lines of a Job's pod log its runner vouched for, by the flag the
+/// Job's controller gave it (FX-43).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobToken {
+    /// No token: a controller from before FX-34 built the Job, or the random
+    /// source failed. Every reader keeps its own rules over the whole log.
+    None,
+    /// FX-34's [`LINE_TOKEN_ARG`]: a controller from before FX-43 built the
+    /// Job. Only the `refusal-detail=` line carries the token (in its JSON);
+    /// every other line is read by the rules that controller used.
+    RefusalDetail(LineToken),
+    /// FX-43's [`RUNNER_LINE_TOKEN_ARG`]: every line the controller acts on is
+    /// sealed with the token, and nothing else in the log is read.
+    EveryLine(LineToken),
+}
+
+impl JobToken {
+    /// The token, whichever flag carried it.
+    #[must_use]
+    pub fn token(&self) -> Option<&LineToken> {
+        match self {
+            Self::None => None,
+            Self::RefusalDetail(t) | Self::EveryLine(t) => Some(t),
+        }
+    }
+}
+
+/// The line token `job`'s runner was given and by which flag: the LAST two
+/// arguments of the container named [`CONTAINER_NAME`], when they are
+/// [`RUNNER_LINE_TOKEN_ARG`] or [`LINE_TOKEN_ARG`] and a well-formed token.
+///
+/// [`JobToken::None`] for a Job built without one. By POSITION IN THE ARGV,
+/// which is this controller's own structure and not a log: [`add_line_token`]
+/// appends, so whatever the arguments before it hold, the last two are what
+/// it wrote.
+#[must_use]
+pub fn job_token(job: &Job) -> JobToken {
+    let Some(args) = job
         .spec
-        .as_ref()?
-        .template
-        .spec
-        .as_ref()?
-        .containers
-        .iter()
-        .find(|c| c.name == CONTAINER_NAME)?
-        .args
-        .as_ref()?;
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .and_then(|pod| pod.containers.iter().find(|c| c.name == CONTAINER_NAME))
+        .and_then(|runner| runner.args.as_ref())
+    else {
+        return JobToken::None;
+    };
     match args.as_slice() {
-        [.., flag, value] if flag == LINE_TOKEN_ARG => LineToken::parse(value),
-        _ => None,
+        [.., flag, value] if flag == RUNNER_LINE_TOKEN_ARG => {
+            LineToken::parse(value).map_or(JobToken::None, JobToken::EveryLine)
+        }
+        [.., flag, value] if flag == LINE_TOKEN_ARG => {
+            LineToken::parse(value).map_or(JobToken::None, JobToken::RefusalDetail)
+        }
+        _ => JobToken::None,
     }
 }

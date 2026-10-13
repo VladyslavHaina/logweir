@@ -1,0 +1,5 @@
+error: unexpected argument '--runner-line-token' found
+
+Usage: logweir check run --plan <PLAN> --check-contract-version <CHECK_CONTRACT_VERSION>
+
+For more information, try '--help'.

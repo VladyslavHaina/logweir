@@ -211,13 +211,54 @@ pub fn classify(input: &Input<'_>) -> Observation {
         };
     };
 
+    // 3b. FX-43: whose lines are read. Under the Job's every-line token, the
+    // sealed end frame and `refusal-reason=` and the frames the end frame
+    // binds by digest; nothing else. A runner that vouched for no exit is
+    // older than this controller, and says nothing this pass reads.
+    let raw = log;
+    let lines = crate::runner_log::own_lines_binding(
+        &crate::job::job_token(input.job),
+        raw,
+        &[
+            logweir_core::check_contract::TOPIC_FRAME_PREFIX,
+            logweir_core::check_contract::PART_FRAME_PREFIX,
+        ],
+    );
+    if !raw.is_empty()
+        && exit_code.is_some_and(crate::runner_log::vouches_for_exit)
+        && lines.runner_is_older()
+    {
+        return Observation {
+            phase: CheckPhase::Failed,
+            reason: CheckCode::CheckContractMismatch,
+            message: format!(
+                "{}: the check runner printed no line sealed with this Job's line token (exit \
+                 {}), which every runner at least as new as this controller does, so the runner \
+                 image is older than this controller (an older one stops at the unknown \
+                 argument `{}`); nothing of its log was read — upgrade the runner image to this \
+                 controller's release",
+                logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                exit_code.map_or_else(|| "<none>".to_string(), |c| c.to_string()),
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+            ),
+            relay: None,
+            waiting,
+            exit_code,
+            cancel_now: false,
+        };
+    }
+    let log = lines.text();
+
     // 4. The contract refusal, BY KEY NAME from a bounded tail.
     if let Some(code) = relay::refusal_reason(log) {
         // A runner refusing a plan this controller rendered is in practice an
         // older runner image: say so, naming the field it did not know when its
         // own stderr line says which.
         let hint = if code == CheckCode::CheckContractMismatch {
-            let field = refused_plan_field(log)
+            // A hint from the runner's own stderr (never sealed): an
+            // identifier of at most 64 letters and digits, shown, never acted
+            // on.
+            let field = refused_plan_field(raw)
                 .map(|f| format!(" (it did not know the plan field `{f}`)"))
                 .unwrap_or_default();
             format!(
@@ -425,8 +466,14 @@ pub async fn create_job(
     spec: &job::CheckJobSpec,
 ) -> Result<Job, kube::Error> {
     let jobs: kube::Api<Job> = kube::Api::namespaced(client.clone(), &spec.namespace);
-    jobs.create(&kube::api::PostParams::default(), &job::build(spec))
-        .await
+    // FX-43: the check runner seals its end frame, its refusal and its exit
+    // with the Job's token, and only those (and the frames the end frame
+    // binds) are read.
+    jobs.create(
+        &kube::api::PostParams::default(),
+        &crate::job::tokened(job::build(spec)),
+    )
+    .await
 }
 
 /// Patch a finished check Job's `ttlSecondsAfterFinished`.

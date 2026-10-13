@@ -84,6 +84,46 @@ impl StorageUrl {
         }
     }
 
+    /// The first of this location's text fields that holds a control
+    /// character or a line or paragraph separator (FX-43), by field name.
+    #[must_use]
+    pub fn line_breaking_part(&self) -> Option<&'static str> {
+        let bad = crate::runner_line::holds_line_breaking_or_control;
+        match self {
+            Self::S3 {
+                bucket,
+                prefix,
+                region,
+                endpoint,
+                ..
+            } => [
+                ("bucket", Some(bucket.as_str())),
+                ("prefix", Some(prefix.as_str())),
+                ("region", region.as_deref()),
+                ("endpoint", endpoint.as_deref()),
+            ]
+            .into_iter()
+            .find_map(|(name, v)| v.is_some_and(bad).then_some(name)),
+            Self::Azure {
+                account_name,
+                container_name,
+                prefix,
+            } => [
+                ("account_name", account_name.as_str()),
+                ("container_name", container_name.as_str()),
+                ("prefix", prefix.as_str()),
+            ]
+            .into_iter()
+            .find_map(|(name, v)| bad(v).then_some(name)),
+            Self::Gcs { bucket, prefix } => {
+                [("bucket", bucket.as_str()), ("prefix", prefix.as_str())]
+                    .into_iter()
+                    .find_map(|(name, v)| bad(v).then_some(name))
+            }
+            Self::Filesystem { path } => bad(&path.to_string_lossy()).then_some("path"),
+        }
+    }
+
     /// An S3 location whose `region` is not a region name
     /// ([`is_valid_s3_region`]). With no endpoint, `object_store` builds the
     /// host as `s3.<region>.amazonaws.com`, so a region such as

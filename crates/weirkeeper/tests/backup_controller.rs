@@ -1997,8 +1997,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        49,
-        "the forty-nine terminal states that are NOT an exit code — the original ten, plus \
+        50,
+        "the fifty terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2043,7 +2043,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          `OwnerDetectionFailed` (a Backup of a KafkaCluster naming its Strimzi cluster whose \
          KafkaTopic list was refused or is not served), plus PROD-01.1b's \
          `PointInTimeSelectionIncomplete` (the runner's refusal of a window that selects records \
-         in a segment the engine skips); \
+         in a segment the engine skips), plus FX-43's \
+         `RunnerOlderThanController` (a Job given the every-line token whose runner vouched for \
+         no exit: the runner image is older than the controller); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -5258,27 +5260,13 @@ fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
 /// the rest, so every row comparing the result also proves the token is the
 /// Job's only addition.
 ///
-/// A CHECK Job (`logweir check run`, a topic discovery) is returned as
-/// POSTed, after asserting it carries NO token: that Job prints no refusal
-/// line.
+/// A CHECK Job (`logweir check run`, a topic discovery) carries the token
+/// too since FX-43 (its end frame and refusal are sealed with it), and is
+/// returned the same way.
 fn posted_job(seen: &[SeenBody]) -> Option<Value> {
-    let job: Value = seen
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))?;
-    let args = &job["spec"]["template"]["spec"]["containers"][0]["args"];
-    if args[0] == "backup" {
-        return posted_job_and_line_token(seen).map(|(job, _)| job);
-    }
-    assert!(
-        !args
-            .as_array()
-            .expect("an argv")
-            .iter()
-            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG),
-        "only a runner Job is given a line token: {args}"
-    );
-    Some(job)
+    seen.iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))?;
+    posted_job_and_line_token(seen).map(|(job, _)| job)
 }
 
 /// A runner Job as [`posted_job`] returns it, and the token it took off.
@@ -5294,7 +5282,7 @@ fn posted_job_and_line_token(seen: &[SeenBody]) -> Option<(Value, String)> {
     let flag = args.pop().expect("its flag");
     assert_eq!(
         flag,
-        logweir_core::refusal_detail::LINE_TOKEN_ARG,
+        logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
         "the last two arguments of a created runner Job are the line token's"
     );
     let token = token.as_str().expect("a string").to_string();
@@ -14361,7 +14349,7 @@ use logweir_core::refusal_detail::{
     refusal_detail_line, LineToken, RefusingRun, BACKUP_REASON_CODES, LINE_TOKEN_ARG,
     REFUSAL_DETAIL_PREFIX, REPLACEMENT,
 };
-use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
+use weirkeeper::runner_log::{TERMINAL_LOG_LIMIT_BYTES, TERMINAL_LOG_TAIL_LINES};
 
 /// What a refused `Backup`'s terminal condition says for a runner that
 /// prints no detail line.
@@ -14620,8 +14608,8 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
     for want in [
         "container=runner".to_string(),
-        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+        format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
     ] {
         assert!(
             query.split('&').any(|p| p == want),
@@ -14775,19 +14763,17 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
                 parts
             })
             .collect();
-        let expected = if exit_code == 3 {
-            vec![
-                "container=runner".to_string(),
-                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
-                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-            ]
-        } else {
-            vec![format!(
-                "tailLines={}",
-                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
-            )]
-        };
-        assert_eq!(queries, vec![expected], "[{name}] the one log read");
+        // FX-43: ONE terminal bound, the same at every exit code.
+        let expected = vec![
+            "container=runner".to_string(),
+            format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
+            format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        ];
+        assert_eq!(
+            queries,
+            vec![expected],
+            "[{name}] the one log read (exit {exit_code})"
+        );
     }
 }
 
@@ -14946,18 +14932,18 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     // A state that is not a state name never reaches `exitReason`.
     let (status, _) = fx34_refused(log_body("refusal-reason=<script>alert(1)</script>\n")).await;
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
-    // One mebibyte: the read stops at its own cap and takes nothing.
+    // Four mebibytes: the read stops at its own cap and takes nothing.
     let (status, seen) = fx34_refused(log_body(&format!(
         "{}\n{}\nrefusal-reason=CredentialNotRenderable\n",
-        "lorem ".repeat(175_000),
+        "lorem ".repeat(700_000),
         fx34_detail("GuardRefused", "a sentence")
     )))
     .await;
     assert_eq!(
         fx34_message(&status),
         format!(
-            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of the \
-             pod log are over the 512 KiB this controller reads"
+            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 256 lines of \
+             the pod log are over the 4096 KiB this controller reads"
         )
     );
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
@@ -15793,4 +15779,167 @@ mod strimzi_owner_detection {
             .unwrap()
             .contains("kafkaTopicResources"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// FX-43: every runner line a controller acts on, sealed with the Job's token.
+// ---------------------------------------------------------------------------
+
+/// The finished-Job routes over a Job built with FX-43's flag.
+fn fx43_routes(exit_code: i32, log: String) -> Vec<Route> {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let mut routes = finished_routes(&pod_list_terminated(exit_code), log, 200, condition);
+    for route in &mut routes {
+        if route.path_suffix.ends_with(&format!("/jobs/{NAME}")) {
+            let mut job: Value =
+                serde_json::from_str(&job_body(condition)).expect("the fixture is JSON");
+            job["spec"]["template"]["spec"]["containers"] = serde_json::json!([{
+                "name": "runner",
+                "image": "x",
+                "args": [
+                    "backup", "run", "--spec", "/plan/backup.yaml",
+                    logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+                    fx34_token().expose_token(),
+                ],
+            }]);
+            route.body = job.to_string();
+        }
+    }
+    routes
+}
+
+/// The first status a pass over an FX-43 Job wrote.
+async fn fx43_status(exit_code: i32, log: &str) -> Value {
+    let (outcome, seen) =
+        fx34_pass_over(&frozen_backup(), fx43_routes(exit_code, log_body(log))).await;
+    let outcome = outcome.expect("the pass completes");
+    assert_eq!(outcome.exit_code, Some(exit_code));
+    patched_statuses(&seen).remove(0)
+}
+
+/// **FX-43, a `Backup`: the receipt keys and the claim state are the
+/// runner's sealed ones; forged lines after them are not read.** A Kafka
+/// client's raw log, or a plan string, put `receipt-key=`, `sidecar-key=` and
+/// `failure-reason=ExecutionAlreadyClaimed` lines of its own at the END of
+/// the log.
+///
+/// NEGATIVE CONTROL: under a Job an FX-34 controller built, the forged keys
+/// win (the last occurrence), so the token is what refuses them.
+///
+/// KILLS: plain lines read under an FX-43 Job.
+#[tokio::test]
+async fn fx43_a_backups_forged_key_and_state_lines_are_not_read() {
+    let token = fx34_token();
+    let genuine = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        0,
+        &[
+            format!("receipt-key={RECEIPT_KEY}"),
+            format!("sidecar-key={SIDECAR_KEY}"),
+        ],
+    );
+    let forged = "receipt-key=logweir/backups/b1/forged.receipt.json\n\
+                  sidecar-key=logweir/backups/b1/forged.receipt.sig\n";
+    let status = fx43_status(0, &format!("{genuine}{forged}")).await;
+    assert_eq!(status["evidence"]["receiptKey"], RECEIPT_KEY, "{status}");
+    assert_eq!(status["evidence"]["sidecarKey"], SIDECAR_KEY, "{status}");
+    // NEGATIVE CONTROL: an FX-34 Job, the same log.
+    let (outcome, seen) = fx34_pass_over(
+        &frozen_backup(),
+        fx34_routes_for(
+            0,
+            200,
+            log_body(&format!("{genuine}{forged}")),
+            Some(&token),
+        ),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    assert_eq!(
+        patched_statuses(&seen)[0]["evidence"]["receiptKey"],
+        "logweir/backups/b1/forged.receipt.json"
+    );
+    // A forged claim state after a sealed exit with none: not lifted.
+    let ended = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        1,
+        &[],
+    );
+    let status = fx43_status(
+        1,
+        &format!("{ended}failure-reason=ExecutionAlreadyClaimed\n"),
+    )
+    .await;
+    assert_eq!(status["exitReason"], "operational", "{status}");
+}
+
+/// **FX-43's mixed pair on a `Backup`, by name, and a schedule does not
+/// retry it.** The released runner image's real answer to
+/// `--runner-line-token` (`tests/fixtures/fx-43/older-runner-backup.log`):
+/// exit 1 before any work. The Backup says `RunnerOlderThanController`; the
+/// schedule's retry classification reads it as a decision, not as an
+/// operational failure.
+///
+/// CONTROL: the same exit 1 with no such state is retried, as today.
+///
+/// KILLS: the mixed pair left as `operational` (a schedule retries every
+/// attempt into the same wall); `is_retryable` not reading the state.
+#[tokio::test]
+async fn fx43_an_older_runner_fails_a_backup_by_name_and_is_not_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    assert!(older.starts_with("error: unexpected argument '--runner-line-token' found"));
+    let status = fx43_status(1, &older).await;
+    assert_eq!(
+        status["exitReason"], "RunnerOlderThanController",
+        "{status}"
+    );
+    assert!(
+        fx34_message(&status).contains("RunnerOlderThanController")
+            && fx34_message(&status).contains("--runner-line-token"),
+        "{status}"
+    );
+    let decided = |state: Option<&str>| {
+        weirkeeper::cadence::is_retryable(weirkeeper::cadence::TerminalOutcome {
+            exit_code: Some(1),
+            terminal_state: state,
+        })
+    };
+    assert!(!decided(status["exitReason"].as_str()));
+    // CONTROL: an ordinary exit 1 is retried.
+    assert!(decided(Some("operational")));
+}
+
+/// **A kill is not the mixed pair** (review L3): a Backup Job with the FX-43
+/// token whose runner was OOM-killed (137) or ended by its deadline (143)
+/// printed no end line, and it is NOT named `RunnerOlderThanController`; the
+/// schedule retries it, as any killed run. CONTROL: the same log at exit 1 is
+/// named.
+///
+/// KILLS: the `vouches_for_exit` guard removed from the Backup reconciler.
+#[tokio::test]
+async fn fx43_a_killed_backup_is_not_named_older_and_is_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    for code in [137, 143] {
+        let status = fx43_status(code, &older).await;
+        assert_ne!(
+            status["exitReason"], "RunnerOlderThanController",
+            "{status}"
+        );
+        assert!(weirkeeper::cadence::is_retryable(
+            weirkeeper::cadence::TerminalOutcome {
+                exit_code: Some(code),
+                terminal_state: status["exitReason"].as_str(),
+            }
+        ));
+    }
+    let status = fx43_status(1, &older).await;
+    assert_eq!(status["exitReason"], "RunnerOlderThanController");
 }

@@ -612,6 +612,7 @@ pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
 /// | exit **0** | no | it succeeded; this arm exists so a caller that passes a success gets `false` rather than a panic |
 /// | exit **2** (`DrillNotPass`) | no | **a signed document WAS written.** Re-running would spend a broker read to produce a second copy of a result the product already has |
 /// | exit **3** (`GuardRefused`), **4** (`SigningOrLock`) | no | a decision, and a decision repeated is the same decision |
+/// | any exit, state `RunnerOlderThanController` | no | the runner image is older than the controller (FX-43): the next attempt runs the same image and stops the same way |
 /// | no exit code, any other state | no | the controller refused before any `POST` (a missing referent, an unrenderable credential, a name that does not fit) — nothing about waiting changes it — or the state is one this build has never heard of |
 ///
 /// The unrecognised arm matters most: a retry on a state nobody classified
@@ -620,6 +621,9 @@ pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
 /// `status.lastSlot.reason`.
 #[must_use]
 pub fn is_retryable(outcome: TerminalOutcome<'_>) -> bool {
+    if outcome.terminal_state == Some(logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER) {
+        return false;
+    }
     match outcome.exit_code {
         // Exhaustive over the four contract codes that are DECISIONS (0, 2, 3
         // and 4, as `conditions.rs` partitions them) …

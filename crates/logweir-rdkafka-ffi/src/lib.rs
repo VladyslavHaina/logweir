@@ -16,6 +16,7 @@
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
 //! | topic IDs (KIP-516) of named topics | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
 //! | the client's own log lines, as events on a private queue (the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
+//! | every log line of a runner's client, to a sink and never to librdkafka's raw stderr logger (FX-43) | `rd_kafka_set_log_queue`, `rd_kafka_queue_poll`, `rd_kafka_event_log` | [`logs::LogPumped`] |
 //!
 //! # The obligations every call keeps
 //!
@@ -67,7 +68,11 @@
 //! queue on the same thread, copies the result out and destroys all three
 //! before returning. The guards hold raw pointers, so they are neither `Send`
 //! nor `Sync`: no librdkafka object made here can cross a thread boundary, and
-//! no two threads ever share one. What a call returns is plain owned data,
+//! no two threads ever share one. **One exception, by construction:**
+//! [`logs::LogPumped`] polls its private log queue on a thread it owns. The
+//! queue stays owned by the `LogPumped`, only a polling handle moves, and the
+//! `LogPumped`'s `Drop` joins the thread before it destroys the queue and
+//! before the client drops. What a call returns is plain owned data,
 //! `Send + Sync`, with no tie to librdkafka. A request that outlives its poll
 //! bound (librdkafka never answered within the margin) is abandoned safely: the
 //! request holds its own reference to the queue's internals, the destroyed

@@ -80,6 +80,9 @@ pub mod rehearsal_scope;
 /// The replay selection — an inclusive window start and per-topic
 /// partition subsets — and the one function preview and execution select by.
 pub mod replay_selection;
+/// FX-43: every runner line a controller acts on, sealed with the Job's line
+/// token; the one-line escape every printed text goes through.
+pub mod runner_line;
 pub mod schema;
 pub mod schema_dependency;
 pub mod scorecard;
