@@ -14,7 +14,8 @@
 #   2. The three licences are present, non-empty and at the path both compiling
 #      images use; `THIRD_PARTY_NOTICES.md` is REQUIRED here (this image ships a
 #      statically linked Rust binary). So is `console-third-party.md`, the
-#      licences of the npm packages bundled into /ui/next.
+#      licences of the npm packages bundled into /ui/next, and
+#      `console-fonts-OFL-1.1.txt`, the licence of the fonts bundled there.
 #   3. The absences: no kafka-backup MIT notice, no org-root anchor, no engine.
 #   4. The entrypoint is `/usr/local/bin/logweir-api` and there is no CMD: the
 #      console's MODE comes from the chart's ConfigMap and from nowhere else.
@@ -363,6 +364,19 @@ if [ "$rc" -ne 0 ]; then
        "  build's .vite/license.md. Rebuild both: \`just console\`, then \`just image-console\`."
 fi
 echo "   ok: the console's bundled-package licences, byte-identical to the tree's build"
+# The fonts bundled into /ui/next are OFL-1.1: the notice and the licence travel with them.
+if ! cp_out /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt "$work/console-fonts-OFL.txt"; then
+  fail "check 2 (licence): $ref is missing /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt," \
+       "  the OFL-1.1 notice and licence of the Red Hat fonts bundled into /ui/next."
+fi
+rc=0
+diff -u console/licenses/RedHatFont-OFL-1.1.txt "$work/console-fonts-OFL.txt" > "$work/lic-fonts.diff" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$work/lic-fonts.diff" >&2
+  fail "check 2 (licence): $ref's console-fonts-OFL-1.1.txt is not this tree's" \
+       "  console/licenses/RedHatFont-OFL-1.1.txt. Rebuild with \`just image-console\`."
+fi
+echo "   ok: the console fonts' OFL-1.1 text, byte-identical to the tree's"
 
 # =========================================================================
 # CHECK 3 — THE ABSENCES. Each one is a claim this image must not make.
@@ -526,7 +540,7 @@ fi
 
 echo
 echo "ok: the twenty-six shipped files byte for byte at /ui and nothing else, the console"
-echo "    preview at /ui/next byte for byte with this tree's build, four licence files,"
+echo "    preview at /ui/next byte for byte with this tree's build, five licence files,"
 echo "    no MIT notice, no org-root anchor and no engine, the entrypoint logweir-api with no"
 echo "    CMD and USER 65532, no key-shaped path anywhere, and the binary runs by bare name"
 echo "    reporting $bin_version — in $ref"

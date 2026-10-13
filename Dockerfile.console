@@ -226,6 +226,9 @@ COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
 # The licences of the npm packages bundled into the console at /ui/next (Vite's
 # `build.license`), generated from the same build.
 COPY --from=console /licenses/console-third-party.md /usr/share/licenses/logweir/
+# The fonts the console bundles (Red Hat's, from PatternFly) are OFL-1.1, whose
+# condition 2 wants the notice and the licence with every copy.
+COPY console/licenses/RedHatFont-OFL-1.1.txt /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt
 
 # THE SAME NON-ROOT UID AS BOTH OTHER IMAGES AND AS the chart's PodSpec
 # (`runAsUser: 65532`, `runAsNonRoot: true`). The kubelet enforces

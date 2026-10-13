@@ -118,7 +118,7 @@ trap 'rm -f "$meta_file" "$out_file"' EXIT
 # graph and an inventory naming nothing.
 cargo metadata --format-version 1 --offline > "$meta_file"
 
-"$PY" - "$meta_file" > "$out_file" <<'PYEOF'
+"$PY" - "$meta_file" "$ROOT" > "$out_file" <<'PYEOF'
 """Render THIRD_PARTY_NOTICES.md from `cargo metadata --offline` JSON.
 
 THE THREE-ARM COPYRIGHT RULE, and why it has three arms.
@@ -463,6 +463,23 @@ def main():
         "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
         "SOFTWARE.\n"
         "```\n"
+    )
+    # NOT AN NPM PACKAGE'S OWN NOTICE (PROD-18.1). The rebuilt console's image
+    # bundles Red Hat's fonts from @patternfly/react-core, whose npm package
+    # carries no OFL text, and OFL-1.1 condition 2 wants the notice and the
+    # licence with every copy. The one text is console/licenses/; the image
+    # ships that file beside console-third-party.md, and this section prints it.
+    with open(os.path.join(sys.argv[2], "console", "licenses", "RedHatFont-OFL-1.1.txt"), encoding="utf-8") as f:
+        ofl = f.read()
+    out(
+        "\n**Red Hat Display, Red Hat Text and Red Hat Mono (RedHatOfficial/RedHatFont).** The rebuilt\n"
+        "console served at `/ui/next/` bundles six of these fonts (`RedHat{Display,Text,Mono}VF` and their\n"
+        "italics, `.woff2`), copied unmodified by the console build from `@patternfly/react-core`'s\n"
+        "`dist/styles/assets/fonts/`. Source: `https://github.com/RedHatOfficial/RedHatFont`. Licence:\n"
+        "SIL Open Font License 1.1. The image carries this text as\n"
+        "`/usr/share/licenses/logweir/console-fonts-OFL-1.1.txt`, beside `console-third-party.md`, which\n"
+        "holds the licences of the npm packages the console bundles (written by its own build).\n\n"
+        "```text\n" + ofl + ("" if ofl.endswith("\n") else "\n") + "```\n"
     )
     # NOT A CARGO PACKAGE, AND NOT IN ANY LOGWEIR IMAGE. The MinIO mirror is a
     # separate image the project publishes for its compose stack, the chart's
