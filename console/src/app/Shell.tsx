@@ -458,6 +458,9 @@ export function Shell() {
         </SkipToContent>
       }
       mainContainerId="lw-main"
+      // The main region scrolls; a page with no control in view must still scroll from
+      // the keyboard (axe scrollable-region-focusable), so it is a tab stop.
+      mainTabIndex={0}
       onPageResize={(_event, { mobileView }) => {
         if (mobileView !== mobile) {
           setMobile(mobileView);
