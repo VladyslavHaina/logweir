@@ -197,7 +197,7 @@ export function Trust() {
   const allowed = flags?.trustPoliciesRead === true;
   const policies = useTrustPolicies(allowed);
   const forbidden = (flags !== null && !allowed) || (policies.error instanceof ApiError && policies.error.status === 403);
-  const items = policies.data?.items ?? [];
+  const items = policies.data ?? [];
 
   return (
     <>
@@ -238,11 +238,6 @@ export function Trust() {
                   <PolicyCard p={p} />
                 </GridItem>
               ))
-            )}
-            {policies.data?.partial && (
-              <GridItem>
-                <Alert isInline variant="info" title="More trust policies exist than this page reads at once" />
-              </GridItem>
             )}
             <GridItem lg={5}>
               <Card isFullHeight>

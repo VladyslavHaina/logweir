@@ -8,7 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import localAdmin from "../../../ui/tests/fixtures/console/session.json";
 import viewer from "../../../ui/tests/fixtures/console/session-viewer.json";
-import { ApiError, readSession } from "../api/client";
+import { ApiError, api, readSession } from "../api/client";
 import type { Session } from "../api/types";
 import { createConsoleRouter } from "../router";
 import { SessionGate } from "./SessionGate";
@@ -129,6 +129,23 @@ describe("signed in", () => {
     renderAt("/team-z");
     expect(await screen.findByText("You hold no role in team-z")).toBeTruthy();
     expect(screen.getByRole("link", { name: "team-a" }).getAttribute("href")).toBe("#/team-a");
+  });
+
+  it("says a page whose read the role lacks is not available, and sends nothing for it", async () => {
+    const grant = viewer.namespaces[0]!;
+    const approver = { ...viewer, namespaces: [{ ...grant, roles: ["approver"], capabilities: { ...grant.capabilities, connectionsRead: false } }] };
+    read.mockResolvedValue(approver as Session);
+    const fetches = vi.spyOn(api, "GET");
+    renderAt("/team-a/connections");
+    expect(await screen.findByRole("heading", { name: "Not available to you here" })).toBeTruthy();
+    expect((fetches.mock.calls as unknown[][]).some((call) => String(call[0]).endsWith("/connections"))).toBe(false);
+    cleanup();
+    // Control: the viewer, who holds connectionsRead, gets the page and its read.
+    read.mockResolvedValue(viewer as Session);
+    renderAt("/team-a/connections");
+    expect(await screen.findByRole("heading", { name: "Connections" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Not available to you here" })).toBeNull();
+    expect((fetches.mock.calls as unknown[][]).some((call) => String(call[0]).endsWith("/connections"))).toBe(true);
   });
 
   it("names the actor and offers sign-out when no namespace is granted", async () => {

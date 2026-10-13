@@ -39,6 +39,7 @@ import {
   type OperationView,
   type PointView,
 } from "../../api/backups";
+import { useOperationStream } from "../../api/stream";
 import { PageHeader } from "../../components/PageHeader";
 import { CaptureStatus, StatusLabel } from "../../components/Status";
 import { ErrorState, LoadingRows } from "../../components/States";
@@ -184,7 +185,7 @@ function Groups({ point }: { point: PointView }) {
  */
 function useRunPoint(ns: string, b: Backup | undefined, receiptSha256: string | null | undefined) {
   const catalogs = useCatalogs(ns);
-  const catalog = (catalogs.data?.items ?? []).find((c) => b?.destinationRef && c.destinationRef?.name === b.destinationRef.name);
+  const catalog = (catalogs.data ?? []).find((c) => b?.destinationRef && c.destinationRef?.name === b.destinationRef.name);
   const points = useCatalogPoints(ns, catalog?.name ?? "", false, Boolean(catalog));
   const enabled = Boolean(catalog);
   const rows = (points.data?.pages ?? []).flatMap((p) => p.items);
@@ -523,7 +524,9 @@ export function BackupDetail() {
   const { ns, name } = useParams({ from: "/$ns/backups/$name" });
   const navigate = useNavigate();
   const backup = useBackupDoc(ns, name);
-  const operation = useBackupOperation(ns, name);
+  // While the run moves, its event stream writes the operation view and the poll stands down.
+  const streaming = useOperationStream(ns, "backup", name, backup.data !== undefined && !backup.data.operation.terminal);
+  const operation = useBackupOperation(ns, name, streaming);
   const runs = useBackupList(ns);
   const flags = useFlags(ns);
 
@@ -535,7 +538,7 @@ export function BackupDetail() {
   );
   const b = backup.data;
   const retries = useMemo(
-    () => (runs.data?.items ?? []).filter((r) => r.trigger?.retryOf?.name === name),
+    () => (runs.data ?? []).filter((r) => r.trigger?.retryOf?.name === name),
     [runs.data, name],
   );
 

@@ -20,4 +20,6 @@ export type OperationSummary = S["OperationSummary"];
 export type PointView = S["PointView"];
 export type PointGroup = S["PointGroupView"];
 export type Problem = S["Problem"];
+export type FieldError = S["FieldError"];
+export type PolicyChangedDetail = S["PolicyChangedDetail"];
 export type CreateRestoreRequest = S["CreateRestoreRequest"];

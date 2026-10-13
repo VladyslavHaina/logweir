@@ -28,10 +28,10 @@ import {
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import type { Backup } from "../../api/types";
 import { ApiError } from "../../api/client";
+import { useBackups, useDestinations } from "../../api/queries";
+import { useCan } from "../../api/session";
 import {
-  useDestinationChoices,
   useRetentionPolicies,
-  useRunHistory,
   useSchedule,
   useSetSuspension,
   type Schedule,
@@ -152,11 +152,19 @@ function Section({ open, text, children }: { open: boolean; text: string; childr
 }
 
 function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid: string | undefined; canRestore: boolean }) {
-  const history = useRunHistory(ns);
+  const history = useBackups(ns);
+  const readable = useCan(ns, "backupsRead");
   const navigate = useNavigate();
+  if (!readable) {
+    return (
+      <Content component="p" className="lw-subtle">
+        Your roles in {ns} do not include reading backups, so this schedule's runs are not shown.
+      </Content>
+    );
+  }
   if (history.isPending) return <LoadingRows rows={4} label="Loading the runs" />;
   if (history.isError) return <ErrorState error={history.error} onRetry={() => void history.refetch()} />;
-  const groups = runsOf(name, uid, history.data.items);
+  const groups = runsOf(name, uid, history.data);
   const latest = latestPoint(groups.mine);
   return (
     <Stack hasGutter>
@@ -210,11 +218,6 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
           <Runs ns={ns} runs={groups.legacy} canRestore={canRestore} label="Runs naming this schedule without its identity" />
         </Section>
       )}
-      {history.data.more && (
-        <Content component="p" className="lw-subtle lw-small">
-          Only the newest 200 runs of this namespace were read; older runs of this schedule are on the Backups page.
-        </Content>
-      )}
     </Stack>
   );
 }
@@ -222,7 +225,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
 const or = (value: number | null | undefined, fallback: string, unit = " s") => (typeof value === "number" ? `${value}${unit}` : fallback);
 
 function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
-  const destinations = useDestinationChoices(ns);
+  const destinations = useDestinations(ns);
   const dest = s.destinationRef ? destinations.data?.find((d) => d.name === s.destinationRef!.name) : undefined;
   const exclude = s.allUserTopics?.exclude;
   return (

@@ -1,7 +1,8 @@
 // Destinations: the location rules, the grants (create and rotation), what
 // "keep" sends, the request bodies and where the API's field errors land.
 import { describe, expect, it } from "vitest";
-import { KEY_IN_PLAIN_FIELD, ProblemError, placeProblems } from "./connections";
+import { ApiError } from "./client";
+import { KEY_IN_PLAIN_FIELD, placeProblems } from "./connections";
 import {
   DESTINATION_DEFAULTS,
   GRANT_ROLES,
@@ -212,7 +213,7 @@ describe("where the API's field errors land", () => {
     expect(destinationField("readiness.writeProbe")).toBe("writeProbe");
     expect(destinationField("somethingElse")).toBeUndefined();
     const placed = placeProblems(
-      new ProblemError(422, { code: "destination_invalid", errors: [{ field: "storage.bucket", code: "bucket_invalid", message: "is not an S3 bucket name" }, { field: "x", code: "y", message: "z" }] }),
+      new ApiError(422, { code: "destination_invalid", errors: [{ field: "storage.bucket", code: "bucket_invalid", message: "is not an S3 bucket name" }, { field: "x", code: "y", message: "z" }] }),
       destinationField,
     );
     expect(placed).toEqual({ fields: { bucket: "is not an S3 bucket name" }, unmatched: ["x: z"] });

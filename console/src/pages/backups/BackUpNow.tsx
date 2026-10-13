@@ -23,14 +23,14 @@ import {
 } from "@patternfly/react-core";
 import { useSchedules } from "../../api/queries";
 import { ApiError } from "../../api/client";
-import { LocalRefusal, ProblemError, mintKey, outcomeOf, useBackUpNow, type ManualBackupResponse } from "../../api/backups";
+import { LocalRefusal, mintKey, outcomeOf, useBackUpNow, type ManualBackupResponse } from "../../api/backups";
 import type { Schedule } from "../../api/types";
 
 /** What a 409 on this route means; its only answer is a new key. */
 export function conflictWords(error: unknown): string | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null;
   if (error.code === "policy_changed") {
-    const now = error instanceof ProblemError ? error.policy?.currentGeneration : undefined;
+    const now = error.policy?.currentGeneration;
     return `The schedule's policy changed after this page read it${typeof now === "number" ? ` (it is at revision g${now} now)` : ""}, so nothing was created: a run copies the revision it names. Back up again reads the schedule afresh and sends a new key.`;
   }
   if (error.code === "idempotency_conflict") {

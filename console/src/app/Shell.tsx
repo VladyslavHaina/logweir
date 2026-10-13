@@ -273,6 +273,24 @@ function NoAccess({ ns, names }: { ns: string; names: string[] }) {
   );
 }
 
+/** A page the navigation names whose read the session does not grant in `ns`: nothing is
+ *  sent for it, and the page says why rather than wait on a read that never starts. */
+function NotGranted({ ns, entry }: { ns: string; entry: Entry }) {
+  return (
+    <>
+      <PageHeader title={entry.label} />
+      <PageSection>
+        <Card>
+          <Empty title="Not available to you here" icon={LockIcon}>
+            Your roles in {ns} do not include reading {entry.label.toLowerCase()}. Ask an administrator for a role that does if you
+            need it.
+          </Empty>
+        </Card>
+      </PageSection>
+    </>
+  );
+}
+
 function NavEntry({ ns, entry, current, rail, count }: { ns: string; entry: Entry; current: boolean; rail: boolean; count?: NavCount }) {
   const ref = useRef<HTMLAnchorElement>(null);
   const Icon = entry.icon;
@@ -336,6 +354,9 @@ export function Shell() {
   const names = session.namespaces.map((g) => g.name);
   const shown = (entry: Entry) =>
     !entry.flag || (entry.anyNamespace ? session.capabilities[entry.flag] === true : grant?.capabilities[entry.flag] === true);
+  // A cluster-wide page (Trust) says for itself why it reads nothing.
+  const current = NAV.flatMap((g) => g.items).find((i) => i.path === section && i.path !== "");
+  const denied = current && !current.anyNamespace && !shown(current) ? current : undefined;
 
   const masthead = (
     <Masthead display={{ default: "inline" }}>
@@ -442,7 +463,7 @@ export function Shell() {
         }
       }}
     >
-      {grant ? <Outlet /> : <NoAccess ns={ns} names={names} />}
+      {!grant ? <NoAccess ns={ns} names={names} /> : denied ? <NotGranted ns={ns} entry={denied} /> : <Outlet />}
     </Page>
   );
 }

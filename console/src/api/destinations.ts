@@ -1,8 +1,10 @@
 // Destinations: the list, one destination, what uses it, the write-once
 // create, the access rotation and the access test, over the typed client.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, createHeaders, unwrap } from "./client";
-import { KEY_IN_PLAIN_FIELD, carriesKeyMaterial, isDataKey, isObjectName, unwrapWrite } from "./connections";
+import { ApiError, api, call, createHeaders } from "./client";
+import { KEY_IN_PLAIN_FIELD, carriesKeyMaterial, isDataKey, isObjectName } from "./connections";
+import { keys, useDestinations } from "./queries";
+import { useCan } from "./session";
 import type { components } from "./schema";
 
 type S = components["schemas"];
@@ -425,38 +427,28 @@ export function rotationField(path: string): "caName" | "caKey" | GrantField | u
 
 // ----------------------------------------------------------------- reads
 
-const LIST_LIMIT = 200;
-
-export function useDestinationList(ns: string, enabled = true) {
-  return useQuery({
-    queryKey: ["destinations", ns, "list"],
-    queryFn: async ({ signal }) => {
-      const page = unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/destinations", { params: { path: { ns }, query: { limit: LIST_LIMIT } }, signal }),
-      );
-      return { items: page.items, more: Boolean(page.page.nextCursor) };
-    },
-    enabled,
-  });
-}
+/** The namespace's destinations: one list, shared with the schedule and catalog pick-lists. */
+export const useDestinationList = useDestinations;
 
 export function useDestination(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "destinations");
   return useQuery({
-    queryKey: ["destinations", ns, "item", name],
+    queryKey: keys.item("destinations", ns, name),
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal })).item,
-    enabled,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal }))).item,
+    enabled: enabled && readable,
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
 }
 
 /** What names this destination. Its failure is not the page's: the detail still renders. */
 export function useDestinationUsage(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "destinations");
   return useQuery({
     queryKey: ["destinations", ns, "usage", name],
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/destinations/{name}/usage", { params: { path: { ns, name } }, signal })),
-    enabled,
+      call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}/usage", { params: { path: { ns, name } }, signal })),
+    enabled: enabled && readable,
     retry: false,
   });
 }
@@ -468,14 +460,14 @@ export function useCreateDestination(ns: string) {
   return useMutation({
     mutationFn: async ({ key, body }: { key: string; body: CreateDestinationRequest }) => {
       try {
-        return unwrapWrite(
-          await api.POST("/api/v1/namespaces/{ns}/destinations", { params: { path: { ns }, header: createHeaders(key) }, body }),
+        return await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/destinations", { params: { path: { ns }, header: createHeaders(key) }, body }),
         );
       } finally {
         forgetAccessCredentials(body.access);
       }
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: ["destinations", ns] }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("destinations", ns) }),
   });
 }
 
@@ -489,18 +481,21 @@ export function useRotateAccess(ns: string, name: string) {
   return useMutation({
     mutationFn: async (body: UpdateDestinationAccessRequest) => {
       try {
-        return unwrapWrite(
-          await api.POST("/api/v1/namespaces/{ns}/destinations/{name}:update-access", {
-            params: { path: { ns, name }, header: { Origin: window.location.origin } },
-            body,
-          }),
+        return (
+          await call(() =>
+            api.POST("/api/v1/namespaces/{ns}/destinations/{name}:update-access", {
+              params: { path: { ns, name }, header: { Origin: window.location.origin } },
+              body,
+            }),
+          )
         ).item;
       } finally {
         forgetAccessCredentials(body.access);
       }
     },
     // A test's applicability is recomputed on read; the grants it was about just changed.
-    onSettled: () => Promise.all([client.invalidateQueries({ queryKey: ["destinations", ns] }), client.invalidateQueries({ queryKey: ["preflights", ns] })]),
+    onSettled: () =>
+      Promise.all([client.invalidateQueries({ queryKey: keys.list("destinations", ns) }), client.invalidateQueries({ queryKey: ["preflights", ns] })]),
   });
 }
 
@@ -508,11 +503,13 @@ export function useRotateAccess(ns: string, name: string) {
 export function useTestDestination(ns: string, name: string) {
   return useMutation({
     mutationFn: async ({ key, roles }: { key: string; roles: GrantRole[] }) =>
-      unwrapWrite(
-        await api.POST("/api/v1/namespaces/{ns}/destinations/{name}:test", {
-          params: { path: { ns, name }, header: createHeaders(key) },
-          body: roles.length > 0 ? { roles } : {},
-        }),
+      (
+        await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/destinations/{name}:test", {
+            params: { path: { ns, name }, header: createHeaders(key) },
+            body: roles.length > 0 ? { roles } : {},
+          }),
+        )
       ).item,
   });
 }

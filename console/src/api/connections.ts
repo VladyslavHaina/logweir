@@ -5,8 +5,9 @@
 // private-key guard, a role's grant, and following a check until it answers.
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, createHeaders, unwrap } from "./client";
-import { useSessionDoc } from "./session";
+import { ApiError, LocalRefusal, api, call, createHeaders, mintKey, outcomeUnknown } from "./client";
+import { keys, useConnections } from "./queries";
+import { useCan, useSessionDoc } from "./session";
 import type { components, operations } from "./schema";
 
 type S = components["schemas"];
@@ -19,7 +20,6 @@ export type Preflight = S["Preflight"];
 export type TopicDiscovery = S["TopicDiscovery"];
 export type TopicPage = S["TopicPageResponse"];
 export type FieldError = S["FieldError"];
-type Problem = S["Problem"];
 type Session = S["SessionResponse"];
 type Capabilities = S["Capabilities"];
 
@@ -66,24 +66,7 @@ export function useGrant(ns: string): Grant {
 
 // ------------------------------------------------------- writes and errors
 
-/** A refusal from the API that keeps its field errors (`ApiError` keeps the rest). */
-export class ProblemError extends ApiError {
-  readonly fieldErrors: FieldError[];
-
-  constructor(status: number, problem: Partial<Problem> | undefined) {
-    super(status, problem);
-    this.fieldErrors = Array.isArray(problem?.errors) ? problem.errors : [];
-  }
-}
-
-/** `unwrap` for writes: the same, but a refusal keeps `errors[]`. */
-export function unwrapWrite<T>(result: { data?: T; error?: unknown; response: Response }): T {
-  if (result.data !== undefined && result.response.ok) return result.data;
-  throw new ProblemError(result.response.status, result.error as Partial<Problem> | undefined);
-}
-
-/** Nothing was sent: this page refused before any request. */
-export class LocalRefusal extends Error {}
+export { LocalRefusal, mintKey };
 
 /**
  * What became of a write.
@@ -97,9 +80,8 @@ export type Outcome = "unknown" | "invalid" | "local" | "refused";
 
 export function outcomeOf(error: unknown): Outcome {
   if (error instanceof LocalRefusal) return "local";
-  if (!(error instanceof ApiError)) return "unknown";
-  if (error.status === 502 || error.status === 503 || error.status === 504 || error.code === "upstream_timeout") return "unknown";
-  if (error instanceof ProblemError && error.fieldErrors.length > 0) return "invalid";
+  if (outcomeUnknown(error) || (error instanceof ApiError && error.code === "upstream_timeout")) return "unknown";
+  if (error instanceof ApiError && error.fieldErrors.length > 0) return "invalid";
   return "refused";
 }
 
@@ -110,29 +92,13 @@ export function placeProblems<F extends string>(
 ): { fields: Partial<Record<F, string>>; unmatched: string[] } {
   const fields: Partial<Record<F, string>> = {};
   const unmatched: string[] = [];
-  const list = error instanceof ProblemError ? error.fieldErrors : [];
+  const list = error instanceof ApiError ? error.fieldErrors : [];
   for (const e of list) {
     const field = place(e.field);
     if (field === undefined) unmatched.push(`${e.field}: ${e.message}`);
     else fields[field] = fields[field] ? `${fields[field]} ${e.message}` : e.message;
   }
   return { fields, unmatched };
-}
-
-/**
- * A fresh `Idempotency-Key`: `logweir-console.<kind>.` and 32 random hex
- * characters. With no random source the page refuses rather than use a
- * counter, which would replay one page load's write in the next.
- */
-export function mintKey(kind: string): string {
-  const source = globalThis.crypto;
-  if (!source || typeof source.getRandomValues !== "function") {
-    throw new LocalRefusal(
-      "This page will not send this: the idempotency key that makes a double click or a retry one request needs the platform's random source, and it is unavailable.",
-    );
-  }
-  const hex = Array.from(source.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
-  return `logweir-console.${kind}.${hex}`;
 }
 
 /**
@@ -419,7 +385,6 @@ export function forgetConnectionCredential(body: CreateConnectionRequest): void 
 
 // ----------------------------------------------------------------- reads
 
-const LIST_LIMIT = 200;
 /** While a probe is in flight the page re-reads every 4 s, for at most the probe Job's two-minute deadline. */
 const PROBE_RE_READ_MS = 4000;
 const PROBE_RE_READS = 30;
@@ -428,26 +393,18 @@ function probing(c: Connection | undefined): boolean {
   return c?.reachability.reason === PROBE_RUNNING_REASON;
 }
 
-export function useConnectionList(ns: string, enabled = true) {
-  return useQuery({
-    queryKey: ["connections", ns, "list"],
-    queryFn: async ({ signal }) => {
-      const page = unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/connections", { params: { path: { ns }, query: { limit: LIST_LIMIT } }, signal }),
-      );
-      return { items: page.items, more: Boolean(page.page.nextCursor) };
-    },
-    enabled,
-    refetchInterval: (q) => (q.state.data?.items.some(probing) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
-  });
+/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight. */
+export function useConnectionList(ns: string) {
+  return useConnections(ns, (items, reads) => (items.some(probing) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false));
 }
 
 export function useConnection(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "connectionsRead");
   return useQuery({
-    queryKey: ["connections", ns, "item", name],
+    queryKey: keys.item("connections", ns, name),
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal })).item,
-    enabled,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal }))).item,
+    enabled: enabled && readable,
     refetchInterval: (q) => (probing(q.state.data) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
@@ -460,8 +417,8 @@ export function useCreateConnection(ns: string) {
   return useMutation({
     mutationFn: async ({ key, body }: { key: string; body: CreateConnectionRequest }) => {
       try {
-        return unwrapWrite(
-          await api.POST("/api/v1/namespaces/{ns}/connections", { params: { path: { ns }, header: createHeaders(key) }, body }),
+        return await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/connections", { params: { path: { ns }, header: createHeaders(key) }, body }),
         );
       } finally {
         // The request is serialized before it is sent; the copy the mutation
@@ -469,7 +426,7 @@ export function useCreateConnection(ns: string) {
         forgetConnectionCredential(body);
       }
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: ["connections", ns] }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("connections", ns) }),
   });
 }
 
@@ -528,11 +485,12 @@ function useFollowingSince(id: string | null): number {
 /** Reads one preflight and follows it until a read answers terminal, the deadline passes, or a read fails. */
 export function useFollowedPreflight(ns: string, id: string | null) {
   const at = useFollowingSince(id);
+  const readable = useCan(ns, "preflight");
   const query = useQuery({
     queryKey: ["preflights", ns, id],
     queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id ?? "" } }, signal })).item,
-    enabled: id !== null,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id ?? "" } }, signal }))).item,
+    enabled: id !== null && readable,
     retry: 3,
     refetchInterval: (q) =>
       !q.state.data || q.state.data.terminal || q.state.status === "error" || performance.now() - at > PREFLIGHT_FOLLOW_MS
@@ -548,11 +506,13 @@ export function useFollowedPreflight(ns: string, id: string | null) {
 export function useStartConnectionCheck(ns: string, name: string) {
   return useMutation({
     mutationFn: async (key: string) =>
-      unwrapWrite(
-        await api.POST("/api/v1/namespaces/{ns}/preflights", {
-          params: { path: { ns }, header: createHeaders(key) },
-          body: { operation: "sourceConnection", sourceConnection: { connectionRef: name } },
-        }),
+      (
+        await call(() =>
+          api.POST("/api/v1/namespaces/{ns}/preflights", {
+            params: { path: { ns }, header: createHeaders(key) },
+            body: { operation: "sourceConnection", sourceConnection: { connectionRef: name } },
+          }),
+        )
       ).item,
   });
 }
@@ -568,18 +528,19 @@ export interface DiscoverySlots {
 export function useDiscoverySlots(ns: string, name: string, enabled = true) {
   const [followFrom, setFollowFrom] = useState<string | null>(null);
   const at = useFollowingSince(followFrom);
+  const readable = useCan(ns, "topicDiscovery");
   const query = useQuery({
     queryKey: ["topic-discoveries", ns, "slots", name],
     queryFn: async ({ signal }): Promise<DiscoverySlots> => {
-      const answer = unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
+      const answer = (await call(() =>
+        api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
           params: { path: { ns, name }, query: { latest: true } },
           signal,
         }),
-      ) as unknown as Partial<DiscoverySlots>;
+      )) as unknown as Partial<DiscoverySlots>;
       return { latestAttempt: answer.latestAttempt ?? null, lastSuccessful: answer.lastSuccessful ?? null };
     },
-    enabled,
+    enabled: enabled && readable,
     refetchInterval: (q) => {
       const latest = q.state.data?.latestAttempt;
       if (!latest || latest.terminal || q.state.status === "error") return false;
@@ -616,13 +577,14 @@ export function useStartDiscovery(ns: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ key, request }: { key: string; request: DiscoveryRequest }) =>
-      unwrapWrite(
-        await api.POST("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
+      call(() =>
+        api.POST("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
           params: { path: { ns, name }, header: createHeaders(key) },
           body: discoveryBody(request),
         }),
       ),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ns, "slots", name] }),
+    // Every discovery read of the namespace: these slots and a schedule form's topic offer.
+    onSuccess: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ns] }),
   });
 }
 
@@ -630,8 +592,8 @@ export function useCancelDiscovery(ns: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) =>
-      unwrapWrite(
-        await api.POST("/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel", {
+      call(() =>
+        api.POST("/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel", {
           params: { path: { ns, id }, header: { Origin: window.location.origin } },
         }),
       ),
@@ -653,6 +615,7 @@ type TopicQuery = NonNullable<
 >;
 
 export function useTopicPage(ns: string, id: string | null, filters: TopicFilters, cursor: string | null) {
+  const readable = useCan(ns, "topicDiscovery");
   return useQuery({
     queryKey: ["topic-discoveries", ns, "topics", id, filters, cursor],
     queryFn: async ({ signal }) => {
@@ -662,14 +625,14 @@ export function useTopicPage(ns: string, id: string | null, filters: TopicFilter
       if (filters.internal !== "exclude") query.internal = filters.internal;
       if (filters.errored !== "include") query.errored = filters.errored;
       if (cursor) query.cursor = cursor;
-      return unwrap(
-        await api.GET("/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics", {
+      return call(() =>
+        api.GET("/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics", {
           params: { path: { ns, id: id ?? "" }, query },
           signal,
         }),
       );
     },
-    enabled: id !== null,
+    enabled: id !== null && readable,
     placeholderData: (previous) => previous,
   });
 }

@@ -3,7 +3,7 @@
 // (ui/tests/fixtures/console/), the ones the old console's rows read.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../api/client";
-import { ProblemError, type RetentionPolicy, type Schedule } from "../../api/schedules";
+import type { RetentionPolicy, Schedule } from "../../api/schedules";
 import type { components } from "../../api/schema";
 import type { Backup } from "../../api/types";
 import {
@@ -170,7 +170,7 @@ describe("where a refusal lands", () => {
   });
 
   it("places each field error beside its input and lists the rest", () => {
-    const refusal = new ProblemError(422, {
+    const refusal = new ApiError(422, {
       code: "validation_failed",
       detail: "One or more fields are invalid.",
       errors: [
@@ -189,6 +189,8 @@ describe("where a refusal lands", () => {
 describe("what a failed write means", () => {
   it("no answer, a timeout or a 5xx is unknown; a refusal is a refusal", () => {
     expect(outcomeOf(new TypeError("Failed to fetch"))).toBe("unknown");
+    // The live client's no answer (client.call): status 0, never a refusal.
+    expect(outcomeOf(new ApiError(0, undefined))).toBe("unknown");
     expect(outcomeOf(new ApiError(503, { code: "kubernetes_unavailable" }))).toBe("unknown");
     expect(outcomeOf(new ApiError(408, {}))).toBe("unknown");
     expect(outcomeOf(new ApiError(412, { code: "precondition_failed" }))).toBe("precondition");

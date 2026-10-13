@@ -15,6 +15,7 @@ import { ConnectArchive } from "../catalog/ConnectArchive";
 import { KEYS_FORBIDDEN_SENTENCE } from "../trust/model";
 import { DIFFERENT_RUN_SENTENCE } from "./BackupDetail";
 import { CASES } from "./verdict";
+import { SessionGate } from "../../app/SessionGate";
 import operator from "../../../../ui/tests/fixtures/console/session-manual-backups.json";
 import viewer from "../../../../ui/tests/fixtures/console/session-viewer.json";
 import schedulesList from "../../../../ui/tests/fixtures/console/schedules-list.json";
@@ -31,7 +32,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; key: string | null; body: unknown }[],
-  answer: (_r: Request, _path: string, _body: unknown): Response | Promise<Response> | null => null,
+  answer: (() => null) as (r: Request, path: string, body: unknown) => Response | Promise<Response> | null,
 }));
 
 vi.mock("../../mock/fetch", () => ({
@@ -43,6 +44,8 @@ vi.mock("../../mock/fetch", () => ({
     net.sent.push({ method: request.method, path, key: request.headers.get("Idempotency-Key"), body });
     const r = await net.answer(request, path, body);
     if (r) return r;
+    // The session gate's read, when a row's network does not answer it itself.
+    if (path === "/session") return json(200, operator);
     return json(404, { code: "not_found", detail: `no fake for ${request.method} ${path}`, status: 404, requestId: "r" });
   },
 }));
@@ -63,7 +66,7 @@ function renderAt(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
 }
@@ -75,7 +78,7 @@ function renderWith(element: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
 }

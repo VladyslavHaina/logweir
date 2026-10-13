@@ -8,7 +8,6 @@ import {
   KEY_IN_PLAIN_FIELD,
   LocalRefusal,
   PROBE_WORDS,
-  ProblemError,
   carriesKeyMaterial,
   connectionBody,
   connectionField,
@@ -194,7 +193,7 @@ describe("field errors and outcomes", () => {
   it("places the API's field errors beside their fields and lists what no field claims", () => {
     const problem = fixture<S["Problem"]>("problem-validation.json");
     problem.errors = [...(problem.errors ?? []), { field: "markerTopic", code: "invalid", message: "is not a topic name" }];
-    const placed = placeProblems(new ProblemError(422, problem), (p) => connectionField(p, "scramSha512"));
+    const placed = placeProblems(new ApiError(422, problem), (p) => connectionField(p, "scramSha512"));
     expect(placed.fields).toEqual({ servers: "must be host:port with no scheme or userinfo", username: "scramSha512 requires a username" });
     expect(placed.unmatched).toEqual(["markerTopic: is not a topic name"]);
   });
@@ -207,8 +206,10 @@ describe("field errors and outcomes", () => {
 
   it("calls a write with no answer unknown, and a refusal a refusal", () => {
     expect(outcomeOf(new TypeError("Failed to fetch"))).toBe("unknown");
+    // The live client's no answer (client.call): status 0, never a refusal.
+    expect(outcomeOf(new ApiError(0, undefined))).toBe("unknown");
     expect(outcomeOf(new ApiError(504, { code: "upstream_timeout" }))).toBe("unknown");
-    expect(outcomeOf(new ProblemError(422, fixture("problem-validation.json")))).toBe("invalid");
+    expect(outcomeOf(new ApiError(422, fixture("problem-validation.json")))).toBe("invalid");
     expect(outcomeOf(new ApiError(409, fixture("problem-conflict.json")))).toBe("refused");
     expect(outcomeOf(new LocalRefusal("no random source"))).toBe("local");
   });

@@ -5,7 +5,7 @@
 // demo, `vite dev`, the tests) its fetch is the in-page mock and nothing leaves the page.
 import createClient, { type Client, type Middleware } from "openapi-fetch";
 import type { paths } from "./schema";
-import type { Problem } from "./types";
+import type { FieldError, PolicyChangedDetail, Problem } from "./types";
 import { mockFetch } from "../mock/fetch";
 
 export const MOCK = import.meta.env.VITE_LOGWEIR_API !== "live";
@@ -61,6 +61,10 @@ export class ApiError extends Error {
   readonly requestId: string | undefined;
   /** False only when the API said repeating the same request cannot succeed. */
   readonly retryable: boolean;
+  /** A refusal's field errors (`errors[]`), so a form places each beside the input it names. */
+  readonly fieldErrors: FieldError[];
+  /** For `policy_changed`: the schedule revision in force now. */
+  readonly policy: PolicyChangedDetail | undefined;
 
   constructor(status: number, problem: Partial<Problem> | string | undefined) {
     const doc = typeof problem === "object" && problem !== null ? problem : undefined;
@@ -70,6 +74,8 @@ export class ApiError extends Error {
     this.code = String(doc?.code ?? (status === 0 ? "no_answer" : "unknown"));
     this.requestId = doc?.requestId ?? undefined;
     this.retryable = doc?.retryable ?? true;
+    this.fieldErrors = Array.isArray(doc?.errors) ? doc.errors : [];
+    this.policy = doc?.policy ?? undefined;
   }
 
   /** A 401 the product API gave because nobody is signed in, or the session ended. */
@@ -142,6 +148,30 @@ export async function listAll<T>(
     "list_too_large",
     `This namespace holds more than ${items.length} ${what}, more than the console reads in one list. It is not showing the first ${items.length} as if they were all.`,
   );
+}
+
+/** A failed write whose outcome is unknown: no answer, a timeout or a server failure. The
+ *  object may or may not exist, and only resending the same Idempotency-Key can tell. */
+export function outcomeUnknown(error: unknown): boolean {
+  return !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500;
+}
+
+/** Nothing was sent: the page refused before any request. */
+export class LocalRefusal extends Error {}
+
+/**
+ * A fresh `Idempotency-Key`: `logweir-console.<kind>.` and 32 random hex characters. With no
+ * random source the page refuses rather than count, which would replay one page load's write in the next.
+ */
+export function mintKey(kind: string): string {
+  const source = globalThis.crypto;
+  if (!source || typeof source.getRandomValues !== "function") {
+    throw new LocalRefusal(
+      "This page will not send this: the idempotency key that makes a double click or a retry one request needs the platform's random source, and it is unavailable.",
+    );
+  }
+  const hex = Array.from(source.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `logweir-console.${kind}.${hex}`;
 }
 
 /** The headers every durable create carries. The browser sets `Origin` itself; the

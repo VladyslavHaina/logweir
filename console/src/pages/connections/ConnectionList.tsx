@@ -2,7 +2,7 @@
 // authenticates, and what the controller's probe last saw.
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { Alert, Button, Card, Content, PageSection, SearchInput, Toolbar, ToolbarContent, ToolbarItem } from "@patternfly/react-core";
+import { Button, Card, Content, PageSection, SearchInput, Toolbar, ToolbarContent, ToolbarItem } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import PlugIcon from "@patternfly/react-icons/dist/esm/icons/plug-icon";
 import SearchIcon from "@patternfly/react-icons/dist/esm/icons/search-icon";
@@ -50,13 +50,13 @@ export function ConnectionList() {
   const navigate = useNavigate();
   const grant = useGrant(ns);
   const readable = grant.can?.connectionsRead !== false;
-  const list = useConnectionList(ns, readable);
+  const list = useConnectionList(ns);
   const narrow = useNarrow();
   const [search, setSearch] = useState("");
   const [adding, setAdding] = useState(false);
   const mayAdd = mayAddConnection(grant);
 
-  const rows = useMemo(() => (list.data?.items ?? []).filter((c) => matches(c, search.trim())).sort((a, b) => a.name.localeCompare(b.name)), [list.data, search]);
+  const rows = useMemo(() => (list.data ?? []).filter((c) => matches(c, search.trim())).sort((a, b) => a.name.localeCompare(b.name)), [list.data, search]);
   const add = (
     <Button variant="primary" onClick={() => setAdding(true)}>
       Add a connection
@@ -82,7 +82,7 @@ export function ConnectionList() {
             </div>
           ) : list.isError ? (
             <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-          ) : list.data.items.length === 0 ? (
+          ) : list.data.length === 0 ? (
             <Empty title="No connections yet" icon={PlugIcon} actions={mayAdd ? add : undefined}>
               A connection names a Kafka cluster and how to reach it. Add the cluster you want to back up first; restores need a target
               connection too.
@@ -195,9 +195,6 @@ export function ConnectionList() {
                 </Table>
               )}
               <div className="lw-pad">
-                {list.data.more && (
-                  <Alert isInline isPlain variant="info" title="Only the first 200 connections are shown." />
-                )}
                 <Content component="p" className="lw-subtle lw-small">
                   {PROBE_SENTENCE} Re-read reads what the controller has recorded since; it dials nothing. A connection's own page has Test
                   connection, which does dial.

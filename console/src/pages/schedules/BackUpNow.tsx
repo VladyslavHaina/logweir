@@ -7,14 +7,13 @@ import { Link } from "@tanstack/react-router";
 import { Alert, Button, Checkbox, Content, Modal, ModalBody, ModalFooter, ModalHeader, ModalVariant } from "@patternfly/react-core";
 import { ApiError } from "../../api/client";
 import { mintIntent, useRunFromSchedule, type ManualBackupResponse, type Schedule } from "../../api/schedules";
-import { ProblemError } from "../../api/schedules";
 import { WriteAlert } from "./parts";
 
 /** What a 409 on this route means, and that its only answer is a new intent. */
 export function conflictWords(error: unknown): string | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null;
   if (error.code === "policy_changed") {
-    const now = error instanceof ProblemError ? error.policy?.currentGeneration : undefined;
+    const now = error instanceof ApiError ? error.policy?.currentGeneration : undefined;
     return `The schedule's policy changed after this page read it${typeof now === "number" ? ` (it is at revision g${now} now)` : ""}, so nothing was created: a run copies the revision it names. Close this, read the schedule again, then back up again.`;
   }
   if (error.code === "idempotency_conflict") {

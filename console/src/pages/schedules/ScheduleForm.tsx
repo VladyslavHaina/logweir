@@ -35,10 +35,9 @@ import {
 } from "@patternfly/react-core";
 import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-icon";
 import PlusIcon from "@patternfly/react-icons/dist/esm/icons/plus-icon";
-import { useConnections } from "../../api/queries";
+import { useConnections, useDestinations } from "../../api/queries";
 import {
   useCadencePreview,
-  useDestinationChoices,
   useDiscoveredTopics,
   type DestinationSummary,
   type Schedule,
@@ -339,7 +338,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
     mode: "onTouched",
   });
   const connections = useConnections(ns);
-  const destinations = useDestinationChoices(ns);
+  const destinations = useDestinations(ns);
   const values = useWatch({ control }) as PolicyValues;
   const [canonical, setCanonical] = useState<string | null>(null);
   const [previewErrors, setPreviewErrors] = useState<Partial<Record<keyof PolicyValues, string>>>({});

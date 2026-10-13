@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import { connections } from "../../mock/data";
+import { SessionProvider } from "../../api/session";
+import { connections, session } from "../../mock/data";
 import { createdSecrets } from "../../mock/connections";
 import { AddConnection } from "./AddConnection";
 
@@ -17,7 +18,9 @@ function setup(ns = "team-a") {
   const onCreated = vi.fn();
   const view = render(
     <QueryClientProvider client={client}>
-      <AddConnection ns={ns} onClose={() => {}} onCreated={onCreated} />
+      <SessionProvider session={session}>
+        <AddConnection ns={ns} onClose={() => {}} onCreated={onCreated} />
+      </SessionProvider>
     </QueryClientProvider>,
   );
   return { client, onCreated, view };

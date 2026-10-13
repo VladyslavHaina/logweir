@@ -12,6 +12,7 @@ import type { Backup, Schedule } from "../api/types";
 import { CadenceError, checkZone, matchPreset, nextRuns, compilePreset, type PresetKind } from "./cadence";
 import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";
 import { backups, connections, hex, protectionPolicies, requestId, schedules } from "./data";
+import { destinationStore } from "./destinations";
 import { mockFetch } from "./fetch";
 
 type S = components["schemas"];
@@ -50,12 +51,6 @@ async function passthrough(request: Request, body?: string): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.set(PASS, "1");
   return mockFetch(new Request(request.url, { method: request.method, headers, ...(body === undefined ? {} : { body }) }));
-}
-
-async function unanswered(response: Response): Promise<boolean> {
-  if (response.status !== 404) return false;
-  const body = (await response.clone().json()) as { detail?: string };
-  return String(body.detail).startsWith("The prototype has no mock");
 }
 
 /** A name the route derives from the request key: `sch-` and 26 base32 characters. */
@@ -187,7 +182,8 @@ function refusals(ns: string, body: Policy, selectionPath: "" | "topicSelection.
   topics.forEach((t, i) => {
     if (/[*?[\]{}]/.test(t)) errors.push({ field: `${selectionPath}topics[${i}]`, code: "pattern_not_allowed", message: "a topic name, never a pattern" });
   });
-  if (body.destinationRef && !DESTINATIONS.some((d) => d.name === body.destinationRef!.name)) {
+  // The destinations the Destinations page shows (mock/destinations.ts): one store.
+  if (body.destinationRef && !destinationStore().some((d) => d.namespace === ns && d.name === body.destinationRef!.name)) {
     errors.push({ field: "destinationRef.name", code: "not_found", message: `no BackupDestination named ${body.destinationRef.name} in ${ns}` });
   }
   if (!body.destinationRef && !body.archive) errors.push({ field: "archive", code: "required", message: "exactly one of archive or destinationRef" });
@@ -379,59 +375,6 @@ const retentionPolicies: S["RetentionPolicyView"][] = [
   },
 ];
 
-// ------------------------------------- answered only when no other mock does
-
-const DESTINATIONS: S["DestinationSummary"][] = [
-  {
-    name: "primary",
-    uid: "0c9b4c1e-58a2-4a77-9b0b-3d1f7d41c2aa",
-    generation: 3,
-    canonicalUrl: "s3://logweir-team-a/archive",
-    endpoint: "https://minio.storage.svc:9000",
-    addressing: "pathStyle",
-    transport: "tls",
-    default: true,
-    description: "The team's archive bucket",
-    status: { valid: true, reason: "AccessVerified", observedAt: iso(NOW - 20 * MINUTE) },
-  },
-  {
-    name: "dr-archive",
-    uid: "8e0e7f1a-1b44-4f0b-9d0c-62b9d2f0a7c3",
-    generation: 1,
-    canonicalUrl: "s3://logweir-team-a-dr/archive",
-    addressing: "virtualHosted",
-    transport: "tls",
-    default: false,
-    status: { valid: true, reason: "AccessVerified", observedAt: iso(NOW - 2 * HOUR) },
-  },
-];
-
-const DISCOVERED: Record<string, string[]> = {
-  "orders-prod": ["orders", "orders-dlq", "payments", "payments-dlq", "refunds", "inventory", "shipments", "__consumer_offsets"],
-};
-
-function discovery(ns: string, connection: string): S["TopicDiscovery"] {
-  const names = DISCOVERED[connection] ?? [];
-  return {
-    id: `disc-${connection}`,
-    namespace: ns,
-    uid: hex(connection.length * 31, 8) + "-0000-4000-8000-" + hex(connection.length, 12),
-    resourceVersion: "70400",
-    state: "succeeded",
-    terminal: true,
-    stale: false,
-    staleReasons: [],
-    truncated: false,
-    chunkCount: 1,
-    conditions: [],
-    connection: { name: connection },
-    observedAt: iso(NOW - 3 * HOUR),
-    freshUntil: iso(NOW + 21 * HOUR),
-    counts: { listed: names.length, returned: names.length, internalExcluded: 0, errored: 0 },
-    visibility: { state: "unknown", basis: ["DescribeClusterAllowed"] },
-  };
-}
-
 const checks = new Map<string, { at: number; request: S["BackupPreflightRequest"] }>();
 
 function readiness(ns: string, id: string): S["Preflight"] | undefined {
@@ -529,32 +472,5 @@ export async function schedulesMock(request: Request): Promise<Response | null> 
     return item ? json(200, { item, requestId: requestId() }) : problem(404, "not_found", `No preflight ${p[2]}.`);
   }
 
-  // Another page's routes: the shared mock first, these only when it has none.
-  const fallback =
-    method !== "GET"
-      ? null
-      : (p = path.match(/^\/namespaces\/([^/]+)\/destinations$/))
-        ? () => json(200, { items: DESTINATIONS, page: { limit: 50, snapshot: "1" }, requestId: requestId() })
-        : (p = path.match(/^\/namespaces\/([^/]+)\/connections\/([^/]+)\/topic-discoveries$/)) && url.searchParams.get("latest") === "true"
-          ? () => {
-              const known = DISCOVERED[p![2]!];
-              const d = known ? discovery(p![1]!, p![2]!) : undefined;
-              return json(200, { ...(d ? { lastSuccessful: d, latestAttempt: d } : {}), requestId: requestId() });
-            }
-          : (p = path.match(/^\/namespaces\/([^/]+)\/topic-discoveries\/disc-([^/]+)\/topics$/))
-            ? () => {
-                const names = DISCOVERED[p![2]!] ?? [];
-                return json(200, {
-                  items: names.map((name, i) => ({ name, partitions: [3, 1, 6, 1, 3, 12, 3, 50][i] ?? 3, internal: name.startsWith("__"), expected: false })),
-                  page: { limit: 200, snapshot: "disc" },
-                  scan: { chunksScanned: 1, complete: true },
-                  requestId: requestId(),
-                });
-              }
-            : null;
-  if (fallback) {
-    const shared = await passthrough(request);
-    return (await unanswered(shared)) ? fallback() : shared;
-  }
   return null;
 }

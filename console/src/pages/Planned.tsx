@@ -10,13 +10,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
 const PLANNED: Record<string, string> = {
-  schedules: "Schedules: list, guided create with a cadence preview, suspend and resume, retention.",
-  protection: "Protection policies: objective, newest point, alerts, and the schedules behind each.",
   approvals: "Approvals: requests waiting for you, the two-person Approve page, and the history.",
-  catalog: "The recovery catalog: every point in the archive, its availability and its verification.",
-  trust: "Trust: the keys the controller accepts, read-only.",
-  connections: "Connections: add a Kafka cluster (the credential typed once), check it, discover topics.",
-  destinations: "Destinations: saved buckets, access rotation, an access test, and what uses each.",
 };
 
 /** The current console's address for the same page (ui/README.md "Routes"). */
@@ -25,19 +19,9 @@ export function currentConsoleHref(ns: string, segments: string[]): string {
   const q = `ns=${encodeURIComponent(ns)}`;
   const one = (route: string) => `/ui/#/${route}?${q}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
   switch (section) {
-    case "backups":
-      return one("backups");
     case "restores":
       return name === "new" ? `/ui/#/restore?${q}` : one("history");
-    case "connections":
-      return one("clusters");
-    case "trust":
-      return "/ui/#/keys";
-    case "schedules":
-    case "protection":
     case "approvals":
-    case "catalog":
-    case "destinations":
       return one(section);
     default:
       return `/ui/#/clusters?${q}`;
@@ -66,8 +50,7 @@ export function Planned() {
                 </Button>
               }
             >
-              {PLANNED[section] ?? "This page does not exist."} The prototype draws the overview, backups, the restore wizard,
-              restores and the cutover review.
+              {PLANNED[section] ?? "This page does not exist."} The prototype draws every other page in the navigation.
             </Empty>
           ) : (
             <Empty
@@ -86,7 +69,7 @@ export function Planned() {
               }
             >
               {known
-                ? "This preview of the rebuilt console has the overview so far. The page you asked for is still in the current console, with the same session."
+                ? "This preview of the rebuilt console does not have this page yet. It is still in the current console, with the same session."
                 : "Nothing in the console has this address."}
             </Empty>
           )}

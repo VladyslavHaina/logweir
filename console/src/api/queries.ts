@@ -12,7 +12,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
 import { useCan } from "./session";
-import type { Backup, CreateRestoreRequest, Restore } from "./types";
+import type { Backup, Connection, CreateRestoreRequest, Restore } from "./types";
 
 const LIVE_MS = 1500;
 
@@ -102,13 +102,27 @@ export function useOperation(ns: string, kind: "backup" | "restore", name: strin
   });
 }
 
-export function useConnections(ns: string) {
+/** `reReadMs` lets a page that watches a probe in flight re-read the list while it runs. */
+export function useConnections(ns: string, reReadMs?: (items: Connection[], reads: number) => number | false) {
   return useQuery({
     queryKey: keys.list("connections", ns),
     enabled: useCan(ns, "connectionsRead"),
     queryFn: ({ signal }) =>
       listAll("connections", (cursor) =>
         call(() => api.GET("/api/v1/namespaces/{ns}/connections", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+      ),
+    refetchInterval: (q) => (reReadMs && q.state.data ? reReadMs(q.state.data, q.state.dataUpdateCount) : false),
+  });
+}
+
+/** The namespace's saved destinations: the Destinations page, a schedule's and a catalog's pick-lists. */
+export function useDestinations(ns: string) {
+  return useQuery({
+    queryKey: keys.list("destinations", ns),
+    enabled: useCan(ns, "destinations"),
+    queryFn: ({ signal }) =>
+      listAll("destinations", (cursor) =>
+        call(() => api.GET("/api/v1/namespaces/{ns}/destinations", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
   });
 }

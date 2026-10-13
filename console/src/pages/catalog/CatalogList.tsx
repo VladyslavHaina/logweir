@@ -40,7 +40,7 @@ export function CatalogList() {
   const narrow = useNarrow();
   const [connecting, setConnecting] = useState(false);
   const mayConnect = flags?.catalogConnect === true;
-  const items = catalogs.data?.items ?? [];
+  const items = catalogs.data ?? [];
   const connectButton = (variant: "primary" | "secondary") =>
     mayConnect ? (
       <Button variant={variant} onClick={() => setConnecting(true)}>

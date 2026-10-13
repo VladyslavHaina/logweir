@@ -4,7 +4,8 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Alert, AlertActionLink, Breadcrumb, BreadcrumbItem, Card, CardBody, PageSection } from "@patternfly/react-core";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import { ApiError } from "../../api/client";
-import { mintIntent, useCreateSchedule, useDestinationChoices, useEditPolicy, useSchedule } from "../../api/schedules";
+import { useDestinations } from "../../api/queries";
+import { mintIntent, useCreateSchedule, useEditPolicy, useSchedule } from "../../api/schedules";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { createBody, draftValues, editBody, outcomeOf, placeFieldErrors, valuesOf } from "./model";
@@ -37,7 +38,7 @@ export function ScheduleCreate() {
   const { ns } = useParams({ from: "/$ns/schedules/new" });
   const navigate = useNavigate();
   const grant = useGrant(ns);
-  const destinations = useDestinationChoices(ns);
+  const destinations = useDestinations(ns);
   const create = useCreateSchedule(ns);
   // One intent per draft: a double click, or a resend after no answer, is ONE schedule.
   const [intent, setIntent] = useState(() => mintIntent("schedule"));

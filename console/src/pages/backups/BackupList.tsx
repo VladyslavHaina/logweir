@@ -3,7 +3,6 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
-  Alert,
   Button,
   Card,
   Content,
@@ -101,7 +100,7 @@ export function Backups() {
   const narrow = useNarrow();
   const mayRestore = flags?.restoreCreate === true;
 
-  const all = list.data?.items ?? [];
+  const all = list.data ?? [];
   const rows = useMemo(
     () => byCreated(all.filter((b) => matches(b, filter) && searchMatches(b, search.trim())), sortDesc),
     [all, search, filter, sortDesc],
@@ -166,12 +165,6 @@ export function Backups() {
       />
       {runNow && <BackUpNow ns={ns} open={runNow} onClose={() => setRunNow(false)} />}
       <PageSection>
-        {list.data?.partial && (
-          <Alert isInline variant="info" title={`Showing the first ${count(all.length)} runs`} className="lw-ev-gap-bottom">
-            This namespace holds more runs than this page reads at once. Use the search to find an older run by name, or
-            list them with kubectl.
-          </Alert>
-        )}
         <Card>
           <Toolbar clearAllFilters={clear}>
             <ToolbarContent>

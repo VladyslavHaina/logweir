@@ -2,7 +2,7 @@
 // and whether the controller has judged it.
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { Alert, Button, Card, Content, PageSection } from "@patternfly/react-core";
+import { Button, Card, Content, PageSection } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import CloudUploadAltIcon from "@patternfly/react-icons/dist/esm/icons/cloud-upload-alt-icon";
 import { mayStart, useGrant } from "../../api/connections";
@@ -35,11 +35,11 @@ export function DestinationList() {
   const navigate = useNavigate();
   const grant = useGrant(ns);
   const readable = grant.can?.destinations !== false;
-  const list = useDestinationList(ns, readable);
+  const list = useDestinationList(ns);
   const narrow = useNarrow();
   const [adding, setAdding] = useState(false);
   const mayAdd = mayStart(grant, "destinations") && Boolean(grant.can?.credentialWrite);
-  const items = [...(list.data?.items ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  const items = [...(list.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
   const add = (
     <Button variant="primary" onClick={() => setAdding(true)}>
       Add a destination
@@ -125,7 +125,6 @@ export function DestinationList() {
                 </Table>
               )}
               <div className="lw-pad">
-                {list.data.more && <Alert isInline isPlain variant="info" title="Only the first 200 destinations are shown." />}
                 {!items.some((d) => d.default) && (
                   <Content component="p" className="lw-subtle lw-small">
                     No destination here is marked default, so a new schedule starts with none chosen. {DEFAULT_ANNOTATION_RESIDUAL}

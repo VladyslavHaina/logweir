@@ -6,9 +6,8 @@
 // create sends, minus the source, which never changes.
 import { z } from "zod";
 import type { Backup } from "../../api/types";
-import { ApiError } from "../../api/client";
+import { ApiError, outcomeUnknown } from "../../api/client";
 import {
-  ProblemError,
   type CadenceQuery,
   type CreateScheduleRequest,
   type DestinationSummary,
@@ -337,7 +336,7 @@ export function fieldOf(path: string): keyof PolicyValues | undefined {
 export function placeFieldErrors(error: unknown): { fields: Partial<Record<keyof PolicyValues, string>>; unmatched: string[] } {
   const fields: Partial<Record<keyof PolicyValues, string>> = {};
   const unmatched: string[] = [];
-  if (error instanceof ProblemError) {
+  if (error instanceof ApiError) {
     for (const e of error.fieldErrors) {
       const field = fieldOf(e.field);
       if (field && !fields[field]) fields[field] = e.message;
@@ -352,8 +351,7 @@ export type Outcome = "unknown" | "invalid" | "conflict" | "precondition" | "ref
 /** What a failed write means. No answer, a timeout or a 5xx is UNKNOWN: the
  *  object may or may not exist, and only resending the same request can tell. */
 export function outcomeOf(error: unknown): Outcome {
-  if (!(error instanceof ApiError)) return "unknown";
-  if (error.status === 408 || error.status >= 500) return "unknown";
+  if (!(error instanceof ApiError) || outcomeUnknown(error)) return "unknown";
   if (error.status === 412) return "precondition";
   if (error.status === 409) return "conflict";
   if (error.status === 400 || error.status === 422) return "invalid";

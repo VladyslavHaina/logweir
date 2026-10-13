@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import type { components } from "../../api/schema";
 import type { Schedule } from "../../api/schedules";
+import { SessionGate } from "../../app/SessionGate";
 import { scheduleRoutes } from "./routes";
 import { BackUpNow } from "./BackUpNow";
 import { NextRuns } from "./parts";
@@ -25,7 +26,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; key: string | null; body: unknown }[],
-  answer: (_r: Request, _path: string, _body: unknown): Response | Promise<Response> | null => null,
+  answer: (() => null) as (r: Request, path: string, body: unknown) => Response | Promise<Response> | null,
 }));
 
 vi.mock("../../mock/fetch", () => ({
@@ -37,6 +38,8 @@ vi.mock("../../mock/fetch", () => ({
     net.sent.push({ method: request.method, path, key: request.headers.get("Idempotency-Key"), body });
     const r = await net.answer(request, path, body);
     if (r) return r;
+    // The session gate's read, when a row's network does not answer it itself.
+    if (path === "/session") return json(200, session(ALL));
     return json(404, { code: "not_found", detail: `no fake for ${request.method} ${path}` });
   },
 }));
@@ -53,8 +56,20 @@ const ALL = {
   preflight: true,
 } as Partial<S["Capabilities"]>;
 
+/** The reads every role here holds (the console sends no read the session does not grant). */
+const READS = {
+  schedulesRead: true,
+  backupsRead: true,
+  connectionsRead: true,
+  destinations: true,
+  topicDiscovery: true,
+  retention: true,
+  protection: true,
+} as Partial<S["Capabilities"]>;
+
 function session(caps: Partial<S["Capabilities"]>) {
-  return { actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: caps, namespaces: [{ name: "team-a", roles: ["operator"], capabilities: caps }], requestId: "r" };
+  const all = { ...READS, ...caps };
+  return { actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: all, namespaces: [{ name: "team-a", roles: ["operator"], capabilities: all }], requestId: "r" };
 }
 
 const schedule = (over: Partial<Schedule> = {}): Schedule => ({ ...(policyFixture.item as unknown as Schedule), namespace: "team-a", name: "nightly", ...over });
@@ -70,7 +85,7 @@ function renderAt(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
   return router;
@@ -83,7 +98,7 @@ function renderWith(element: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
 }

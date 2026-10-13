@@ -8,6 +8,8 @@ import type { ReactNode } from "react";
 import { api } from "../../api/client";
 import type { Connection, Preflight } from "../../api/connections";
 import type { components } from "../../api/schema";
+import { SessionProvider } from "../../api/session";
+import { session } from "../../mock/data";
 import { ConnectionCheck } from "./ConnectionDetail";
 import { Discovery } from "./Discovery";
 import { CheckResult, LastTestLine } from "./parts";
@@ -24,7 +26,11 @@ const text = () => document.body.textContent ?? "";
 
 function withClient(node: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={qc}>{node}</QueryClientProvider>);
+  return render(
+    <QueryClientProvider client={qc}>
+      <SessionProvider session={session}>{node}</SessionProvider>
+    </QueryClientProvider>,
+  );
 }
 
 function answer(data: unknown) {

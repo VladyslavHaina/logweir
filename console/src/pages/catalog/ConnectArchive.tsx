@@ -29,7 +29,6 @@ import {
 import { ApiError } from "../../api/client";
 import {
   LocalRefusal,
-  ProblemError,
   mintKey,
   outcomeOf,
   useConnectArchive,
@@ -75,7 +74,7 @@ export function connectRefusalWords(error: unknown, name: string): string {
   if (error instanceof ApiError && error.code === "state_conflict") {
     return `A catalog named ${name} already exists and this request did not create it, so nothing was changed and nothing was adopted. Choose another name.`;
   }
-  if (error instanceof ProblemError && error.fieldErrors.length > 0) return `Catalog ${name} was not created: fix the fields marked below. Your input is kept.`;
+  if (error instanceof ApiError && error.fieldErrors.length > 0) return `Catalog ${name} was not created: fix the fields marked below. Your input is kept.`;
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -91,7 +90,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
     defaultValues: { name: "", destination: "", syncMode: "full" },
   });
   const { errors } = form.formState;
-  const list = choices.data?.items ?? null;
+  const list = choices.data ?? null;
 
   const submit = form.handleSubmit((values) => {
     if (connect.isPending) return;
@@ -117,7 +116,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
         },
         onError: (error) => {
           const missed: string[] = [];
-          for (const fe of error instanceof ProblemError ? error.fieldErrors : []) {
+          for (const fe of error instanceof ApiError ? error.fieldErrors : []) {
             const field = connectFieldOf(fe.field);
             if (field) form.setError(field, { type: "server", message: fe.message });
             else missed.push(`${fe.field}: ${fe.message}`);
