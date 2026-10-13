@@ -171,6 +171,7 @@ interface Scenario {
   brokers?: BrokerFact;
   values: Partial<WizardValues>;
   /** The edits the old page applies for the same inputs, in its refresh order. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the old wizard's untyped state (ui/pages/restore-wizard.js)
   edits: (state: Record<string, any>) => void;
 }
 

@@ -5,6 +5,7 @@
 // every topic it left, and a failed run offers a retry to a fresh target.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, render, screen } from "@testing-library/react";
+import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 // @ts-expect-error ui/ is plain JavaScript; the line readers are compared with it.
@@ -121,7 +122,7 @@ function showRestore(restore: Restore, operation?: OperationView) {
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [`/t/restores/${restore.name}`] }) });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
 }

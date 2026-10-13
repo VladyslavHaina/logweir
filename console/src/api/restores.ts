@@ -3,7 +3,8 @@
 // while it is not final. Every write carries the Idempotency-Key the plan's minted
 // name gives it, so a second click, a lost answer or a reload never makes a second object.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, api, createHeaders, unwrap } from "./client";
+import { ApiError, LIST_PAGE_BUDGET, LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
+import { keys, useBackups, useConnections, useDestinations, useOperation, useRestore, useRestores } from "./queries";
 import { grantOf, useSessionDoc } from "./session";
 import type { components } from "./schema";
 
@@ -22,50 +23,31 @@ export type RestoreRouting = S["RestoreRoutingView"];
 export type TopicDiscovery = S["TopicDiscovery"];
 export type Capabilities = S["Capabilities"];
 
-const LIVE_MS = 1500;
-const PAGE = 200;
-const PAGE_BUDGET = 25;
+const PAGE = LIST_PAGE_SIZE;
+const PAGE_BUDGET = LIST_PAGE_BUDGET;
 
+/** R1's keys where the read is the shared one; the rest have their own kind. */
 export const restoreKeys = {
-  list: (ns: string) => ["restores", ns] as const,
-  item: (ns: string, name: string) => ["restores", ns, name] as const,
-  operation: (ns: string, name: string) => ["operations", ns, "restore", name] as const,
-  approvalRequest: (ns: string, name: string) => ["restores", ns, name, "approval-request"] as const,
-  policy: (ns: string) => ["approval-policy", ns] as const,
+  list: (ns: string) => keys.list("restores", ns),
+  item: (ns: string, name: string) => keys.item("restores", ns, name),
+  operation: (ns: string, name: string) => keys.operation(ns, "restore", name),
+  /** Null when no request was made: kept apart from the Approvals page's read, which throws. */
+  approvalRequest: (ns: string, name: string) => ["restore-approval-requests", ns, name] as const,
+  /** The fail-safe reading (null when unreadable), kept apart from the Approvals page's. */
+  policy: (ns: string) => ["approval-policy", ns, "fail-safe"] as const,
   preflight: (ns: string, id: string) => ["preflights", ns, id] as const,
 };
 
-/** A refusal that keeps the problem's field errors. */
-export class RestoreProblem extends ApiError {
-  readonly fieldErrors: S["FieldError"][];
-  constructor(status: number, problem: Partial<S["Problem"]> | undefined) {
-    super(status, problem);
-    this.fieldErrors = Array.isArray(problem?.errors) ? problem.errors : [];
+export { outcomeUnknown } from "./client";
+
+/** A read whose 404 is an answer (nothing there), not an error. */
+async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
   }
-}
-
-/** A write that reached no answer, or a gateway that gave up: it may or may not have landed. */
-export function outcomeUnknown(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return true;
-  return error.status === 502 || error.status === 503 || error.status === 504 || error.code === "upstream_timeout";
-}
-
-function unwrapWrite<T>(result: { data?: T; error?: unknown; response: Response }): T {
-  if (result.data !== undefined && result.response.ok) return result.data;
-  throw new RestoreProblem(result.response.status, result.error as Partial<S["Problem"]> | undefined);
-}
-
-/** Every page of a list, following nextCursor. A list past the budget is an error, never a prefix shown as the whole. */
-async function listAll<T>(what: string, read: (cursor: string | undefined) => Promise<{ items: T[]; page: { nextCursor?: string | null } }>): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  for (let pages = 0; pages < PAGE_BUDGET; pages += 1) {
-    const page = await read(cursor);
-    items.push(...page.items);
-    if (!page.page.nextCursor) return items;
-    cursor = page.page.nextCursor;
-  }
-  throw new ApiError(0, { code: "list_too_large" as S["Problem"]["code"], detail: `This namespace holds more than ${items.length} ${what}, more than the console reads in one list.` });
 }
 
 /** What this session may do in a namespace. */
@@ -76,40 +58,15 @@ export function useCapabilities(ns: string): Capabilities | undefined {
 
 // ------------------------------------------------------------------- reads
 
-const moving = (items: { operation: { terminal: boolean } }[] | undefined) => (items?.some((i) => !i.operation.terminal) ? LIVE_MS : false);
-const notFound = (error: unknown) => error instanceof ApiError && (error.status === 404 || error.status === 403);
+/** The namespace's restores, newest first: R1's list, one cache with Approvals and the Overview. */
+export const useRestoreList = useRestores;
+/** One restore: R1's read. */
+export const useRestoreItem = useRestore;
 
-export function useRestoreList(ns: string) {
-  return useQuery({
-    queryKey: restoreKeys.list(ns),
-    queryFn: ({ signal }) =>
-      listAll("restores", async (cursor) =>
-        unwrap(await api.GET("/api/v1/namespaces/{ns}/restores", { params: { path: { ns }, query: { limit: PAGE, ...(cursor ? { cursor } : {}) } }, signal })),
-      ),
-    refetchInterval: (q) => moving(q.state.data),
-  });
-}
-
-export function useRestoreItem(ns: string, name: string) {
-  return useQuery({
-    queryKey: restoreKeys.item(ns, name),
-    queryFn: async ({ signal }) => unwrap(await api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal })).item,
-    refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? LIVE_MS : false),
-    retry: (count, error) => !notFound(error) && count < 2,
-  });
-}
-
-/** THE LIVE WATCH: the run's operation, re-read every second while it is not final.
- *  (R1's operation stream feeds the same cache key when the page is served live.) */
-export function useRestoreOperation(ns: string, name: string, enabled = true) {
-  return useQuery({
-    queryKey: restoreKeys.operation(ns, name),
-    enabled,
-    queryFn: async ({ signal }) =>
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "restore", name } }, signal })).item,
-    refetchInterval: (q) => (q.state.data && !q.state.data.terminal ? 1000 : false),
-    retry: (count, error) => !notFound(error) && count < 2,
-  });
+/** THE LIVE WATCH: the run's operation (R1's read), re-read every second while it is not
+ *  final unless the run's event stream (stream.ts) is carrying it. */
+export function useRestoreOperation(ns: string, name: string, streaming = false) {
+  return useOperation(ns, "restore", name, streaming);
 }
 
 /** The two-person request a restore waits on, when there is one (404 when none was made). */
@@ -117,11 +74,8 @@ export function useApprovalRequest(ns: string, name: string, enabled: boolean) {
   return useQuery({
     queryKey: restoreKeys.approvalRequest(ns, name),
     enabled,
-    queryFn: async ({ signal }) => {
-      const r = await api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal });
-      if (r.response.status === 404) return null;
-      return unwrap(r).item;
-    },
+    queryFn: ({ signal }) =>
+      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item),
     refetchInterval: 5000,
   });
 }
@@ -135,7 +89,7 @@ export function useApprovalPolicy(ns: string) {
       try {
         // The published operation names a stray `name` path parameter this route does not have;
         // openapi-fetch drops what the path does not use.
-        return unwrap(await api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns, name: "" } }, signal })).item;
+        return (await call(() => api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns, name: "" } }, signal }))).item;
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         return null;
@@ -146,59 +100,32 @@ export function useApprovalPolicy(ns: string) {
   });
 }
 
-export function useBackupList(ns: string) {
-  return useQuery({
-    queryKey: ["backups", ns, "all"],
-    queryFn: ({ signal }) =>
-      listAll("backups", async (cursor) =>
-        unwrap(await api.GET("/api/v1/namespaces/{ns}/backups", { params: { path: { ns }, query: { limit: PAGE, ...(cursor ? { cursor } : {}) } }, signal })),
-      ),
-  });
-}
-
-export function useConnectionList(ns: string) {
-  return useQuery({
-    queryKey: ["connections", ns, "all"],
-    queryFn: ({ signal }) =>
-      listAll("connections", async (cursor) =>
-        unwrap(await api.GET("/api/v1/namespaces/{ns}/connections", { params: { path: { ns }, query: { limit: PAGE, ...(cursor ? { cursor } : {}) } }, signal })),
-      ),
-  });
-}
-
-export function useDestinationList(ns: string, enabled: boolean) {
-  return useQuery({
-    queryKey: ["destinations", ns, "all"],
-    enabled,
-    queryFn: ({ signal }) =>
-      listAll("destinations", async (cursor) =>
-        unwrap(await api.GET("/api/v1/namespaces/{ns}/destinations", { params: { path: { ns }, query: { limit: PAGE, ...(cursor ? { cursor } : {}) } }, signal })),
-      ),
-  });
-}
+/** The shared lists (R1's keys, one cache with the pages that own them). */
+export const useBackupList = useBackups;
+export const useConnectionList = useConnections;
+export const useDestinationList = useDestinations;
 
 export async function readDestination(ns: string, name: string, signal?: AbortSignal): Promise<Destination | null> {
-  const r = await api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal });
-  if (r.response.status === 404) return null;
-  return unwrap(r).item;
+  return orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal }))).item);
 }
 
+/** One destination, null when it does not exist (kept apart from R2's read, which throws on 404). */
 export function useDestination(ns: string, name: string) {
   return useQuery({
-    queryKey: ["destinations", ns, "item", name],
+    queryKey: ["destinations-or-null", ns, name],
     enabled: name.length > 0,
     queryFn: ({ signal }) => readDestination(ns, name, signal),
   });
 }
 
 export async function listCatalogs(ns: string, signal?: AbortSignal): Promise<CatalogView[]> {
-  return listAll("catalogs", async (cursor) =>
-    unwrap(await api.GET("/api/v1/namespaces/{ns}/catalogs", { params: { path: { ns }, query: { limit: PAGE, ...(cursor ? { cursor } : {}) } }, signal })),
+  return listAll("catalogs", (cursor) =>
+    call(() => api.GET("/api/v1/namespaces/{ns}/catalogs", { params: { path: { ns }, query: { limit: PAGE, cursor } }, signal })),
   );
 }
 
 export async function readCatalog(ns: string, name: string, signal?: AbortSignal): Promise<CatalogView> {
-  return unwrap(await api.GET("/api/v1/namespaces/{ns}/catalogs/{name}", { params: { path: { ns, name } }, signal })).item;
+  return (await call(() => api.GET("/api/v1/namespaces/{ns}/catalogs/{name}", { params: { path: { ns, name } }, signal }))).item;
 }
 
 export interface PointSearch {
@@ -214,9 +141,10 @@ export async function findCatalogPoint(ns: string, catalog: string, match: (p: P
   const out: PointSearch = { entry: null, viewExpired: false, backupVerdictsIncomplete: null, incomplete: false, budgetExhausted: false };
   let cursor: string | undefined;
   for (let read = 0; read < PAGE_BUDGET; read += 1) {
-    const page = unwrap(
-      await api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-        params: { path: { ns, name: catalog }, query: { limit: PAGE, ...(cursor ? { cursor } : {}), ...(selectable ? { selectable: "true" as const } : {}) } },
+    const at = cursor;
+    const page = await call(() =>
+      api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
+        params: { path: { ns, name: catalog }, query: { limit: PAGE, ...(at ? { cursor: at } : {}), ...(selectable ? { selectable: "true" as const } : {}) } },
         signal,
       }),
     );
@@ -247,9 +175,10 @@ export async function readCatalogOffers(ns: string, signal?: AbortSignal) {
       let cursor: string | undefined;
       let complete = false;
       for (let read = 0; read < PAGE_BUDGET; read += 1) {
-        const page = unwrap(
-          await api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-            params: { path: { ns, name: catalog.name }, query: { limit: PAGE, selectable: "true", ...(cursor ? { cursor } : {}) } },
+        const at = cursor;
+        const page = await call(() =>
+          api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
+            params: { path: { ns, name: catalog.name }, query: { limit: PAGE, selectable: "true", ...(at ? { cursor: at } : {}) } },
             signal,
           }),
         );
@@ -272,17 +201,19 @@ export async function readCatalogOffers(ns: string, signal?: AbortSignal) {
 
 /** A Backup's own receipt digest, from its operation's evidence (the list does not carry it). */
 export async function readBackupReceiptDigest(ns: string, name: string, signal?: AbortSignal): Promise<string | null> {
-  const op = unwrap(await api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "backup", name } }, signal })).item;
+  const op = (await call(() => api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "backup", name } }, signal }))).item;
   return op.evidence.payloadSha256 ?? null;
 }
 
 /** The target's newest topic discoveries (`?latest=true`), for its broker count. */
 export async function readLatestDiscoveries(ns: string, connection: string, signal?: AbortSignal) {
-  const r = await api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
-    params: { path: { ns, name: connection }, query: { latest: true } },
-    signal,
-  });
-  return unwrap(r) as unknown as { latestAttempt?: TopicDiscovery | null; lastSuccessful?: TopicDiscovery | null };
+  const r = await call(() =>
+    api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
+      params: { path: { ns, name: connection }, query: { latest: true } },
+      signal,
+    }),
+  );
+  return r as unknown as { latestAttempt?: TopicDiscovery | null; lastSuccessful?: TopicDiscovery | null };
 }
 
 // ------------------------------------------------------------------- writes
@@ -290,23 +221,23 @@ export async function readLatestDiscoveries(ns: string, connection: string, sign
 /** Start a restore Preflight for exactly the prepared bytes. One deliberate click is one
  *  observation of mutable state, so each click mints its own key. */
 export async function startPreflight(ns: string, body: S["CreatePreflightRequest"], key: string): Promise<Preflight> {
-  return unwrapWrite(await api.POST("/api/v1/namespaces/{ns}/preflights", { params: { path: { ns }, header: createHeaders(key) }, body })).item;
+  return (await call(() => api.POST("/api/v1/namespaces/{ns}/preflights", { params: { path: { ns }, header: createHeaders(key) }, body }))).item;
 }
 
 /** Read a preflight against the hash on screen: the server recomputes `applicable` and `stale`. */
 export async function readPreflight(ns: string, id: string, planHash: string, signal?: AbortSignal): Promise<Preflight> {
-  return unwrap(await api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id }, query: planHash ? { planHash } : {} }, signal })).item;
+  return (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id }, query: planHash ? { planHash } : {} }, signal }))).item;
 }
 
 export async function cancelPreflight(ns: string, id: string): Promise<void> {
-  unwrapWrite(await api.POST("/api/v1/namespaces/{ns}/preflights/{id}:cancel", { params: { path: { ns, id }, header: { Origin: window.location.origin } } }));
+  await call(() => api.POST("/api/v1/namespaces/{ns}/preflights/{id}:cancel", { params: { path: { ns, id }, header: { Origin: window.location.origin } } }));
 }
 
 export function useCreateRestore(ns: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ body, key }: { body: S["CreateRestoreRequest"]; key: string }) =>
-      unwrapWrite(await api.POST("/api/v1/namespaces/{ns}/restores", { params: { path: { ns }, header: createHeaders(key) }, body })),
+      call(() => api.POST("/api/v1/namespaces/{ns}/restores", { params: { path: { ns }, header: createHeaders(key) }, body })),
     onSuccess: () => client.invalidateQueries({ queryKey: restoreKeys.list(ns) }),
   });
 }

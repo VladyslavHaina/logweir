@@ -6,6 +6,7 @@
 // fetch is the real mock with a recorder in front, so every request is seen.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import type { components } from "../../api/schema";
@@ -55,7 +56,7 @@ function renderAt(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
   return router;

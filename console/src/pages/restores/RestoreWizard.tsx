@@ -2,6 +2,7 @@
 // Point, topics and time, target, readiness, review. The plan bytes are rendered in the
 // browser in the runner's grammar (./plan.ts, held to ui/'s goldens), hashed with
 // crypto.subtle, and sent unchanged; the hash on screen is the hash the approver signs.
+import { ApiError } from "../../api/client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -23,7 +24,6 @@ import {
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import {
-  RestoreProblem,
   cancelPreflight,
   readDestination,
   readCatalogOffers,
@@ -235,7 +235,7 @@ function WizardBody({
   const routeRefusal = routed.state === "missing" || routed.state === "unusable" ? refusalSentence(routed) : "";
 
   const offers = useQuery({ queryKey: ["restore-offers", ns], queryFn: ({ signal }) => readCatalogOffers(ns, signal), staleTime: 60_000 });
-  const destinations = useDestinationList(ns, true);
+  const destinations = useDestinationList(ns);
 
   // --------------------------------------------------------------- the form
   const ctxRef = useRef<{ ctx: WizardContext | null; problem: string | null }>({ ctx: null, problem: null });
@@ -462,7 +462,7 @@ function WizardBody({
       void navigate({ to: "/$ns/restores/$name", params: { ns, name: created.item.name } });
     } catch (error) {
       const unmatched: string[] = [];
-      if (error instanceof RestoreProblem) {
+      if (error instanceof ApiError) {
         for (const fe of error.fieldErrors) {
           const input = fieldOfPath(fe.field);
           if (input && input !== "archive") form.setError(input as keyof WizardValues, { type: "server", message: `${fe.message} (${fe.code})` });

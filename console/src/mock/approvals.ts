@@ -594,7 +594,9 @@ async function approvalNamed(ns: string, name: string): Promise<Approval | null>
 export async function approvalsMock(request: Request, method: string, path: string): Promise<Response | null> {
   let p: RegExpMatchArray | null;
 
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approval-policy$/))) {
+  // The demo namespaces' policies; every other namespace's is the restores mock's
+  // (mock/restores.ts), which the wizard's tests switch between modes.
+  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approval-policy$/)) && ownsNamespace(p[1]!)) {
     return json(200, { item: policyOf(p[1]!), requestId: requestId() });
   }
   if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approvals$/))) {

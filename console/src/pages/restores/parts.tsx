@@ -18,7 +18,8 @@ import {
 import { ApiError } from "../../api/client";
 import { RunStatus, StatusLabel } from "../../components/Status";
 import { When } from "../../components/When";
-import { RestoreProblem, outcomeUnknown, type Restore } from "../../api/restores";
+import { outcomeUnknown } from "../../api/client";
+import type { Restore } from "../../api/restores";
 import { restoreVerified, summaryCase } from "./words";
 
 /** A restore's status: green only by the restore badge rule, and a complete verification
@@ -136,7 +137,7 @@ export function WriteProblem({ error, title, unmatched = [] }: { error: unknown;
   return (
     <Alert variant="danger" isInline title={title}>
       <p>{error instanceof Error ? error.message : String(error)}</p>
-      {error instanceof RestoreProblem && unmatched.length > 0 && (
+      {error instanceof ApiError && unmatched.length > 0 && (
         <ul className="lw-plain-list">
           {unmatched.map((u) => (
             <li key={u}>{u}</li>

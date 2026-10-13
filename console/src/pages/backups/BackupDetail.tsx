@@ -574,7 +574,7 @@ export function BackupDetail() {
     <Button
       variant="primary"
       isAriaDisabled={!offer.offer}
-      onClick={() => offer.offer && void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name } })}
+      onClick={() => offer.offer && void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } })}
     >
       Restore this point
     </Button>

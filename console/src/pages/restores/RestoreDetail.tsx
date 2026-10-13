@@ -40,6 +40,7 @@ import {
   type OperationView,
   type Restore,
 } from "../../api/restores";
+import { useOperationStream } from "../../api/stream";
 import type { OperationStage } from "../../api/types";
 import { PageHeader } from "../../components/PageHeader";
 import { StatusLabel } from "../../components/Status";
@@ -159,9 +160,10 @@ function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) 
   const route = approvalRoute(policy.data ?? null);
   const request = useApprovalRequest(ns, r.name, op.awaitingApproval && route === "two-person");
   if (!op.awaitingApproval) return null;
+  // R6's page for this request; it refuses the link if the restore moved since (hash, approval).
   const approvals = (
-    <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
-      Open Approvals
+    <Link to="/$ns/approvals/$name" params={{ ns, name: r.name }} search={{ hash: r.planHash, approval: r.approvalRef.name }}>
+      Open its approval
     </Link>
   );
   if (route === "two-person") {
@@ -259,7 +261,9 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const navigate = useNavigate();
   const caps = useCapabilities(ns);
   const restore = useRestoreItem(ns, name);
-  const operation = useRestoreOperation(ns, name, caps?.operationsRead !== false);
+  // While the run moves, its event stream (R1) writes the operation view and the poll stands down.
+  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && !restore.data.operation.terminal);
+  const operation = useRestoreOperation(ns, name, streaming);
   const [showPlan, setShowPlan] = useState(false);
 
   const breadcrumb = (

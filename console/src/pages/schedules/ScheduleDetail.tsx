@@ -68,7 +68,7 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
         titles={{ paginationAriaLabel: `${label} pages` }}
       />
     ) : null;
-  const restore = (b: Backup) => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name } });
+  const restore = (b: Backup) => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } });
   if (narrow) {
     return (
       <>
@@ -189,7 +189,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
               )}
             </Content>
             {latest && canRestore && (
-              <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: latest.name } })}>
+              <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: latest.name, uid: latest.uid } })}>
                 Restore the latest point
               </Button>
             )}

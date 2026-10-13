@@ -138,7 +138,7 @@ export function Backups() {
         title: "Restore this point",
         isAriaDisabled: !offer.offer,
         tooltipProps: offer.offer ? undefined : { content: offer.reason },
-        onClick: () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name } }),
+        onClick: () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } }),
       },
     ];
   };

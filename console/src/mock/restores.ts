@@ -4,6 +4,7 @@
 // idempotent creates). `restoresMock` answers the routes this group owns;
 // `restoresFallback` answers the reads it needs from other groups' routes (destinations,
 // catalogs, a backup's receipt digest, the target's discovery) only when nothing else did.
+import { destinationStore } from "./destinations";
 import type { components } from "../api/schema";
 import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";
 import { backups, connections, hex, pointOf, requestId, restores as baseRestores } from "./data";
@@ -68,8 +69,11 @@ export function policyFor(ns: string): S["ApprovalPolicyView"] {
 
 // ------------------------------------------------- frozen destination facts
 
-const PRIMARY_UID = "5f0c2a1e-7b3d-4c9a-8e21-6d4b9f0a1c37";
-const PRIMARY_DIGEST = `sha256:${hex(510, 64)}`;
+// One store: the frozen facts are the Destinations page's `primary` (mock/destinations.ts),
+// so the wizard's check of the point's destination agrees with what that page shows.
+const STORED_PRIMARY = destinationStore().find((d) => d.namespace === "team-a" && d.name === "primary");
+const PRIMARY_UID = STORED_PRIMARY?.uid ?? "5f0c2a1e-7b3d-4c9a-8e21-6d4b9f0a1c37";
+const PRIMARY_DIGEST = STORED_PRIMARY?.locationDigest ?? `sha256:${hex(510, 64)}`;
 const VAULT_UID = "a81d7e44-02c9-4b6f-9d3a-1f5e8c7b2a90";
 
 // The mock's runs were frozen against `primary`: the uid and location digest every
@@ -604,7 +608,7 @@ export async function restoresMock(request: Request): Promise<Response | null> {
   if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/approval-policy$/))) return json(200, { item: policyFor(m[1]!), requestId: requestId() });
   if ((m = at(path, /^\/namespaces\/([^/]+)\/restores$/))) {
     await ready;
-    if (method === "GET") return json(200, page(list(m[1]!).map(live).map(({ planBytes: _omit, ...rest }) => rest)));
+    if (method === "GET") return json(200, page(list(m[1]!).map(live).map((x) => ({ ...x, planBytes: undefined }))));
     if (method === "POST") return create(m[1]!, request);
   }
   if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/restores\/([^/:]+)$/))) {
