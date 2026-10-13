@@ -755,6 +755,21 @@ helm-demo:
 gate:
     bash scripts/ci-check.sh
 
+# THE REBUILT CONSOLE (PROD-18.1), `console/`. CI's `console` job is this recipe,
+# run only when console/ or schemas/logweir-api-v1.openapi.json changed, so it is
+# not part of `gate`. Needs Node 22 or 24 and the npm registry.
+# The console's gates: lockfile install, API types, tsc, ESLint, Vitest, build, audit, licences.
+console:
+    cd console && npm ci
+    cd console && npm run check:api
+    cd console && npx tsc --noEmit
+    cd console && npm run lint
+    cd console && npm test
+    cd console && npx vite build
+    cd console && npm run check:dist
+    cd console && npm audit --audit-level=high
+    cd console && npm run check:licences
+
 # THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the twenty-two page files.
 #
 # `Dockerfile.console` COMPILES, so this recipe behaves like

@@ -969,6 +969,59 @@ fn ci_changes_classifies_docs_only_diffs() {
     assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
 }
 
+/// PROD-18.1: the `console` job runs `just console` only when the diff touches
+/// `console/` or the API schema its types are generated from, and whenever the
+/// classifier cannot tell. Each `false` has a `true` twin one path away.
+#[test]
+fn the_console_job_runs_when_the_console_or_its_schema_changed() {
+    let ci = workflow("ci.yml");
+    let job = &ci["jobs"]["console"];
+    assert_eq!(dependencies(job), ["changes"]);
+    assert_eq!(
+        job["if"].as_str(),
+        Some("needs.changes.outputs.console == 'true'")
+    );
+    assert!(job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|s| s["run"] == "just console"));
+    assert_eq!(
+        ci["jobs"]["changes"]["outputs"]["console"].as_str(),
+        Some("${{ steps.classify.outputs.console }}")
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    let base = commit(dir, "crates/a.rs");
+    let console = |a: &str, b: &str| {
+        let out = std::process::Command::new("bash")
+            .arg(root().join("scripts/ci-changes.sh"))
+            .args([a, b, "console"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let docs = commit(dir, "docs/api.md");
+    assert_eq!(console(&base, &docs), "console=false");
+    let page = commit(dir, "console/src/main.tsx");
+    assert_eq!(console(&docs, &page), "console=true");
+    let rust = commit(dir, "crates/b.rs");
+    assert_eq!(console(&page, &rust), "console=false");
+    let schema = commit(dir, "schemas/logweir-api-v1.openapi.json");
+    assert_eq!(console(&rust, &schema), "console=true");
+    let other_schema = commit(dir, "schemas/logweir-receipt.json");
+    assert_eq!(console(&schema, &other_schema), "console=false");
+    let lookalike = commit(dir, "console-notes/x.md");
+    assert_eq!(console(&other_schema, &lookalike), "console=false");
+    assert_eq!(console("", &lookalike), "console=true");
+    // The default question is unchanged.
+    assert_eq!(classify(dir, &base, &docs), "code=false");
+}
+
 /// EVERY IMAGE BASE IS PINNED BY DIGEST. `images.yml` pulls Docker Hub bases
 /// through a public mirror (rate limits); a digest makes the mirror serve
 /// exactly those bytes or nothing, because BuildKit verifies the content

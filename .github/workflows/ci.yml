@@ -20,13 +20,16 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.classify.outputs.code }}
+      console: ${{ steps.classify.outputs.console }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - id: classify
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+          bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" console | tee -a "$GITHUB_OUTPUT"
   check:
     runs-on: ubuntu-24.04
     # ci-check.sh takes 18-24 minutes; at 25 the job on main 4bfc8b4a was
@@ -60,6 +63,22 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
+  # PROD-18.1: the rebuilt console (console/), only when it or the API schema its
+  # types come from changed. `just console` is the whole job: the lockfile
+  # install, the API types, tsc, ESLint, Vitest, the build and its shape, npm
+  # audit and the licence allowlist.
+  console:
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
+      - run: just console
   # FX-41: the e2e suite in four shards BY TEST BINARY, each on its own
   # runner with its own stack, engine build and logweir build (the Rust cache
   # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
