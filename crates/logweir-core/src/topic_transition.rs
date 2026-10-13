@@ -91,6 +91,11 @@ pub const TOPIC_CLASS_DISAGREES: &str = "TopicClassDisagrees";
 pub const TOPIC_OWNER_NOT_CHECKED: &str = "TopicOwnerNotChecked";
 /// Phase 9 found a topic's overrides changed since phase 0 set them.
 pub const CONFIG_CHANGED_SINCE_CREATION: &str = "ConfigChangedSinceCreation";
+/// Phase 9 leaves a topic whose configuration the point did not record
+/// (`captureDenied`, `describeFailed`) on its during-restore settings: an
+/// empty desired set would be the target's defaults read as "no overrides",
+/// which the model never says.
+pub const CONFIGURATION_NOT_RECORDED: &str = "ConfigurationNotRecorded";
 
 /// `Long.MAX_VALUE`, Kafka's "no bound" for the timestamp keys.
 pub const LONG_MAX: &str = "9223372036854775807";
@@ -646,12 +651,16 @@ pub enum TopicStep {
 }
 
 /// **The per-topic transition decision**: an owned topic is exported; a
-/// topic whose overrides changed since creation is skipped; every other
-/// topic gets its whole desired set.
+/// topic whose configuration was not recorded keeps its during-restore
+/// settings; a topic whose overrides changed since creation is skipped; every
+/// other topic gets its whole desired set.
 #[must_use]
 pub fn step_for(topic: &TopicDesired, overrides_now: &BTreeMap<String, String>) -> TopicStep {
     if topic.route == ROUTE_DESIRED_STATE_EXPORT {
         return TopicStep::Export;
+    }
+    if topic.not_recorded {
+        return TopicStep::Skip(CONFIGURATION_NOT_RECORDED.to_string());
     }
     if !unchanged_since_creation(&topic.created_overrides(), overrides_now) {
         return TopicStep::Skip(CONFIG_CHANGED_SINCE_CREATION.to_string());
@@ -887,7 +896,7 @@ pub struct TransitionFailure {
 pub struct TransitionSkip {
     /// The target topic.
     pub topic: String,
-    /// [`CONFIG_CHANGED_SINCE_CREATION`].
+    /// [`CONFIG_CHANGED_SINCE_CREATION`] or [`CONFIGURATION_NOT_RECORDED`].
     pub reason: String,
     /// The topic's whole desired override set.
     pub desired: BTreeMap<String, String>,
@@ -907,7 +916,8 @@ pub struct TransitionOutcome {
     pub applied: Vec<String>,
     /// Topics the transition tried and could not.
     pub failed: Vec<TransitionFailure>,
-    /// Topics left alone because their overrides changed since creation.
+    /// Topics left alone: their overrides changed since creation, or the
+    /// point did not record their configuration.
     pub skipped: Vec<TransitionSkip>,
     /// Owned topics, exported in the desired-state document.
     pub exported: Vec<String>,
@@ -1510,6 +1520,12 @@ mod tests {
         assert!(t.not_recorded);
         assert!(t.at_creation.is_empty() && t.deferred.is_empty() && t.not_applied.is_empty());
         assert_eq!(t.created_overrides().len(), 6);
+        // Phase 9 keeps the safe settings: an empty desired set is not "no
+        // overrides". KILLS: the not-recorded topic transitioned to defaults.
+        assert_eq!(
+            step_for(t, &t.created_overrides()),
+            TopicStep::Skip(CONFIGURATION_NOT_RECORDED.to_string())
+        );
     }
 
     /// `ConfigChangedSinceCreation`. KILLS: a subset compare; comparing keys
