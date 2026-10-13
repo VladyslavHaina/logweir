@@ -13606,3 +13606,26 @@ async fn fx43_a_refusal_is_read_only_off_the_sealed_pair() {
         "{status}"
     );
 }
+
+/// **A kill is not the mixed pair** (review L3): a Restore Job with the FX-43
+/// token killed at 137 with no end line is not named. CONTROL: exit 1 is.
+///
+/// KILLS: the `vouches_for_exit` guard removed from the Restore reconciler.
+#[tokio::test]
+async fn fx43_a_killed_restore_is_not_named_older() {
+    let older = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx-43/older-runner-restore.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let (outcome, status) = fx43_pass(137, older.clone()).await;
+    assert_ne!(
+        outcome.terminal_state.as_deref(),
+        Some("RunnerOlderThanController")
+    );
+    assert_ne!(
+        status["exitReason"], "RunnerOlderThanController",
+        "{status}"
+    );
+    let (_, status) = fx43_pass(1, older).await;
+    assert_eq!(status["exitReason"], "RunnerOlderThanController");
+}

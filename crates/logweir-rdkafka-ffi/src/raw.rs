@@ -276,7 +276,7 @@ impl QueuePoller {
     ///
     /// The [`Queue`] this poller came from must not have been destroyed: its
     /// owner keeps it alive until every thread that holds this poller has been
-    /// joined, and `timeout_ms` is finite and positive so each wait ends.
+    /// joined, and `timeout_ms` is finite and not negative, so each wait ends.
     pub(crate) unsafe fn poll(&self, timeout_ms: c_int) -> Option<Event> {
         // SAFETY: by this function's contract the queue is live; the wait is
         // bounded. The result is NULL or an event the application owns and

@@ -15636,3 +15636,34 @@ async fn fx43_an_older_runner_fails_a_backup_by_name_and_is_not_retried() {
     // CONTROL: an ordinary exit 1 is retried.
     assert!(decided(Some("operational")));
 }
+
+/// **A kill is not the mixed pair** (review L3): a Backup Job with the FX-43
+/// token whose runner was OOM-killed (137) or ended by its deadline (143)
+/// printed no end line, and it is NOT named `RunnerOlderThanController`; the
+/// schedule retries it, as any killed run. CONTROL: the same log at exit 1 is
+/// named.
+///
+/// KILLS: the `vouches_for_exit` guard removed from the Backup reconciler.
+#[tokio::test]
+async fn fx43_a_killed_backup_is_not_named_older_and_is_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    for code in [137, 143] {
+        let status = fx43_status(code, &older).await;
+        assert_ne!(
+            status["exitReason"], "RunnerOlderThanController",
+            "{status}"
+        );
+        assert!(weirkeeper::cadence::is_retryable(
+            weirkeeper::cadence::TerminalOutcome {
+                exit_code: Some(code),
+                terminal_state: status["exitReason"].as_str(),
+            }
+        ));
+    }
+    let status = fx43_status(1, &older).await;
+    assert_eq!(status["exitReason"], "RunnerOlderThanController");
+}

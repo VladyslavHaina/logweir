@@ -193,8 +193,39 @@ pub fn drain_logs<C: ClientContext>(
 }
 
 /// How long the pump thread waits for one line before it looks at its stop
-/// flag: the most a [`LogPumped`]'s drop waits for the thread.
+/// flag again.
 const PUMP_POLL_MS: c_int = 100;
+
+/// The most lines the pump hands on after it is told to stop: what was queued
+/// before the stop, bounded, so a client that never stops logging cannot keep
+/// the drop waiting.
+const PUMP_DRAIN_AFTER_STOP: usize = 1_000;
+
+/// The pump's loop, over any source of events. It looks at `stop` before
+/// EVERY wait: once it is set, it hands on at most [`PUMP_DRAIN_AFTER_STOP`]
+/// more events without waiting (a `None` ends the drain) and returns, however
+/// fast the source produces them. Pure of librdkafka, so it is tested over a
+/// source that never runs dry.
+fn pump_loop<E>(
+    mut poll: impl FnMut(c_int) -> Option<E>,
+    stop: &AtomicBool,
+    mut hand: impl FnMut(E),
+) {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            for _ in 0..PUMP_DRAIN_AFTER_STOP {
+                match poll(0) {
+                    Some(event) => hand(event),
+                    None => break,
+                }
+            }
+            return;
+        }
+        if let Some(event) = poll(PUMP_POLL_MS) {
+            hand(event);
+        }
+    }
+}
 
 /// Where a pumped client's log lines go. A plain function: the caller decides
 /// how a line is written (`logweir-kafka` escapes it onto one line, FX-43);
@@ -267,11 +298,13 @@ unsafe impl Sync for PumpQueue {}
 /// the sink. No callback is installed, so no librdkafka thread ever enters
 /// Rust code.
 ///
-/// Dropping it stops the thread (it drains what is queued first), joins it,
-/// forwards the logs back to the main queue and destroys the private queue,
-/// in that order, and only then drops the client: [`Drop`] here runs before
-/// the fields drop. Lines the client logs while it is destroyed go to the main
-/// queue and are freed with it.
+/// Dropping it first lowers the client's log level to 0, so the client logs
+/// nothing more (a consumer's close would otherwise log through librdkafka's
+/// raw default logger once the queue is handed back, `rdkafka.c`'s
+/// `rd_kafka_poll_cb`); then it stops the thread (which hands on at most
+/// [`PUMP_DRAIN_AFTER_STOP`] lines already queued), joins it, forwards the
+/// logs back to the main queue and destroys the private queue, in that order,
+/// and only then drops the client: [`Drop`] here runs before the fields drop.
 pub struct LogPumped<T: OwnsClient> {
     pump: Option<Pump>,
     inner: T,
@@ -309,22 +342,22 @@ impl<T: OwnsClient> LogPumped<T> {
         let flag = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name("rdkafka-log-pump".to_string())
-            .spawn(move || loop {
-                // SAFETY: the queue this poller came from is owned by the
-                // `Pump` that owns this thread's handle, and `LogPumped`'s
-                // `Drop` joins this thread before that queue is destroyed;
-                // the wait is bounded by `PUMP_POLL_MS`.
-                match unsafe { poller.poll(PUMP_POLL_MS) } {
-                    Some(event) => {
+            .spawn(move || {
+                pump_loop(
+                    // SAFETY: the queue this poller came from is owned by the
+                    // `Pump` that owns this thread's handle, and `LogPumped`'s
+                    // `Drop` joins this thread before that queue is destroyed;
+                    // every wait is bounded (`PUMP_POLL_MS`, or 0 to drain).
+                    |ms| unsafe { poller.poll(ms) },
+                    &flag,
+                    |event| {
                         if event.event_type() == rd::RD_KAFKA_EVENT_LOG {
                             if let Some(line) = log_line(&event) {
                                 sink(&line);
                             }
                         }
-                    }
-                    None if flag.load(Ordering::Acquire) => break,
-                    None => {}
-                }
+                    },
+                );
             });
         match spawned {
             Ok(thread) => Ok(Self {
@@ -362,6 +395,12 @@ impl<T: OwnsClient> Drop for LogPumped<T> {
         let Some(mut pump) = self.pump.take() else {
             return;
         };
+        let rk = self.inner.native_client().native_ptr();
+        // SAFETY: `rk` is the live `rd_kafka_t` `self.inner` owns (fields drop
+        // after this body); the call only stores the level. From here the
+        // client logs nothing more, so no line of its close reaches the raw
+        // default logger after the queue is handed back below.
+        unsafe { rd::rd_kafka_set_log_level(rk, 0) };
         pump.stop.store(true, Ordering::Release);
         if let Some(thread) = pump.thread.take() {
             // A sink that panicked ended the thread early; there is nothing
@@ -373,12 +412,7 @@ impl<T: OwnsClient> Drop for LogPumped<T> {
         // dropping librdkafka's reference to the private queue, which `pump`
         // destroys when it drops at the end of this body; the thread that
         // polled it has been joined above.
-        let _ = unsafe {
-            sys::set_log_queue(
-                self.inner.native_client().native_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
+        let _ = unsafe { sys::set_log_queue(rk, std::ptr::null_mut()) };
         drop(pump);
     }
 }
@@ -505,6 +539,67 @@ mod tests {
             Err(other) => panic!("expected NOT_CONFIGURED, got {other:?}"),
             Ok(_) => panic!("a handle without log.queue was pumped"),
         }
+    }
+
+    /// **The pump looks at its stop flag before every wait, and drains at
+    /// most a bounded number of lines after it**, so a client that never
+    /// stops logging cannot keep `LogPumped`'s drop waiting (review L2).
+    /// KILLS: the flag read only on an empty poll (the loop never returns
+    /// here); an unbounded drain.
+    #[test]
+    fn the_pump_returns_over_a_source_that_never_runs_dry() {
+        let stop = AtomicBool::new(false);
+        let mut polls = 0usize;
+        let mut handed = 0usize;
+        pump_loop(
+            |_| {
+                polls += 1;
+                if polls == 5 {
+                    stop.store(true, Ordering::Release);
+                }
+                Some(())
+            },
+            &stop,
+            |()| handed += 1,
+        );
+        assert_eq!(polls, 5 + PUMP_DRAIN_AFTER_STOP, "{polls}");
+        assert_eq!(handed, polls);
+        // A source that runs dry after the stop ends the drain at once.
+        let stop = AtomicBool::new(true);
+        let mut left = 3;
+        let mut handed = 0;
+        pump_loop(
+            |ms| {
+                assert_eq!(ms, 0, "no wait after the stop");
+                (left > 0).then(|| left -= 1)
+            },
+            &stop,
+            |()| handed += 1,
+        );
+        assert_eq!(handed, 3);
+    }
+
+    /// **After the drop, the client logs nothing more**: its level is set
+    /// to 0 BEFORE the pump stops and before the queue is handed back, so a
+    /// consumer's close cannot reach librdkafka's raw default logger (review
+    /// L1). A source pin: the raw logger writes to this process's stderr,
+    /// which a unit test cannot capture. KILLS: the level left as it was; the
+    /// level lowered after the queue is handed back.
+    #[test]
+    fn the_drop_lowers_the_log_level_before_the_queue_goes_back() {
+        let src = include_str!("logs.rs");
+        let drop_at = src
+            .find("impl<T: OwnsClient> Drop for LogPumped<T>")
+            .expect("the drop");
+        let body = &src[drop_at..];
+        let level = body
+            .find("rd_kafka_set_log_level(rk, 0)")
+            .expect("the level");
+        let handed_back = body
+            .find("sys::set_log_queue(rk, std::ptr::null_mut())")
+            .expect("the queue handed back");
+        let stopped = body.find("pump.stop.store(true").expect("the stop");
+        assert!(level < stopped && stopped < handed_back);
     }
 
     /// A drain that hits its time bound says it did not end by quiet.

@@ -4020,3 +4020,21 @@ async fn fx43_a_created_probe_job_carries_the_line_token() {
         job::JobToken::EveryLine(_)
     ));
 }
+
+/// **A killed probe is not the mixed pair** (review L3): exit 137 with no end
+/// line keeps today's verdict (`ProbeOutputUnreadable`). CONTROL: exit 1 is
+/// named.
+///
+/// KILLS: the `vouches_for_exit` guard removed from the probe reconciler.
+#[tokio::test]
+async fn fx43_a_killed_probe_is_not_named_older() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-probe.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let status = fx43_probe_status(fx43_routes(137, older.clone())).await;
+    assert_ne!(status["reason"], "RunnerOlderThanController", "{status}");
+    let status = fx43_probe_status(fx43_routes(1, older)).await;
+    assert_eq!(status["reason"], "RunnerOlderThanController");
+}
