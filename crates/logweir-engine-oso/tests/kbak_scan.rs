@@ -44,6 +44,8 @@ fn the_scan_agrees_with_the_full_decoder_on_every_fixture() {
             assert_eq!(scanned.len(), full.len(), "{name}");
             for (s, f) in scanned.iter().zip(&full) {
                 assert_eq!(s.offset, f.offset, "{name}");
+                // PROD-01.1b reads the record times off this scan.
+                assert_eq!(s.timestamp, f.timestamp, "{name}");
                 assert_eq!(s.key, cut(&f.key, prefix), "{name} prefix {prefix}");
                 assert_eq!(s.value, cut(&f.value, prefix), "{name} prefix {prefix}");
                 // Each header's key, in order, cut the same way.

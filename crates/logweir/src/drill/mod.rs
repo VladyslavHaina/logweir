@@ -4,6 +4,7 @@
 /// Execution contract **v2**'s two pre-data-plane bindings (D3 §4.3, §5.5).
 /// Not a phase: everything in it runs before phase 0, before `context`, and
 /// therefore before any broker client exists.
+pub mod archive_scan;
 pub mod binding;
 pub mod phase0_admit;
 pub mod phase1_approval;
@@ -2218,6 +2219,27 @@ fn execute_with_validated_approval(
             named.iter().copied().collect::<Vec<&str>>().join(", ")
         ))));
     }
+    let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
+    // PROD-01.1b: one bounded pass over every segment of the restored
+    // partitions (`archive_scan`), before phase 2, for the transaction-marker
+    // check below and the records' own timestamps. From here on the run reads
+    // `facts` with each read segment's first/last widened to its records'
+    // min/max (`record_times::widen`): the floor G-WIN binds is the oldest
+    // archived record and the count bounds are true bounds. `manifest_facts`
+    // is the archive as described, which the engine selects segments by.
+    let window = logweir_core::replay_selection::ReplaySelection {
+        topics: selected.iter().cloned().collect(),
+        ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
+            .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+    };
+    let scan = archive_scan::run(
+        &c.archive,
+        &facts,
+        &window,
+        !c.spec.restore.allow_transaction_markers,
+    )?;
+    let manifest_facts = facts;
+    let facts = logweir_core::record_times::widen(&manifest_facts, &scan.times);
     // The time basis, decided here and nowhere later: the first point at which
     // both its records (the manifest's timestamp-type override, the verified
     // receipt's effective type) are in hand, and before phase 2, so a refused
@@ -2227,7 +2249,6 @@ fn execute_with_validated_approval(
     // and deleted (the documented exception, `docs/stability.md`).
     // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic` pins
     // the position.
-    let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let time_basis =
         logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
             .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
@@ -2238,7 +2259,8 @@ fn execute_with_validated_approval(
     // started. `None` for a plan that states no selection. The same function
     // binds the window in `build_plan` and previews it in the restore
     // preflight (`logweir_core::replay_selection`).
-    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
+    // Over the manifest as described, as the preview resolves it.
+    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &manifest_facts)?;
     // The selection is signed (`source.selection`) in every document this run
     // writes from here on: format 1.7.0 for a window start only, 2.0.0 for a
     // partition subset, which older readers refuse as an unsupported major.
@@ -2262,28 +2284,40 @@ fn execute_with_validated_approval(
     let marker_note = if c.spec.restore.allow_transaction_markers {
         Some(logweir_core::transaction_markers::OVERRIDE_NOTE.to_string())
     } else {
-        let window = logweir_core::replay_selection::ReplaySelection {
-            topics: selected.iter().cloned().collect(),
-            ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
-                .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
-        };
-        let scan = count_transaction_markers(&c.archive, &facts, &window)?;
-        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.counts) {
+        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.markers) {
             return Err(DrillError::Guard(GuardRefusal(refusal)));
         }
-        // Never silent: the runner's output names the segments, and the
-        // scorecard's note below says how many.
-        let unread = &scan.unread_after_window;
-        (!unread.is_empty()).then(|| {
-            let note = logweir_core::transaction_markers::unread_after_window_note(unread.len());
-            // One line whatever a manifest key holds (`exit::one_line`).
-            eprintln!(
-                "{}",
-                crate::exit::one_line(&format!("{note}: {}", unread.join(", ")))
-            );
-            note
-        })
+        archive_scan::noted(
+            &scan.markers_unread,
+            logweir_core::transaction_markers::unread_after_window_note,
+        )
     };
+    // PROD-01.1b: a segment the engine skips by its first and last timestamps
+    // while it holds a record the window selects is refused exit 3,
+    // `PointInTimeSelectionIncomplete`, with no target topic created and no
+    // engine started. The window is the one phase 5 holds the rendered
+    // document to: the stated start, else the floor over the widened facts.
+    let floor_ms = facts
+        .earliest_covered_timestamp_ms(&named)
+        .unwrap_or(i64::MIN);
+    let skipped =
+        logweir_core::record_times::skipped(&manifest_facts, &scan.times, &window, floor_ms);
+    if let Some(refusal) = logweir_core::record_times::refusal(
+        &skipped,
+        window.window_start_ms.unwrap_or(floor_ms),
+        window.window_end_ms,
+    ) {
+        return Err(DrillError::Guard(GuardRefusal(refusal)));
+    }
+    // The record-time note first: the marker note stays last, where
+    // `logweir show` and its rows read it.
+    let marker_note = [
+        archive_scan::noted(&scan.times_unread, logweir_core::record_times::unread_note),
+        marker_note,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|a, b| format!("{a}; {b}"));
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -2997,99 +3031,6 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
-}
-
-/// What the transaction-marker check found.
-struct MarkerScan {
-    /// Marker-shaped records per topic and partition.
-    counts: logweir_core::transaction_markers::MarkerCounts,
-    /// The segments after the window's end it could not read.
-    unread_after_window: Vec<String>,
-}
-
-/// The records shaped like a transaction marker in the selected partitions'
-/// segments that the window overlaps (the engine's own rule,
-/// `ReplaySelection::segment_overlaps`) and in every segment after the
-/// window's end: a marker there closes a transaction that can have records in
-/// the window. Segments whose last record is before the window's start are
-/// skipped (out-of-order timestamps can put a closing marker there:
-/// `docs/stability.md` lists it as not detected). Each is streamed through the
-/// bounded `kbak::scan_segment` (one stored segment and a few hundred KiB held
-/// at a time).
-///
-/// A segment the restore reads and the scan cannot decode refuses the run
-/// (`GuardRefused`); one the store does not hold is left to the restore. A
-/// segment after the window that is absent or cannot be read never refuses
-/// (the restore does not read it); it is listed in `unread_after_window`,
-/// which the run reports.
-fn count_transaction_markers(
-    archive: &Store,
-    facts: &BackupSetFacts,
-    window: &logweir_core::replay_selection::ReplaySelection,
-) -> Result<MarkerScan, DrillError> {
-    use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
-    use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
-    use logweir_engine_oso::storage::{caps, StoreError};
-    let limits = ScanLimits {
-        max_decompressed: caps::SEGMENT,
-        deadline: None,
-    };
-    let start = window.window_start_ms.unwrap_or(i64::MIN);
-    let mut scan = MarkerScan {
-        counts: MarkerCounts::new(),
-        unread_after_window: Vec::new(),
-    };
-    for topic in &facts.topics {
-        for p in topic
-            .partitions
-            .iter()
-            .filter(|p| window.selects_partition(&topic.name, p.partition_id))
-        {
-            for seg in p.segments.iter().filter(|s| s.end_timestamp >= start) {
-                let after = seg.start_timestamp > window.window_end_ms;
-                let bytes = match archive.get_capped(&seg.key, caps::SEGMENT) {
-                    Ok((bytes, _)) => bytes,
-                    Err(_) if after => {
-                        scan.unread_after_window.push(seg.key.clone());
-                        continue;
-                    }
-                    Err(StoreError::NotFound(_)) => continue,
-                    Err(e) => return Err(logweir_core::engine::EngineError::from(e).into()),
-                };
-                let mut found = 0u64;
-                let read = scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
-                    if is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys) {
-                        found += 1;
-                    }
-                    true
-                });
-                if found > 0 {
-                    *scan
-                        .counts
-                        .entry(topic.name.clone())
-                        .or_default()
-                        .entry(p.partition_id)
-                        .or_default() += found;
-                }
-                match read {
-                    Ok(_) => {}
-                    Err(_) if after => scan.unread_after_window.push(seg.key.clone()),
-                    Err(e) => {
-                        return Err(DrillError::Guard(GuardRefusal(format!(
-                            "the transaction-marker check could not read archive segment `{}` \
-                             of topic `{}` partition {} ({e}), so it cannot say the restored \
-                             partitions hold no transaction marker. The run stopped before any \
-                             target topic was created. State \
-                             `restore.allow_transaction_markers: true` in the plan to restore \
-                             without the check.",
-                            seg.key, topic.name, p.partition_id
-                        ))))
-                    }
-                }
-            }
-        }
-    }
-    Ok(scan)
 }
 
 /// The signed `source.selection` block of a resolved selection: its stated

@@ -278,12 +278,15 @@ fn opt_bytes(
 // A STREAMING scan that keeps only each record's prefix bytes.
 // ---------------------------------------------------------------------------
 
-/// What [`scan_segment`] keeps of one record: its offset and at most the
-/// first `prefix` bytes of its key, of its value (`None` is null) and of each
-/// header's key, in order. Never a whole payload, and never a header value.
+/// What [`scan_segment`] keeps of one record: its offset, its timestamp and
+/// at most the first `prefix` bytes of its key, of its value (`None` is null)
+/// and of each header's key, in order. Never a whole payload, and never a
+/// header value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordPrefix {
     pub offset: i64,
+    /// The record's own timestamp, epoch milliseconds, as archived.
+    pub timestamp: i64,
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
     pub header_keys: Vec<Vec<u8>>,
@@ -737,7 +740,7 @@ fn read_prefix_record(
     prefix: usize,
 ) -> std::io::Result<RecordPrefix> {
     use byteorder::{ReadBytesExt, LE};
-    let _timestamp = frame.read_i64::<LE>()?;
+    let timestamp = frame.read_i64::<LE>()?;
     let offset = frame.read_i64::<LE>()?;
     let key_len = frame.read_i32::<LE>()?;
     let key = prefix_of(frame, key_len, prefix)?;
@@ -757,6 +760,7 @@ fn read_prefix_record(
     }
     Ok(RecordPrefix {
         offset,
+        timestamp,
         key,
         value,
         header_keys,

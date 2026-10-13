@@ -140,6 +140,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     // An archive holding transaction markers under a plan that does not allow
     // them, read off `refusal-reason=`.
     logweir_core::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
+    // A restore window that selects records in a segment the engine skips
+    // (out-of-order timestamps), read off `refusal-reason=`.
+    logweir_core::guard::TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",

@@ -315,7 +315,27 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         ),
         "refusal-reason=TransactionMarkersInArchive"
     );
-    assert_eq!(TERMINAL_STATES.len(), 7);
+    // The eighth: a window that selects records in a segment the engine
+    // skips (PROD-01.1b).
+    assert_eq!(
+        refusal_reason_line(
+            &logweir_core::record_times::refusal(
+                &[logweir_core::record_times::Skipped {
+                    topic: "t".into(),
+                    partition: 0,
+                    key: "k".into(),
+                    first_ms: 9,
+                    last_ms: 9,
+                    selected: 1,
+                }],
+                0,
+                5
+            )
+            .expect("a skipped segment refuses")
+        ),
+        "refusal-reason=PointInTimeSelectionIncomplete"
+    );
+    assert_eq!(TERMINAL_STATES.len(), 8);
     // The line carries no whitespace and no quoting: a controller reads it as
     // the final stdout line and splits on `=`.
     let line = refusal_reason_line("CredentialNotRenderable: x");

@@ -82,7 +82,7 @@ condition's reason.
 | `ApprovalBundleConflict` | The approval bundle was made by another controller; delete and re-create |
 | `ApprovalBundleMaterializationFailed` | Held: a bundle key cannot sign anything new under its usage |
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
-| `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
+| `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
 | `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point whose receipt or manifest is missing or unreadable is exit 1 |
 
 Plus the no-exit-code states of the `Backup` table, `PodOwnershipContested`,
@@ -210,7 +210,7 @@ and take no token.
 
 | Run | Codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 When the controller shows no reason, the message ends with nothing after

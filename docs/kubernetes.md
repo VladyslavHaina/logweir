@@ -1088,8 +1088,11 @@ sample:
 `TargetTopicConfigRefused`, `CredentialNotRenderable`,
 `PointInTimeByProducerTime` (a point in time over a `LogAppendTime` topic without
 `restore.time_basis: producerTime`, [the plan field](formats/drill-spec.md#restoretime_basis-fx-8))
-and `TransactionMarkersInArchive` (without `restore.allow_transaction_markers:
-true`) are exit 3 told apart only by the `refusal-reason=` line. The point-binding
+`TransactionMarkersInArchive` (without `restore.allow_transaction_markers:
+true`) and `PointInTimeSelectionIncomplete` (a window that selects records held
+out of timestamp order in a segment the engine skips,
+[the limitation](stability.md#recovery-point-selection-reads-each-records-own-timestamp))
+are exit 3 told apart only by the `refusal-reason=` line. The point-binding
 refusals (`PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch`)
 read `refusal-reason=GuardRefused`; their name opens the message. A log with no
 such line is `GuardRefusedUnknownReason`. See
