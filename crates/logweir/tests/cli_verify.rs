@@ -888,6 +888,7 @@ fn drill_verify_prints_what_the_verdict_covered() {
         serde_json::from_slice(&std::fs::read(format!("{FIX}/scorecard.json")).unwrap()).unwrap();
     sc.format_version = logweir_core::FORMAT_VERSION.into();
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -955,6 +956,7 @@ fn a_sampled_pass_says_what_it_proves_at_its_version() {
     use logweir_core::outcome::Outcome;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -1004,6 +1006,7 @@ fn a_sampled_pass_over_a_selection_says_so() {
     use logweir_core::outcome::Outcome;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -1104,6 +1107,7 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
     use logweir_core::outcome::IntegrityResult;
     use logweir_core::scorecard::*;
     let sampled = Verification {
+        positions_mapping: None,
         coverage: COVERAGE_SAMPLED.into(),
         comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
         header_order: HEADER_ORDER_NOT_VERIFIED.into(),

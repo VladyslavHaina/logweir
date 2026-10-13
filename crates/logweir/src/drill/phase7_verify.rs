@@ -1613,6 +1613,7 @@ pub fn run_after_restore(
             }
             let (gaps, pruned) = complete::ranges_for(facts, &selected);
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Sampled.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 // The sampled lane reconciles `record_fingerprint`, which
@@ -1636,6 +1637,7 @@ pub fn run_after_restore(
                 complete_max_records,
             )?;
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Complete.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 header_order: HEADER_ORDER_VERIFIED.to_string(),

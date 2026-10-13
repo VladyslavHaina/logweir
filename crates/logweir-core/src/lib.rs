@@ -64,6 +64,7 @@ pub mod ids;
 /// probe's scratch name.
 pub mod original_name;
 pub mod outcome;
+pub mod positions_mapping;
 /// The facts a reader takes from a backup receipt without building a
 /// tree of it — the shared controller's bounded read.
 pub mod receipt_facts;
