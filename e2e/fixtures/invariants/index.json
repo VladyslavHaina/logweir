@@ -1258,5 +1258,75 @@
   "rust_exit": 0,
   "python_exit": 0,
   "reason": ""
+ },
+ {
+  "id": "topic_configuration_1_10_accepted",
+  "file": "topic_configuration_1_10_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "topic_configuration_1_10_exported_accepted",
+  "file": "topic_configuration_1_10_exported_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "topic_configuration_under_format_1_9_0",
+  "file": "topic_configuration_under_format_1_9_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration is present but format_version \"1.9.0\" does not define it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2",
+  "arm": "target.topic_configuration is present but format_version "
+ },
+ {
+  "id": "topic_configuration_transition_outside_its_set",
+  "file": "topic_configuration_transition_outside_its_set.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.transition is not \"afterVerification\" or \"none\"",
+  "arm": "target.topic_configuration.transition is not "
+ },
+ {
+  "id": "topic_configuration_route_unknown",
+  "file": "topic_configuration_route_unknown.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0",
+  "arm": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0"
+ },
+ {
+  "id": "topic_configuration_replication_factor_zero",
+  "file": "topic_configuration_replication_factor_zero.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0",
+  "arm": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0"
+ },
+ {
+  "id": "topic_configuration_desired_state_without_an_owned_topic",
+  "file": "topic_configuration_desired_state_without_an_owned_topic.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256",
+  "arm": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256"
+ },
+ {
+  "id": "topic_configuration_owned_topic_without_desired_state",
+  "file": "topic_configuration_owned_topic_without_desired_state.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256",
+  "arm": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256"
+ },
+ {
+  "id": "topic_configuration_1_10_secret_with_a_value",
+  "file": "topic_configuration_1_10_secret_with_a_value.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration lists a secret with a value, or another entry without one",
+  "arm": "target.topic_configuration lists a secret with a value, or another entry without one"
  }
 ]

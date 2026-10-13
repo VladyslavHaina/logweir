@@ -514,13 +514,13 @@ drill), not as a defect in the artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.30.0` and the
+The Python report ends with `verifier: verify_scorecard.py 1.31.0` and the
 checks applied. That is the **verifier's** version, not the document's
 `format_version` (scorecard `1.0.0`; `1.1.0` FX-4; `1.2.0` FX-3; `1.3.0` FX-8;
 `1.4.0` PROD-08.1; `1.5.0` PROD-01.3's auth modes; `1.6.0` every sampled drill
 since FX-23; `1.7.0` a window start, PROD-11.1; `1.8.0` original names,
-PROD-15.1; `1.9.0`/`2.1.0` a console approval, PROD-16.2; `2.0.0` a partition
-subset, PROD-11.1b). It moves when the accepted-document set changes:
+PROD-15.1; `1.9.0`/`2.1.0` a console approval, PROD-16.2; `1.10.0`/`2.2.0` a
+target topic configuration, PROD-05.2; `2.0.0` a partition subset, PROD-11.1b). It moves when the accepted-document set changes:
 
 | Version | Changed checks |
 | --- | --- |
@@ -554,6 +554,7 @@ subset, PROD-11.1b). It moves when the accepted-document set changes:
 | `1.28.0` | Scorecard `1.8.0` (PROD-15.1): ON-1 to ON-14, the two `original name:` lines. |
 | `1.29.0` | Scorecard `1.9.0` and `2.1.0` (PROD-16.2): CA-1 to CA-8, ON-5 by version, the `console approval:` line. |
 | `1.30.0` | Receipt `1.8.0` (PROD-02.1): `source_watermarks` arms 41–45; an empty capture only beside the block. |
+| `1.31.0` | Scorecard `1.10.0` and `2.2.0` (PROD-05.2): `target.topic_configuration` arms TC-1 to TC-5 and its shape. |
 
 Every document without a version's new field is decided as before it. One
 diagnostic-order difference remains: with both `run_id` and `engine` absent,

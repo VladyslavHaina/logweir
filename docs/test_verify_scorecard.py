@@ -905,7 +905,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.30.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.31.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2329,9 +2329,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.30.0 (PROD-02.1) adds the receipt's five `source_watermarks` arms
     # (41-45, format 1.8.0), arm 4's empty window beside them, the shape check
     # and the `source_watermarks` lines. Map still five.
+    #
+    # 1.31.0 (PROD-05.2) adds the scorecard's five `target.topic_configuration`
+    # arms (TC-1 to TC-5, format 1.10.0 and 2.2.0) and its shape check. Map
+    # still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.30.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.31.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -4781,6 +4785,40 @@ def test_the_console_approval_minors_are_the_rust_readers():
         ("0.9.0", False), ("1.x.0", False), ("1", False), ("", False), (None, False),
     ):
         assert mod._defines_console_approval(version) is defines, version
+
+
+def test_the_topic_configuration_constants_are_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
+    assert mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2"
+    assert mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2 == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION: &str = "2\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2
+    core = (ROOT / "crates/logweir-core/src/topic_transition.rs").read_text()
+    for name, values in (
+        ("TRANSITION_AFTER_VERIFICATION", mod.TOPIC_CONFIGURATION_TRANSITIONS[0]),
+        ("TRANSITION_NONE", mod.TOPIC_CONFIGURATION_TRANSITIONS[1]),
+        ("ROUTE_ADMIN_API", mod.TOPIC_CONFIGURATION_ROUTES[0]),
+        ("ROUTE_DESIRED_STATE_EXPORT", mod.TOPIC_CONFIGURATION_ROUTES[1]),
+        ("RF_SOURCE_FACTOR", mod.TOPIC_CONFIGURATION_RF_REASONS[0]),
+        ("RF_TARGET_BROKERS", mod.TOPIC_CONFIGURATION_RF_REASONS[1]),
+        ("RF_NOT_RECORDED", mod.TOPIC_CONFIGURATION_RF_REASONS[2]),
+    ):
+        assert f'pub const {name}: &str = "{values}";' in core, name
+    for version, defines in (
+        ("1.10.0", True), ("1.11.0", True), ("2.2.0", True), ("2.9.1", True),
+        ("1.9.0", False), ("1.0.0", False), ("2.1.0", False), ("3.2.0", False),
+        ("1.x.0", False), ("", False), (None, False),
+    ):
+        assert mod._defines_topic_configuration(version) is defines, version
 
 
 def test_the_console_identity_rule_is_the_rust_readers():

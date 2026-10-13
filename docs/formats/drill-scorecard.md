@@ -3,12 +3,12 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.1.0.json`](../../schemas/logweir-drill-scorecard-2.1.0.json)
+[`schemas/logweir-drill-scorecard-2.2.0.json`](../../schemas/logweir-drill-scorecard-2.2.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json)
+[`schemas/logweir-drill-scorecard-1.10.0.json`](../../schemas/logweir-drill-scorecard-1.10.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.8.0.json` and `-2.0.0.json`, is frozen beside
+schema file, `-1.0.0.json` to `-1.9.0.json`, `-2.0.0.json` and `-2.1.0.json`, is frozen beside
 them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is

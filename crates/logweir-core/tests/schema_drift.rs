@@ -36,11 +36,11 @@ fn justfile_schema_version(name: &str) -> String {
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION
     );
     assert_eq!(
         justfile_schema_version("scorecard_format_1"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     );
     assert_eq!(
         justfile_schema_version("receipt"),
@@ -55,7 +55,7 @@ fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION,
     );
     assert_eq!(
         generated.trim_end(),
@@ -63,7 +63,7 @@ fn checked_in_schema_matches_the_types() {
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION
     );
 }
 
@@ -99,7 +99,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -342,7 +342,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -743,7 +743,7 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
     assert_eq!(
         current["$id"],
-        "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.2.0.json"
     );
     assert_eq!(
         current["properties"]["format_version"]["pattern"],
@@ -837,9 +837,38 @@ const FROZEN_1_8_0_SCORECARD_SCHEMA: &str =
 const FROZEN_2_0_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-2.0.0.json");
 
-/// What `just schema` writes as format 1's newest minor (the 1.9.0 file).
+/// The text of the frozen 1.9.0 scorecard schema, format 1's last file before
+/// the `target.topic_configuration` block.
+const FROZEN_1_9_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-1.9.0.json");
+
+/// The text of the frozen 2.1.0 scorecard schema, format 2's last file before
+/// the `target.topic_configuration` block.
+const FROZEN_2_1_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-2.1.0.json");
+
+/// What `just schema` writes as format 1's newest minor (the 1.10.0 file).
 fn format_1_scorecard_schema() -> String {
-    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_8_0_SCORECARD_SCHEMA)
+    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_9_0_SCORECARD_SCHEMA)
+}
+
+/// `schema` with the `target.topic_configuration` block set aside and its
+/// `$id` replaced: what is left must be the file the block was added to.
+fn without_the_topic_configuration(
+    mut schema: serde_json::Value,
+    id: &serde_json::Value,
+) -> serde_json::Value {
+    schema["$id"] = id.clone();
+    let definitions = schema["definitions"].as_object_mut().unwrap();
+    for name in logweir_core::schema::TOPIC_CONFIGURATION_DEFINITIONS {
+        assert!(definitions.remove(name).is_some(), "it defines {name}");
+    }
+    assert!(schema["definitions"]["TargetInfo"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove(logweir_core::schema::TOPIC_CONFIGURATION_PROPERTY)
+        .is_some());
+    schema
 }
 
 /// The two definitions the `approval.console` block brings with it.
@@ -865,22 +894,22 @@ fn without_the_console_approval(
 }
 
 /// **The scorecard has two generated files, and format 1's is checked in as
-/// the generator writes it.** The type reads both majors, so the 1.9.0 file is
-/// built from the frozen 1.8.0 file plus the block the type derives. KILLS: a
-/// change to `ConsoleApprovalInfo` without `just schema`; a hand edit of the
-/// 1.9.0 file.
+/// the generator writes it.** The type reads both majors, so the 1.10.0 file
+/// is built from the frozen 1.9.0 file plus the block the type derives. KILLS:
+/// a change to `TopicConfigurationBlock` without `just schema`; a hand edit of
+/// the 1.10.0 file.
 #[test]
 fn checked_in_format_1_scorecard_schema_matches_the_types() {
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION,
     );
     assert_eq!(
         format_1_scorecard_schema().trim_end(),
         checked_in.trim_end(),
         "schemas/logweir-drill-scorecard-{}.json is stale. Run `just schema` and review the \
-         diff: only `approval.console` and its two definitions may move.",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
+         diff: only `target.topic_configuration` and its definitions may move.",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     );
 }
 
@@ -943,10 +972,11 @@ fn the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_
 /// a 1.x file), or that moves anything else of format 1; a block made
 /// required, which every document before 1.9.0 would fail.
 #[test]
-fn the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block() {
+fn the_frozen_1_9_0_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block() {
     let frozen: serde_json::Value =
         serde_json::from_str(FROZEN_1_8_0_SCORECARD_SCHEMA).expect("the frozen 1.8.0 parses");
-    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    let format_1: serde_json::Value =
+        serde_json::from_str(FROZEN_1_9_0_SCORECARD_SCHEMA).expect("the frozen 1.9.0 parses");
     assert_eq!(
         format_1["$id"],
         "https://logweir.dev/schemas/logweir-drill-scorecard-1.9.0.json"
@@ -1026,7 +1056,7 @@ fn the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approv
         assert!(frozen["definitions"].get(name).is_none(), "{name}");
     }
     let current: serde_json::Value =
-        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+        serde_json::from_str(FROZEN_2_1_0_SCORECARD_SCHEMA).expect("the frozen 2.1.0 parses");
     assert_eq!(
         current["$id"],
         "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
@@ -1040,7 +1070,8 @@ fn the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approv
         "approval.console is OPTIONAL in format 2 as well"
     );
     // The block is the SAME in both lines: one type derives both.
-    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    let format_1: serde_json::Value =
+        serde_json::from_str(FROZEN_1_9_0_SCORECARD_SCHEMA).expect("the frozen 1.9.0 parses");
     assert_eq!(
         current["definitions"]["ApprovalInfo"]["properties"]["console"],
         format_1["definitions"]["ApprovalInfo"]["properties"]["console"]
@@ -1065,6 +1096,85 @@ fn the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approv
     );
 }
 
+/// **A MINOR adds optional fields only, and PROD-05.2's adds exactly one
+/// block.** The 1.10.0 file is the frozen 1.9.0 file, value for value, once
+/// its `$id`, `target.topic_configuration` and the block's definitions are set
+/// aside; the block is OPTIONAL. KILLS: a generator that moves anything else
+/// of format 1; a block made required, which every document before 1.10.0
+/// would fail.
+#[test]
+fn the_format_1_scorecard_schema_is_the_frozen_1_9_0_plus_the_topic_configuration_block() {
+    let frozen: serde_json::Value =
+        serde_json::from_str(FROZEN_1_9_0_SCORECARD_SCHEMA).expect("the frozen 1.9.0 parses");
+    assert!(
+        frozen["definitions"]["TargetInfo"]["properties"]
+            .get("topic_configuration")
+            .is_none(),
+        "the frozen 1.9.0 schema must not describe the 1.10.0 block"
+    );
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_eq!(
+        format_1["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.10.0.json"
+    );
+    assert!(format_1["definitions"]["TargetInfo"]["properties"]["topic_configuration"].is_object());
+    assert!(
+        !format_1["definitions"]["TargetInfo"]["required"]
+            .as_array()
+            .expect("TargetInfo has required fields")
+            .iter()
+            .any(|r| r == "topic_configuration"),
+        "target.topic_configuration is OPTIONAL"
+    );
+    assert_eq!(
+        without_the_topic_configuration(format_1, &frozen["$id"]),
+        frozen
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION,
+        "1.10.0"
+    );
+    assert_eq!(logweir_core::scorecard::TOPIC_CONFIGURATION_SINCE_MINOR, 10);
+}
+
+/// **The 2.1.0 file is FROZEN beside 2.2.0, and 2.2.0 is that file plus
+/// PROD-05.2's block**, the same block as format 1's. KILLS: a hand edit of
+/// the 2.1.0 file; a 2.2.0 generator that moves anything else of format 2.
+#[test]
+fn the_frozen_2_1_0_scorecard_schema_is_the_2_2_0_one_without_the_topic_configuration() {
+    let frozen: serde_json::Value =
+        serde_json::from_str(FROZEN_2_1_0_SCORECARD_SCHEMA).expect("the frozen 2.1.0 parses");
+    let current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        current["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.2.0.json"
+    );
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    assert_eq!(
+        current["definitions"]["TargetInfo"]["properties"]["topic_configuration"],
+        format_1["definitions"]["TargetInfo"]["properties"]["topic_configuration"]
+    );
+    for name in logweir_core::schema::TOPIC_CONFIGURATION_DEFINITIONS {
+        assert_eq!(
+            current["definitions"][name], format_1["definitions"][name],
+            "{name}"
+        );
+    }
+    assert_eq!(
+        without_the_topic_configuration(current, &frozen["$id"]),
+        frozen
+    );
+    assert_eq!(
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION,
+        "2.2.0"
+    );
+    assert_eq!(
+        logweir_core::scorecard::TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2,
+        2
+    );
+}
+
 /// **The `original_name` block never appears in a 2.x document, so format 2's
 /// file does not describe it** (an original-name restore restores whole topics:
 /// `OriginalNameNeedsWholeTopics`, arm ON-14). KILLS: a format 2 generator that
@@ -1075,7 +1185,7 @@ fn the_format_2_scorecard_schema_does_not_describe_the_original_name() {
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
     assert_eq!(
         current["$id"],
-        "https://logweir.dev/schemas/logweir-drill-scorecard-2.1.0.json"
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.2.0.json"
     );
     assert!(current["definitions"]["TargetInfo"]["properties"]
         .get("original_name")
