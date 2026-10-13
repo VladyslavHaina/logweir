@@ -530,6 +530,7 @@ fn every_granted_verb_has_a_caller() {
             // The other direction of the same mapping.
             "trustpolicies" => "TrustPolicy",
             "retentionpolicies" => "RetentionPolicy",
+            "switchovers" => "Switchover",
             "protectionpolicies" => "ProtectionPolicy",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
@@ -943,6 +944,7 @@ fn every_call_site_has_a_grant() {
             // `Restore` for the active-restore protection set; and `Job` for
             // the one Job it creates.
             "RetentionPolicy" => ("logweir.dev", "retentionpolicies"),
+            "Switchover" => ("logweir.dev", "switchovers"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
@@ -1261,6 +1263,19 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["retentionpolicies/status"]),
             v(&["patch"]),
         ),
+        // PROD-04.2: the `Switchover` reconciler's watch and namespace-wide
+        // `list`, the `Approval` reconciler's `get` of a switchover subject,
+        // and `patch_status`.
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers"]),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers/status"]),
+            v(&["patch"]),
+        ),
     ];
     assert_eq!(
         rules_of(DEFAULT_RENDER, "weirkeeper"),
@@ -1287,6 +1302,12 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         (
             v(&["logweir.dev"]),
             v(&SEVEN_NEW_KINDS),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        // PROD-04.2, in a rule of its own.
+        (
+            v(&["logweir.dev"]),
+            v(&["switchovers"]),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
     ];
@@ -1356,6 +1377,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // second, unnoticed field, which the API server would then refuse for
         // that field alone.
         (v(&["logweir.dev"]), v(&["recoverycatalogs"]), v(&["patch"])),
+        // PROD-04.2: request a switchover; it runs only under its own
+        // Approval, which `logweir-approver` creates.
+        (v(&["logweir.dev"]), v(&["switchovers"]), v(&["create"])),
     ];
     let operator_rules = rules_of(DEFAULT_RENDER, "logweir-operator");
     assert_eq!(

@@ -465,9 +465,12 @@ rules:
       - protectionpolicies
       - recoverycatalogs
       - retentionpolicies
-      - switchovers
       - topicdiscoveries
       - trustpolicies
+    verbs: ["get", "list", "watch"]
+  # PROD-04.2: a switchover's groups, outcomes and record key. Read only.
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers"]
     verbs: ["get", "list", "watch"]
 ---
 # Source: logweir/templates/human-roles.yaml

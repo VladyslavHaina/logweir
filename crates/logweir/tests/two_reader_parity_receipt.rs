@@ -913,7 +913,11 @@ fn two_reader_parity_over_the_positions_mapping_corpus() {
     let mapping_lines = |out: &std::process::Output| -> Vec<String> {
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .filter_map(|l| l.find("positions_mapping").map(|i| l[i..].to_string()))
+            .filter_map(|l| {
+                l.find("positions_mapping:")
+                    .or_else(|| l.find("positions_mapping["))
+                    .map(|i| l[i..].to_string())
+            })
             .collect()
     };
     let mut failures: Vec<String> = Vec::new();

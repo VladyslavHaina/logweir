@@ -1125,6 +1125,21 @@ pub fn verify_scorecard_with(
             return Err(ExitCode::Operational);
         }
     };
+    verify_bytes_with(&bytes, signature, public_key, payload_type, positions)
+}
+
+/// [`verify_scorecard_with`] over bytes ALREADY READ, once: everything it
+/// decides is about exactly these bytes, so a caller that checks something
+/// else against the same document (`--positions-mapping`) holds the bytes
+/// that were verified and never reads the file a second time.
+fn verify_bytes_with(
+    bytes: &[u8],
+    signature: &Path,
+    public_key: &Path,
+    payload_type: &str,
+    positions: Option<&Path>,
+) -> Result<Verdict, ExitCode> {
+    let bytes = bytes.to_vec();
     let sidecar: Sidecar = match std::fs::read(signature)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -1670,15 +1685,17 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
 /// exact bytes, never a re-serialisation. `Err` is the exit code, the refusal
 /// already printed.
 fn checked_mapping(
-    scorecard: &Path,
+    scorecard_bytes: &[u8],
     mapping: &Path,
 ) -> Result<logweir_core::positions_mapping::MappingDocument, ExitCode> {
     use logweir_core::positions_mapping as pm;
-    let sc: Option<Scorecard> = std::fs::read(scorecard)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
-    let Some(sc) = sc else {
-        eprintln!("cannot read the scorecard {} again", scorecard.display());
+    // The scorecard is the one whose signature and arms were just verified:
+    // its bytes are handed down, never read from disk again (a file swapped
+    // between the two reads could otherwise bind the mapping to bytes nobody
+    // verified). The mapping file is read once too, and the digest is over
+    // the bytes that are parsed.
+    let Ok(sc) = serde_json::from_slice::<Scorecard>(scorecard_bytes) else {
+        eprintln!("the verified scorecard does not parse as a scorecard");
         return Err(ExitCode::Operational);
     };
     let bytes = match std::fs::read(mapping) {
@@ -1751,8 +1768,17 @@ pub fn run_with_mapping(
         );
         return ExitCode::Operational;
     }
-    match verify_scorecard_with(scorecard, signature, public_key, wanted, positions) {
-        Ok(Verdict::Scorecard(r)) => match checked_mapping(scorecard, mapping) {
+    // ONE read of the scorecard: the bytes verified below are the bytes the
+    // mapping is checked against.
+    let bytes = match std::fs::read(scorecard) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", scorecard.display());
+            return ExitCode::Operational;
+        }
+    };
+    match verify_bytes_with(&bytes, signature, public_key, wanted, positions) {
+        Ok(Verdict::Scorecard(r)) => match checked_mapping(&bytes, mapping) {
             Ok(doc) => {
                 print_report_with(&r, Some(&doc));
                 ExitCode::Ok
@@ -1841,5 +1867,46 @@ pub fn run_with(
             ExitCode::Ok
         }
         Err(c) => c,
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    fn corpus(name: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/invariants")
+                .join(name),
+        )
+        .expect("a corpus file")
+    }
+
+    /// The security review's TOCTOU finding, closed BY CONSTRUCTION: the
+    /// mapping is checked against the bytes the signature was verified over,
+    /// handed down, and `run_with_mapping` reads the scorecard file exactly
+    /// once. A scorecard swapped on disk after verification cannot reach the
+    /// mapping check, which has no path to read it from; the verdict follows
+    /// the bytes it is given.
+    #[test]
+    fn the_mapping_is_checked_against_the_verified_bytes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mapping = dir.path().join("m.json");
+        std::fs::write(&mapping, corpus("positions_mapping_accepted.mapping.json")).unwrap();
+        let verified = corpus("positions_mapping_accepted.json");
+        assert!(checked_mapping(&verified, &mapping).is_ok());
+        // Another scorecard's bytes (another document key): refused.
+        let other = corpus("positions_mapping_pmd3_another_run.json");
+        assert!(checked_mapping(&other, &mapping).is_err());
+        // One read of the scorecard path in the function that verifies.
+        let src = include_str!("verify.rs");
+        let body = src
+            .split("pub fn run_with_mapping(")
+            .nth(1)
+            .and_then(|b| b.split("\n}\n").next())
+            .expect("run_with_mapping's body");
+        assert_eq!(body.matches("std::fs::read(scorecard)").count(), 1);
+        assert!(body.contains("checked_mapping(&bytes, mapping)"));
     }
 }

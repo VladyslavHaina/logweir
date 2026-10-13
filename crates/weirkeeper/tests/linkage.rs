@@ -1008,11 +1008,11 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          11), so a non-empty stderr is a panic or a missing subscriber. Got: {stderr:?}"
     );
     assert!(
-        stdout.contains("\"controllers\":13"),
-        "the startup line names the registered controller count: thirteen, from \
+        stdout.contains("\"controllers\":14"),
+        "the startup line names the registered controller count: fourteen, from \
          `controllers::trust_roster` and `controllers::approval` (Task 16) to \
-         `controllers::retention_policy` (D3 W9). D3 W7's `controllers::rehearsal_schedule` \
-         is withdrawn in v1 (OD-12). A count that is not 13 means `main`'s registration \
+         `controllers::retention_policy` (D3 W9) and `controllers::switchover` (PROD-04.2). D3 W7's `controllers::rehearsal_schedule` \
+         is withdrawn in v1 (OD-12). A count that is not 14 means `main`'s registration \
          point lost a `controllers.push(…)` line. \
          Got: {stdout:?}"
     );
