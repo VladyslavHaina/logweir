@@ -448,6 +448,21 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             mode: scope.target.mode.to_string(),
             topic_prefix: scope.target.topic_prefix.clone(),
             allow_transaction_markers: scope.target.allow_transaction_markers,
+            topic_configuration: scope.target.topic_configuration.as_ref().map(|block| {
+                crate::contract::ScopeTopicConfigurationView {
+                    transition: block.transition.to_string(),
+                    owners: block.owners.as_ref().map(|owners| {
+                        owners
+                            .iter()
+                            .map(|o| ScopeOwnerView {
+                                topic: o.topic.clone(),
+                                kind: o.kind.clone(),
+                                reference: o.reference.clone(),
+                            })
+                            .collect()
+                    }),
+                }
+            }),
         },
         topics: scope
             .topics

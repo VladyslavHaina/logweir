@@ -1047,6 +1047,16 @@ pub struct RestoreStatus {
     /// other `Restore`, and on anything an older controller reconciled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone: Option<CloneStatus>,
+    /// For a plan carrying `target.topic_configuration`: each
+    /// target topic's replication factor with its reason, its overrides
+    /// before (Logweir's during-restore settings and the source's at-creation
+    /// set) and after (the whole desired set), and what phase 9's transition
+    /// did. Read off the runner's `topic-configuration=` line and held to
+    /// this Restore's mapped target names: a CLAIM, like `topicPreflight`; the
+    /// signed scorecard's `target.topic_configuration` and the phase-9
+    /// attestation are the evidence. Absent on every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<RestoreTopicConfiguration>,
     /// The condition set. `RunnerReady` joins `Verified` as a condition every
     /// terminal builder carries forward, because a JSON merge patch replaces
     /// the whole list.
@@ -1150,6 +1160,85 @@ pub struct CloneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 1024))]
     pub reason: Option<String>,
+}
+
+/// `Restore.status.topicConfiguration`: a restore's target topic configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreTopicConfiguration {
+    /// `applied`, `partial`, or `notRun: <reason>` (`transitionNone`,
+    /// `verdictNotPass`, `topicsNotKept`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub transition: Option<String>,
+    /// Topics whose desired set was applied and read back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub applied: Option<Vec<String>>,
+    /// Topics not transitioned, each with its whole desired set: the
+    /// remaining step, which the operator applies. Logweir never retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub failed: Option<Vec<TopicConfigurationFailure>>,
+    /// Owned topics, whose configuration is the desired-state document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub exported: Option<Vec<String>>,
+    /// The desired-state document's evidence key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_state_key: Option<String>,
+    /// Per target topic: the replication factor and the overrides before
+    /// and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub topics: Option<Vec<TopicConfigurationStatusTopic>>,
+}
+
+/// One topic the transition did not apply.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationFailure {
+    /// The target topic.
+    pub topic: String,
+    /// Why (`ConfigChangedSinceCreation`, or the failure), bounded.
+    #[schemars(length(max = 256))]
+    pub error: String,
+    /// The topic's whole desired override set.
+    #[serde(default)]
+    pub desired: std::collections::BTreeMap<String, String>,
+}
+
+/// One target topic's configuration, before and after.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationStatusTopic {
+    /// The target topic.
+    pub topic: String,
+    /// `adminApi` or `desiredStateExport`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// The replication factor it was created with, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<TopicReplicationFactor>,
+    /// The overrides it was created with.
+    #[serde(default)]
+    pub before: std::collections::BTreeMap<String, String>,
+    /// The whole desired override set.
+    #[serde(default)]
+    pub after: std::collections::BTreeMap<String, String>,
+}
+
+/// A created topic's replication factor.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicReplicationFactor {
+    /// The source's, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<i64>,
+    /// The factor the topic was created with.
+    pub target: i64,
+    /// `sourceFactor`, `targetBrokers` or `notRecorded`.
+    pub reason: String,
 }
 
 /// One topic teardown could not remove.

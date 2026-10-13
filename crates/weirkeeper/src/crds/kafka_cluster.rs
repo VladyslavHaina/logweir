@@ -356,9 +356,42 @@ pub struct KafkaClusterSpec {
     /// and a `mode: scratch` restore against this cluster is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_topic: Option<String>,
+    /// The Strimzi cluster that manages this Kafka cluster's topics. Set, a
+    /// `Backup` of this cluster lists the `KafkaTopic` resources of that
+    /// namespace labelled `strimzi.io/cluster=<cluster>` (read only, granted
+    /// per namespace by the chart values `strimzi.readKafkaTopics` and
+    /// `strimzi.namespaces`), and its receipt records each named topic's
+    /// Strimzi owner, so a restore exports desired state for it. A namespace
+    /// the chart does not list, a refused list, or a `KafkaTopic` resource the
+    /// API server does not serve fails the backup closed
+    /// (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing
+    /// is listed, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strimzi: Option<StrimziRef>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub unrecognized_fields: UnrecognizedFields,
+}
+
+/// Where a Strimzi cluster's `KafkaTopic` resources live.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StrimziRef {
+    /// The namespace of the `Kafka` resource and its `KafkaTopic`s.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub namespace: String,
+    /// The `Kafka` resource's name: the `strimzi.io/cluster` label value, so
+    /// at most 63 characters (a label value's bound; a longer one would make
+    /// every `KafkaTopic` list a 400). The pattern is a subset of a label
+    /// value's.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+    )]
+    pub cluster: String,
 }
 
 /// `KafkaCluster.status` — entirely observations.

@@ -935,6 +935,14 @@ impl ClusterReader for RdKafkaReader {
     /// empty-answer rule exactly as the one-broker read is (an empty answer is
     /// a refused read, an error), so `None` means only "this broker answered
     /// and did not name the key".
+    fn broker_count(&self) -> Result<Option<u32>, KafkaError> {
+        let md = self
+            .consumer
+            .fetch_metadata(None, T)
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        Ok(u32::try_from(md.brokers().len()).ok().filter(|n| *n >= 1))
+    }
+
     fn broker_config_value_all(&self, key: &str) -> Result<Vec<(i32, Option<String>)>, KafkaError> {
         use rdkafka::admin::{AdminOptions, OwnedResourceSpecifier, ResourceSpecifier};
         let md = self
@@ -1187,11 +1195,13 @@ impl TopicCreator for RdKafkaReader {
     /// mapping guard has already refused to let equal any source topic, and
     /// phase 3 reports every target name that already exists.
     ///
-    /// **THIS IMPLEMENTATION CREATES AND DOES NOTHING ELSE.** It never
-    /// deletes, not what its own request created and not after a partial
-    /// failure: `logweir-kafka`'s one topic delete is `impl TopicDeleter`'s,
-    /// behind the scratch prefix and the protected names
-    /// (`crates/logweir/tests/no_topic_delete_inventory.rs` reads this file).
+    /// **THIS IMPLEMENTATION NEVER DELETES**, not what its own request
+    /// created and not after a partial failure: `logweir-kafka`'s one topic
+    /// delete is `impl TopicDeleter`'s, behind the scratch prefix and the
+    /// protected names (`crates/logweir/tests/no_topic_delete_inventory.rs`
+    /// reads this file). Beside the create it validates (`validate_only`,
+    /// which writes nothing) and, for PROD-05.2's phase 9, alters the
+    /// configuration of a topic the restore created.
     fn create_topics(
         &self,
         topics: &[NewTopicSpec],
@@ -1222,6 +1232,67 @@ impl TopicCreator for RdKafkaReader {
                 Err((name, code)) => (name, Err(code.to_string())),
             })
             .collect())
+    }
+
+    /// The same request with `validate_only(true)`: the broker judges each
+    /// spec and creates nothing.
+    fn validate_create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        use rdkafka::admin::AdminOptions;
+        if topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let new_topics = new_topics_for(topics);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let options = AdminOptions::new()
+            .request_timeout(Some(T))
+            .operation_timeout(Some(CREATE_OPERATION_TIMEOUT))
+            .validate_only(true);
+        let res = rt
+            .block_on(self.admin.create_topics(&new_topics, &options))
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        Ok(res
+            .into_iter()
+            .map(|r| match r {
+                Ok(name) => (name, Ok(())),
+                Err((name, code)) => (name, Err(code.to_string())),
+            })
+            .collect())
+    }
+
+    /// One legacy `AlterConfigs` for `topic`, its whole set. The answer is
+    /// not proof (the trait's doc); a whole-request failure is an error.
+    fn alter_topic_configs(
+        &self,
+        topic: &str,
+        configs: &BTreeMap<String, String>,
+    ) -> Result<(), KafkaError> {
+        use rdkafka::admin::{AdminOptions, AlterConfig, ResourceSpecifier};
+        let mut alter = AlterConfig::new(ResourceSpecifier::Topic(topic));
+        for (key, value) in configs {
+            alter = alter.set(key.as_str(), value.as_str());
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let res = rt
+            .block_on(self.admin.alter_configs(
+                std::iter::once(&alter),
+                &AdminOptions::new().request_timeout(Some(T)),
+            ))
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        for r in res {
+            if let Err((_, code)) = r {
+                return Err(KafkaError::Client(code.to_string()));
+            }
+        }
+        Ok(())
     }
 }
 

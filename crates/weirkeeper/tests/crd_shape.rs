@@ -337,13 +337,24 @@ fn no_vendor_crd_group_is_named_anywhere() {
         root.join("crates/weirkeeper/examples"),
         root.join("charts/logweir/crds"),
     ];
-    let needles = ["kafka.oso.sh", "kafkabackup.com", "osodevops/"];
+    let needles = [
+        "kafka.oso.sh",
+        "kafkabackup.com",
+        "osodevops/",
+        "kafka.strimzi.io",
+    ];
+    // PROD-05.1a, Amendment K (4): ONE file may name Strimzi's group, the
+    // read-only list of its `KafkaTopic`s (`get`/`list` only, chart-gated).
+    let exempt = root.join("crates/weirkeeper/src/strimzi_topics.rs");
     let mut hits = Vec::new();
     let mut scanned_files = 0usize;
     for dir in &scanned {
         for (path, text) in files_under(dir) {
             scanned_files += 1;
             for needle in needles {
+                if needle == "kafka.strimzi.io" && path == exempt {
+                    continue;
+                }
                 if text.contains(needle) {
                     hits.push(format!("{} names `{needle}`", path.display()));
                 }
@@ -2441,6 +2452,22 @@ fn kafka_cluster_auth_mode_accepts_only_the_five_modes() {
             keys,
             vec!["key", "name"],
             "a CA source is {{name, key}} in THIS namespace — no namespace field"
+        );
+    }
+}
+
+/// PROD-05.1a: `spec.strimzi.cluster` is a label value (the
+/// `strimzi.io/cluster` selector), so the API server refuses a name a label
+/// cannot hold, instead of the controller requeueing on a 400 forever.
+#[test]
+fn the_strimzi_cluster_name_is_bounded_as_a_label_value() {
+    let doc = crd("kafkaclusters.yaml");
+    let strimzi = at(spec_schema(&doc), &["properties", "strimzi", "properties"]);
+    for field in ["namespace", "cluster"] {
+        assert_eq!(
+            at(strimzi, &[field, "maxLength"]).as_u64(),
+            Some(63),
+            "`strimzi.{field}` is at most 63 characters"
         );
     }
 }

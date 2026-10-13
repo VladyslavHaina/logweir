@@ -3022,6 +3022,40 @@ pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
     (!kept.is_empty()).then(|| json!({ "failed": kept }))
 }
 
+/// **PROD-05.2.** `status.topicConfiguration` from the runner's last
+/// `topic-configuration=` line, held to this Restore's mapped target names and
+/// re-shaped into exactly the CRD's fields (a typed round trip): a topic the
+/// plan does not map is not this run's to name. `None` when there is no line
+/// or it does not parse.
+#[must_use]
+pub fn topic_configuration(log: &str, mapped: &[String]) -> Option<Value> {
+    use crate::crds::restore::RestoreTopicConfiguration;
+    let raw = runner_log::key_values(
+        log,
+        logweir_core::topic_transition::TOPIC_CONFIGURATION_KEY_PREFIX,
+    )
+    .pop()?;
+    let mut doc: RestoreTopicConfiguration = serde_json::from_str(raw).ok()?;
+    let ours = |t: &String| mapped.iter().any(|m| m == t);
+    if let Some(list) = doc.applied.as_mut() {
+        list.retain(ours);
+    }
+    if let Some(list) = doc.exported.as_mut() {
+        list.retain(ours);
+    }
+    if let Some(list) = doc.failed.as_mut() {
+        list.retain(|f| ours(&f.topic));
+        for f in list.iter_mut() {
+            f.error = f.error.chars().take(256).collect();
+        }
+    }
+    if let Some(list) = doc.topics.as_mut() {
+        list.retain(|t| ours(&t.topic));
+    }
+    doc.transition = doc.transition.map(|t| t.chars().take(64).collect());
+    serde_json::to_value(doc).ok()
+}
+
 /// Guard **G-TS**'s observation, read off the pod log by key name.
 ///
 /// Returns the printed object filtered to the three fields
@@ -6905,6 +6939,15 @@ async fn reconcile_restore_inner(
     ) {
         if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
             status.insert("teardown".to_string(), teardown);
+        }
+    }
+    // PROD-05.2: what the configuration transition did, by the same rule.
+    if let Some(configured) = topic_configuration(
+        &log,
+        topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
+    ) {
+        if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
+            status.insert("topicConfiguration".to_string(), configured);
         }
     }
     let terminal = diagnostics::apply_finished(

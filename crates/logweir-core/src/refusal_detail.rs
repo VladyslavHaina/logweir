@@ -219,7 +219,7 @@ pub enum RefusingRun {
 /// Four of the codes are constants of the `logweir` crate, which this crate
 /// cannot name; `crates/logweir/tests/refusal_detail.rs` holds each literal
 /// here to its constant.
-pub const RESTORE_REASON_CODES: [&str; 14] = [
+pub const RESTORE_REASON_CODES: [&str; 18] = [
     crate::guard::TERMINAL_STATE_GUARD_REFUSED,
     crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     crate::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
@@ -235,6 +235,11 @@ pub const RESTORE_REASON_CODES: [&str; 14] = [
     "PointBindingSetMismatch",
     "PointUntrusted",
     "RehearsalScopeViolation",
+    // PROD-05.2's four, `crate::topic_transition`'s.
+    crate::topic_transition::TOPIC_CONFIGURATION_NOT_RECORDED,
+    crate::topic_transition::TOPIC_CONFIG_REFUSED_BY_TARGET,
+    crate::topic_transition::TOPIC_CLASS_DISAGREES,
+    crate::topic_transition::TOPIC_OWNER_NOT_CHECKED,
 ];
 
 /// Every reason code `logweir backup run` can print. See
@@ -858,8 +863,8 @@ mod tests {
         );
         assert_eq!(
             restore.union(&backup).count(),
-            18,
-            "the exit-3 sweep's count of distinct codes"
+            22,
+            "the exit-3 sweep's count of distinct codes (18, and the four topic configuration refusals)"
         );
         // PER KIND: a code of one is not a code of the other.
         for only_restore in restore.difference(&backup) {

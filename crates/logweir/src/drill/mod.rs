@@ -15,6 +15,7 @@ pub mod phase6_restore;
 pub mod phase7_verify;
 pub mod phase8_score;
 pub mod phase9_teardown;
+pub mod phase9_transition;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
@@ -2210,6 +2211,17 @@ fn execute_with_validated_approval(
     // pin the position.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
+    // PROD-05.2: each topic's desired state from the bound point's model, and
+    // the target's `validate_only` verdict, once the restored set is proved
+    // the point's and before anything is created. Every refusal is exit 3
+    // with nothing written (`validate_only` creates nothing).
+    let configured = phase0_admit::admit_topic_configuration(
+        &c.spec,
+        &c.source_config_coverage,
+        &admitted.topic_mapping,
+        reader,
+        creator,
+    )?;
     // An empty capture is refused by name, here: a set with no segment for any
     // topic this restore names is refused exit 3 before phase 2 and before any
     // other archive-based refusal, never phase 4's exit 1 over an "empty
@@ -2502,14 +2514,27 @@ fn execute_with_validated_approval(
             &mut std::io::stdout().lock(),
         );
     };
+    // PROD-05.2: the signed `target.topic_configuration`, and the owned
+    // topics' desired-state document it binds, put before anything is
+    // created, so a failed put leaves the target as it was.
+    if let Some(configured) = configured.as_ref() {
+        sc.target.topic_configuration = Some(topic_configuration_block(configured, run_id, c)?);
+        sc.format_version = logweir_core::scorecard::format_version_with_topic_configuration(
+            &sc.format_version,
+            sc.target.topic_configuration.as_ref(),
+        )
+        .to_string();
+    }
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
-    // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
-    phase0_admit::create_target_topics(
+    // creates them, with `TARGET_TOPIC_CONFIGS` on every one (or, with
+    // `target.topic_configuration`, each topic's own creation set).
+    phase0_admit::create_target_topics_from(
         creator,
         reader,
         &admitted.topic_mapping,
         &facts,
         c.spec.target.default_replication_factor,
+        configured.as_ref(),
         &mut topic_preflight,
     )?;
     let created = topic_preflight.topics_created.clone();
@@ -2585,6 +2610,7 @@ fn execute_with_validated_approval(
                 deleter,
                 &admitted.topic_mapping,
                 &logweir_core::ids::sha256_prefixed(&signed.bytes),
+                configured.as_ref(),
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
@@ -2678,6 +2704,7 @@ fn execute_with_validated_approval(
         deleter,
         &admitted.topic_mapping,
         &signed_bytes_sha256,
+        configured.as_ref(),
     );
     // The mainline exit-2 gate: a drill that ran every phase and was scored
     // `fail-objective` or `fail-integrity` is a drill result, exit 2, with the
@@ -2750,6 +2777,7 @@ impl EvidenceKeys {
 /// The attestation is BOUND to the signed bytes, not to the run id again:
 /// binding to the run id twice carries no independent information and cannot
 /// identify WHICH signed document this teardown accompanies.
+#[allow(clippy::too_many_arguments)]
 fn teardown(
     sc: &mut Scorecard,
     run_id: &str,
@@ -2758,11 +2786,18 @@ fn teardown(
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
     scorecard_sha256: &str,
+    configured: Option<&phase0_admit::TopicConfigurationAdmission>,
 ) {
     // PROD-11.1a: a TTL clone keeps a passing run's topics for its cleanup and
     // tears any other run down at once; the attestation names the declared
     // policy (`ttl`).
     let passed = sc.outcome == Outcome::Pass;
+    let desired_state_key = sc
+        .target
+        .topic_configuration
+        .as_ref()
+        .and_then(|b| b.desired_state.as_ref())
+        .map(|d| d.key.clone());
     let attested = record(sc, 9, "teardown", || {
         let mut a = phase9_teardown::run(
             deleter,
@@ -2777,6 +2812,29 @@ fn teardown(
             scorecard_sha256,
         );
         a.teardown_policy = c.spec.target.teardown.policy().to_string();
+        // PROD-05.2: the configuration transition, after the signed verdict,
+        // on the topics the run keeps (a TTL clone keeps a passing run's);
+        // attested beside the teardown and printed for
+        // `Restore.status.topicConfiguration`.
+        if let Some(configured) = configured {
+            let kept = c.spec.target.mode == logweir_core::spec::TargetMode::NewTopic
+                || c.spec.target.teardown.phase9_policy(passed) != "delete";
+            let outcome = phase9_transition::run(
+                configured,
+                passed,
+                kept,
+                desired_state_key.as_deref(),
+                c.client.as_reader(),
+                c.client.as_creator(),
+                phase9_transition::READBACK_WITHIN,
+            );
+            println!(
+                "{}{}",
+                logweir_core::topic_transition::TOPIC_CONFIGURATION_KEY_PREFIX,
+                logweir_core::topic_transition::status_line_value(&outcome, &configured.topics)
+            );
+            a.topic_configuration = Some(outcome);
+        }
         // A teardown that left topics is a warning event: the names travel in
         // the `topics` field and in the message (JSON and plain-text
         // consumers), and `run_id` is on the event, not only on the span,
@@ -3379,6 +3437,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // subject (`original_name_info`), never on a draft.
             original_name: None,
             creation: None,
+            topic_configuration: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -3711,6 +3770,41 @@ fn target_info(
         // here would sign a subject nobody had checked yet.
         original_name: None,
         creation: None,
+        // Filled once the creation step has created the topics with it
+        // (`topic_configuration_block`).
+        topic_configuration: None,
+    })
+}
+
+/// **PROD-05.2.** The signed `target.topic_configuration` of a run whose
+/// topics were created from its desired set, and the owned topics'
+/// desired-state document, put create-only beside the scorecard and bound by
+/// its digest.
+fn topic_configuration_block(
+    configured: &phase0_admit::TopicConfigurationAdmission,
+    run_id: &str,
+    c: &Ctx,
+) -> Result<logweir_core::topic_transition::TopicConfigurationBlock, DrillError> {
+    use logweir_core::topic_transition as tt;
+    let desired_state = match tt::desired_state_document(&configured.topics) {
+        None => None,
+        Some(doc) => {
+            let key = tt::desired_state_key(run_id);
+            c.store
+                .put_create_only(&key, doc.as_bytes())
+                .map_err(|e| DrillError::Operational(format!("{key}: {e}")))?;
+            Some(tt::DesiredStateRef {
+                key,
+                sha256: logweir_core::ids::sha256_prefixed(doc.as_bytes()),
+                bytes: doc.len() as u64,
+            })
+        }
+    };
+    Ok(tt::TopicConfigurationBlock {
+        transition: configured.transition.wire_name().to_string(),
+        target_line: configured.line.wire_name().to_string(),
+        topics: configured.topics.clone(),
+        desired_state,
     })
 }
 
@@ -4126,7 +4220,7 @@ mod tests {
             "phase2_target::run(",
             "phase3_diff::run(",
             "&c.source_config_coverage",
-            "create_target_topics(",
+            "create_target_topics_from(",
         ] {
             assert!(check < at(later), "the set check must precede `{later}`");
         }

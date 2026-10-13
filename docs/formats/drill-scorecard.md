@@ -3,12 +3,12 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.2.0.json`](../../schemas/logweir-drill-scorecard-2.2.0.json)
+[`schemas/logweir-drill-scorecard-2.3.0.json`](../../schemas/logweir-drill-scorecard-2.3.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.10.0.json`](../../schemas/logweir-drill-scorecard-1.10.0.json)
+[`schemas/logweir-drill-scorecard-1.11.0.json`](../../schemas/logweir-drill-scorecard-1.11.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.9.0.json`, `-2.0.0.json` and `-2.1.0.json`,
+schema file, `-1.0.0.json` to `-1.10.0.json` and `-2.0.0.json` to `-2.2.0.json`,
 is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
@@ -66,6 +66,7 @@ chose.
 | 1.8.0 | PROD-15.1 | [`target.original_name`](#targetoriginal_name-format-180), arms ON-1 to ON-14 | a restore under the original topic names; format 1 only | MINOR, OD-7 (a) |
 | 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
 | 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
+| 1.11.0, 2.3.0 | PROD-05.2 | [`target.topic_configuration`](#targettopic_configuration-format-1110-and-230), arms TC-1 to TC-5 | a restore whose plan carries `target.topic_configuration` (2.3.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -83,6 +84,7 @@ chose.
 | 1.8.0 | A verifier older than 1.28.0 and a `logweir` built before PROD-15.1 accept it, ignore the block and print no `original name:` line. An older runner refuses an original-name plan at phase 0 (its empty prefix maps every topic onto itself) | Documents stay valid; no older runner restores under the original names |
 | 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
 | 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
+| 1.11.0, 2.3.0 | A verifier older than 1.32.0 and an older `logweir drill verify` accept it and ignore the block; readers before 1.27.0 refuse a 2.3.0 document by its major. An older runner ignores the plan block, creates its topics as before and claims nothing | Documents stay valid |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -97,6 +99,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 2.0.0 | `scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR`; the justfile's `scorecard_schema_version` and the current schema's name; `SCORECARD_PARTITION_SUBSETS_VERSION` and `SCORECARD_PARTITION_SUBSETS_MAJOR`; `SCORECARD_SUBSET_VERSION`; `subsets_*.json` |
 | 1.8.0 | `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; the justfile's `scorecard_format_1_schema_version` and the schema's name; `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`; `SCORECARD_ORIGINAL_NAME_VERSION`; `original_name_*.json` |
 | 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
+| 1.11.0, 2.3.0 | `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`, `FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`, `TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; `topic_configuration_1_11_*.json`, `topic_configuration_under_format_1_10_0.json` |
 
 ---
 
@@ -104,7 +107,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format: `1.0.0` to `1.10.0` (major 1) or `2.0.0` to `2.2.0` (major 2, a partition subset only). See [Versions](#versions). |
+| `format_version` | string | Semver of this format: `1.0.0` to `1.11.0` (major 1) or `2.0.0` to `2.3.0` (major 2, a partition subset only). See [Versions](#versions). |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -202,6 +205,7 @@ is added, `format_version` stays `1.0.0`, and the accepted set only narrows.
 | `target.topic_mapping_sha256` | string | `sha256:` of the mapping, so the mapping is attested rather than described. |
 | `target.topic_mapping_entries` | integer | How many mapping entries there were. |
 | `target.original_name` | object, **optional** (1.8.0) | The restore wrote under the source's **original topic names**, into topics phase 0 proved absent and the run created itself. See [below](#targetoriginal_name-format-180). ABSENT means it did not: every mapped name differed from its source. |
+| `target.topic_configuration` | object, **optional** (1.11.0, 2.3.0) | The plan carried `target.topic_configuration`: each target topic was created from the bound point's configuration model, and its deferred settings are applied after a passing verdict. See [below](#targettopic_configuration-format-1110-and-230). ABSENT: the topics were created as before. |
 | `target.auth` | object, optional | How the target client authenticated: `mode` and, for a SASL mode, `username` — never a password. `mode` is `plaintext` or `scramSha512` in every format and from **1.5.0** also `scramSha256`, `plain` or `mtls` (PROD-01.3); a new value under an older version, or any other value, is refused by both readers. `mtls` has no `username` (the identity is the client certificate). Absent means plaintext. |
 
 ### `source.time_basis` (format 1.3.0)
@@ -608,6 +612,68 @@ judged in the same words as before. Both readers print one line:
 console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key c0c0… signed the request and the approval, which is expected in this mode: no personal key is involved
 ```
 
+### `target.topic_configuration` (format 1.11.0 and 2.3.0)
+
+PROD-05.2: present exactly when the restore plan carried
+`target.topic_configuration` ([the plan field](drill-spec.md)). Phase 0 decided
+it from the bound point's configuration model before creating anything, and
+phase 8 signed it before phase 9's transition ran.
+
+```json
+"topic_configuration": {
+  "transition": "afterVerification",
+  "target_line": "4.x",
+  "topics": {
+    "restore-orders": {
+      "source_topic": "orders",
+      "partitions": 6,
+      "replication_factor": {"source": 3, "target": 1, "reason": "targetBrokers"},
+      "during_restore": {"cleanup.policy": "delete", "retention.ms": "-1", "…": "…"},
+      "at_creation": {"min.insync.replicas": "1", "segment.bytes": "104857600"},
+      "deferred": {"cleanup.policy": "compact"},
+      "not_applied": [
+        {"key": "retention.ms", "value": "604800000", "portability": "inherited",
+         "reason": "inherited", "target_default": "86400000"}
+      ],
+      "capped": {"min.insync.replicas": {"source": "2", "applied": "1"}},
+      "route": "adminApi"
+    }
+  },
+  "desired_state": {"key": "logweir/drills/<run_id>.desired-state.yaml", "sha256": "sha256:…", "bytes": 412}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `transition` | `afterVerification` (phase 9 applies `deferred` after a passing verdict) or `none` |
+| `target_line` | `3.x`, `4.x` or `unknown`, from the target broker's configuration keys |
+| `topics.<target>.replication_factor` | the source's factor, the one the topic was created with, and why: `sourceFactor`, `targetBrokers` (bounded by the target's broker count) or `notRecorded` (the plan's `default_replication_factor`) |
+| `during_restore` | Logweir's settings while the restore runs: nothing restored is deleted, compacted, rejected or re-stamped before the verdict |
+| `at_creation` | the source's overrides applied with the create (`min.insync.replicas` capped at the factor, stated in `capped`) |
+| `deferred` | the source's settings phase 9 applies (compaction, retention, the timestamp type and bounds); for an owned topic, every source setting, exported instead |
+| `not_applied` | what is never applied, with the source's value (never a secret's) and the target's own default where its broker reported one: `inherited`, `clusterBound`, `providerOnly`, `secret`, and `removedInKafka4` to a target not on 3.x |
+| `route` | `adminApi`, or `desiredStateExport` for a topic a declarative owner manages: created with Logweir's settings only and never altered; its configuration is the `desired_state` document (`KafkaTopic` YAML for Strimzi) |
+| `not_recorded` | `true` when the point did not record the topic's configuration: created with Logweir's settings only, and phase 9 leaves it on them |
+
+A Strimzi `KafkaTopic` in the `desired_state` document keeps the source
+owner's namespace and has no `strimzi.io/cluster` label. Set the target
+cluster's namespace and label before applying it: as exported, no operator
+reconciles it.
+
+Both readers refuse (arms TC-1 to TC-5, the same words): the block under a
+version before 1.11.0 of format 1 or 2.3.0 of format 2; a `transition` outside
+the two; a route, factor reason or factor of 0 outside the sets; a
+`desired_state` without an exported topic, or an exported topic without one, or
+a digest that is not `sha256:` and 64 lowercase hex; and a `secret` with a value
+or another entry without one.
+
+**What the transition did** is the phase-9 teardown attestation's
+`topic_configuration` (signed; readers check it signature-only): `applied`
+(each read back as its desired set), `failed` and `skipped`
+(`ConfigChangedSinceCreation`, `ConfigurationNotRecorded`), each with its whole
+desired set, `exported`, `not_run` (`transitionNone`, `verdictNotPass`,
+`topicsNotKept`), and the desired-state key.
+
 ## `phases`
 
 An array of `{phase, name, at, duration_ms, outcome, notes[]}` — the first five
@@ -916,8 +982,10 @@ Since 1.2.0 a `newTopic` restore writes each of the four that differs, as
 `partition_count` or `replication_factor`):
 
 - into `not_reconstructed`, the authoritative list: a source setting the
-  restore did NOT reconstruct on the target. Applying it is the operator's
-  until PROD-05 does it ([stability.md](../stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+  restore did NOT reconstruct on the target when phase 7 compared it. A plan
+  with `target.topic_configuration` applies the source's settings in phase 9,
+  after this list is signed ([stability.md](../stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings));
+  otherwise applying them is the operator's;
 - into `unexpected_divergence`, the list every reader has always shown, so a
   reader older than 1.2.0 sees a divergence: a weaker conclusion than the
   label it replaces, never a stronger one, and never the silence that reads

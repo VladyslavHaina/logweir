@@ -95,6 +95,9 @@ pub mod topic_configuration;
 /// The topic ID's canonical text, its closed sets, and the
 /// generation rule two points' IDs are read by.
 pub mod topic_identity;
+/// A restore's target topic configuration in stages (PROD-05.2): the stage
+/// table, the desired set and diff, and the phase-9 guard.
+pub mod topic_transition;
 /// Transaction markers in a restored archive, and the
 /// `TransactionMarkersInArchive` refusal.
 pub mod transaction_markers;

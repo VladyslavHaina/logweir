@@ -13358,3 +13358,53 @@ async fn fx19_a_restore_does_not_admit_on_a_probe_reading_too_old_to_vouch_for()
         }
     }
 }
+
+/// **PROD-05.2.** `status.topicConfiguration` is the runner's last
+/// `topic-configuration=` line, held to the Restore's mapped target names and
+/// re-shaped into the CRD's fields: a topic the plan does not map is dropped,
+/// an over-long error is cut, and a line that does not parse writes nothing.
+/// KILLS: a foreign topic name copied onto the status; the first line taken
+/// over the last.
+#[test]
+fn the_topic_configuration_line_is_held_to_the_mapped_names() {
+    use weirkeeper::controllers::restore::topic_configuration;
+    let line = serde_json::json!({
+        "transition": "partial",
+        "applied": ["r-orders", "elsewhere"],
+        "failed": [{"topic": "r-payments", "error": "x".repeat(400), "desired": {"cleanup.policy": "compact"}}],
+        "exported": [],
+        "topics": [
+            {"topic": "r-orders", "route": "adminApi",
+             "replicationFactor": {"source": 3, "target": 1, "reason": "targetBrokers"},
+             "before": {"cleanup.policy": "delete"}, "after": {"cleanup.policy": "compact"}},
+            {"topic": "elsewhere", "route": "adminApi",
+             "replicationFactor": {"target": 1, "reason": "notRecorded"},
+             "before": {}, "after": {}}
+        ]
+    });
+    let log = format!(
+        "topic-configuration={{\"transition\":\"applied\"}}\ntopic-configuration={line}\nscorecard-key=k\n"
+    );
+    let mapped = vec!["r-orders".to_string(), "r-payments".to_string()];
+    let status = topic_configuration(&log, &mapped).expect("the line is read");
+    assert_eq!(status["transition"], "partial");
+    assert_eq!(status["applied"], serde_json::json!(["r-orders"]));
+    assert_eq!(status["failed"][0]["topic"], "r-payments");
+    assert_eq!(
+        status["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        256
+    );
+    assert_eq!(status["failed"][0]["desired"]["cleanup.policy"], "compact");
+    assert_eq!(status["topics"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        status["topics"][0]["replicationFactor"]["reason"],
+        "targetBrokers"
+    );
+    assert_eq!(status["topics"][0]["after"]["cleanup.policy"], "compact");
+    assert!(topic_configuration("topic-configuration=not json\n", &mapped).is_none());
+    assert!(topic_configuration("scorecard-key=k\n", &mapped).is_none());
+}

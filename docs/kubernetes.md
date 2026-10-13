@@ -337,6 +337,31 @@ run may claim, for example
 `{"mode":"SelectedTopics","coverage":"NamedTopics","resolvedTopicCount":2,"resolvedTopicBytes":14}`.
 Only `coverage: AllUserTopicsAttested` may be shown as "all topics".
 
+### Strimzi owners of a backup's topics
+
+A `KafkaCluster` whose topics a Strimzi cluster manages names it:
+`spec.strimzi: {namespace: kafka, cluster: my-cluster}`. A `Backup` of it then
+lists the `KafkaTopic`s of that namespace labelled
+`strimzi.io/cluster=my-cluster` (unmanaged ones excluded), freezes those naming
+the run's topics into its plan, and the receipt records each topic's owner and
+`owner_detection: [kafkaTopicResources]`, so a restore exports desired state
+for it instead of changing it.
+
+- The read is opt-in and per namespace: chart values
+  `strimzi.readKafkaTopics: true` and `strimzi.namespaces: [kafka]` grant `get`
+  and `list` on `kafkatopics` through a Role in each listed namespace, and
+  nothing else.
+- A namespace the chart does not list, a refused list, or no `KafkaTopic`
+  resource served fails the backup closed, `OwnerDetectionFailed`, before any
+  Job: never "looked, no owner". Remove `spec.strimzi` to back up without it.
+- A frozen run never lists again. A controller older than this field refuses a
+  plan that carries the list (`PlanConfigMapConflict`); roll back only after
+  such runs finish.
+- The exported `KafkaTopic` keeps the SOURCE owner's namespace and carries no
+  `strimzi.io/cluster` label: Logweir does not know which `Kafka` resource
+  manages the target. Set the target's namespace and label before applying
+  it; as exported, no operator reconciles it.
+
 ### Dynamic selection
 
 `topics: []` with `spec.allUserTopics` means every user topic the run's principal
@@ -1060,8 +1085,10 @@ sample:
   plan's `original_name.owners` (an empty list is the approver's signed
   statement), in `--kafka-topic-resources <file>` (`kubectl get kafkatopics -A -o
   yaml`; CLI only), and in the owners the bound point's receipt recorded; it
-  refuses when it looked in neither of the first two. The controller does not
-  list `KafkaTopic`s. `owner_path: true` restores anyway: pause the owner first
+  refuses when it looked in neither of the first two. The controller lists
+  `KafkaTopic`s for a `Backup` only
+  ([Strimzi owners](#strimzi-owners-of-a-backups-topics)), never for a
+  restore. `owner_path: true` restores anyway: pause the owner first
   (`strimzi.io/pause-reconciliation: "true"`, suspend GitOps sync) and make its
   desired state keep the restored `retention.ms`.
 - **Stop every producer of a restored name first.** A producer still writing is
@@ -1082,6 +1109,38 @@ sample:
   verifiers check and print as two `original name:` lines.
 - A `Preflight` accepts the identity mapping it asked for but does not evaluate
   the cluster and owner conditions; phase 0 does.
+
+### The target topics' configuration
+
+A plan with `target.topic_configuration`
+([the plan field](formats/drill-spec.md#targettopic_configuration-prod-052))
+creates each target topic from the bound point's configuration model and,
+with `transition: afterVerification`, applies the source's compaction,
+retention and timestamp settings in phase 9 after a passing verdict. The
+`Restore` itself declares nothing new: the block is in `planBytes`, and the
+approval scope shows the choice and every owner it states.
+
+- **Preview first.** A `Preflight` `operation: Restore` writes one details line
+  per topic (`GET …/preflights/{id}/details`, `check: target.topicConfiguration`):
+  the replication factor and why, the during-restore, at-creation,
+  after-verification and never-applied sets, each inherited value against the
+  target's own default, the owner route, the target's `validate_only` verdicts,
+  and what the transition's retention deletes. Or the refusal phase 0 would
+  make.
+- **`status.topicConfiguration`** carries each topic's replication factor with
+  its reason, its overrides before (Logweir's, with the at-creation set) and
+  after (the whole desired set), and the transition's outcome: `applied`,
+  `partial` or `notRun: <reason>`; `applied`, `failed` (each with its whole
+  desired set: the remaining step, which you apply; Logweir never retries),
+  `exported` and `desiredStateKey`. It is read off the runner's log; the signed
+  scorecard's `target.topic_configuration` and the phase-9 attestation
+  (`logweir/drills/<run_id>.teardown.json`) are the evidence.
+- **The restore principal** needs `DescribeConfigs` and `AlterConfigs` on the
+  restored topics, and `CreateTopics` with `validate_only`. A denied
+  `AlterConfigs` is a `failed` topic, found by reading the overrides back.
+- **Owned topics** (a Strimzi `KafkaTopic` recorded at backup, or `owners` in
+  the plan) are created with Logweir's settings only and never altered; apply
+  the exported `KafkaTopic` YAML (`desiredStateKey`) with your owner.
 
 ### Exit 3 and the evidence keys
 

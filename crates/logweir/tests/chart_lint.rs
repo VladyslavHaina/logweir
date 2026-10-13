@@ -2346,6 +2346,16 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
                 },
             );
         }
+        // PROD-05.1a: `get`/`list` on Strimzi KafkaTopics, in each namespace
+        // `strimzi.namespaces` lists, only with `strimzi.readKafkaTopics`.
+        if values["strimzi"]["readKafkaTopics"].as_bool() == Some(true) {
+            for ns in string_list(&values["strimzi"]["namespaces"]) {
+                want.entry(ns).or_default().extend(pinned(&[
+                    "get kafka.strimzi.io/kafkatopics",
+                    "list kafka.strimzi.io/kafkatopics",
+                ]));
+            }
+        }
         let reached = reachable_grants(render, &docs, RENDER_NAMESPACE, "weirkeeper");
         assert_grants(
             render,

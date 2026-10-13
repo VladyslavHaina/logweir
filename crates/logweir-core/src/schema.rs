@@ -24,12 +24,17 @@ use crate::scorecard::Scorecard;
 /// 2.0.0 file is 2.1.0 without the block
 /// (`the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
 ///
-/// **2.2.0**, this file, adds `target.creation` (PROD-11.1a: the topics a run
-/// created and their IDs): 2.1.0's fields plus that optional block and its two
-/// definitions; the frozen 2.1.0 file is this file without it
-/// (`the_frozen_2_1_0_scorecard_schema_is_the_2_2_0_one_without_the_target_creation`).
+/// **2.2.0** adds `target.creation` (PROD-11.1a: the topics a run created and
+/// their IDs): 2.1.0's fields plus that optional block and its two
+/// definitions; the frozen 2.1.0 file is the frozen 2.2.0 file without it
+/// (`the_frozen_2_1_0_scorecard_schema_is_the_frozen_2_2_0_one_without_the_target_creation`).
+///
+/// **2.3.0**, this file, adds `target.topic_configuration` (PROD-05.2): 2.2.0's
+/// fields plus that optional block and its definitions, exactly as the type
+/// derives them; the frozen 2.2.0 file is this file without the block
+/// (`the_frozen_2_2_0_scorecard_schema_is_the_2_3_0_one_without_the_topic_configuration`).
 /// The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`].
+/// [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`].
 ///
 /// **`target.original_name` is NOT in this file, on purpose**: an original-name
 /// restore restores whole topics (arm ON-14), so the block never appears in a
@@ -46,7 +51,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
+        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION
     ));
     fn def<'a>(
         definitions: &'a mut schemars::Map<String, Schema>,
@@ -117,26 +122,34 @@ const ORIGINAL_NAME_PROPERTY: &str = "original_name";
 /// The two definitions the `original_name` block brings with it.
 const ORIGINAL_NAME_DEFINITIONS: [&str; 2] = ["OriginalNameInfo", "OriginalNameOwner"];
 
-/// `TargetInfo`'s property for the `target.creation` block.
-const TARGET_CREATION_PROPERTY: &str = "creation";
+/// `TargetInfo`'s property for the `topic_configuration` block (PROD-05.2).
+pub const TOPIC_CONFIGURATION_PROPERTY: &str = "topic_configuration";
 
-/// The two definitions the `target.creation` block brings with it.
-const TARGET_CREATION_DEFINITIONS: [&str; 2] = ["TargetCreation", "CreatedTopic"];
+/// The definitions the `target.topic_configuration` block brings with it.
+pub const TOPIC_CONFIGURATION_DEFINITIONS: [&str; 7] = [
+    "Capped",
+    "DesiredStateRef",
+    "NotApplied",
+    "ReplicationChoice",
+    "TopicConfigurationBlock",
+    "TopicDesired",
+    "TopicOwner",
+];
 
 /// Pretty-printed JSON Schema of the NEWEST MINOR OF SCORECARD FORMAT 1:
-/// **1.10.0** (`target.creation`, PROD-11.1a: the topics a run created and
-/// their IDs). It describes every 1.x document this build writes; the 1.9.0
-/// file (`approval.console`) is frozen beside it.
+/// **1.11.0** (`target.topic_configuration`, PROD-05.2). It describes every
+/// 1.x document this build writes; the 1.10.0 file (`target.creation`) is
+/// frozen beside it.
 ///
 /// The Rust type reads both majors, so what it derives on its own is no longer
 /// format 1's selection block. A MINOR adds optional fields only, so this file
-/// is BUILT AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.9.0
-/// file), plus the optional `target.creation` property and its two
+/// is BUILT AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.10.0
+/// file), plus the optional `target.topic_configuration` property and its
 /// definitions exactly as the type derives them, under the `$id` built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`]. So a change to
-/// [`crate::target_creation::TargetCreation`] is a diff of this file
-/// (`just schema-check`), and nothing else of format 1 can move
-/// (`the_format_1_scorecard_schema_is_the_frozen_1_9_0_plus_the_target_creation_block`).
+/// [`crate::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`]. So a change
+/// to [`crate::topic_transition::TopicConfigurationBlock`] is a diff of this
+/// file (`just schema-check`), and nothing else of format 1 can move
+/// (`the_format_1_scorecard_schema_is_the_frozen_1_10_0_plus_the_topic_configuration_block`).
 ///
 /// # Panics
 ///
@@ -155,14 +168,14 @@ pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
         serde_json::from_str(frozen_predecessor).expect("the frozen scorecard schema parses");
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
+        crate::scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
     ));
     let property = match derived.definitions.get_mut("TargetInfo") {
         Some(Schema::Object(o)) => o
             .object()
             .properties
-            .remove(TARGET_CREATION_PROPERTY)
-            .expect("the scorecard type derives target.creation"),
+            .remove(TOPIC_CONFIGURATION_PROPERTY)
+            .expect("the scorecard type derives target.topic_configuration"),
         _ => panic!("the scorecard type derives TargetInfo"),
     };
     match root.definitions.get_mut("TargetInfo") {
@@ -170,14 +183,14 @@ pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
             assert!(
                 o.object()
                     .properties
-                    .insert(TARGET_CREATION_PROPERTY.into(), property)
+                    .insert(TOPIC_CONFIGURATION_PROPERTY.into(), property)
                     .is_none(),
-                "the frozen predecessor must not describe target.creation"
+                "the frozen predecessor must not describe target.topic_configuration"
             );
         }
         _ => panic!("the frozen scorecard schema defines TargetInfo"),
     }
-    for name in TARGET_CREATION_DEFINITIONS {
+    for name in TOPIC_CONFIGURATION_DEFINITIONS {
         let definition = derived
             .definitions
             .remove(name)

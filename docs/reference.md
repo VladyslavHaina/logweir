@@ -43,7 +43,7 @@ Neither returns 2 or 4.
 | 3 | `Failed` | the state on `refusal-reason=`, or `GuardRefusedUnknownReason` | `Failed=True`, `GuardRefused` | A guard refused; the message ends with the runner's reason |
 | 4 | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` | `Failed=True`, `SigningOrLock` | Nothing uploaded. `ExecutionClaimUnproven`: the store refused the claim, does not enforce conditional create, or the archive could not be read for a reason no retry changes |
 | absent | `Failed` | `operational` | `Failed=True`, `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` / `VolumeMountFailed` / `CredentialReferenceMissing` / `RunnerImageUnavailable` / `PodCreationForbidden` / `PodOwnershipContested` | The runner reported no terminated state |
-| absent | `Failed` | `operational` | `Failed=True`, a refusal before any Job: `NameTooLong`, `ExecutionSpecInvalid`, `ScheduledIdentityMismatch`, `ScheduleNotFound`, `RunPolicyDigestMismatch`, `InvalidTopicSelection`, `GuardRefused` (a glob), `ReferentNotFound`, `CredentialNotRenderable`, `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `PlainWithoutTls`, `ArchiveUrlUnreadable`, `PlanConfigMapConflict`, `JobNameConflict`, `SelectionTooLarge`, and the dynamic-selection reasons | Nothing was created |
+| absent | `Failed` | `operational` | `Failed=True`, a refusal before any Job: `NameTooLong`, `ExecutionSpecInvalid`, `ScheduledIdentityMismatch`, `ScheduleNotFound`, `RunPolicyDigestMismatch`, `InvalidTopicSelection`, `GuardRefused` (a glob), `ReferentNotFound`, `CredentialNotRenderable`, `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `PlainWithoutTls`, `ArchiveUrlUnreadable`, `PlanConfigMapConflict`, `JobNameConflict`, `SelectionTooLarge`, `OwnerDetectionFailed`, and the dynamic-selection reasons | Nothing was created |
 
 `status.exitReason` carries the five lowercase wire strings (`ok`,
 `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock`) or a more
@@ -217,7 +217,7 @@ and take no token.
 
 | Run | Codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`, `TopicConfigurationNotRecorded`, `TopicConfigRefusedByTarget`, `TopicClassDisagrees`, `TopicOwnerNotChecked` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 When the controller shows no reason, the message ends with nothing after

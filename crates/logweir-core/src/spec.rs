@@ -603,6 +603,14 @@ pub struct TargetSpec {
     /// refuses at parse.
     #[serde(default)]
     pub teardown: crate::target_creation::Teardown,
+    /// **PROD-05.2.** Create the target topics from the bound point's
+    /// configuration model and, after a passing verdict, apply the settings
+    /// that would have dropped or re-stamped restored records
+    /// ([`crate::topic_transition`]). ABSENT: every topic is created as it
+    /// always was, byte for byte. An older runner ignores the block, applies
+    /// what it always did and claims nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<crate::topic_transition::TopicConfigurationPlan>,
 }
 impl TargetSpec {
     /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the

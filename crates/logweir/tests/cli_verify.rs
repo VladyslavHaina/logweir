@@ -11,15 +11,18 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest version (2.2.0: every partition subset that created
-            // topics, PROD-11.1a; 1.10.0 every other such run). Before it, 2.1.0 for a
+            // The newest version (2.3.0: a partition-subset restore whose plan
+            // carries `target.topic_configuration`, PROD-05.2; 1.11.0 for any
+            // other restore with the plan block). Before it, 2.2.0 for a
+            // partition subset that created topics (PROD-11.1a) and 1.10.0
+            // for any other run that created topics, 2.1.0 for a
             // partition-subset restore a second person approved in the
             // console and 2.0.0 for any other partition subset, 1.9.0 for any
             // other restore approved in the console, 1.8.0 for one under the
             // original topic names, 1.7.0 for one that states a window start
             // only, 1.6.0 for every other sampled drill, and 1.4.0/1.5.0 for a
             // complete one.
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION
         )),
         "{s}"
     );

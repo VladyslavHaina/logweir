@@ -83,6 +83,7 @@ fn main() {
             // original-name restore.
             original_name: None,
             creation: None,
+            topic_configuration: None,
         },
         approval: ApprovalInfo {
             approver: "sre-oncall@example.com".into(),

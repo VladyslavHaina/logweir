@@ -617,7 +617,19 @@ FORMAT_VERSION = "1.4.0"
 # from 1.10.0 / 2.2.0, lineage headers kept, each topic named once with a
 # partition, an ID or its closed-set reason, and a lifetime only on a bounded
 # scratch clone. One `target creation:` line, in the Rust reader's words.
-SCRIPT_VERSION = "1.31.0"
+#
+# 1.32.0 (PROD-05.2) knows scorecard format 1.11.0, and 2.3.0 of format 2, and
+# their optional `target.topic_configuration`: a restore that created its
+# topics from the bound point's configuration model and applies the deferred
+# settings after a passing verdict. Five arms, TC-1 to TC-5, mirrored byte for
+# byte and in position (after CA-8, before `redactions`): the block only from
+# 1.11.0 of format 1 or 2.3.0 of format 2; its transition `afterVerification`
+# or `none`; each topic's route `adminApi` or `desiredStateExport`, its
+# replication factor reason from its closed set and a factor of at least 1;
+# `desired_state` exactly when a topic is exported, named by sha256; and no
+# secret with a value. They fire only on a document carrying the block (OD-7
+# (a)). The shape layer refuses a block that is not the writer's shape.
+SCRIPT_VERSION = "1.32.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -690,6 +702,20 @@ SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2 = 2
 LINEAGE_HEADERS_KEPT = "kept"
 CLONE_TTL_MIN_SECONDS = 300
 CLONE_TTL_MAX_SECONDS = 2592000
+
+# PROD-05.2: `target.topic_configuration`. The first minor of format 1, and
+# of format 2, that defines the block (arm TC-1) --
+# `TOPIC_CONFIGURATION_SINCE_MINOR` and
+# `TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`, and its closed sets, `TRANSITIONS`,
+# `ROUTES` and `RF_REASONS` in `crates/logweir-core/src/topic_transition.rs`,
+# which they must equal
+# (`docs/test_verify_scorecard.py::test_the_topic_configuration_constants_are_the_rust_readers`).
+SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR = 11
+SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2 = 3
+TOPIC_CONFIGURATION_TRANSITIONS = ("afterVerification", "none")
+TOPIC_CONFIGURATION_ROUTES = ("adminApi", "desiredStateExport")
+TOPIC_CONFIGURATION_RF_REASONS = ("sourceFactor", "targetBrokers", "notRecorded")
 
 # The block's one mode, and the new member of `ORIGINAL_NAME_APPROVAL_MODES`
 # above -- `APPROVAL_MODE_CONSOLE` in `scorecard.rs`. THE VOCABULARY IS HELD TO
@@ -1349,6 +1375,21 @@ def _defines_target_creation(version) -> bool:
     return False
 
 
+def _defines_topic_configuration(version) -> bool:
+    """Whether a document of `version` defines `target.topic_configuration`
+    -- the twin of `logweir_core::scorecard::defines_topic_configuration` (arm
+    TC-1): a 1.x document from 1.11.0 on, or a 2.x document from 2.3.0 on."""
+    minor = _minor(version)
+    if minor is None:
+        return False
+    major = _major(version)
+    if major == 1:
+        return minor >= SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
 def _days_from_civil(year: int, month: int, day: int) -> int:
     """Days since 1970-01-01 of a proleptic Gregorian date (any year)."""
     year -= month <= 2
@@ -1689,6 +1730,101 @@ def _target_creation_shape_ok(block) -> bool:
             value = t.get(name)
             if value is not None and not isinstance(value, str):
                 return False
+    return True
+
+
+def _str_map(x) -> bool:
+    return isinstance(x, dict) and all(
+        isinstance(k, str) and isinstance(v, str) for k, v in x.items()
+    )
+
+
+def _u32(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 2 ** 32
+
+
+def _topic_configuration_shape_ok(block) -> bool:
+    """`target.topic_configuration` has the shape `TopicConfigurationBlock`
+    deserialises (PROD-05.2, format 1.11.0 and 2.3.0): strings `transition`
+    and `target_line`; `topics`, an object of topic objects, each with a
+    string `source_topic` and `route`, an optional `partitions` (u32), a
+    `replication_factor` of an optional `source` and a `target` (u32) and a
+    string `reason`, three string maps (`during_restore`, `at_creation`,
+    `deferred`), a `not_applied` array of `{key, value?, portability, reason,
+    target_default?}` strings, an optional `capped` map of `{source, applied}`,
+    an optional `owner` of three strings and an optional bool `not_recorded`;
+    and an optional `desired_state` of a string `key`, a string `sha256` and a
+    u64 `bytes`. Unknown keys are ignored, as serde ignores them."""
+    if not isinstance(block, dict):
+        return False
+    if not isinstance(block.get("transition"), str) or not isinstance(
+        block.get("target_line"), str
+    ):
+        return False
+    topics = block.get("topics")
+    if not isinstance(topics, dict):
+        return False
+    for topic in topics.values():
+        if not isinstance(topic, dict):
+            return False
+        if not isinstance(topic.get("source_topic"), str) or not isinstance(
+            topic.get("route"), str
+        ):
+            return False
+        if topic.get("partitions") is not None and not _u32(topic.get("partitions")):
+            return False
+        rf = topic.get("replication_factor")
+        if not isinstance(rf, dict) or not _u32(rf.get("target")):
+            return False
+        if rf.get("source") is not None and not _u32(rf.get("source")):
+            return False
+        if not isinstance(rf.get("reason"), str):
+            return False
+        for name in ("during_restore", "at_creation", "deferred"):
+            if not _str_map(topic.get(name)):
+                return False
+        not_applied = topic.get("not_applied")
+        if not isinstance(not_applied, list):
+            return False
+        for n in not_applied:
+            if not isinstance(n, dict) or not all(
+                isinstance(n.get(k), str) for k in ("key", "portability", "reason")
+            ):
+                return False
+            for k in ("value", "target_default"):
+                if n.get(k) is not None and not isinstance(n.get(k), str):
+                    return False
+        # `capped` and `not_recorded` are absent or a value, never null: the
+        # Rust reader's `BTreeMap` and `bool` (serde default) refuse null.
+        capped = topic.get("capped")
+        if "capped" in topic and not (
+            isinstance(capped, dict)
+            and all(
+                isinstance(c, dict)
+                and isinstance(c.get("source"), str)
+                and isinstance(c.get("applied"), str)
+                for c in capped.values()
+            )
+        ):
+            return False
+        owner = topic.get("owner")
+        if owner is not None and not (
+            isinstance(owner, dict)
+            and all(isinstance(owner.get(k), str) for k in ("kind", "basis", "reference"))
+        ):
+            return False
+        if "not_recorded" in topic and not isinstance(topic.get("not_recorded"), bool):
+            return False
+    desired = block.get("desired_state")
+    if desired is not None and not (
+        isinstance(desired, dict)
+        and isinstance(desired.get("key"), str)
+        and isinstance(desired.get("sha256"), str)
+        and isinstance(desired.get("bytes"), int)
+        and not isinstance(desired.get("bytes"), bool)
+        and 0 <= desired.get("bytes") < 2 ** 64
+    ):
+        return False
     return True
 
 
@@ -2243,6 +2379,21 @@ def check_invariants(doc) -> str:
             "target.creation is not an object of the shape the writer gives it: an array of "
             "topics of a string name, an integer partition count, a topic id or null and an "
             "optional reason, a string lineage_headers and an optional integer lifetime"
+        )
+
+    # Also shape (PROD-05.2, scorecard 1.11.0 and 2.3.0):
+    # `target.topic_configuration` is an `Option<TopicConfigurationBlock>`
+    # over there, so `null` is ABSENT and anything that is not the writer's
+    # shape is refused at DESERIALISATION. Arms TC-1 to TC-5 below compare
+    # its fields, so the shape is asserted first.
+    topic_configuration = target.get("topic_configuration")
+    if topic_configuration is not None and not _topic_configuration_shape_ok(
+        topic_configuration
+    ):
+        return (
+            "target.topic_configuration is not an object of the shape the writer gives it: a "
+            "transition, a target line, per topic its route, replication factor, three "
+            "setting maps and the settings not applied, and an optional desired-state document"
         )
 
     # Also shape (PROD-16.2, scorecard 1.9.0 and 2.1.0): `approval.console` is
@@ -3323,6 +3474,59 @@ def check_invariants(doc) -> str:
                 "target.creation.teardown_after_seconds is present but target.mode is not "
                 "scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, "
                 "kept from five minutes to thirty days"
+            )
+
+    # `target.topic_configuration` (format 1.11.0, and 2.3.0; PROD-05.2): arms
+    # TC-1 to TC-5, mirrored ARM FOR ARM, IN THIS POSITION and with the same
+    # words from `Scorecard::validate_invariants`. They fire ONLY on a
+    # document carrying the block. Not interpolated except TC-1's version.
+    if topic_configuration is not None:
+        # TC-1. The block is defined from 1.11.0 of format 1 and from 2.3.0 of
+        # format 2.
+        if not _defines_topic_configuration(version):
+            return (
+                f"target.topic_configuration is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is defined from "
+                f"1.{SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR}.0 of format 1 and from "
+                f"2.{SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+            )
+        topics = topic_configuration["topics"].values()
+        # TC-2.
+        if topic_configuration["transition"] not in TOPIC_CONFIGURATION_TRANSITIONS:
+            return (
+                "target.topic_configuration.transition is not \"afterVerification\" or \"none\""
+            )
+        # TC-3.
+        if any(
+            t["route"] not in TOPIC_CONFIGURATION_ROUTES
+            or t["replication_factor"]["reason"] not in TOPIC_CONFIGURATION_RF_REASONS
+            or t["replication_factor"]["target"] == 0
+            for t in topics
+        ):
+            return (
+                "target.topic_configuration names a route outside adminApi and "
+                "desiredStateExport, a replication factor reason outside its closed set, or a "
+                "replication factor of 0"
+            )
+        # TC-4.
+        exported = any(t["route"] == "desiredStateExport" for t in topics)
+        desired = topic_configuration.get("desired_state")
+        if exported != (desired is not None) or (
+            desired is not None and not _is_sha256_prefixed(desired["sha256"])
+        ):
+            return (
+                "target.topic_configuration.desired_state is present exactly when a topic's "
+                "route is desiredStateExport, and names its document by sha256"
+            )
+        # TC-5. A secret is never copied into a signed document.
+        if any(
+            (n["portability"] == "secret") == (n.get("value") is not None)
+            for t in topics
+            for n in t["not_applied"]
+        ):
+            return (
+                "target.topic_configuration lists a secret with a value, or another entry "
+                "without one"
             )
 
     # T0-3, mirrored: see the `redactions` arm at the end of

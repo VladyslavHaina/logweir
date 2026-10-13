@@ -164,27 +164,33 @@ golden:
 # frozen beside the new files
 # (`the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`,
 # `the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
-# The two generated files are now `-2.1.0.json`, from the type, and
-# `-1.9.0.json`, which is the frozen `-1.8.0.json` plus the block as the type
-# derives it
-# (`the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block`).
-# This build writes 1.9.0 or 2.1.0 only for such a restore.
-#
 # PROD-11.1a added `target.creation` (the topics a run created and their IDs),
-# an optional block in BOTH lines: 1.10.0 and 2.2.0. PROD-16.2's `-1.9.0.json`
-# and `-2.1.0.json` are frozen beside the new files; `-1.10.0.json` is the
-# frozen `-1.9.0.json` plus the block as the type derives it.
+# an optional block in BOTH lines: 1.10.0 and 2.2.0, written by every run that
+# creates topics. PROD-16.2's `-1.9.0.json` and `-2.1.0.json` are frozen beside
+# them; `-1.10.0.json` is the frozen `-1.9.0.json` plus the block as the type
+# derives it
+# (`the_frozen_1_10_0_scorecard_schema_is_the_frozen_1_9_0_plus_the_target_creation_block`,
+# `the_frozen_2_1_0_scorecard_schema_is_the_frozen_2_2_0_one_without_the_target_creation`).
+# PROD-05.2 adds `target.topic_configuration` at 1.11.0 and 2.3.0; `-1.10.0.json`
+# and `-2.2.0.json` are frozen beside them
+# (`the_frozen_2_2_0_scorecard_schema_is_the_2_3_0_one_without_the_topic_configuration`).
+# The two generated files are now `-2.3.0.json`, from the type, and
+# `-1.11.0.json`, which is the frozen `-1.10.0.json` plus the block as the type
+# derives it
+# (`the_format_1_scorecard_schema_is_the_frozen_1_10_0_plus_the_topic_configuration_block`).
+# This build writes 1.11.0 or 2.3.0 only for a restore whose plan carries
+# `target.topic_configuration`.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`,
+# (`scorecard::FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new. The scorecard's format-1 file is named by
-# `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION` the same way.
-scorecard_schema_version := "2.2.0"
-scorecard_format_1_schema_version := "1.10.0"
+# `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` the same way.
+scorecard_schema_version := "2.3.0"
+scorecard_format_1_schema_version := "1.11.0"
 receipt_schema_version := "1.8.0"
 catalog_schema_version := "1.7.0"
 

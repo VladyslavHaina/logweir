@@ -112,6 +112,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `controller.failFastSeconds` | `""` (300 s) | patience for a stuck run; `0` is never (for a Secret materialised late); under 60 is clamped up; unparseable is the default |
 | `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job stays; under 3600 is clamped up |
 | `controller.watchNamespaces` | `[]` (all) | the execution namespaces (below) |
+| `strimzi.readKafkaTopics`, `strimzi.namespaces` | `false`, `[]` | let the controller read (`get`, `list`) Strimzi `KafkaTopic`s in the listed namespaces, through a Role in each, for a `KafkaCluster` with `spec.strimzi` ([kubernetes.md](../../docs/kubernetes.md#strimzi-owners-of-a-backups-topics)); any other namespace is refused `OwnerDetectionFailed` |
 | `controller.resources` | 50m / 128Mi, limit 512Mi | also `nodeSelector`, `tolerations`, `affinity` |
 | `checks.maxActivePerNamespace`, `.maxActiveTotal` | `4`, `20` | check Jobs at once; the total must be at least the per-namespace value |
 | `checks.maxActiveDiscoveriesPerConnection` | `1` | |

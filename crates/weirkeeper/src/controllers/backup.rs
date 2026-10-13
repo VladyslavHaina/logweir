@@ -4616,6 +4616,37 @@ async fn reconcile_backup_inner(
                 destination.as_deref(),
             )?,
         };
+        // PROD-05.1a: the Strimzi `KafkaTopic` resources of a cluster that
+        // names its Strimzi cluster, listed once and frozen with the run; a
+        // frozen run reads them back and never lists again.
+        let kafka_topics = match stored_plan
+            .as_ref()
+            .and_then(backup_execution::stored_kafka_topic_resources)
+        {
+            Some(frozen) => frozen,
+            None => crate::strimzi_topics::resolve(
+                client,
+                &cluster,
+                &selection.topics,
+                &crate::strimzi_topics::process_namespaces(),
+            )
+            .await
+            .map_err(|e| match e {
+                crate::strimzi_topics::StrimziListError::Refused(message) => BackupError::Refused(
+                    crate::conditions::TERMINAL_STATE_OWNER_DETECTION_FAILED,
+                    message,
+                ),
+                crate::strimzi_topics::StrimziListError::Api(e) => BackupError::Api(e),
+            })?,
+        };
+        let desired = match kafka_topics {
+            None => desired,
+            Some(block) => FrozenInputs::freeze_with_ca(
+                backup_execution::with_kafka_topic_resources(desired.inputs, Some(block)),
+                desired.ca_pem,
+            )
+            .map_err(refused)?,
+        };
 
         // The plan ConfigMap, in this same pass and before the Job `POST`; it
         // is the freeze boundary. The Job mounts `<name>-plan`, so a Job created

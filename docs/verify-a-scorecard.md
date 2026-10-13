@@ -458,7 +458,7 @@ allowlist. A value inherited from a broker default is never compared: a
 (measured by FX-4). The receipt's `config_coverage` records the effective value;
 comparing other effective values is PROD-05.1's.
 
-### A `newTopic` restore does not reconstruct the source's topic settings
+### A `newTopic` restore does not reconstruct the source's topic settings unless its plan asks
 
 A restore creates its topics at the plan's replication factor, with
 `retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch drill
@@ -467,6 +467,10 @@ NOT reconstructed, listed in 1.2.0's `topic_parity.not_reconstructed` and in
 `unexpected_divergence`. **A `newTopic` scorecard before 1.2.0 labels them
 `intentionally_deviated`; that label is the defect FX-3 fixed, not intent**
 ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings)).
+A plan with `target.topic_configuration` creates them from the point's model
+and applies the source's compaction and retention after a passing verdict;
+its document (1.11.0, 2.3.0) carries `target.topic_configuration`, and
+`topic_parity` still describes what phase 7 saw, before that transition.
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
@@ -514,13 +518,14 @@ drill), not as a defect in the artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.31.0` and the
+The Python report ends with `verifier: verify_scorecard.py 1.32.0` and the
 checks applied. That is the **verifier's** version, not the document's
 `format_version` (scorecard `1.0.0`; `1.1.0` FX-4; `1.2.0` FX-3; `1.3.0` FX-8;
 `1.4.0` PROD-08.1; `1.5.0` PROD-01.3's auth modes; `1.6.0` every sampled drill
 since FX-23; `1.7.0` a window start, PROD-11.1; `1.8.0` original names,
 PROD-15.1; `1.9.0`/`2.1.0` a console approval, PROD-16.2; `2.0.0` a partition
-subset, PROD-11.1b; `1.10.0`/`2.2.0` every run that created topics, PROD-11.1a). It moves when the accepted-document set changes:
+subset, PROD-11.1b; `1.10.0`/`2.2.0` every run that created topics, PROD-11.1a;
+`1.11.0`/`2.3.0` a target topic configuration, PROD-05.2). It moves when the accepted-document set changes:
 
 | Version | Changed checks |
 | --- | --- |
@@ -555,6 +560,7 @@ subset, PROD-11.1b; `1.10.0`/`2.2.0` every run that created topics, PROD-11.1a).
 | `1.29.0` | Scorecard `1.9.0` and `2.1.0` (PROD-16.2): CA-1 to CA-8, ON-5 by version, the `console approval:` line. |
 | `1.30.0` | Receipt `1.8.0` (PROD-02.1): `source_watermarks` arms 41–45; an empty capture only beside the block. |
 | `1.31.0` | Scorecard `1.10.0` and `2.2.0` (PROD-11.1a): `target.creation` arms TCR-1 to TCR-5, the `target creation:` line. |
+| `1.32.0` | Scorecard `1.11.0` and `2.3.0` (PROD-05.2): `target.topic_configuration` arms TC-1 to TC-5 and its shape. |
 
 Every document without a version's new field is decided as before it. One
 diagnostic-order difference remains: with both `run_id` and `engine` absent,

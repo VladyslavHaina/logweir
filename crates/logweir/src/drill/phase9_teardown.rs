@@ -58,6 +58,12 @@ pub struct TeardownAttestation {
     pub topics_deleted: Vec<String>,
     pub topics_failed: Vec<(String, String)>,
     pub deleted_at: chrono::DateTime<chrono::Utc>,
+    /// **PROD-05.2.** What phase 9's configuration transition did, for a
+    /// restore whose plan carried `target.topic_configuration`; absent on
+    /// every other attestation, which keeps its bytes. Readers verify this
+    /// document signature-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<logweir_core::topic_transition::TransitionOutcome>,
 }
 
 /// What phase 9 deletes, and what it could not: the deleting half of [`run`],
@@ -214,6 +220,7 @@ pub fn run(
         // Global Constraint 1: the clock is read HERE, in `crates/logweir`,
         // never in `logweir-core`.
         deleted_at: chrono::Utc::now(),
+        topic_configuration: None,
     }
 }
 

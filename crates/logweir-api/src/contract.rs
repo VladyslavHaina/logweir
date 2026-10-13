@@ -1448,6 +1448,14 @@ pub struct Restore {
     /// ABSENT on a run that did not complete phase 0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_preflight: Option<TopicPreflightView>,
+    /// **PROD-05.2.** `status.topicConfiguration`: for a plan carrying
+    /// `target.topic_configuration`, each topic's replication factor and
+    /// overrides before and after, and what the configuration transition
+    /// did. A CLAIM read off the runner's log; the signed scorecard's block
+    /// and the phase-9 attestation are the evidence. ABSENT on every other
+    /// run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<TopicConfigurationView>,
     /// The source topics the new ones were restored from
     /// (`status.oldTopics`), at most 100. Nothing here was written to.
     /// Empty when none is recorded.
@@ -1473,6 +1481,63 @@ pub struct TopicPreflightView {
     /// rewriting the record, epoch milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp_bound: Option<i64>,
+}
+
+/// PROD-05.2: `Restore.topicConfiguration`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationView {
+    /// `applied`, `partial`, or `notRun: <reason>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition: Option<String>,
+    /// Topics whose desired set was applied and read back.
+    pub applied: Vec<String>,
+    /// Topics not transitioned, each with its whole desired set.
+    pub failed: Vec<TopicConfigurationFailureView>,
+    /// Owned topics, exported in the desired-state document.
+    pub exported: Vec<String>,
+    /// The desired-state document's evidence key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_state_key: Option<String>,
+    /// Per target topic: the replication factor and the overrides before and
+    /// after.
+    pub topics: Vec<TopicConfigurationTopicView>,
+}
+
+/// One topic the transition did not apply.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationFailureView {
+    /// The target topic.
+    pub topic: String,
+    /// Why.
+    pub error: String,
+    /// The whole desired override set: the remaining step.
+    pub desired: std::collections::BTreeMap<String, String>,
+}
+
+/// One target topic's configuration, before and after.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfigurationTopicView {
+    /// The target topic.
+    pub topic: String,
+    /// `adminApi` or `desiredStateExport`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// The source's replication factor, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_replication_factor: Option<i64>,
+    /// The factor the topic was created with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_factor: Option<i64>,
+    /// Why: `sourceFactor`, `targetBrokers` or `notRecorded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_factor_reason: Option<String>,
+    /// The overrides it was created with.
+    pub before: std::collections::BTreeMap<String, String>,
+    /// The whole desired override set.
+    pub after: std::collections::BTreeMap<String, String>,
 }
 
 /// **PROD-08.1a.** `Restore.coverage`: asked for, and signed.
@@ -4092,7 +4157,10 @@ pub struct ScopeTargetView {
     /// The SASL principal the plan authenticates as, when it names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_username: Option<String>,
-    /// The replication factor of every topic the run creates.
+    /// `target.default_replication_factor`: the factor of every topic the run
+    /// creates, except with `topic_configuration`, where a topic the point
+    /// records a factor for is created at that factor, bounded by the
+    /// target's brokers, and only one without gets this.
     pub replication_factor: i16,
     /// `target.teardown`: what happens to a SCRATCH run's targets afterwards
     /// (`delete`: the topics the run created are deleted; a `newTopic`
@@ -4122,6 +4190,25 @@ pub struct ScopeTargetView {
     /// refused. Absent: the plan does not allow them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_transaction_markers: bool,
+    /// PROD-05.2: `target.topic_configuration`, the plan's configuration
+    /// choice: topics created from the recovery point's configuration model
+    /// and, with `afterVerification`, the source's compaction, retention and
+    /// timestamp settings applied after a passing verdict. Absent: the topics
+    /// are created as always.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<ScopeTopicConfigurationView>,
+}
+
+/// PROD-05.2: the plan's configuration choice, as a second person approves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTopicConfigurationView {
+    /// `afterVerification` or `none`.
+    pub transition: String,
+    /// The requester's owner statement, by source topic. Absent: the plan
+    /// states none, and the recovery point's own detection decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<ScopeOwnerView>>,
 }
 
 /// PROD-16.2 (review S-1): the requester's owner statement for an

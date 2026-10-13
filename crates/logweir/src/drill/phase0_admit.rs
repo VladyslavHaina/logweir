@@ -823,7 +823,13 @@ fn target_topic_preflight(
     // both bound keys is `9223372036854775807`, so a plain `-` overflows and
     // panics in debug and wraps to a floor in the FUTURE in release — which
     // would refuse every window on every default broker.
-    if let Some(bound) = timestamp_bound_ms {
+    // A plan with `target.topic_configuration` creates every target topic with
+    // per-topic timestamp bounds of Long.MAX while the restore runs
+    // (`logweir_core::topic_transition::during_restore`), which take
+    // precedence over the broker's default: the broker's bound cannot refuse
+    // the window, so it is not judged here (PROD-05.2, row C23).
+    let bound_applies = spec.target.topic_configuration.is_none();
+    if let Some(bound) = timestamp_bound_ms.filter(|_| bound_applies) {
         // The window end this plan asks the engine for: `point_in_time` when
         // stated, else `sample.window_end`, as `build_plan_with_floor`
         // chooses. The start is not checked: it is the archive's floor (guard
@@ -972,20 +978,49 @@ pub fn create_target_topics(
     default_replication_factor: i16,
     preflight: &mut TopicPreflight,
 ) -> Result<(), DrillError> {
+    create_target_topics_from(
+        creator,
+        reader,
+        topic_mapping,
+        facts,
+        default_replication_factor,
+        None,
+        preflight,
+    )
+}
+
+/// [`create_target_topics`], with PROD-05.2's desired set when the plan
+/// carries `target.topic_configuration`: each topic is created with its
+/// bounded replication factor and Logweir's during-restore settings plus the
+/// source's at-creation set ([`TopicConfigurationAdmission`]). `None` is
+/// today's creation, byte for byte.
+pub fn create_target_topics_from(
+    creator: &dyn TopicCreator,
+    reader: &dyn ClusterReader,
+    topic_mapping: &BTreeMap<String, String>,
+    facts: &logweir_core::engine::BackupSetFacts,
+    default_replication_factor: i16,
+    configured: Option<&TopicConfigurationAdmission>,
+    preflight: &mut TopicPreflight,
+) -> Result<(), DrillError> {
     let mut specs: Vec<NewTopicSpec> = Vec::new();
     for t in &facts.topics {
         let Some(dst) = topic_mapping.get(&t.name) else {
             continue;
         };
+        let desired = configured.and_then(|c| c.topics.get(dst));
         specs.push(NewTopicSpec {
             name: dst.clone(),
             num_partitions: super::phase3_diff::restore_partition_count(t),
-            replication_factor: i32::from(default_replication_factor),
-            // `TARGET_TOPIC_CONFIGS`, in order, on EVERY topic. Not a default
-            // set, not a broker default, and not conditional on what the
-            // broker reported: `configs_set` in the preflight is the claim
-            // that this is what was applied.
-            configs: TopicPreflight::pinned_configs(),
+            replication_factor: desired.map_or(i32::from(default_replication_factor), |d| {
+                i32::try_from(d.replication_factor.target).unwrap_or(i32::MAX)
+            }),
+            // `TARGET_TOPIC_CONFIGS`, in order, on EVERY topic without the
+            // plan block. Not a default set, not a broker default, and not
+            // conditional on what the broker reported: `configs_set` in the
+            // preflight is the claim that this is what was applied. With the
+            // block, the topic's own creation set, Logweir's keys first.
+            configs: desired.map_or_else(TopicPreflight::pinned_configs, creation_configs),
         });
     }
     if specs.is_empty() {
@@ -1093,10 +1128,15 @@ pub fn create_target_topics(
             ))
         } else {
             failed.map(|(name, e)| {
+                let configs = specs
+                    .iter()
+                    .find(|spec| spec.name == name)
+                    .map(|spec| spec.configs.clone())
+                    .unwrap_or_else(TopicPreflight::pinned_configs);
                 format!(
                     "target topic `{name}` could not be created with the pinned configuration \
                      ({}): {e}",
-                    TARGET_TOPIC_CONFIGS
+                    configs
                         .iter()
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect::<Vec<_>>()
@@ -1197,6 +1237,202 @@ pub fn created_topics_identity(
         &rows,
         teardown_after_seconds,
     ))
+}
+
+/// **PROD-05.2.** What phase 0 decided about the target topics'
+/// configuration for a plan carrying `target.topic_configuration`: each
+/// topic's desired state, which the creation step creates it with, the
+/// scorecard signs, and phase 9 transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicConfigurationAdmission {
+    /// The plan's transition.
+    pub transition: logweir_core::topic_transition::Transition,
+    /// The target's line, from its broker configuration.
+    pub line: logweir_core::topic_transition::TargetLine,
+    /// Per TARGET topic.
+    pub topics: BTreeMap<String, logweir_core::topic_transition::TopicDesired>,
+}
+
+/// A topic's creation set as an ordered list: Logweir's during-restore keys
+/// in their own order, then the source's at-creation set by key.
+#[must_use]
+pub fn creation_configs(
+    desired: &logweir_core::topic_transition::TopicDesired,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = desired
+        .during_restore
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let order: Vec<&str> = logweir_core::topic_transition::during_restore(
+        logweir_core::topic_transition::TargetLine::Kafka3,
+    )
+    .into_iter()
+    .map(|(k, _)| k)
+    .collect();
+    out.sort_by_key(|(k, _)| order.iter().position(|o| o == k).unwrap_or(usize::MAX));
+    out.extend(
+        desired
+            .at_creation
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
+    out
+}
+
+/// **PROD-05.2, phase 0.** For a plan carrying `target.topic_configuration`:
+/// every topic's desired state from the bound point's model
+/// (`logweir_core::topic_transition::plan_topics`), and the target's
+/// `CreateTopics validate_only` verdict on the set each topic is created with
+/// and on the set the transition will apply, BEFORE anything is created.
+/// `Ok(None)` for a plan without the block.
+///
+/// # Errors
+///
+/// A `GuardRefusal` (exit 3, nothing written) for every refusal
+/// `plan_topics` makes and for `TopicConfigRefusedByTarget`, naming the topic
+/// and the key; a `KafkaError` (exit 1) for a read or a validation the broker
+/// did not answer.
+pub fn admit_topic_configuration(
+    spec: &DrillSpec,
+    coverage: &logweir_core::backup_receipt::SourceConfigCoverage,
+    topic_mapping: &BTreeMap<String, String>,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+) -> Result<Option<TopicConfigurationAdmission>, DrillError> {
+    use logweir_core::topic_transition::{plan_topics, target_line_of, PlanInputs};
+    let Some(plan) = spec.target.topic_configuration.as_ref() else {
+        return Ok(None);
+    };
+    // Local refusals first: a plan the model cannot serve is refused before
+    // any broker is asked anything more.
+    let broker = reader.broker_configs()?;
+    let line = target_line_of(&broker);
+    let brokers = reader.broker_count()?;
+    let topics = plan_topics(&PlanInputs {
+        plan,
+        model: coverage.model(),
+        owner_detection: coverage.owner_detection(),
+        mapping: topic_mapping,
+        line,
+        brokers,
+        default_replication_factor: spec.target.default_replication_factor,
+        broker: &broker,
+    })
+    .map_err(GuardRefusal)?;
+    // The creation set, then the set the transition applies (an owned topic
+    // is never altered, so only its creation set is judged).
+    for (stage, set_of) in [
+        (
+            "at creation",
+            (|d: &logweir_core::topic_transition::TopicDesired| Some(creation_configs(d)))
+                as fn(
+                    &logweir_core::topic_transition::TopicDesired,
+                ) -> Option<Vec<(String, String)>>,
+        ),
+        ("after verification", |d| {
+            (d.route == logweir_core::topic_transition::ROUTE_ADMIN_API).then(|| {
+                d.final_overrides()
+                    .into_iter()
+                    .collect::<Vec<(String, String)>>()
+            })
+        }),
+    ] {
+        let specs: Vec<NewTopicSpec> = topics
+            .iter()
+            .filter_map(|(name, d)| set_of(d).map(|configs| validation_spec(name, d, configs)))
+            .collect();
+        validate_or_name_the_key(creator, &specs, stage)?;
+    }
+    Ok(Some(TopicConfigurationAdmission {
+        transition: plan.transition,
+        line,
+        topics,
+    }))
+}
+
+/// The spec a `validate_only` judges for one topic: its partitions (1 when
+/// the model records none), its bounded factor and `configs`.
+#[must_use]
+pub fn validation_spec(
+    name: &str,
+    desired: &logweir_core::topic_transition::TopicDesired,
+    configs: Vec<(String, String)>,
+) -> NewTopicSpec {
+    NewTopicSpec {
+        name: name.to_string(),
+        num_partitions: desired
+            .partitions
+            .and_then(|p| i32::try_from(p).ok())
+            .filter(|p| *p >= 1)
+            .unwrap_or(1),
+        replication_factor: i32::try_from(desired.replication_factor.target).unwrap_or(i32::MAX),
+        configs,
+    }
+}
+
+/// `validate_only` over `specs`; on a refusal, the key that makes it, found
+/// by validating the topic without each key in turn: `TopicConfigRefusedByTarget`
+/// names the topic, the stage and the key (or the whole set when no single
+/// key is the cause).
+fn validate_or_name_the_key(
+    creator: &dyn TopicCreator,
+    specs: &[NewTopicSpec],
+    stage: &str,
+) -> Result<(), DrillError> {
+    use logweir_core::topic_transition::TOPIC_CONFIG_REFUSED_BY_TARGET;
+    if specs.is_empty() {
+        return Ok(());
+    }
+    let answers = creator.validate_create_topics(specs)?;
+    for spec in specs {
+        let refused = answers
+            .iter()
+            .find(|(n, _)| n == &spec.name)
+            .map_or(Some("no answer for the topic".to_string()), |(_, r)| {
+                r.as_ref().err().cloned()
+            });
+        let Some(error) = refused else {
+            continue;
+        };
+        let mut culprit: Option<String> = None;
+        for (key, value) in &spec.configs {
+            let without: Vec<(String, String)> = spec
+                .configs
+                .iter()
+                .filter(|(k, _)| k != key)
+                .cloned()
+                .collect();
+            let probe = NewTopicSpec {
+                configs: without,
+                ..spec.clone()
+            };
+            let answer = creator.validate_create_topics(std::slice::from_ref(&probe))?;
+            if answer.iter().all(|(_, r)| r.is_ok()) && !answer.is_empty() {
+                culprit = Some(format!("{key}={value}"));
+                break;
+            }
+        }
+        return Err(GuardRefusal(format!(
+            "{TOPIC_CONFIG_REFUSED_BY_TARGET}: the target refused target topic `{}`'s settings \
+             {stage} (CreateTopics validate_only: {error}); {}. Nothing was created",
+            spec.name,
+            match culprit {
+                Some(entry) => format!("without `{entry}` it is accepted"),
+                None => format!(
+                    "no single setting is the cause: replication factor {}, settings {}",
+                    spec.replication_factor,
+                    spec.configs
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// The creation step stopped, and nothing is deleted.
@@ -1472,6 +1708,7 @@ mod tests {
                 topic_mapping_prefix: prefix.into(),
                 default_replication_factor: 1,
                 teardown: "delete".into(),
+                topic_configuration: None,
             },
             sample: SampleSpec {
                 window_start: ts("2026-08-29T00:00:00Z"),
@@ -1929,5 +2166,300 @@ mod tests {
             DrillError::Kafka(_) => {}
             other => panic!("expected DrillError::Kafka (exit 1), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod topic_configuration_tests {
+    //! PROD-05.2's phase-0 half: the `validate_only` refusal names the topic,
+    //! the stage and the key, before anything is created.
+    use super::*;
+    use logweir_kafka::reader::KafkaError;
+    use std::sync::Mutex;
+
+    /// A target that refuses any creation carrying `refuse` and records every
+    /// request it was asked to judge or make.
+    struct Target {
+        refuse: &'static str,
+        validated: Mutex<usize>,
+        created: Mutex<usize>,
+    }
+
+    impl TopicCreator for Target {
+        fn create_topics(
+            &self,
+            _: &[NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            *self.created.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+        fn validate_create_topics(
+            &self,
+            topics: &[NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            *self.validated.lock().unwrap() += 1;
+            Ok(topics
+                .iter()
+                .map(|t| {
+                    let refused = t.configs.iter().any(|(k, _)| k == self.refuse);
+                    (
+                        t.name.clone(),
+                        if refused {
+                            Err("InvalidConfig".to_string())
+                        } else {
+                            Ok(())
+                        },
+                    )
+                })
+                .collect())
+        }
+    }
+
+    fn spec(name: &str, configs: &[(&str, &str)]) -> NewTopicSpec {
+        NewTopicSpec {
+            name: name.into(),
+            num_partitions: 3,
+            replication_factor: 1,
+            configs: configs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    /// KILLS: a refusal that does not name the key; a create attempted after
+    /// a refused validation.
+    #[test]
+    fn a_refused_setting_is_named_and_nothing_is_created() {
+        let target = Target {
+            refuse: "remote.storage.enable",
+            validated: Mutex::new(0),
+            created: Mutex::new(0),
+        };
+        let specs = [
+            spec("r-a", &[("retention.ms", "-1")]),
+            spec(
+                "r-b",
+                &[("retention.ms", "-1"), ("remote.storage.enable", "true")],
+            ),
+        ];
+        let err = validate_or_name_the_key(&target, &specs, "at creation").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("TopicConfigRefusedByTarget: "), "{msg}");
+        assert!(msg.contains("`r-b`"), "{msg}");
+        assert!(msg.contains("`remote.storage.enable=true`"), "{msg}");
+        assert!(msg.contains("at creation"), "{msg}");
+        assert_eq!(*target.created.lock().unwrap(), 0);
+        // NEGATIVE CONTROL: the same sets without the refused key pass.
+        let ok = [spec("r-a", &[("retention.ms", "-1")])];
+        assert!(validate_or_name_the_key(&target, &ok, "at creation").is_ok());
+    }
+
+    /// **Phase 0 judges the set the transition will apply, too.** The
+    /// source's `cleanup.policy=compact` is deferred: the topic is created
+    /// with `delete` (accepted), and a target that refuses only `compact`
+    /// stops the restore before anything is created, naming the stage and the
+    /// key. CONTROL: a target that refuses nothing admits the same plan.
+    /// KILLS: phase 0 validating the creation set only (mutant L2).
+    #[test]
+    fn a_target_refusing_only_the_transition_set_is_refused_at_admission() {
+        use logweir_core::backup_receipt as r;
+        struct Refuses(Option<(&'static str, &'static str)>, Mutex<usize>);
+        impl TopicCreator for Refuses {
+            fn create_topics(
+                &self,
+                _: &[NewTopicSpec],
+            ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+                *self.1.lock().unwrap() += 1;
+                Ok(Vec::new())
+            }
+            fn validate_create_topics(
+                &self,
+                topics: &[NewTopicSpec],
+            ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+                Ok(topics
+                    .iter()
+                    .map(|t| {
+                        let refused = self.0.is_some_and(|(k, v)| {
+                            t.configs.iter().any(|(ck, cv)| ck == k && cv == v)
+                        });
+                        let verdict = if refused {
+                            Err("InvalidConfig".to_string())
+                        } else {
+                            Ok(())
+                        };
+                        (t.name.clone(), verdict)
+                    })
+                    .collect())
+            }
+        }
+        struct Broker;
+        impl ClusterReader for Broker {
+            fn cluster_id(&self) -> Result<String, KafkaError> {
+                unreachable!()
+            }
+            fn list_topics(&self) -> Result<Vec<logweir_kafka::reader::TopicMeta>, KafkaError> {
+                unreachable!()
+            }
+            fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+                unreachable!()
+            }
+            fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!()
+            }
+            fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+                Ok(BTreeMap::new())
+            }
+            fn consume_range(
+                &self,
+                _: &str,
+                _: i32,
+                _: i64,
+                _: usize,
+            ) -> Result<Vec<logweir_kafka::reader::ConsumedRecord>, KafkaError> {
+                unreachable!()
+            }
+        }
+        let mut spec: DrillSpec =
+            serde_yaml::from_str(include_str!("../../../../examples/restore.yaml"))
+                .expect("the example parses");
+        spec.target.topic_configuration =
+            Some(logweir_core::topic_transition::TopicConfigurationPlan {
+                transition: logweir_core::topic_transition::Transition::AfterVerification,
+                owners: None,
+            });
+        let model = BTreeMap::from([(
+            "orders".to_string(),
+            r::TopicConfiguration {
+                partitions: Some(1),
+                replication_factor: Some(1),
+                entries: Some(BTreeMap::from([(
+                    "cleanup.policy".to_string(),
+                    r::ConfigEntry {
+                        value: Some("compact".into()),
+                        source: "dynamicTopicConfig".into(),
+                        portability: logweir_core::topic_configuration::PORTABLE.into(),
+                    },
+                )])),
+                owner: None,
+            },
+        )]);
+        let receipt = r::BackupReceipt {
+            format_version: r::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION.into(),
+            run_id: "r".into(),
+            backup_id: "b".into(),
+            requested_at: chrono::Utc::now(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            exit_code: 0,
+            triggered_by: String::new(),
+            source: r::ReceiptSource {
+                cluster_id: "c".into(),
+                bootstrap_servers: vec![],
+                auth: r::ReceiptAuth {
+                    mode: "plaintext".into(),
+                    username: None,
+                },
+                topics: vec!["orders".into()],
+            },
+            engine: r::ReceiptEngine {
+                id: "e".into(),
+                version: "v".into(),
+                digest: "d".into(),
+            },
+            archive: r::ReceiptArchive {
+                manifest_key: "k".into(),
+                manifest_sha256: "s".into(),
+                manifest_version_id: None,
+                prefix: "p".into(),
+            },
+            records: BTreeMap::from([("orders".to_string(), 1)]),
+            covered: r::ReceiptCovered {
+                from_ms: 1,
+                to_ms: 2,
+            },
+            config_coverage: None,
+            topic_configuration: Some(model),
+            owner_detection: Some(vec!["declared".into()]),
+            consumer_positions: None,
+            schema_dependency: None,
+            generations: None,
+            source_watermarks: None,
+        };
+        let coverage = r::SourceConfigCoverage::from_receipt(&receipt);
+        let mapping = BTreeMap::from([("orders".to_string(), "r-orders".to_string())]);
+        let refusing = Refuses(Some(("cleanup.policy", "compact")), Mutex::new(0));
+        let msg = admit_topic_configuration(&spec, &coverage, &mapping, &Broker, &refusing)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("TopicConfigRefusedByTarget: "), "{msg}");
+        assert!(msg.contains("`r-orders`"), "{msg}");
+        assert!(msg.contains("after verification"), "{msg}");
+        assert!(msg.contains("`cleanup.policy=compact`"), "{msg}");
+        assert_eq!(*refusing.1.lock().unwrap(), 0, "nothing is created");
+        // CONTROL: a target that refuses nothing admits the same plan, and the
+        // topic is created with `delete` and transitioned to `compact`.
+        let admitted = admit_topic_configuration(
+            &spec,
+            &coverage,
+            &mapping,
+            &Broker,
+            &Refuses(None, Mutex::new(0)),
+        )
+        .expect("admitted")
+        .expect("the block is present");
+        let t = &admitted.topics["r-orders"];
+        assert_eq!(t.created_overrides()["cleanup.policy"], "delete");
+        assert_eq!(t.final_overrides()["cleanup.policy"], "compact");
+    }
+
+    #[test]
+    fn a_plan_without_the_block_asks_the_target_nothing() {
+        let spec: DrillSpec =
+            serde_yaml::from_str(include_str!("../../../../examples/restore.yaml"))
+                .expect("the example parses");
+        assert!(spec.target.topic_configuration.is_none());
+        struct Unreachable;
+        impl ClusterReader for Unreachable {
+            fn cluster_id(&self) -> Result<String, KafkaError> {
+                unreachable!()
+            }
+            fn list_topics(&self) -> Result<Vec<logweir_kafka::reader::TopicMeta>, KafkaError> {
+                unreachable!()
+            }
+            fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+                unreachable!()
+            }
+            fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!()
+            }
+            fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!("no broker read for a plan without the block")
+            }
+            fn consume_range(
+                &self,
+                _: &str,
+                _: i32,
+                _: i64,
+                _: usize,
+            ) -> Result<Vec<logweir_kafka::reader::ConsumedRecord>, KafkaError> {
+                unreachable!()
+            }
+        }
+        let target = Target {
+            refuse: "x",
+            validated: Mutex::new(0),
+            created: Mutex::new(0),
+        };
+        let got = admit_topic_configuration(
+            &spec,
+            &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            &BTreeMap::new(),
+            &Unreachable,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(got, None);
+        assert_eq!(*target.validated.lock().unwrap(), 0);
     }
 }
