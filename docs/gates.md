@@ -22,10 +22,11 @@ under `docs/` and always run everything, since images copy them.
 
 | Job | Purpose |
 |---|---|
-| `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed |
+| `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed. It also says whether the rebuilt console's inputs changed (`console/`, `ui/tests/fixtures/console/` or the product API's OpenAPI document) |
+| `console` | Only when the console's inputs changed: `just console`, the rebuilt console's gates (lockfile install, API types, TypeScript, ESLint, Vitest, the build and its shape, `npm audit` and the licence allowlist) |
 | `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
 | `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with Logweir's build of the engine compiled from the vendored source (`scripts/engine-source.sh build`; OSO's pinned image seeds the archive) and both evidence readers; retains Compose logs and tears down the stack |
-| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set |
+| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `check`, `e2e` and `console`, and a `console` job skipped for a change outside its inputs passes |
 
 The Compose suite excludes the test that requires a local `docker-desktop`
 Kubernetes listener. That exclusion does not establish Kubernetes deployment

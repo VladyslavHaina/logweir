@@ -34,14 +34,18 @@ scripts off (`.npmrc`).
 `Dockerfile.console`'s `console` stage runs `npm ci`, `npm run check:api`,
 `npx vite build` and `scripts/check-dist.mjs`, then copies `dist/` to
 `/ui/next` and the bundled packages' licences (`dist/.vite/license.md`, never
-served) to `/usr/share/licenses/logweir/console-third-party.md`. `scripts/check-image-api.sh` holds the image's `/ui/next` to this
+served) to `/usr/share/licenses/logweir/console-third-party.md`. The Red Hat
+fonts it bundles are OFL-1.1: their text is `licenses/RedHatFont-OFL-1.1.txt`,
+shipped as `/usr/share/licenses/logweir/console-fonts-OFL-1.1.txt` and printed in
+`THIRD_PARTY_NOTICES.md`. `scripts/check-image-api.sh` holds the image's `/ui/next` to this
 tree's `dist/`, sha256 for sha256, so run `just console` before
 `just smoke-console`.
 
 ## Testing it
 
 `just console` runs every gate, the same as CI's `console` job, which runs when
-`console/` or the schema changes:
+`console/`, `ui/tests/fixtures/console/` or the schema changes; `publish` waits
+for it:
 
 1. `npm ci`;
 2. `npm run check:api`: the committed `src/api/schema.d.ts` matches the schema
@@ -64,15 +68,16 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
 
 | path | what it is |
 |---|---|
-| `src/api/client.ts` | the one client: same origin, the cookie session, `X-CSRF-Token` on unsafe methods; `ApiError`; `listAll` (every page of a list); the bounded session read; sign-in and sign-out |
-| `src/api/queries.ts` | every read and write as a TanStack Query hook, and the query keys |
+| `src/api/client.ts` | the one client: same origin, the cookie session, `X-CSRF-Token` on unsafe methods; `ApiError` (with the problem's field errors); `outcomeUnknown`; `mintKey`; `listAll` (every page of a list); the bounded session read; sign-in and sign-out |
+| `src/api/queries.ts` | the lists the Overview, the navigation and the pages share, as TanStack Query hooks, and the query keys |
+| `src/api/<area>.ts` | each page group's own reads and writes (connections, destinations, schedules, backups with the catalog and trust) |
 | `src/api/session.tsx` | the session document for everything under the gate: `useSessionDoc`, `useGrant`, `useCan` |
 | `src/api/stream.ts` | one run's event stream, written into the query cache |
 | `src/api/schema.d.ts` | generated from the schema; never edited by hand |
 | `src/app/SessionGate.tsx` | the boot read of `/api/v1/session` and its four pages: console, sign in, unavailable, no namespace |
 | `src/app/Shell.tsx` | the masthead, the namespace selector, the user menu, and the navigation with counts |
 | `src/app/attention.ts`, `src/pages/overviewData.ts` | the Overview's numbers, as pure functions of the API's documents |
-| `src/router.tsx` | hash routes, `#/<namespace>/<page>`; which pages are still prototype-only |
+| `src/router.tsx` | hash routes, `#/<namespace>/<page>`; each page group adds its routes in one line; which pages are still prototype-only |
 | `src/pages/`, `src/components/` | pages; shared pieces (`States.tsx`: loading, empty and error) |
 | `src/mock/` | the prototype's data and fake `fetch`, used by the mock builds and the tests; a live build drops it |
 | `scripts/` | `check-dist.mjs`, `check-licences.mjs` |
@@ -83,12 +88,13 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
   object (`keys` in `queries.ts`). After a write, invalidate `[kind, ns]`.
 - **Capabilities:** a hook whose read the session does not grant in the
   namespace stays idle, and the page leaves that part out (`useCan`). The
-  navigation hides an entry the same way.
+  navigation hides an entry the same way, and the shell answers a page whose
+  read the role lacks with "Not available to you here".
 - **States:** `LoadingRows` while loading; `ErrorState` for an `ApiError`
   (headline by status, the server's message, status, code and request id, and
   Try again); `Empty` with the one action that fills the page. A request with
-  no answer is `status` 0; a write with no answer keeps its `Idempotency-Key`
-  for the retry.
+  no answer is `status` 0; a write whose outcome is unknown (`outcomeUnknown`:
+  no answer, 408 or 5xx) keeps its `Idempotency-Key` for the retry.
 - **Making a page live:** drop its `PROTOTYPE ?` in `src/router.tsx`, read
   through `queries.ts`, and replace anything it takes from `src/mock/`.
 
