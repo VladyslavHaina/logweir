@@ -105,6 +105,7 @@ mod sealed {
     impl Sealed for weirkeeper::crds::protection_policy::ProtectionPolicy {}
     impl Sealed for weirkeeper::crds::recovery_catalog::RecoveryCatalog {}
     impl Sealed for weirkeeper::crds::retention_policy::RetentionPolicy {}
+    impl Sealed for weirkeeper::crds::switchover::Switchover {}
 
     /// The cluster-scoped half of the seal. `TrustPolicy` is the only kind in
     /// it, and it is READ-ONLY here: see [`super::ClusterResource`].
@@ -138,6 +139,7 @@ impl ProductResource for Preflight {}
 impl ProductResource for ProtectionPolicy {}
 impl ProductResource for RecoveryCatalog {}
 impl ProductResource for RetentionPolicy {}
+impl ProductResource for weirkeeper::crds::switchover::Switchover {}
 
 /// The closed set of CLUSTER-SCOPED custom resources this service may READ.
 ///

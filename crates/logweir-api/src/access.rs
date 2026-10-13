@@ -320,6 +320,28 @@ pub const ROUTES: &[RouteAccess] = &[
         "/api/v1/namespaces/{ns}/restores/{name}",
         ns(&[Action::ReadRestores]),
     ),
+    // PROD-04.2: switchovers, under the restore actions (reading one is
+    // reading a restore's consequence; requesting one is an operator's).
+    route(
+        "GET",
+        "/api/v1/namespaces/{ns}/switchovers",
+        ns(&[Action::ReadRestores]),
+    ),
+    route(
+        "POST",
+        "/api/v1/namespaces/{ns}/switchovers",
+        ns(&[Action::CreateRestore]),
+    ),
+    route(
+        "GET",
+        "/api/v1/namespaces/{ns}/switchovers/{name}",
+        ns(&[Action::ReadRestores]),
+    ),
+    route(
+        "POST",
+        "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+        ns(&[Action::SubmitApproval]),
+    ),
     // A governed approver's countersignature. The handler keeps its own role
     // check (it decides by the frozen policy's mode as well).
     route(

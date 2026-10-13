@@ -566,6 +566,43 @@ fn paths() -> Value {
             }],
         ),
         (
+            "/api/v1/namespaces/{ns}/switchovers",
+            vec![
+                list("listSwitchovers", "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.", "SwitchoverList"),
+                create(
+                    "createSwitchover",
+                    "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
+                    "CreateSwitchoverRequest",
+                    "SwitchoverResponse",
+                ),
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}",
+            vec![get_one("getSwitchover", "PROD-04.2: one Switchover projection, planBytes included.", "SwitchoverResponse")],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+            vec![Op {
+                method: "post",
+                operation_id: "submitSwitchoverApproval",
+                summary: "PROD-04.2: in an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote; under a two-person or strict policy, an approver's countersignature over the console's stored request (never the requester's own). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("SubmitApprovalRequest"),
+                success: vec![
+                    ("201", "The Approval was created.", "ApprovalResponse"),
+                    ("200", "An identical Approval already exists (a replay).", "ApprovalResponse"),
+                ],
+                problems: all_codes(&[
+                    COMMON,
+                    NAMESPACED,
+                    KUBE,
+                    UNSAFE,
+                    &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
+                ]),
+            }],
+        ),
+        (
             "/api/v1/namespaces/{ns}/approval-policy",
             vec![get_one(
                 "getApprovalPolicy",
@@ -1033,6 +1070,9 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::CreateRestoreRequest>();
     let _ = generator.subschema_for::<c::RestoreList>();
     let _ = generator.subschema_for::<c::RestoreResponse>();
+    let _ = generator.subschema_for::<c::CreateSwitchoverRequest>();
+    let _ = generator.subschema_for::<c::SwitchoverList>();
+    let _ = generator.subschema_for::<c::SwitchoverResponse>();
     let _ = generator.subschema_for::<c::ApprovalList>();
     let _ = generator.subschema_for::<c::ApprovalResponse>();
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();

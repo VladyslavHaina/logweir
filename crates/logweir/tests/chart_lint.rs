@@ -1434,6 +1434,7 @@ fn console_plural(ty: &str) -> &'static str {
         "ProtectionPolicy" => "protectionpolicies",
         "RecoveryCatalog" => "recoverycatalogs",
         "RetentionPolicy" => "retentionpolicies",
+        "Switchover" => "switchovers",
         "TrustPolicy" => "trustpolicies",
         other => panic!(
             "`crates/logweir-api/src/kube.rs` seals the type `{other}`, which this test cannot \
@@ -1549,6 +1550,11 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             vec!["logweir.dev".to_string()],
             vec!["recoverycatalogs".to_string()],
             vec!["create".to_string()],
+        ),
+        (
+            vec!["logweir.dev".to_string()],
+            vec!["switchovers".to_string()],
+            vec!["create".to_string(), "get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the console spends, never an engine subcommand
         ),
         (
             vec![String::new()],
@@ -1952,7 +1958,7 @@ const RENDER_NAMESPACE: &str = "logweir-system";
 /// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
 /// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
 /// derives them from `kube.rs`; this list pins what is REACHABLE.
-const API_NAMESPACED_GRANTS: [&str; 37] = [
+const API_NAMESPACED_GRANTS: [&str; 40] = [
     "get logweir.dev/approvals",
     "list logweir.dev/approvals",
     "create logweir.dev/approvals",
@@ -1988,6 +1994,9 @@ const API_NAMESPACED_GRANTS: [&str; 37] = [
     "create logweir.dev/recoverycatalogs",
     "get logweir.dev/retentionpolicies",
     "list logweir.dev/retentionpolicies",
+    "get logweir.dev/switchovers",
+    "list logweir.dev/switchovers",
+    "create logweir.dev/switchovers",
     "get core/configmaps",
     "create core/secrets",
 ];

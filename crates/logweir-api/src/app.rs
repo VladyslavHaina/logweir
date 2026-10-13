@@ -272,7 +272,7 @@ pub fn router(state: AppState) -> Router {
     use crate::routes::{
         approvals, backups, cadence_previews, catalogs, connections, console_approval,
         destinations, health, namespaces, operations, preflights, protection, restores, retention,
-        schedules, session, topic_discoveries, trust,
+        schedules, session, switchovers, topic_discoveries, trust,
     };
 
     let api = Router::new()
@@ -365,6 +365,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
             axum::routing::post(console_approval::approve),
+        )
+        // PROD-04.2: switchovers, their creation and approval routing.
+        .route(
+            "/api/v1/namespaces/{ns}/switchovers",
+            get(switchovers::list).post(switchovers::create),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/switchovers/{name}",
+            get(switchovers::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+            axum::routing::post(switchovers::submit_approval),
         )
         .route(
             "/api/v1/namespaces/{ns}/approval-policy",

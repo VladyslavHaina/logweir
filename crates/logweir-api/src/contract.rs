@@ -4323,3 +4323,95 @@ pub struct ApprovalPacketResponse {
     /// The packet.
     pub item: ApprovalPacket,
 }
+
+// SWITCHOVERS (PROD-04.2).
+
+/// The restore a switchover applies, by name and UID.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SwitchoverRestoreRef {
+    /// The `Restore`'s name, in this namespace.
+    pub name: String,
+    /// Its UID.
+    pub uid: String,
+}
+
+/// `POST .../switchovers`: a reviewed plan (`logweir switchover plan`) to
+/// apply to stopped groups on a verified restore's target.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateSwitchoverRequest {
+    /// The plan document, exactly as approved, at most 256 KiB.
+    pub plan_bytes: String,
+    /// `sha256:<lowercase hex>` of `planBytes`.
+    pub plan_hash: String,
+    /// The Approval (subject kind `Switchover`) that will authorise it.
+    pub approval_ref: NameRef,
+    /// The restore the plan names; it must be the plan's own `restore` block.
+    pub restore_ref: SwitchoverRestoreRef,
+    /// The Job's deadline, 60 to 86400 seconds.
+    pub deadline_seconds: i64,
+    /// The change ticket, signed beside the plan in a bound namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// One group's outcome, as the status carries it.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverGroupView {
+    pub source: String,
+    pub target: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub created: bool,
+    pub partitions: u32,
+}
+
+/// A `Switchover`, projected.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverView {
+    pub name: String,
+    pub namespace: String,
+    pub uid: String,
+    pub restore: SwitchoverRestoreRef,
+    pub approval_name: String,
+    /// `sha256:` of `planBytes`.
+    pub plan_hash: String,
+    /// The plan, on a single object's read only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub groups: Vec<SwitchoverGroupView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_key: Option<String>,
+}
+
+/// `GET .../switchovers`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverList {
+    pub request_id: String,
+    pub items: Vec<SwitchoverView>,
+    pub page: Page,
+}
+
+/// `GET .../switchovers/{name}` and `POST .../switchovers`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverResponse {
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    pub item: SwitchoverView,
+    /// On a create, where the submission goes next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<RestoreRoutingView>,
+}

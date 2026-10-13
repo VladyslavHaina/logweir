@@ -1485,6 +1485,7 @@ check_console_grants() {
     'get kafkaclusters'      'list kafkaclusters'      'create kafkaclusters' \
     'get preflights'         'list preflights'         'create preflights'         'patch preflights' \
     'get restores'           'list restores'           'create restores' \
+    'get switchovers'        'list switchovers'        'create switchovers' \
     'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
     'get protectionpolicies' 'list protectionpolicies' \
     'get recoverycatalogs'   'list recoverycatalogs'   'create recoverycatalogs' \
