@@ -125,7 +125,7 @@ export const connections: Connection[] = [
     bootstrapServers: ["kafka-0.analytics.svc:9093"],
     auth: { mode: "mtls", tls: true },
     markerTopic: "logweir.scratch",
-    reachability: { state: "unreachable", reason: "BrokerTransportFailure", observedAt: iso(NOW - 6 * MINUTE) },
+    reachability: { state: "unreachable", reason: "ProbeReportedUnreachable", observedAt: iso(NOW - 6 * MINUTE) },
   },
 ];
 
