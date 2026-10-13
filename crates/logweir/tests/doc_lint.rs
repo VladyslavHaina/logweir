@@ -2194,6 +2194,26 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a dropped connection no longer fails an evidence write",
             "error sending request`",
         ),
+        // PROD-11.1a (item 91): safe clones; the finalizer that holds them.
+        (
+            "a scratch restore kept for a declared time",
+            "`logweir.dev/clone-cleanup`",
+        ),
+        // PROD-05.2 (item 92): the target topic configuration; the plan block.
+        (
+            "a restore rebuilds its topics' configuration",
+            "`target.topic_configuration: {transition: afterVerification | none, owners?}`",
+        ),
+        // PROD-05.1a (item 93): Strimzi owners from the controller; the value.
+        (
+            "backups record Strimzi owners",
+            "`strimzi.readKafkaTopics: true`",
+        ),
+        // PROD-01.1b (item 94): out-of-order timestamps; the refusal.
+        (
+            "a record out of timestamp order is never lost",
+            "`refusal-reason=PointInTimeSelectionIncomplete`",
+        ),
     ];
     assert_eq!(
         items.len(),
