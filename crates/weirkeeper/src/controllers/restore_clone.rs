@@ -753,6 +753,10 @@ async fn watch(
         .pod
         .as_ref()
         .and_then(crate::controllers::backup::terminated_exit_code);
+    // FX-43: the cleanup's lines are read only through its Job's token, in
+    // one call (`runner_log::read_own_terminal`); a runner older than the
+    // controller is named and nothing of its log is read.
+    let mut older = false;
     let report = match found.pod.as_ref() {
         Some(pod) => {
             let pods: Api<k8s_openapi::api::core::v1::Pod> =
@@ -760,13 +764,21 @@ async fn watch(
             // A log the API did not hand over is an error this pass retries,
             // never "the cleanup printed nothing", which would spend an
             // attempt.
-            let log =
-                crate::runner_log::read_text(&pods, &pod.name_any(), &crate::runner_log::TERMINAL)
-                    .await
-                    .map_err(RestoreError::Api)?;
-            crate::runner_log::key_values(&log, CLONE_CLEANUP_PREFIX)
-                .pop()
-                .and_then(CloneCleanupReport::parse)
+            match crate::runner_log::read_own_terminal(&pods, &pod.name_any(), &job, exit_code)
+                .await
+                .map_err(RestoreError::Api)?
+            {
+                crate::runner_log::Terminal::Lines(lines) => {
+                    crate::runner_log::key_values(lines.text(), CLONE_CLEANUP_PREFIX)
+                        .pop()
+                        .and_then(CloneCleanupReport::parse)
+                }
+                crate::runner_log::Terminal::RunnerOlder => {
+                    older = true;
+                    None
+                }
+                crate::runner_log::Terminal::OverBound => None,
+            }
         }
         None => None,
     };
@@ -776,7 +788,17 @@ async fn watch(
         .and_then(|s| s.teardown.as_ref())
         .and_then(|t| t.deleted.clone())
         .unwrap_or_default();
-    match ended(exit_code, report) {
+    let outcome = if older {
+        // Refused, not retried: the next attempt runs the same image.
+        Ended::Refused(format!(
+            "{}: {}",
+            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+            crate::runner_log::RUNNER_OLDER_SENTENCE
+        ))
+    } else {
+        ended(exit_code, report)
+    };
+    match outcome {
         Ended::Removed(report) => {
             // `reason: null` clears an earlier attempt's reason.
             let stored = patch_clone(
@@ -922,7 +944,9 @@ async fn build_attempt(
             "the run Job has no runner container to copy".to_string()
         ));
     };
-    jobs.create(&PostParams::default(), &job)
+    // FX-43: a fresh line token for this attempt's Job (the argv was built
+    // fresh, so the run Job's token is not copied).
+    jobs.create(&PostParams::default(), &crate::job::tokened(job))
         .await
         .map_err(RestoreError::Api)?;
     Ok(Ok(name))

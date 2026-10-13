@@ -217,6 +217,8 @@ fn main() -> std::process::ExitCode {
         }
         // PROD-11.1a: a TTL clone's cleanup Job.
         cli::Command::Restore(cli::RestoreCmd::Cleanup(a)) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, a.runner_line_token.clone());
             logweir::restore_cleanup::run(a.into())
         }
         // PROD-04.2: the Switchover's plan builders and its Job.
@@ -273,21 +275,26 @@ fn main() -> std::process::ExitCode {
             store_contract_version,
             approval_policy,
             confirmation_key,
-        }) => logweir::switchover::run(&logweir::switchover::RunArgs {
-            plan,
-            restore_plan,
-            approval,
-            approver_key,
-            evidence_keys,
-            signing_key,
-            scorecard_key,
-            namespace,
-            name,
-            uid,
-            store_contract_version,
-            approval_policy,
-            confirmation_key,
-        }),
+            runner_line_token,
+        }) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::switchover::run(&logweir::switchover::RunArgs {
+                plan,
+                restore_plan,
+                approval,
+                approver_key,
+                evidence_keys,
+                signing_key,
+                scorecard_key,
+                namespace,
+                name,
+                uid,
+                store_contract_version,
+                approval_policy,
+                confirmation_key,
+            })
+        }
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error
         // (`non-exhaustive patterns`), not a runtime stub.

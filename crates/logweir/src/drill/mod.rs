@@ -2946,11 +2946,13 @@ fn teardown(
                 c.client.as_creator(),
                 phase9_transition::READBACK_WITHIN,
             );
-            println!(
+            // FX-43: sealed with the Job's token, so the controller lifts it
+            // into `status.topicConfiguration` (it reads only sealed lines).
+            crate::exit::print_lines(&[format!(
                 "{}{}",
                 logweir_core::topic_transition::TOPIC_CONFIGURATION_KEY_PREFIX,
                 logweir_core::topic_transition::status_line_value(&outcome, &configured.topics)
-            );
+            )]);
             a.topic_configuration = Some(outcome);
         }
         // A teardown that left topics is a warning event: the names travel in

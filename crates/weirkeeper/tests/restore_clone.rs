@@ -268,8 +268,20 @@ async fn a_passing_clone_is_kept_with_its_cleanup_job_suspended() {
     assert_eq!(job["spec"]["suspend"], true);
     let c = &job["spec"]["template"]["spec"]["containers"][0];
     assert_eq!(c["image"], "runner:new");
+    // FX-43: the last two arguments are this Job's own line token, read back
+    // by `runner_log::read_own_terminal`; the rest is the cleanup's argv.
+    let mut args = c["args"].as_array().expect("an argv").clone();
+    let token = args.pop().expect("the line token");
     assert_eq!(
-        c["args"],
+        args.pop().expect("its flag"),
+        logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+    );
+    assert!(
+        logweir_core::refusal_detail::LineToken::parse(token.as_str().unwrap()).is_some(),
+        "a fresh line token"
+    );
+    assert_eq!(
+        Value::Array(args),
         json!([
             "restore",
             "cleanup",

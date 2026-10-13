@@ -674,14 +674,35 @@ pub async fn reconcile(
         let status = match terminated {
             Some((pod, code)) => {
                 let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-                let log = crate::runner_log::read_text(
-                    &pods,
-                    &pod.name_any(),
-                    &crate::runner_log::TERMINAL,
-                )
-                .await
-                .unwrap_or_default();
-                status_from_run(code, &log, &name)
+                // FX-43: the run's lines are read only through its Job's
+                // token, in one call; a runner older than the controller is
+                // named and nothing of its log is read. A failed read is a
+                // reconcile error (retried), never an empty log.
+                match crate::runner_log::read_own_terminal(&pods, &pod.name_any(), &job, Some(code))
+                    .await?
+                {
+                    crate::runner_log::Terminal::Lines(lines) => {
+                        status_from_run(code, lines.text(), &name)
+                    }
+                    crate::runner_log::Terminal::OverBound => status_from_run(code, "", &name),
+                    crate::runner_log::Terminal::RunnerOlder => SwitchoverStatus {
+                        phase: Some(so::RUN_FAILED.into()),
+                        exit_code: Some(code),
+                        exit_reason: Some(
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.into(),
+                        ),
+                        reason: Some(
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.into(),
+                        ),
+                        message: Some(format!(
+                            "{}: {}",
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                            crate::runner_log::RUNNER_OLDER_SENTENCE
+                        )),
+                        job_ref: Some(name.clone()),
+                        ..SwitchoverStatus::default()
+                    },
+                }
             }
             None => SwitchoverStatus {
                 phase: Some(so::RUN_FAILED.into()),
@@ -899,7 +920,8 @@ pub async fn reconcile(
     spec.image = ctx.runner_image.image.clone();
     spec.image_pull_policy = ctx.runner_image.image_pull_policy.clone();
     match jobs
-        .create(&PostParams::default(), &job::build(&spec))
+        // FX-43: a fresh line token; only the lines sealed with it are read.
+        .create(&PostParams::default(), &job::tokened(job::build(&spec)))
         .await
     {
         Ok(_) => {}

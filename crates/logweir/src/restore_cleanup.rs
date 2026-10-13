@@ -68,7 +68,15 @@ pub struct CleanupArgs {
 /// refusal's two lines), and exit by the code table in the module doc.
 pub fn run(args: CleanupArgs) -> ExitCode {
     let cleaned = execute(&args);
-    finish(&args.run_id, cleaned, &mut std::io::stdout().lock())
+    // FX-43: `finish` writes its lines into a buffer, and they go out once,
+    // last, through the terminal block: sealed with the Job's token, the
+    // sealed `runner-exit=`, then the plain lines.
+    let mut buffer = Vec::new();
+    let code = finish(&args.run_id, cleaned, &mut buffer);
+    let mut last = crate::exit::FinalLines::default();
+    last.extend(String::from_utf8_lossy(&buffer).lines().map(str::to_string));
+    last.print(code);
+    code
 }
 
 /// What one cleanup attempt did, and whether a later attempt may do more.
@@ -119,7 +127,9 @@ pub fn finish(
             ExitCode::GuardRefused
         }
         Err(e) => {
-            eprintln!("{e}");
+            // On one line: the error can repeat a plan value or a broker's
+            // message.
+            eprintln!("{}", crate::exit::one_line(&e.to_string()));
             e.exit_code()
         }
     }

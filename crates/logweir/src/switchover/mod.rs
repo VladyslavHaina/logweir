@@ -729,13 +729,27 @@ pub fn group_line(g: &GroupRecord) -> String {
 /// or failed); 3 a whole-run refusal before any group was touched; 1 the
 /// run could not do its job; 4 the record could not be signed or written.
 pub fn run(args: &RunArgs) -> ExitCode {
+    // FX-43: every line a controller reads goes out once, last, through the
+    // terminal block (sealed with the Job's token, the sealed `runner-exit=`,
+    // then the plain lines).
+    let last = std::cell::RefCell::new(crate::exit::FinalLines::default());
+    let code = run_with_lines(args, &last);
+    last.into_inner().print(code);
+    code
+}
+
+/// [`run`]'s body: the lines it owes the controller go into `last`.
+fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLines>) -> ExitCode {
+    macro_rules! out_line {
+        ($($t:tt)*) => { last.borrow_mut().push(format!($($t)*)) };
+    }
     let started_at = chrono::Utc::now();
     let run_id = crate::ids::new_run_id();
-    println!("switchover-run-id={run_id}");
+    out_line!("switchover-run-id={run_id}");
     let fail = |code: ExitCode, why: String| {
-        eprintln!("{why}");
-        println!("{OUTCOME_LINE}{}", so::RUN_FAILED);
-        println!(
+        eprintln!("{}", crate::exit::one_line(&why));
+        out_line!("{OUTCOME_LINE}{}", so::RUN_FAILED);
+        out_line!(
             "failure-reason={}",
             why.split(':').next().unwrap_or("Operational")
         );
@@ -798,8 +812,8 @@ pub fn run(args: &RunArgs) -> ExitCode {
         }
         None => {
             eprintln!("{}: the restore plan does not parse", so::PLAN_INVALID);
-            println!("{OUTCOME_LINE}{}", so::RUN_REFUSED);
-            println!("refusal-reason={}", so::PLAN_INVALID);
+            out_line!("{OUTCOME_LINE}{}", so::RUN_REFUSED);
+            out_line!("refusal-reason={}", so::PLAN_INVALID);
             return ExitCode::GuardRefused;
         }
     };
@@ -889,25 +903,30 @@ pub fn run(args: &RunArgs) -> ExitCode {
         Ok(())
     });
     for g in &record.groups {
-        println!("{}", group_line(g));
+        out_line!("{}", group_line(g));
     }
     if let Err(e) = &written {
-        eprintln!("the switchover record could not be signed or written: {e}");
+        eprintln!(
+            "{}",
+            crate::exit::one_line(&format!(
+                "the switchover record could not be signed or written: {e}"
+            ))
+        );
     } else {
-        println!("{RECORD_LINE}{key}");
+        out_line!("{RECORD_LINE}{key}");
     }
-    println!("{OUTCOME_LINE}{}", record.outcome);
-    println!("{COUNTS_LINE}{}", record.counts.render());
+    out_line!("{OUTCOME_LINE}{}", record.outcome);
+    out_line!("{COUNTS_LINE}{}", record.counts.render());
     if let Some(why) = &refused {
-        eprintln!("refused: {why}");
-        println!(
+        eprintln!("{}", crate::exit::one_line(&format!("refused: {why}")));
+        out_line!(
             "refusal-reason={}",
             why.split(':').next().unwrap_or(so::PLAN_INVALID)
         );
         return ExitCode::GuardRefused;
     }
     if written.is_err() {
-        println!("failure-reason=RecordNotWritten");
+        out_line!("failure-reason=RecordNotWritten");
         return ExitCode::SigningOrLock;
     }
     if record.outcome == so::SUCCEEDED {

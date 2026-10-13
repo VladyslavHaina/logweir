@@ -557,6 +557,9 @@ pub struct RestoreCleanupArgs {
     /// D2 §3.5's store-contract handshake, as `restore run` takes it.
     #[arg(long)]
     pub store_contract_version: Option<String>,
+    /// FX-43: see `restore run`'s flag of the same name.
+    #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+    pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
 }
 
 impl From<RestoreCleanupArgs> for crate::restore_cleanup::CleanupArgs {
@@ -975,6 +978,9 @@ pub enum SwitchoverCmd {
         approval_policy: Option<PathBuf>,
         #[arg(long)]
         confirmation_key: Option<PathBuf>,
+        /// FX-43: see `restore run`'s flag of the same name.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 
