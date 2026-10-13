@@ -799,5 +799,14 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"orders\", expected struct TopicConfigurationBlock",
   "python_reason": "target.topic_configuration is not an object of the shape the writer gives it: a transition, a target line, per topic its route, replication factor, three setting maps and the settings not applied, and an optional desired-state document"
+ },
+ {
+  "id": "topic_configuration_capped_null",
+  "file": "topic_configuration_capped_null.json",
+  "check": "message:target.topic_configuration is not an object of the shape the writer gives it",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: null, expected a map",
+  "python_reason": "target.topic_configuration is not an object of the shape the writer gives it: a transition, a target line, per topic its route, replication factor, three setting maps and the settings not applied, and an optional desired-state document"
  }
 ]

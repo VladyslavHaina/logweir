@@ -1725,8 +1725,10 @@ def _topic_configuration_shape_ok(block) -> bool:
             for k in ("value", "target_default"):
                 if n.get(k) is not None and not isinstance(n.get(k), str):
                     return False
+        # `capped` and `not_recorded` are absent or a value, never null: the
+        # Rust reader's `BTreeMap` and `bool` (serde default) refuse null.
         capped = topic.get("capped")
-        if capped is not None and not (
+        if "capped" in topic and not (
             isinstance(capped, dict)
             and all(
                 isinstance(c, dict)
@@ -1742,9 +1744,7 @@ def _topic_configuration_shape_ok(block) -> bool:
             and all(isinstance(owner.get(k), str) for k in ("kind", "basis", "reference"))
         ):
             return False
-        if topic.get("not_recorded") is not None and not isinstance(
-            topic.get("not_recorded"), bool
-        ):
+        if "not_recorded" in topic and not isinstance(topic.get("not_recorded"), bool):
             return False
     desired = block.get("desired_state")
     if desired is not None and not (
