@@ -173,6 +173,7 @@ fn text(o: &Output) -> String {
 
 /// One of a broker's own CLIs, inside its RUNNING container.
 fn kafka_cli(c: &Cluster, args: &[&str]) -> Output {
+    harness::stack::ensure_coherent();
     let s = stack();
     let mut cmd = Command::new("docker");
     cmd.args([
