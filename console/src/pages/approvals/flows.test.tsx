@@ -261,6 +261,24 @@ describe("unbound: the approver's two files", () => {
   });
 });
 
+describe("the draft", () => {
+  it("keeps the documents in memory across a visit elsewhere, never key text and never in browser storage", async () => {
+    const stored = vi.spyOn(window.Storage.prototype, "setItem");
+    serve({ policy: LEGACY });
+    renderAt("/team-a/approvals/restore-x");
+    fireEvent.change(await screen.findByLabelText(/^approval\.json/), { target: { value: '{"plan_hash":"sha256:bb"}' } });
+    fireEvent.change(screen.getByLabelText(/^approval\.sig/), { target: { value: "PRIVATE KEY" } });
+    cleanup();
+    serve({ policy: LEGACY });
+    renderAt("/team-a/approvals/restore-x");
+    expect(((await screen.findByLabelText(/^approval\.json/)) as HTMLTextAreaElement).value).toBe('{"plan_hash":"sha256:bb"}');
+    // NEGATIVE CONTROL: the key text typed beside it was never kept.
+    expect((screen.getByLabelText(/^approval\.sig/) as HTMLTextAreaElement).value).toBe("");
+    expect(stored).not.toHaveBeenCalled();
+    stored.mockRestore();
+  });
+});
+
 describe("confirm: the requester's confirmation is the authorization", () => {
   it("offers nothing to approve and shows OD-10's typed names from the signed bytes", async () => {
     const typed = { ...packetFixture.item, name: "approval-x", approvalBytes: JSON.stringify({ originalNameConfirmation: { typedTopics: ["orders", "payments"] } }) };

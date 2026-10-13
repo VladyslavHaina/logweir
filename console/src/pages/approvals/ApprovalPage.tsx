@@ -273,6 +273,12 @@ function MismatchRefusal({ ns, subject, mismatches }: { ns: string; subject: Sub
 export function ApprovalPage() {
   const { ns, name } = useParams({ from: "/$ns/approvals/$name" });
   const claim = useSearch({ from: "/$ns/approvals/$name" }) as RouteClaim;
+  // One page per subject: what was approved here, and the click's own state,
+  // never carry over to the next Restore's page.
+  return <SubjectPage key={`${ns}/${name}`} ns={ns} name={name} claim={claim} />;
+}
+
+function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: RouteClaim }) {
   const grant = useApprovalGrant(ns);
   const policyQ = useApprovalPolicy(ns, grant.approvalsRead);
   const restoreQ = useSubjectRestore(ns, name, grant.restoresRead);
@@ -567,7 +573,7 @@ export function ApprovalPage() {
   return (
     <>
       <PageHeader title={name} breadcrumb={breadcrumb} status={status} description={description} />
-      <PageSection>
+      <PageSection className="lw-approval-page">
         <Stack hasGutter>
           {refusals}
           {body}

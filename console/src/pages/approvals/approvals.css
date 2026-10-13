@@ -57,3 +57,11 @@
   gap: var(--pf-t--global--spacer--md);
   margin-top: var(--pf-t--global--spacer--md);
 }
+/* Key ids, UIDs and hashes run on without a break; they wrap rather than widen a card. */
+.lw-approval-page .pf-v6-c-content--p,
+.lw-approval-page .pf-v6-c-alert__description,
+.lw-approval-page .pf-v6-c-alert__title,
+.lw-approval-page .pf-v6-c-helper-text__item-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
