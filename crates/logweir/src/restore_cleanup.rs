@@ -357,6 +357,9 @@ pub fn clean(
         topics_failed: left.clone(),
         // Global Constraint 1: the clock is read here, in `crates/logweir`.
         deleted_at: chrono::Utc::now(),
+        // The cleanup applies no configuration (PROD-05.2's transition is
+        // the run's own phase 9).
+        topic_configuration: None,
     };
     let key = cleanup_attestation_key(&sc.run_id, inputs.attempt);
     persist(&attestation, &key, signer, store)?;

@@ -12013,6 +12013,11 @@
             "$ref": "#/components/schemas/RestoreTimeBasisView",
             "nullable": true
           },
+          "topicConfiguration": {
+            "description": "**PROD-05.2.** `status.topicConfiguration`: for a plan carrying `target.topic_configuration`, each topic's replication factor and overrides before and after, and what the configuration transition did. A CLAIM read off the runner's log; the signed scorecard's block and the phase-9 attestation are the evidence. ABSENT on every other run.",
+            "$ref": "#/components/schemas/TopicConfigurationView",
+            "nullable": true
+          },
           "topicPreflight": {
             "description": "What phase 0 found about the target topics (`status.topicPreflight`). ABSENT on a run that did not complete phase 0.",
             "$ref": "#/components/schemas/TopicPreflightView",
@@ -13502,7 +13507,7 @@
             "nullable": true
           },
           "replicationFactor": {
-            "description": "The replication factor of every topic the run creates.",
+            "description": "`target.default_replication_factor`: the factor of every topic the run creates, except with `topic_configuration`, where a topic the point records a factor for is created at that factor, bounded by the target's brokers, and only one without gets this.",
             "type": "integer",
             "format": "int16"
           },
@@ -13517,8 +13522,34 @@
             "minimum": 0.0,
             "nullable": true
           },
+          "topicConfiguration": {
+            "description": "PROD-05.2: `target.topic_configuration`, the plan's configuration choice: topics created from the recovery point's configuration model and, with `afterVerification`, the source's compaction, retention and timestamp settings applied after a passing verdict. Absent: the topics are created as always.",
+            "$ref": "#/components/schemas/ScopeTopicConfigurationView",
+            "nullable": true
+          },
           "topicPrefix": {
             "description": "The prefix every source topic is mapped through; empty for a restore under the original topic names.",
+            "type": "string"
+          }
+        }
+      },
+      "ScopeTopicConfigurationView": {
+        "description": "PROD-05.2: the plan's configuration choice, as a second person approves it.",
+        "type": "object",
+        "required": [
+          "transition"
+        ],
+        "properties": {
+          "owners": {
+            "description": "The requester's owner statement, by source topic. Absent: the plan states none, and the recovery point's own detection decides.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeOwnerView"
+            },
+            "nullable": true
+          },
+          "transition": {
+            "description": "`afterVerification` or `none`.",
             "type": "string"
           }
         }
@@ -14117,6 +14148,133 @@
           "name": {
             "description": "The object's name.",
             "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationFailureView": {
+        "description": "One topic the transition did not apply.",
+        "type": "object",
+        "required": [
+          "desired",
+          "error",
+          "topic"
+        ],
+        "properties": {
+          "desired": {
+            "description": "The whole desired override set: the remaining step.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "description": "Why.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "The target topic.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationTopicView": {
+        "description": "One target topic's configuration, before and after.",
+        "type": "object",
+        "required": [
+          "after",
+          "before",
+          "topic"
+        ],
+        "properties": {
+          "after": {
+            "description": "The whole desired override set.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "before": {
+            "description": "The overrides it was created with.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "replicationFactor": {
+            "description": "The factor the topic was created with.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "replicationFactorReason": {
+            "description": "Why: `sourceFactor`, `targetBrokers` or `notRecorded`.",
+            "type": "string",
+            "nullable": true
+          },
+          "route": {
+            "description": "`adminApi` or `desiredStateExport`.",
+            "type": "string",
+            "nullable": true
+          },
+          "sourceReplicationFactor": {
+            "description": "The source's replication factor, when recorded.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "topic": {
+            "description": "The target topic.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationView": {
+        "description": "PROD-05.2: `Restore.topicConfiguration`.",
+        "type": "object",
+        "required": [
+          "applied",
+          "exported",
+          "failed",
+          "topics"
+        ],
+        "properties": {
+          "applied": {
+            "description": "Topics whose desired set was applied and read back.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "desiredStateKey": {
+            "description": "The desired-state document's evidence key.",
+            "type": "string",
+            "nullable": true
+          },
+          "exported": {
+            "description": "Owned topics, exported in the desired-state document.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "description": "Topics not transitioned, each with its whole desired set.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicConfigurationFailureView"
+            }
+          },
+          "topics": {
+            "description": "Per target topic: the replication factor and the overrides before and after.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicConfigurationTopicView"
+            }
+          },
+          "transition": {
+            "description": "`applied`, `partial`, or `notRun: <reason>`.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
