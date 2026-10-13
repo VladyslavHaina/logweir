@@ -1,0 +1,67 @@
+/* The R4 pages' few additions (Backups, Recovery catalog, Trust). Theme values
+   stay in styles.css; this file only spaces and aligns. */
+.lw-ev-gap-bottom {
+  margin-bottom: var(--pf-t--global--spacer--md);
+}
+.lw-ev-note {
+  margin: 0;
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  border-top: 1px solid var(--pf-t--global--border--color--default);
+}
+.lw-ev-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--pf-t--global--spacer--sm);
+}
+.lw-ev-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  margin: 0;
+}
+.lw-ev-counts > div {
+  display: flex;
+  flex-direction: column;
+}
+.lw-ev-counts dt {
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+}
+.lw-ev-counts dd {
+  margin: 0;
+  font-size: var(--pf-t--global--font--size--lg);
+  font-variant-numeric: tabular-nums;
+}
+.lw-ev-stack.lw-ev-stack > * + * {
+  margin-top: var(--pf-t--global--spacer--md);
+}
+.lw-ev-cell-note {
+  display: block;
+  margin-top: var(--pf-t--global--spacer--xs);
+}
+.lw-ev-key {
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--sm);
+  overflow-wrap: anywhere;
+}
+.lw-ev-histogram li {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr 3rem;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--sm);
+  font-size: var(--pf-t--global--font--size--sm);
+}
+.lw-ev-histogram li + li {
+  margin-top: 2px;
+}
+.lw-ev-bar {
+  display: block;
+  block-size: 0.5rem;
+  min-inline-size: 2px;
+  border-radius: 2px;
+  background: var(--pf-t--global--color--brand--default);
+  opacity: 0.55;
+}
+.lw-ev-histogram .lw-num {
+  text-align: end;
+}

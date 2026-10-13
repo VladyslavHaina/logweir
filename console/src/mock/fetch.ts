@@ -20,6 +20,7 @@ import { declareRestore } from "./themeA";
 import { connectionsMock } from "./connections";
 import { destinationsMock } from "./destinations";
 import { schedulesMock } from "./schedules";
+import { backupsMock } from "./backups";
 
 const LATENCY_MS = 350;
 
@@ -166,6 +167,7 @@ let restoreSerial = 0;
 
 async function route(request: Request): Promise<Response> {
   const owned = await schedulesMock(request); if (owned) return owned;
+  { const evidence = await backupsMock(request, route); if (evidence) return evidence; }
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;

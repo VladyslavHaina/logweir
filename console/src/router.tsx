@@ -14,8 +14,6 @@ import { landingNamespace } from "./api/session";
 import type { Session } from "./api/types";
 import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
-import { Backups } from "./pages/Backups";
-import { BackupDetail } from "./pages/BackupDetail";
 import { Restores } from "./pages/Restores";
 import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
@@ -24,6 +22,7 @@ import { Planned } from "./pages/Planned";
 import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
 import { scheduleRoutes } from "./pages/schedules/routes";
+import { backupRoutes } from "./pages/backups/routes";
 
 export type RouterContext = { session: Session };
 
@@ -45,8 +44,6 @@ const home = createRoute({
 export const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
 
 const overview = createRoute({ getParentRoute: () => nsRoute, path: "/", component: Overview });
-const backups = createRoute({ getParentRoute: () => nsRoute, path: "backups", component: PROTOTYPE ? Backups : Planned });
-const backup = createRoute({ getParentRoute: () => nsRoute, path: "backups/$name", component: PROTOTYPE ? BackupDetail : Planned });
 const restores = createRoute({ getParentRoute: () => nsRoute, path: "restores", component: PROTOTYPE ? Restores : Planned });
 const restoreNew = createRoute({
   getParentRoute: () => nsRoute,
@@ -63,8 +60,7 @@ const routeTree = root.addChildren([
   home,
   nsRoute.addChildren([
     overview,
-    backups,
-    backup,
+    ...backupRoutes(nsRoute),
     restores,
     restoreNew,
     restore,
