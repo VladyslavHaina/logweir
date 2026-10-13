@@ -12,8 +12,9 @@
 //!    `impl TopicDeleter for RdKafkaReader`, behind the scratch prefix and the
 //!    protected names;
 //! 2. `impl TopicCreator for RdKafkaReader` names no delete at all;
-//! 3. the trait method is called from EXACTLY TWO places in the product: the
-//!    phase-0 `LogAppendTime` probe (its own probe topic) and phase 9;
+//! 3. the trait method is called from EXACTLY THREE places in the product:
+//!    the phase-0 `LogAppendTime` probe (its own probe topic), phase 9, and
+//!    a TTL clone's cleanup (PROD-11.1a), over the names its ID rule kept;
 //! 4. no crate but `logweir-kafka` (which defines it) and `logweir` (the
 //!    runner) names `TopicDeleter`, and the runner takes its deleter from one
 //!    place;
@@ -130,6 +131,8 @@ const READER: &str = "logweir-kafka/src/reader.rs";
 const RDKAFKA_READER: &str = "logweir-kafka/src/rdkafka_reader.rs";
 const PHASE0: &str = "logweir/src/drill/phase0_admit.rs";
 const PHASE9: &str = "logweir/src/drill/phase9_teardown.rs";
+/// PROD-11.1a: `logweir restore cleanup`, a TTL clone's cleanup.
+const RESTORE_CLEANUP: &str = "logweir/src/restore_cleanup.rs";
 const ORCHESTRATOR: &str = "logweir/src/drill/mod.rs";
 /// The vendored copy of the pinned engine's request-version table.
 const ENGINE_VERSION_TABLE: &str = "logweir-engine-oso/src/vendored/request_versions.rs";
@@ -160,6 +163,8 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
             (PHASE0, 2),
             // Phase 9.
             (PHASE9, 1),
+            // A TTL clone's cleanup (PROD-11.1a).
+            (RESTORE_CLEANUP, 1),
         ]),
         "a topic delete is named somewhere this inventory does not list, or a listed one moved"
     );
@@ -167,7 +172,12 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
     // product callers of the trait method, and one test call.
     assert_eq!(
         inventory(".delete_topics("),
-        expect(&[(RDKAFKA_READER, 2), (PHASE0, 1), (PHASE9, 1)])
+        expect(&[
+            (RDKAFKA_READER, 2),
+            (PHASE0, 1),
+            (PHASE9, 1),
+            (RESTORE_CLEANUP, 1)
+        ])
     );
     // Nothing names another way to remove a topic or its records: the
     // broker protocol's own names, librdkafka's, or a UFCS spelling.
@@ -255,8 +265,8 @@ fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
     }
 }
 
-/// **The trait method is called from exactly two places: the phase-0 probe,
-/// for its own probe topic, and phase 9.** Phase 9's file also holds the
+/// **The trait method is called from exactly three places: the phase-0
+/// probe, for its own probe topic, phase 9, and a TTL clone's cleanup.** Phase 9's file also holds the
 /// teardown of a run that failed after the restore started, through the same
 /// one call; the orchestrator reaches it only from the error returns of
 /// phase 6 onwards. KILLS: a third caller (a cleanup after the creation step,
@@ -271,7 +281,35 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
         .filter(|(_, text)| count(&code(text), ".delete_topics(") > 0)
         .map(|(path, _)| path)
         .collect();
-    assert_eq!(callers, vec![PHASE0.to_string(), PHASE9.to_string()]);
+    assert_eq!(
+        callers,
+        vec![
+            PHASE0.to_string(),
+            PHASE9.to_string(),
+            RESTORE_CLEANUP.to_string()
+        ]
+    );
+
+    // PROD-11.1a: the cleanup's one call deletes exactly what the ID rule
+    // kept, after the record was verified and the cluster checked.
+    let cleanup = code(&source(RESTORE_CLEANUP));
+    assert_eq!(count(&cleanup, ".delete_topics("), 1);
+    let call = cleanup
+        .find("deleter.delete_topics(&plan.delete)")
+        .expect("the cleanup deletes the ID rule's list and nothing else");
+    for before in [
+        "verified_scorecard(inputs, store)?",
+        "check_cluster(&sc.target.cluster_id, &current_cluster)",
+        "let plan = cleanup_plan(creation, &current);",
+    ] {
+        let at = cleanup
+            .find(before)
+            .unwrap_or_else(|| panic!("the cleanup no longer does `{before}`"));
+        assert!(
+            at < call,
+            "`{before}` is decided before anything is deleted"
+        );
+    }
 
     // Phase 0: one call, the probe's own name, BEFORE the creation step in
     // the file, and the creation step itself holds no deleter.
@@ -357,6 +395,7 @@ fn only_the_kafka_crate_and_the_runner_name_the_deleter() {
             ORCHESTRATOR.to_string(),
             PHASE0.to_string(),
             PHASE9.to_string(),
+            RESTORE_CLEANUP.to_string(),
             RDKAFKA_READER.to_string(),
             READER.to_string(),
         ],

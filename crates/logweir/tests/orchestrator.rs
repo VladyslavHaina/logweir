@@ -2779,3 +2779,81 @@ fn every_creating_run_signs_the_topics_it_created() {
         &sc.format_version
     ));
 }
+
+/// **PROD-11.1a: phase 9 keeps a passing TTL clone's topics, and tears a
+/// failed one down at once.** A scratch plan with `target.teardown:
+/// {ttl_seconds: 300}` that passes deletes nothing, attests `teardown_policy:
+/// ttl`, and signs the lifetime in `target.creation.teardown_after_seconds`;
+/// the same plan whose verification fails deletes what it created, as a
+/// scratch drill does.
+///
+/// KILLS: a phase 9 that deletes a passing clone (its topics would be gone
+/// before the controller's cleanup); one that keeps a failed clone (nothing
+/// would ever delete it: only a passing run is cleaned up).
+#[test]
+fn a_ttl_clone_is_kept_when_it_passes_and_torn_down_when_it_fails() {
+    let ttl =
+        logweir_core::target_creation::Teardown::Ttl(logweir_core::target_creation::CloneTtl {
+            ttl_seconds: 300,
+        });
+    let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+    f.ctx.spec.target.teardown = ttl.clone();
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the clone passes");
+    assert!(f.deleted_topics.lock().unwrap().is_empty());
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(
+        sc.target.creation.as_ref().unwrap().teardown_after_seconds,
+        Some(300)
+    );
+    let (att, _) = f
+        .ctx
+        .store
+        .get_capped(
+            &format!("logweir/drills/{}.teardown.json", f.run_id),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+        )
+        .expect("phase 9 attested");
+    let att: serde_json::Value = serde_json::from_slice(&att).unwrap();
+    assert_eq!(att["teardown_policy"], "ttl");
+    assert_eq!(att["topics_deleted"], serde_json::json!([]));
+
+    let mut f = fixtures::orchestrator_fixture(Drill::ReconcilesWithMismatches);
+    f.ctx.spec.target.teardown = ttl;
+    let _ = execute_with(&f.args, &f.run_id, &f.ctx);
+    let created: Vec<String> = fixtures::created_topics(&f)
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert!(!created.is_empty());
+    assert_eq!(*f.deleted_topics.lock().unwrap(), created);
+}
+
+/// **PROD-11.1a: the clone form is refused outside its shape, before
+/// anything is written** — `CloneTtlNeedsScratch` in `newTopic` mode and
+/// `CloneTtlOutOfRange` below five minutes, each exit 3 with no topic
+/// created. NEGATIVE CONTROL: the bounded scratch clone above runs.
+#[test]
+fn a_clone_outside_its_shape_is_refused_before_anything_is_created() {
+    use logweir_core::target_creation::{CloneTtl, Teardown};
+    for (mode, ttl, state) in [
+        (
+            logweir_core::spec::TargetMode::NewTopic,
+            300,
+            "CloneTtlNeedsScratch: ",
+        ),
+        (
+            logweir_core::spec::TargetMode::Scratch,
+            299,
+            "CloneTtlOutOfRange: ",
+        ),
+    ] {
+        let mut f = fixtures::orchestrator_fixture(Drill::Passes);
+        f.ctx.spec.target.mode = mode;
+        f.ctx.spec.target.teardown = Teardown::Ttl(CloneTtl { ttl_seconds: ttl });
+        let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
+        assert_eq!(err.exit_code(), logweir::exit::ExitCode::GuardRefused);
+        assert!(err.to_string().contains(state), "{err}");
+        assert!(fixtures::created_topics(&f).is_empty());
+    }
+}

@@ -269,9 +269,13 @@ pub enum CurrentId {
 pub struct CleanupPlan {
     /// Recorded topics whose current ID is the recorded one: deleted.
     pub delete: Vec<String>,
-    /// `(topic, why)`: recorded topics left in place by the ID rule,
-    /// [`CLONE_TARGET_REPLACED`] or [`CLONE_TARGET_IDENTITY_UNKNOWN`].
+    /// `(topic, why)`: recorded topics the ID rule leaves in place for good:
+    /// [`CLONE_TARGET_REPLACED`], or [`CLONE_TARGET_IDENTITY_UNKNOWN`] for a
+    /// topic whose ID was never recorded. Retrying cannot change these.
     pub skipped: Vec<(String, String)>,
+    /// `(topic, why)`: recorded topics whose ID could not be read now
+    /// ([`CLONE_TARGET_IDENTITY_UNKNOWN`]); a later attempt may read it.
+    pub unreadable: Vec<(String, String)>,
     /// Recorded topics the cluster no longer holds.
     pub already_absent: Vec<String>,
 }
@@ -311,14 +315,14 @@ pub fn cleanup_plan(
                 ),
             )),
             Some(CurrentId::NotFound) => plan.already_absent.push(topic.name.clone()),
-            Some(CurrentId::Unread(why)) => plan.skipped.push((
+            Some(CurrentId::Unread(why)) => plan.unreadable.push((
                 topic.name.clone(),
                 format!(
                     "{CLONE_TARGET_IDENTITY_UNKNOWN}: the topic's ID could not be read ({why}), \
                      so it is not deleted"
                 ),
             )),
-            None => plan.skipped.push((
+            None => plan.unreadable.push((
                 topic.name.clone(),
                 format!(
                     "{CLONE_TARGET_IDENTITY_UNKNOWN}: the topic's ID could not be read (no \
@@ -328,6 +332,75 @@ pub fn cleanup_plan(
         }
     }
     plan
+}
+
+/// The stdout key of the cleanup's one machine line: `clone-cleanup=` and a
+/// [`CloneCleanupReport`] as one JSON object. The controller reads it off the
+/// cleanup Job's pod log into `Restore.status.teardown` and
+/// `status.clone`.
+pub const CLONE_CLEANUP_PREFIX: &str = "clone-cleanup=";
+
+/// What one cleanup attempt did, or why it refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneCleanupReport {
+    /// The restore run the cleanup acted for.
+    #[serde(default)]
+    pub run_id: String,
+    /// The recorded topics it deleted.
+    #[serde(default)]
+    pub deleted: Vec<String>,
+    /// The recorded topics the cluster no longer held.
+    #[serde(default)]
+    pub already_absent: Vec<String>,
+    /// The recorded topics left in place, with why: the ID rule's refusals
+    /// and the broker's failures.
+    #[serde(default)]
+    pub left: Vec<CloneCleanupLeft>,
+    /// The signed cleanup attestation's key, when it was persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_key: Option<String>,
+    /// The refusal, when the cleanup deleted nothing by rule (exit 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
+/// One topic the cleanup left, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneCleanupLeft {
+    /// The topic.
+    pub topic: String,
+    /// Why it is still there.
+    pub reason: String,
+}
+
+impl CloneCleanupReport {
+    /// The `clone-cleanup=` line.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "{CLONE_CLEANUP_PREFIX}{}",
+            serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
+    /// The report a `clone-cleanup=` line's value carries, or `None`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        serde_json::from_str(value).ok()
+    }
+}
+
+/// `logweir/drills/<run_id>.cleanup.json` for the first attempt, and
+/// `.cleanup-<n>.json` for attempt `n` after it: each attempt's attestation
+/// is its own create-only object.
+#[must_use]
+pub fn cleanup_attestation_key(run_id: &str, attempt: u32) -> String {
+    if attempt <= 1 {
+        format!("logweir/drills/{run_id}.cleanup.json")
+    } else {
+        format!("logweir/drills/{run_id}.cleanup-{attempt}.json")
+    }
 }
 
 /// `CloneTargetClusterChanged`, or `Ok` when the cleanup's target is the
@@ -403,18 +476,24 @@ mod tests {
         );
         assert_eq!(plan.delete, ["c-same"]);
         assert_eq!(plan.already_absent, ["c-gone"]);
-        let skipped: Vec<(&str, &str)> = plan
-            .skipped
-            .iter()
-            .map(|(n, why)| (n.as_str(), why.split(':').next().unwrap()))
-            .collect();
+        let codes = |list: &[(String, String)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(n, why)| (n.clone(), why.split(':').next().unwrap().to_string()))
+                .collect()
+        };
+        let pair = |n: &str, c: &str| (n.to_string(), c.to_string());
         assert_eq!(
-            skipped,
+            codes(&plan.skipped),
             [
-                ("c-replaced", CLONE_TARGET_REPLACED),
-                ("c-unread", CLONE_TARGET_IDENTITY_UNKNOWN),
-                ("c-unanswered", CLONE_TARGET_IDENTITY_UNKNOWN),
-                ("c-never-recorded", CLONE_TARGET_IDENTITY_UNKNOWN),
+                pair("c-replaced", CLONE_TARGET_REPLACED),
+                pair("c-never-recorded", CLONE_TARGET_IDENTITY_UNKNOWN),
+            ]
+        );
+        assert_eq!(
+            codes(&plan.unreadable),
+            [
+                pair("c-unread", CLONE_TARGET_IDENTITY_UNKNOWN),
+                pair("c-unanswered", CLONE_TARGET_IDENTITY_UNKNOWN),
             ]
         );
         assert!(plan.skipped[0].1.contains(A) && plan.skipped[0].1.contains(B));

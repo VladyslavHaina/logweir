@@ -1895,6 +1895,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
         return Err(GuardRefusal(refusal).into());
     }
+    // PROD-11.1a: a clone (`target.teardown: {ttl_seconds}`) is a scratch
+    // restore with a bounded lifetime; refused by name, exit 3, before
+    // anything is read or dialled. Phase 0 repeats the check.
+    if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(&authenticated_spec)
+    {
+        return Err(GuardRefusal(refusal).into());
+    }
     // The approval subject, over the authenticated plan and before anything is
     // read or dialled: an original-name plan needs its own approval subject,
     // which an ordinary approval cannot satisfy, and an `originalName`

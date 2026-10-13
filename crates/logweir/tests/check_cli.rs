@@ -13811,3 +13811,42 @@ fn the_walks_peak_memory_is_one_points() {
 /// to hash it, one at a time, under the 256 MiB manifest cap; a real manifest
 /// is about 540 bytes a segment, and this row's is 13 bytes.
 const FX33_WALK_BOUND: u64 = 64 << 20;
+
+/// **PROD-11.1a, C46's unit half: the preview names each selected partition
+/// with nothing in the window** (`emptyInWindow`). From a stated start one
+/// hour into the archive, `orders/1` (one segment in the archive's first 100
+/// seconds) has nothing in the window and is named, `NotReady` with
+/// `SelectionEmpty`, because the run's phase 5 would report it `empty` and
+/// stop `preflight-failed`; `orders/0`, which has records there, is not
+/// named. NEGATIVE CONTROL: the same window over `orders/0` alone is covered.
+#[test]
+fn the_preview_names_a_selected_partition_with_nothing_in_the_window() {
+    let run_of = |yaml: &str| {
+        let m = mount(&restore_plan(yaml, None));
+        drive(
+            &m,
+            &restore_wiring(yaml, &two_partition_manifest(), FakeProbe::new()),
+        )
+    };
+    let start = 1_757_898_000_000 + 3_600_000;
+    let run = run_of(&subset_yaml(Some(start), INSIDE_MS, "orders: [0, 1]"));
+    let row = run.row(CheckId::ArchiveCoverage);
+    assert_eq!(row.code, CheckCode::SelectionEmpty, "{:?}", row.message);
+    assert!(
+        row.message
+            .contains("1 selected partition(s) have no archived segment in the window")
+            && row.message.contains(": orders/1."),
+        "{:?}",
+        row.message
+    );
+    assert!(!row.message.contains("orders/0"), "{:?}", row.message);
+    assert_eq!(
+        row.detail.as_ref().unwrap()["emptyInWindow"],
+        serde_json::json!({"count": 1, "sample": ["orders/1"]})
+    );
+
+    let run = run_of(&subset_yaml(Some(start), INSIDE_MS, "orders: [0]"));
+    let row = run.row(CheckId::ArchiveCoverage);
+    assert_eq!(row.code, CheckCode::PointInTimeCovered, "{:?}", row.message);
+    assert!(row.detail.is_none());
+}

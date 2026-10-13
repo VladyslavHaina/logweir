@@ -472,6 +472,9 @@ pub enum DrillCmd {
 }
 
 #[derive(Subcommand)]
+// `Run` carries every flag of a restore; the cleanup's few are the small
+// variant, parsed once per process.
+#[allow(clippy::large_enum_variant)]
 pub enum RestoreCmd {
     /// Restore the window the spec names into the target cluster, reconcile it
     /// per record, and emit a signed scorecard.
@@ -495,6 +498,54 @@ pub enum RestoreCmd {
     /// `LOGWEIR_TARGET_TLS_KEY_FILE` — see `drill run` for why there is no
     /// flag for either.
     Run(RestoreRunArgs),
+    /// Remove a TTL clone (PROD-11.1a): delete exactly the topics the run's
+    /// signed scorecard records in `target.creation`, on the cluster it
+    /// records, and only while each topic's ID is the one recorded at
+    /// creation; sign what was deleted and what was left. The controller runs
+    /// it at the clone's `expiresAt`, or when its `Restore` is deleted.
+    ///
+    /// Exit 0: every recorded topic deleted, already gone, or left for good by
+    /// the ID rule; 1: a delete failed or an ID could not be read (try again);
+    /// 3: refused, nothing deleted; 4: the attestation was not persisted.
+    Cleanup(RestoreCleanupArgs),
+}
+
+/// `logweir restore cleanup`'s flags.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct RestoreCleanupArgs {
+    /// The approved restore plan: the run's own `--spec`.
+    #[arg(long)]
+    pub spec: PathBuf,
+    /// The restore run whose clone this removes (its scorecard is
+    /// `logweir/drills/<run-id>.json` in the plan's evidence store).
+    #[arg(long)]
+    pub run_id: String,
+    /// Signs the cleanup attestation; its public half verifies the run's
+    /// scorecard.
+    #[arg(long)]
+    pub signing_key: PathBuf,
+    /// More keys the run's scorecard may verify under (the evidence keyring).
+    #[arg(long)]
+    pub evidence_keys: Option<PathBuf>,
+    /// Which attempt this is; attempt N > 1 writes `.cleanup-N.json`.
+    #[arg(long, default_value_t = 1)]
+    pub attempt: u32,
+    /// D2 §3.5's store-contract handshake, as `restore run` takes it.
+    #[arg(long)]
+    pub store_contract_version: Option<String>,
+}
+
+impl From<RestoreCleanupArgs> for crate::restore_cleanup::CleanupArgs {
+    fn from(a: RestoreCleanupArgs) -> Self {
+        crate::restore_cleanup::CleanupArgs {
+            spec: a.spec,
+            run_id: a.run_id,
+            signing_key: a.signing_key,
+            evidence_keys: a.evidence_keys,
+            attempt: a.attempt,
+            store_contract_version: a.store_contract_version,
+        }
+    }
 }
 
 /// The flags `logweir restore run` and `logweir drill run` share.

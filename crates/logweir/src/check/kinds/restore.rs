@@ -875,6 +875,35 @@ fn coverage_row(
     };
     match selection.resolve(&archive::topic_facts(manifest)) {
         Ok(r) => {
+            // PROD-11.1a (`emptyInWindow`): a selected partition no archived
+            // segment of the window overlaps is named. The run's phase 5
+            // reports it `empty` and the restore is `preflight-failed`, so the
+            // preview says so before anyone approves it.
+            let empty: Vec<String> = r
+                .partitions
+                .iter()
+                .filter(|p| p.segment_keys.is_empty())
+                .map(|p| format!("{}/{}", p.topic, p.partition))
+                .collect();
+            if !empty.is_empty() {
+                return catalogue::outcome(
+                    CheckId::ArchiveCoverage,
+                    CheckState::NotReady,
+                    CheckCode::SelectionEmpty,
+                    now,
+                )
+                .with_message(&format!(
+                    "{covered}; {} selected partition(s) have no archived segment in the \
+                     window from epoch-ms {} to epoch-ms {}: {}. The restore would stop at its \
+                     preflight (`preflight-failed`)",
+                    empty.len(),
+                    r.start_ms,
+                    r.end_ms,
+                    empty.join(", ")
+                ))
+                .with_remedy(remedy_for(CheckCode::SelectionEmpty))
+                .with_detail(serde_json::json!({ "emptyInWindow": detail(&empty) }));
+            }
             let topics: BTreeSet<&str> = r.partitions.iter().map(|p| p.topic.as_str()).collect();
             let with_data = r
                 .partitions

@@ -295,6 +295,11 @@ pub fn run_with_original_name(
     if let Some(refusal) = original_name::refuse_shape(spec) {
         return Err(GuardRefusal(refusal).into());
     }
+    // PROD-11.1a, purely local: the clone form of `target.teardown` only in
+    // scratch mode, with a lifetime within its bounds.
+    if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(spec) {
+        return Err(GuardRefusal(refusal).into());
+    }
     let is_original_name = original_name::is_original_name_restore(spec);
 
     // The two PURELY LOCAL checks run first, before any network round trip. A
