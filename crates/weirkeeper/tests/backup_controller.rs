@@ -5256,28 +5256,13 @@ fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
 /// the rest, so every row comparing the result also proves the token is the
 /// Job's only addition.
 ///
-/// A CHECK Job (`logweir check run`, a topic discovery) is returned as
-/// POSTed, after asserting it carries NO token: that Job prints no refusal
-/// line.
+/// A CHECK Job (`logweir check run`, a topic discovery) carries the token
+/// too since FX-43 (its end frame and refusal are sealed with it), and is
+/// returned the same way.
 fn posted_job(seen: &[SeenBody]) -> Option<Value> {
-    let job: Value = seen
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))?;
-    let args = &job["spec"]["template"]["spec"]["containers"][0]["args"];
-    if args[0] == "backup" {
-        return posted_job_and_line_token(seen).map(|(job, _)| job);
-    }
-    assert!(
-        !args
-            .as_array()
-            .expect("an argv")
-            .iter()
-            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG
-                || a == logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG),
-        "only a runner Job is given a line token: {args}"
-    );
-    Some(job)
+    seen.iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))?;
+    posted_job_and_line_token(seen).map(|(job, _)| job)
 }
 
 /// A runner Job as [`posted_job`] returns it, and the token it took off.
