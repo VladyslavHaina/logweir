@@ -82,6 +82,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     // The runner's refusal of an archive holding transaction markers. Exit 3
     // as well; listed for the same reason.
     "TransactionMarkersInArchive",
+    // The runner's refusal of a window that selects records in a segment the
+    // engine skips. Exit 3; listed for the same reason.
+    "PointInTimeSelectionIncomplete",
 ];
 
 /// A condition view with a bounded message.

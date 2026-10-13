@@ -31,10 +31,8 @@
 //!    (`logweir_kafka::fingerprint::record_digest_ordered`).
 //!
 //! The count check is EXACT: a partition passes only when the restored count
-//! equals the expected count and every record is accounted for. The
-//! manifest's first/last-timestamp count BOUND (`check_restored_count`) is
-//! not consulted in this lane; it is what makes a correct point-in-time
-//! restore fail and a skipped segment pass.
+//! equals the expected count and every record is accounted for. The segment
+//! count BOUND (`check_restored_count`) is not consulted in this lane.
 //!
 //! # One ledger, still
 //!

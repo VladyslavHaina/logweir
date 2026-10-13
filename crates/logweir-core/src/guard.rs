@@ -371,8 +371,14 @@ pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
 /// `restore.allow_transaction_markers: true`. Its call site is
 /// `crate::transaction_markers::refusal`; refused before phase 2.
 pub const TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE: &str = "TransactionMarkersInArchive";
+/// [I9] The restore window selects archived records in a segment the engine
+/// skips: its first and last record timestamps do not overlap the window, and
+/// its records are out of timestamp order. Its call site is
+/// `crate::record_times::refusal`; refused before phase 2.
+pub const TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE: &str =
+    "PointInTimeSelectionIncomplete";
 /// [I9] Every terminal state a guard refusal can name.
-pub const TERMINAL_STATES: [&str; 7] = [
+pub const TERMINAL_STATES: [&str; 8] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
@@ -380,6 +386,7 @@ pub const TERMINAL_STATES: [&str; 7] = [
     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
     TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
+    TERMINAL_STATE_POINT_IN_TIME_SELECTION_INCOMPLETE,
 ];
 
 /// [I9] A refusal message MAY open with `<State>: `, naming one of

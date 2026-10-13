@@ -1997,8 +1997,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        48,
-        "the forty-eight terminal states that are NOT an exit code — the original ten, plus \
+        49,
+        "the forty-nine terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2041,7 +2041,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
          markers under a plan that does not allow them), plus PROD-05.1a's \
          `OwnerDetectionFailed` (a Backup of a KafkaCluster naming its Strimzi cluster whose \
-         KafkaTopic list was refused or is not served); \
+         KafkaTopic list was refused or is not served), plus PROD-01.1b's \
+         `PointInTimeSelectionIncomplete` (the runner's refusal of a window that selects records \
+         in a segment the engine skips); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

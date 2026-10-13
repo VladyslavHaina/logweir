@@ -12167,6 +12167,13 @@ fn the_preview_refuses_a_window_start_before_coverage() {
                 "{:?}",
                 row.message
             );
+            // PROD-01.1b: the manifest-only preview names the run's refusal
+            // it cannot see, whole, under the message cap.
+            assert!(
+                row.message.ends_with("(PointInTimeSelectionIncomplete)"),
+                "{:?}",
+                row.message
+            );
         }
     }
 }

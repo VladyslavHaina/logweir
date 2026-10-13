@@ -244,8 +244,10 @@ or with an unrecorded type **as far as the archive manifest's segment bounds
 show**. A plan with no point in time whose `sample.window_end` is at or after
 every segment's first and last timestamp is not counted as a selection; with
 out-of-order timestamps inside a segment the restore can still leave out a
-record later than both of its segment's ends, which is PROD-01.1b's
-([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+record later than both of its segment's ends. A runner since PROD-01.1b
+decides over each restored segment's newest record and counts that case as a
+selection; the document does not say which runner signed it
+([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)).
 
 Four arms, enforced by both readers in the same position (after `target.auth`,
 before `redactions`) and words, fire only on a document carrying the block:
@@ -302,10 +304,10 @@ window.
 `replay selection: every partition of every restored topic, from epoch-ms S
 (the plan's stated window start, inclusive) to epoch-ms E (inclusive); no
 record before the start was expected`, and under the sampled lane goes on
-`; a sampled check does not prove that none was restored` and names the one
-limit a start adds (an in-window record held in a segment whose last record
-is before the start is not found by a sampled check; `sample.coverage:
-complete` finds it). The note is written before phase 7 judges anything, so
+`; a sampled check does not prove that none was restored`. Before PROD-01.1b
+it also named the one limit a start added (an in-window record held in a
+segment whose last record is before the start, which the engine skips); a
+runner since refuses that window before it writes anything. The note is written before phase 7 judges anything, so
 it never says that no record before the start was RESTORED. A complete
 block's `window.start_ms` is the stated start, and `sample.window_start` is
 never earlier than it (for a sampled document that is the sample window,
@@ -787,9 +789,9 @@ Since FX-23 a sampled verification makes three checks more:
   record's timestamp is inside the window. A correct restore of an archive
   whose record timestamps do not run backwards within a segment cannot fail
   it. When they do run backwards, a record older than every segment's first
-  record is dropped by every restore of that archive
-  ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)),
-  and the per-partition bound now fails that restore; so does a duplicate from
+  record was dropped by every restore of that archive until PROD-01.1b
+  ([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)),
+  and the per-partition bound failed that restore; so does a duplicate from
   the engine's non-idempotent producer. Failing is the safer verdict.
 - **Phase 7 reads the engine's offset report** — streaming, keeping only its
   partition entries — and fails a restore whose report has no entry for a
@@ -1099,7 +1101,8 @@ A plan chooses how much of the restore phase 7 verifies with
 **`sampled`**, the default, is the check every earlier scorecard records: the
 first records of each sampled partition reconciled by a fingerprint that sorts
 headers, the sha256 of the segments those records came from, and the manifest's
-count bound for the window, which reads segment first and last timestamps.
+count bound for the window, which reads each segment's time bounds (its
+oldest and newest record since PROD-01.1b, its first and last before).
 **`complete`** reads every archived segment of every partition of every
 restored topic, checks its sha256 and decodes it, computes the expected output
 from each archived record's OWN timestamp, reads every restored record back,
@@ -1108,8 +1111,8 @@ the expected-output model and what filters, partition subsets, compaction and
 transformations do to it — is
 [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md).
 A complete verification can pass a restore the sampled check fails, and fail one
-it passes: the exact per-partition model replaces the manifest's first/last
-count bound ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+it passes: the exact per-partition model replaces the segment count bound
+([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)).
 
 | Field | Type | Meaning |
 |---|---|---|

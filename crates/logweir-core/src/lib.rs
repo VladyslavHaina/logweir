@@ -67,6 +67,9 @@ pub mod outcome;
 /// The facts a reader takes from a backup receipt without building a
 /// tree of it — the shared controller's bounded read.
 pub mod receipt_facts;
+/// Recovery-point selection over out-of-order timestamps: segment bounds
+/// widened by their records, and the `PointInTimeSelectionIncomplete` refusal.
+pub mod record_times;
 /// A guard refusal's reason code and sentence as one validated,
 /// cleaned and bounded `refusal-detail=` line.
 pub mod refusal_detail;

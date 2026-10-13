@@ -174,6 +174,10 @@ impl BackupSetFacts {
     /// get the same answer from the same manifest. The MINIMUM over the whole
     /// walk: a floor from the newest segment would exclude every record before
     /// it, and nothing orders a real manifest.
+    ///
+    /// A restore run reads it over facts widened by the restored segments'
+    /// decoded record times (`crate::record_times::widen`, PROD-01.1b), so
+    /// there it is the oldest archived record, never a first record above it.
     pub fn earliest_covered_timestamp_ms(
         &self,
         named_topics: &std::collections::BTreeSet<&str>,
@@ -255,6 +259,10 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
 /// sum can stay inside its bound. One bound per partition has no sibling to
 /// borrow from, and the straddler's 1 makes an empty partition the manifest
 /// proves non-empty in the window fall outside its own bound.
+///
+/// Over facts widened by the decoded record times (`crate::record_times`) the
+/// two ends are the segment's oldest and newest records, each still a record's
+/// own timestamp, so the same proof holds and the bound is a true one.
 ///
 /// A segment that overlaps the window with neither end inside it (it starts
 /// before `floor_ms` and ends after `pit_ms`) proves nothing: its records may
@@ -380,6 +388,9 @@ pub struct SegmentFacts {
     pub key: String,
     pub start_offset: i64,
     pub end_offset: i64,
+    /// The manifest's FIRST and LAST record timestamps, which the engine
+    /// selects segments by. A restore run widens them to the records' oldest
+    /// and newest once it has read the segment (`crate::record_times::widen`).
     pub start_timestamp: i64,
     pub end_timestamp: i64,
     pub record_count: i64,
