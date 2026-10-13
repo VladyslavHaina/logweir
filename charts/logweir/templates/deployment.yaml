@@ -81,6 +81,11 @@ spec:
             - name: LOGWEIR_WATCH_NAMESPACES
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- /* PROD-05.1a: exactly the namespaces `strimzi-topics.yaml` grants. */ -}}
+            {{- if and (.Values.strimzi).readKafkaTopics (.Values.strimzi).namespaces }}
+            - name: LOGWEIR_STRIMZI_NAMESPACES
+              value: {{ join "," .Values.strimzi.namespaces | quote }}
+            {{- end }}
             {{- if ne (toString .Values.controller.failFastSeconds) "" }}
             - name: LOGWEIR_FAIL_FAST_SECONDS
               value: {{ .Values.controller.failFastSeconds | toString | quote }}

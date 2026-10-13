@@ -1,0 +1,44 @@
+{{- /*
+PROD-05.1a, opt-in: `strimzi.readKafkaTopics: true` lets the controller read
+(`get`, `list`) Strimzi `KafkaTopic` resources in each namespace
+`strimzi.namespaces` lists, through a Role and a RoleBinding THERE and nowhere
+else. `deployment.yaml` renders `LOGWEIR_STRIMZI_NAMESPACES` from the same
+list, and the controller refuses a KafkaCluster whose `spec.strimzi.namespace`
+is not in it (`OwnerDetectionFailed`) before any API call: a KafkaCluster's
+author cannot point the controller's read at another namespace. Nothing
+creates, changes or deletes a KafkaTopic.
+*/ -}}
+{{- if (.Values.strimzi).readKafkaTopics }}
+{{- range $ns := .Values.strimzi.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: weirkeeper-strimzi-kafkatopics
+  namespace: {{ $ns }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+rules:
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkatopics"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper-strimzi-kafkatopics
+  namespace: {{ $ns }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper-strimzi-kafkatopics
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

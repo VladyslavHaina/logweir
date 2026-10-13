@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(
             restore.union(&backup).count(),
             22,
-            "the exit-3 sweep's count of distinct codes (18, and PROD-05.2's four)"
+            "the exit-3 sweep's count of distinct codes (18, and the four topic configuration refusals)"
         );
         // PER KIND: a code of one is not a code of the other.
         for only_restore in restore.difference(&backup) {

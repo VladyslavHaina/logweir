@@ -356,15 +356,16 @@ pub struct KafkaClusterSpec {
     /// and a `mode: scratch` restore against this cluster is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_topic: Option<String>,
-    /// **PROD-05.1a.** The Strimzi cluster that manages this Kafka cluster's
-    /// topics. Set, a `Backup` of this cluster lists the `KafkaTopic`
-    /// resources of that namespace labelled `strimzi.io/cluster=<cluster>`
-    /// (read only: `get`, `list`, granted by the chart value
-    /// `strimzi.readKafkaTopics`), and its receipt records each named topic's
-    /// Strimzi owner, so a restore exports desired state for it. A refused
-    /// list, or a `KafkaTopic` resource the API server does not serve, fails
-    /// the backup closed (`OwnerDetectionFailed`), never "looked, none
-    /// found". Absent: nothing is listed, as before.
+    /// The Strimzi cluster that manages this Kafka cluster's topics. Set, a
+    /// `Backup` of this cluster lists the `KafkaTopic` resources of that
+    /// namespace labelled `strimzi.io/cluster=<cluster>` (read only, granted
+    /// per namespace by the chart values `strimzi.readKafkaTopics` and
+    /// `strimzi.namespaces`), and its receipt records each named topic's
+    /// Strimzi owner, so a restore exports desired state for it. A namespace
+    /// the chart does not list, a refused list, or a `KafkaTopic` resource the
+    /// API server does not serve fails the backup closed
+    /// (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing
+    /// is listed, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strimzi: Option<StrimziRef>,
     #[serde(flatten)]

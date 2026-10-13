@@ -115,12 +115,3 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies/status"]
     verbs: ["patch"]
-  {{- if (.Values.strimzi).readKafkaTopics }}
-  # PROD-05.1a, opt-in (`strimzi.readKafkaTopics`): `list` on Strimzi
-  # `KafkaTopic` resources, read only, for a Backup of a KafkaCluster that sets
-  # `spec.strimzi` (`crates/weirkeeper/src/strimzi_topics.rs`). Nothing creates,
-  # changes or deletes one (ADR 0008 Amendment K (4)).
-  - apiGroups: ["kafka.strimzi.io"]
-    resources: ["kafkatopics"]
-    verbs: ["list"]
-  {{- end }}

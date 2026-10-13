@@ -1659,7 +1659,7 @@ fn the_creation_step_holds_no_deleter_and_phase_0_deletes_only_its_probe() {
     // nothing either.
     let orchestrator = include_str!("../src/drill/mod.rs");
     let from = orchestrator
-        .find("phase0_admit::create_target_topics(")
+        .find("phase0_admit::create_target_topics_from(")
         .expect("the call site");
     let to = from
         + orchestrator[from..]

@@ -2122,8 +2122,8 @@ fn execute_with_validated_approval(
         check_original_name_subject(&c.spec, Some(approved))?;
     }
     // 0
-    let (admitted, configured) = record(&mut sc, 0, "admit", || {
-        let admitted = phase0_admit::run_with_original_name(
+    let admitted = record(&mut sc, 0, "admit", || {
+        phase0_admit::run_with_original_name(
             &c.spec,
             &c.spec_text,
             &c.allowed,
@@ -2131,17 +2131,7 @@ fn execute_with_validated_approval(
             creator,
             deleter,
             &c.original_name,
-        )?;
-        // PROD-05.2: each topic's desired state and the target's
-        // `validate_only` verdict, before anything is created.
-        let configured = phase0_admit::admit_topic_configuration(
-            &c.spec,
-            &c.source_config_coverage,
-            &admitted.topic_mapping,
-            reader,
-            creator,
-        )?;
-        Ok((admitted, configured))
+        )
     })?;
     let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
@@ -2214,6 +2204,17 @@ fn execute_with_validated_approval(
     // pin the position.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
+    // PROD-05.2: each topic's desired state from the bound point's model, and
+    // the target's `validate_only` verdict, once the restored set is proved
+    // the point's and before anything is created. Every refusal is exit 3
+    // with nothing written (`validate_only` creates nothing).
+    let configured = phase0_admit::admit_topic_configuration(
+        &c.spec,
+        &c.source_config_coverage,
+        &admitted.topic_mapping,
+        reader,
+        creator,
+    )?;
     // An empty capture is refused by name, here: a set with no segment for any
     // topic this restore names is refused exit 3 before phase 2 and before any
     // other archive-based refusal, never phase 4's exit 1 over an "empty
@@ -2505,8 +2506,20 @@ fn execute_with_validated_approval(
             &mut std::io::stdout().lock(),
         );
     };
+    // PROD-05.2: the signed `target.topic_configuration`, and the owned
+    // topics' desired-state document it binds, put before anything is
+    // created, so a failed put leaves the target as it was.
+    if let Some(configured) = configured.as_ref() {
+        sc.target.topic_configuration = Some(topic_configuration_block(configured, run_id, c)?);
+        sc.format_version = logweir_core::scorecard::format_version_with_topic_configuration(
+            &sc.format_version,
+            sc.target.topic_configuration.as_ref(),
+        )
+        .to_string();
+    }
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
-    // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
+    // creates them, with `TARGET_TOPIC_CONFIGS` on every one (or, with
+    // `target.topic_configuration`, each topic's own creation set).
     phase0_admit::create_target_topics_from(
         creator,
         reader,
@@ -2521,17 +2534,6 @@ fn execute_with_validated_approval(
         remove_created(&created);
         e
     };
-    // PROD-05.2: the signed `target.topic_configuration`, and the owned
-    // topics' desired-state document it binds, once the topics exist.
-    if let Some(configured) = configured.as_ref() {
-        sc.target.topic_configuration =
-            Some(topic_configuration_block(configured, run_id, c).map_err(torn_down)?);
-        sc.format_version = logweir_core::scorecard::format_version_with_topic_configuration(
-            &sc.format_version,
-            sc.target.topic_configuration.as_ref(),
-        )
-        .to_string();
-    }
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
@@ -4188,7 +4190,7 @@ mod tests {
             "phase2_target::run(",
             "phase3_diff::run(",
             "&c.source_config_coverage",
-            "create_target_topics(",
+            "create_target_topics_from(",
         ] {
             assert!(check < at(later), "the set check must precede `{later}`");
         }

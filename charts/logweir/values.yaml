@@ -79,7 +79,8 @@ engine:
 evidence:
   controllerIdentityLocations: [] # [{endpoint, region, bucket}] the controller may read evidence from
 strimzi:
-  readKafkaTopics: false          # PROD-05.1a: `list` on Strimzi KafkaTopics (read only), for KafkaClusters that set spec.strimzi
+  readKafkaTopics: false          # PROD-05.1a: read (get, list) Strimzi KafkaTopics, for KafkaClusters that set spec.strimzi
+  namespaces: []                  # ...in these namespaces only (a Role in each); any other spec.strimzi.namespace is refused
 
 # ---- admissionPolicy: fence the console's `create secrets`. Off only because it needs Kubernetes 1.30+
 admissionPolicy:

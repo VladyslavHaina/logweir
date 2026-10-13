@@ -214,6 +214,8 @@ runs.maxManualBackupsActivePerNamespace|default|-|--set|5
 runs.maxManualRestoresActivePerNamespace|default|-|--set|3
 engine.allowUnverifiedCustomCa|default|-|--set|true
 evidence.controllerIdentityLocations|default|-|--set-json|[{"endpoint":"","region":"","bucket":"fx10-bucket"}]
+strimzi.readKafkaTopics|default|--set-json strimzi.namespaces=["kafka"]|--set|true
+strimzi.namespaces|default|--set strimzi.readKafkaTopics=true|--set-json|["kafka"]
 # ---- the controller
 controllerImage|default|-|--set-string|example.invalid/fx10-probe/weirkeeper:probe
 imagePullPolicy|default|-|--set-string|IfNotPresent

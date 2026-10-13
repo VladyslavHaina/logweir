@@ -313,7 +313,7 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
     assert_eq!(count(&production, ".delete_topics("), 0);
     assert_eq!(count(&production, ".as_deleter()"), 1);
     let from = production
-        .find("phase0_admit::create_target_topics(")
+        .find("phase0_admit::create_target_topics_from(")
         .expect("the creation step's call site");
     let to = from
         + production[from..]

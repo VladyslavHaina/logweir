@@ -369,13 +369,6 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies/status"]
     verbs: ["patch"]
-  # PROD-05.1a, opt-in (`strimzi.readKafkaTopics`): `list` on Strimzi
-  # `KafkaTopic` resources, read only, for a Backup of a KafkaCluster that sets
-  # `spec.strimzi` (`crates/weirkeeper/src/strimzi_topics.rs`). Nothing creates,
-  # changes or deletes one (ADR 0008 Amendment K (4)).
-  - apiGroups: ["kafka.strimzi.io"]
-    resources: ["kafkatopics"]
-    verbs: ["list"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -718,6 +711,23 @@ rules:
     resourceNames: ["logweir-console-trust"]
     verbs: ["get", "patch"]
 ---
+# Source: logweir/templates/strimzi-topics.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: weirkeeper-strimzi-kafkatopics
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+rules:
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkatopics"]
+    verbs: ["get", "list"]
+---
 # Source: logweir/templates/ui/api-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -755,6 +765,27 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: logweir-identity-bootstrap
+    namespace: logweir-system
+---
+# Source: logweir/templates/strimzi-topics.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper-strimzi-kafkatopics
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper-strimzi-kafkatopics
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
     namespace: logweir-system
 ---
 # Source: logweir/templates/ui/api-rbac.yaml
@@ -855,6 +886,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: LOGWEIR_STRIMZI_NAMESPACES
+              value: "kafka"
             - name: LOGWEIR_FAIL_FAST_SECONDS
               value: "120"
             - name: LOGWEIR_JOB_TTL_SECONDS

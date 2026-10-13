@@ -80,6 +80,7 @@ api:
     keySecret: logweir-console-keys
     rateLimits: { manualBackupsPerMinute: 11, manualRestoresPerMinute: 9 }
 # PROD-05.1a's opt-in grant, so one render carries the rule
-# (`manifest_lint.rs::the_strimzi_grant_is_list_on_kafkatopics_and_only_when_asked`).
+# (`manifest_lint.rs::the_strimzi_grant_is_a_role_in_each_listed_namespace_and_only_when_asked`).
 strimzi:
   readKafkaTopics: true
+  namespaces: [kafka]

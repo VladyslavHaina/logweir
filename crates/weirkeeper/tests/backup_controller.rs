@@ -15514,10 +15514,25 @@ mod strimzi_owner_detection {
     const KAFKA_TOPICS: &str = "/apis/kafka.strimzi.io/v1beta2/namespaces/kafka/kafkatopics";
 
     fn strimzi_cluster_json() -> String {
+        strimzi_cluster_in("kafka")
+    }
+
+    fn strimzi_cluster_in(namespace: &str) -> String {
         let mut cluster: Value = serde_json::from_str(&kafka_cluster_json()).unwrap();
         cluster["spec"]["strimzi"] =
-            serde_json::json!({"namespace": "kafka", "cluster": "prod-kafka"});
+            serde_json::json!({"namespace": namespace, "cluster": "prod-kafka"});
         cluster.to_string()
+    }
+
+    /// The installation's list, as the chart renders it into the controller's
+    /// environment. Every row of this module sets the SAME value, so rows
+    /// running in parallel cannot disagree about it; no other row in this
+    /// binary names a Strimzi cluster.
+    fn chart_lists_kafka() {
+        std::env::set_var(
+            weirkeeper::strimzi_topics::STRIMZI_NAMESPACES_ENV,
+            "kafka,kafka-b",
+        );
     }
 
     /// Three `KafkaTopic`s labelled for the cluster: one names `orders`
@@ -15571,6 +15586,7 @@ mod strimzi_owner_detection {
     /// an unmanaged or unplanned resource passed on; the argv flag missing.
     #[tokio::test]
     async fn the_listed_kafka_topics_reach_the_inputs_and_the_runner() {
+        chart_lists_kafka();
         let (client, seen, bodies) =
             mock_client_recording_bodies(routes_with(Some((200, kafka_topic_list()))));
         let outcome = reconcile_backup(
@@ -15650,6 +15666,7 @@ mod strimzi_owner_detection {
     /// KILLS: a 403 read as "no owner"; a Job created anyway.
     #[tokio::test]
     async fn a_refused_list_is_owner_detection_failed() {
+        chart_lists_kafka();
         let forbidden = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"kafkatopics.kafka.strimzi.io is forbidden","reason":"Forbidden","code":403}"#;
         let (client, seen, bodies) =
             mock_client_recording_bodies(routes_with(Some((403, forbidden.to_string()))));
@@ -15676,6 +15693,7 @@ mod strimzi_owner_detection {
     /// A resource no version of which is served fails closed too.
     #[tokio::test]
     async fn an_unserved_resource_is_owner_detection_failed() {
+        chart_lists_kafka();
         let mut routes = routes_with(Some((404, not_found_body("kafkatopics", ""))));
         routes.push(Route {
             method: "GET",
@@ -15697,6 +15715,44 @@ mod strimzi_owner_detection {
             outcome.terminal_state.as_deref(),
             Some("OwnerDetectionFailed")
         );
+    }
+
+    /// **The confused deputy, closed.** A `KafkaCluster` naming a Strimzi
+    /// namespace the chart did not list is refused before any API call, naming
+    /// the namespace; the listed one (the first row above) proceeds. KILLS: the
+    /// read pointed at any namespace a `KafkaCluster`'s author chose.
+    #[tokio::test]
+    async fn an_unlisted_namespace_is_refused_before_any_read() {
+        chart_lists_kafka();
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        for r in &mut routes {
+            if r.path_suffix == "/kafkaclusters/prod" {
+                r.body = strimzi_cluster_in("kube-system");
+            }
+        }
+        let (client, seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+        let seen = seen.lock().unwrap();
+        assert!(
+            !seen.iter().any(|r| r.uri.contains("kafkatopics")),
+            "nothing read"
+        );
+        assert!(!seen.iter().any(|r| r.method == "POST"), "nothing created");
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
+        assert!(message.contains("`kube-system`"), "{message}");
     }
 
     /// Without `spec.strimzi` nothing is listed (the mock refuses any route it

@@ -10,10 +10,16 @@
 //! them as it reads `--kafka-topic-resources`, and the receipt records
 //! `owner_detection: [kafkaTopicResources]`.
 //!
-//! **Read only, and opt-in.** The chart grants `get` and `list` on
-//! `kafkatopics` in `kafka.strimzi.io`, and nothing else, only with
-//! `strimzi.readKafkaTopics: true` (default `false`). This module never
-//! creates, changes or deletes one (ADR 0008 Amendment K (4)).
+//! **Read only, opt-in, and only where the chart says.** The chart grants
+//! `get` and `list` on `kafkatopics` in `kafka.strimzi.io`, through a Role and
+//! RoleBinding in each namespace `strimzi.namespaces` lists, only with
+//! `strimzi.readKafkaTopics: true` (default `false`), and renders the same
+//! list into [`STRIMZI_NAMESPACES_ENV`]. A `KafkaCluster` naming any other
+//! namespace is refused before any API call ([`admit_namespace`]): whoever can
+//! write a `KafkaCluster` cannot point the controller's read, and the receipt
+//! it feeds, at a namespace the installation did not open to it. This module
+//! never creates, changes or deletes a `KafkaTopic` (ADR 0008 Amendment K
+//! (4)).
 //!
 //! **Fails closed.** When `spec.strimzi` is set and the list is refused (403)
 //! or the resource is not served (404 for every version), the run is refused
@@ -41,6 +47,48 @@ pub const MAX_KAFKA_TOPICS: usize = 10_000;
 /// One page.
 pub const PAGE_SIZE: u32 = 500;
 
+/// The controller's environment variable naming the namespaces it may read
+/// `KafkaTopic`s in, comma-separated: the chart's `strimzi.namespaces`, set
+/// only with `strimzi.readKafkaTopics: true`.
+pub const STRIMZI_NAMESPACES_ENV: &str = "LOGWEIR_STRIMZI_NAMESPACES";
+
+/// The namespaces [`STRIMZI_NAMESPACES_ENV`] lists; empty when it is unset.
+#[must_use]
+pub fn configured_namespaces(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// This process's [`configured_namespaces`].
+#[must_use]
+pub fn process_namespaces() -> Vec<String> {
+    configured_namespaces(std::env::var(STRIMZI_NAMESPACES_ENV).ok().as_deref())
+}
+
+/// Why a `KafkaCluster`'s Strimzi namespace may not be read, or `None`: it
+/// must be one the installation listed.
+#[must_use]
+pub fn admit_namespace(strimzi: &StrimziRef, allowed: &[String]) -> Option<String> {
+    if allowed.iter().any(|n| *n == strimzi.namespace) {
+        return None;
+    }
+    Some(format!(
+        "the KafkaCluster's spec.strimzi.namespace `{}` is not a namespace this installation \
+         lets the controller read KafkaTopics in (the chart's strimzi.namespaces, with \
+         strimzi.readKafkaTopics: true, lists {}); no KafkaTopic was read",
+        strimzi.namespace,
+        if allowed.is_empty() {
+            "none".to_string()
+        } else {
+            allowed.join(", ")
+        }
+    ))
+}
+
 /// Why the list did not produce an answer.
 #[derive(Debug)]
 pub enum StrimziListError {
@@ -52,21 +100,25 @@ pub enum StrimziListError {
 
 /// **The read.** `Ok(None)` when the `KafkaCluster` names no Strimzi
 /// cluster: nothing is listed. Otherwise every listed `KafkaTopic` that
-/// names one of `topics`, possibly none.
+/// names one of `topics`, possibly none, from a namespace in `allowed` only.
 ///
 /// # Errors
 ///
-/// [`StrimziListError::Refused`] for a 403 or a resource no version of which
-/// is served, or more than [`MAX_KAFKA_TOPICS`];
-/// [`StrimziListError::Api`] for any other failure.
+/// [`StrimziListError::Refused`] for a namespace not in `allowed` (before
+/// any API call), a 403, a resource no version of which is served, or more
+/// than [`MAX_KAFKA_TOPICS`]; [`StrimziListError::Api`] for any other failure.
 pub async fn resolve(
     client: &kube::Client,
     cluster: &KafkaCluster,
     topics: &[String],
+    allowed: &[String],
 ) -> Result<Option<KafkaTopicResourcesInputs>, StrimziListError> {
     let Some(strimzi) = cluster.spec.strimzi.as_ref() else {
         return Ok(None);
     };
+    if let Some(why) = admit_namespace(strimzi, allowed) {
+        return Err(StrimziListError::Refused(why));
+    }
     let items = list(client, strimzi).await?;
     Ok(Some(select(strimzi, &items, topics)))
 }
@@ -110,9 +162,9 @@ async fn list(
                 Err(kube::Error::Api(e)) if e.code == 403 => {
                     return Err(StrimziListError::Refused(format!(
                         "the controller may not list kafkatopics.{STRIMZI_GROUP} in namespace {} \
-                         (403); set the chart value strimzi.readKafkaTopics: true, which grants \
-                         get and list on them and nothing else, or remove spec.strimzi from the \
-                         KafkaCluster",
+                         (403); set the chart values strimzi.readKafkaTopics: true and \
+                         strimzi.namespaces to include it, which grant get and list on them there \
+                         and nothing else, or remove spec.strimzi from the KafkaCluster",
                         strimzi.namespace
                     )));
                 }
@@ -213,4 +265,34 @@ pub fn document(resources: &KafkaTopicResourcesInputs) -> Result<String, serde_y
         "kind": "List",
         "items": items,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strimzi(namespace: &str) -> StrimziRef {
+        StrimziRef {
+            namespace: namespace.into(),
+            cluster: "prod-kafka".into(),
+        }
+    }
+
+    /// KILLS: an unlisted namespace read; a substring or prefix match.
+    #[test]
+    fn only_a_listed_namespace_is_read() {
+        let allowed = configured_namespaces(Some(" kafka, kafka-b ,,"));
+        assert_eq!(allowed, ["kafka", "kafka-b"]);
+        assert_eq!(admit_namespace(&strimzi("kafka"), &allowed), None);
+        assert_eq!(admit_namespace(&strimzi("kafka-b"), &allowed), None);
+        for other in ["kube-system", "kafk", "kafka-c", "team-a"] {
+            let why = admit_namespace(&strimzi(other), &allowed).expect("refused");
+            assert!(why.contains(&format!("`{other}`")), "{why}");
+        }
+        assert!(
+            admit_namespace(&strimzi("kafka"), &configured_namespaces(None))
+                .unwrap()
+                .contains("lists none")
+        );
+    }
 }

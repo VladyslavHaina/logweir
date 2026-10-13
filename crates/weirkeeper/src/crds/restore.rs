@@ -1042,7 +1042,7 @@ pub struct RestoreStatus {
     /// What phase 9 removed, and what it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<Teardown>,
-    /// **PROD-05.2.** For a plan carrying `target.topic_configuration`: each
+    /// For a plan carrying `target.topic_configuration`: each
     /// target topic's replication factor with its reason, its overrides
     /// before (Logweir's during-restore settings and the source's at-creation
     /// set) and after (the whole desired set), and what phase 9's transition
@@ -1116,7 +1116,7 @@ pub struct RestoreCompletion {
     pub sample_window: Option<SampleWindow>,
 }
 
-/// PROD-05.2: `Restore.status.topicConfiguration`.
+/// `Restore.status.topicConfiguration`: a restore's target topic configuration.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreTopicConfiguration {

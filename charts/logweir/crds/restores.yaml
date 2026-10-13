@@ -1189,7 +1189,7 @@ spec:
                     type: array
                 type: object
               topicConfiguration:
-                description: '**PROD-05.2.** For a plan carrying `target.topic_configuration`: each target topic''s replication factor with its reason, its overrides before (Logweir''s during-restore settings and the source''s at-creation set) and after (the whole desired set), and what phase 9''s transition did. Read off the runner''s `topic-configuration=` line and held to this Restore''s mapped target names: a CLAIM, like `topicPreflight`; the signed scorecard''s `target.topic_configuration` and the phase-9 attestation are the evidence. Absent on every other run.'
+                description: 'For a plan carrying `target.topic_configuration`: each target topic''s replication factor with its reason, its overrides before (Logweir''s during-restore settings and the source''s at-creation set) and after (the whole desired set), and what phase 9''s transition did. Read off the runner''s `topic-configuration=` line and held to this Restore''s mapped target names: a CLAIM, like `topicPreflight`; the signed scorecard''s `target.topic_configuration` and the phase-9 attestation are the evidence. Absent on every other run.'
                 nullable: true
                 properties:
                   applied:
