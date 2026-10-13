@@ -304,6 +304,19 @@ function destinationText(d: DestinationSummary): string {
   return `${d.name}${d.default ? " (namespace default)" : ""} · ${d.canonicalUrl}`;
 }
 
+type Pin = { name: string; uid: string };
+
+/** The refusal for a chosen object that is gone, or was created again under its name. */
+function identityChanged(field: keyof PolicyValues, kind: string, pin: Pin | undefined, fresh: { name: string; uid: string }[] | undefined): [keyof PolicyValues, string] | null {
+  if (!pin || !fresh) return null;
+  const now = fresh.find((x) => x.name === pin.name);
+  if (!now) return [field, `The ${kind} ${pin.name} is not in this namespace any more. Nothing was sent; choose another.`];
+  if (now.uid !== pin.uid) {
+    return [field, `The ${kind} ${pin.name} was deleted and created again: a different object answers to the name now. Nothing was sent; check it, then submit again to use it.`];
+  }
+  return null;
+}
+
 export interface ScheduleFormProps {
   ns: string;
   initial: PolicyValues;
@@ -331,6 +344,18 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
   const [canonical, setCanonical] = useState<string | null>(null);
   const [previewErrors, setPreviewErrors] = useState<Partial<Record<keyof PolicyValues, string>>>({});
   const [more, setMore] = useState(false);
+  // The object each name meant when it was chosen. A connection or destination
+  // deleted and created again under the same name is a different cluster or
+  // store, so a submit re-reads both and refuses to follow the name.
+  const [pins, setPins] = useState<{ source?: Pin; destination?: Pin }>({});
+  useEffect(() => {
+    const c = connections.data?.find((x) => x.name === values.source);
+    if (c && pins.source?.name !== c.name) setPins((p) => ({ ...p, source: { name: c.name, uid: c.uid } }));
+  }, [values.source, connections.data]);
+  useEffect(() => {
+    const d = values.where === "destination" ? destinations.data?.find((x) => x.name === values.destination) : undefined;
+    if (d && pins.destination?.name !== d.name) setPins((p) => ({ ...p, destination: { name: d.name, uid: d.uid } }));
+  }, [values.destination, values.where, destinations.data]);
 
   // A refusal's field errors go next to their fields; one under "More options" opens it.
   useEffect(() => {
@@ -366,9 +391,22 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
           }
         : null;
 
-  const submit = handleSubmit((v) => {
+  const submit = handleSubmit(async (v) => {
     if (moves && !v.confirmMove) {
       setError("confirmMove", { type: "manual", message: "Tick this to write new runs to the new location, or keep the current one." });
+      return;
+    }
+    const [freshSources, freshDestinations] = await Promise.all([
+      editing ? Promise.resolve(undefined) : connections.refetch().then((r) => r.data),
+      v.where === "destination" ? destinations.refetch().then((r) => r.data) : Promise.resolve(undefined),
+    ]);
+    const moved = [
+      identityChanged("source", "connection", pins.source, freshSources),
+      identityChanged("destination", "destination", v.where === "destination" ? pins.destination : undefined, freshDestinations),
+    ].filter((x): x is [keyof PolicyValues, string] => x !== null);
+    if (moved.length) {
+      for (const [field, message] of moved) setError(field, { type: "manual", message });
+      setPins((p) => Object.fromEntries(Object.entries(p).filter(([k]) => !moved.some(([f]) => f === k))));
       return;
     }
     onSubmit(v, preset ? (canonical ?? "") : v.cron.trim());

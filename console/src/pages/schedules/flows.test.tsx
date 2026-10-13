@@ -203,7 +203,7 @@ describe("next runs", () => {
 
 // ------------------------------------------------------------ the form
 
-const CONNECTIONS = [{ name: "orders-prod", namespace: "team-a", role: "source", reachability: { state: "reachable" } }];
+const CONNECTIONS = [{ name: "orders-prod", uid: "c-1", namespace: "team-a", role: "source", reachability: { state: "reachable" } }];
 const DESTINATIONS = [{ name: "primary", uid: "d1", default: true, canonicalUrl: "s3://b/p", generation: 1, addressing: "pathStyle", transport: "tls", status: {} }];
 
 function formNetwork(over: (r: Request, path: string, body: unknown) => Response | null = () => null, caps = ALL) {
@@ -292,6 +292,23 @@ describe("guided create", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create schedule" }));
     await waitFor(() => expect(posts()).toHaveLength(2));
     expect(posts()[1]!.key).toBe(posts()[0]!.key);
+  });
+
+  it("a connection deleted and created again under the chosen name is refused, not followed", async () => {
+    let reads = 0;
+    formNetwork((_r, path) => {
+      if (!path.startsWith("/namespaces/team-a/connections")) return null;
+      reads += 1;
+      // The second read (the one a submit makes) finds another object under the name.
+      return json(200, { items: [{ ...CONNECTIONS[0], uid: reads === 1 ? "c-1" : "c-2" }], page: { limit: 50 }, requestId: "r" });
+    });
+    renderAt("/team-a/schedules/new");
+    await fillGuided();
+    const create = await screen.findByRole("button", { name: "Create schedule" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(document.getElementById("sf-source-helper")?.textContent).toMatch(/was deleted and created again/));
+    expect(posts()).toHaveLength(0);
   });
 
   it("a login without the grant is told so and offered no form", async () => {

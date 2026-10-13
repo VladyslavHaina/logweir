@@ -141,6 +141,16 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
   );
 }
 
+/** A disclosure that starts open where its runs are the page's point (a deleted schedule). */
+function Section({ open, text, children }: { open: boolean; text: string; children: React.ReactNode }) {
+  const [expanded, setExpanded] = useState(open);
+  return (
+    <ExpandableSection toggleText={text} isExpanded={expanded} onToggle={(_e, o) => setExpanded(o)}>
+      {children}
+    </ExpandableSection>
+  );
+}
+
 function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid: string | undefined; canRestore: boolean }) {
   const history = useRunHistory(ns);
   const navigate = useNavigate();
@@ -177,23 +187,26 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
           <Runs ns={ns} runs={groups.mine} canRestore={canRestore} label={`Runs of ${name}`} />
         </>
       )}
-      {groups.earlier.length > 0 && (
-        <ExpandableSection toggleText={`${groups.earlier.length} runs of an earlier schedule with this name`}>
-          <Content component="p" className="lw-subtle">
-            They carry a different schedule identity: a schedule deleted and recreated under one name is a different
-            schedule, so they count for nothing above. Their points can still be restored.
-          </Content>
-          <Runs ns={ns} runs={groups.earlier} canRestore={canRestore} label="Runs of an earlier schedule with this name" />
-        </ExpandableSection>
-      )}
+      {[...new Set(groups.earlier.map((b) => b.scheduleRef!.uid!))].map((identity, i) => {
+        const runs = groups.earlier.filter((b) => b.scheduleRef?.uid === identity);
+        return (
+          <Section key={identity} open={!uid} text={uid ? `${runs.length} runs of an earlier schedule with this name` : `${runs.length} runs of ${name}, identity ${i + 1}`}>
+            <Content component="p" className="lw-subtle">
+              They carry schedule identity {identity}. A schedule deleted and created again under one name is a different
+              schedule, so these are never merged with another identity's runs. Their points can still be restored.
+            </Content>
+            <Runs ns={ns} runs={runs} canRestore={canRestore} label={`Runs of schedule identity ${identity}`} />
+          </Section>
+        );
+      })}
       {groups.legacy.length > 0 && (
-        <ExpandableSection toggleText={`${groups.legacy.length} runs naming this schedule without its identity`}>
+        <Section open={!uid} text={`${groups.legacy.length} runs naming this schedule without its identity`}>
           <Content component="p" className="lw-subtle">
             They record no schedule identity, so nothing tells whether this schedule or an earlier one of the same name
             made them. They are never offered as this schedule's latest point; each can still be restored on its own.
           </Content>
           <Runs ns={ns} runs={groups.legacy} canRestore={canRestore} label="Runs naming this schedule without its identity" />
-        </ExpandableSection>
+        </Section>
       )}
       {history.data.more && (
         <Content component="p" className="lw-subtle lw-small">
