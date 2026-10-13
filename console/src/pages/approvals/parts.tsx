@@ -140,7 +140,7 @@ export function ApprovalRecord({ approval, packet, grant, heading = "The approva
         <CardTitle component="h2">{heading}</CardTitle>
       </CardHeader>
       <CardBody>
-        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "14ch" }}>
+        <DescriptionList isCompact orientation={{ md: "horizontal" }} horizontalTermWidthModifier={{ default: "14ch" }}>
           <Term term="Approval">{approval.name}</Term>
           <Term term="Subject">
             {approval.subjectRef.kind}/{approval.subjectRef.name}

@@ -140,7 +140,7 @@ function SubjectCard({ ns, restore, subject, mode, computed }: { ns: string; res
         <Content component="p" className="lw-subtle">
           Every value below was read from Restore {restore.name} itself. They are exactly what an approval for it binds, and they are not editable.
         </Content>
-        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "14ch" }} className="lw-gap-top lw-approval-facts">
+        <DescriptionList isCompact orientation={{ md: "horizontal" }} horizontalTermWidthModifier={{ default: "14ch" }} className="lw-gap-top lw-approval-facts">
           <Term term="Restore">
             <Link to="/$ns/restores/$name" params={{ ns, name: restore.name }}>
               {restore.name}
@@ -494,7 +494,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
               <StateLine found={found} subject={subject} approvalError={approvalQ.error} />
               {decision}
               {failure}
-              <RecordedNotice written={written} />
+              <RecordedNotice written={found?.state === "verified" ? null : written} />
             </CardBody>
           </Card>
         </StackItem>
@@ -562,7 +562,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
             <CardBody>
               <StateLine found={found} subject={subject} approvalError={approvalQ.error} showAbsent={mode === "confirm"} />
               {action}
-              <RecordedNotice written={written} />
+              <RecordedNotice written={found?.state === "verified" ? null : written} />
             </CardBody>
           </Card>
         </StackItem>

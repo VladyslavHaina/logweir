@@ -740,20 +740,23 @@ export async function approvalsMock(request: Request, method: string, path: stri
     if (!Array.isArray(sidecar.signatures) || sidecar.signatures.length < 2) {
       return problem(422, "validation_failed", "The sidecar adds no signature.", [{ field: "sidecarBytes", code: "no_countersignature", message: "the sidecar carries no signature beside the console's: run logweir drill countersign over the confirmation" }]);
     }
-    return record(ns, await restoreOf(d!, false), sent, APPROVER_KEY, "https://dex.logweir.localtest.me#alice");
+    return record(ns, await restoreOf(d!, false), sent, APPROVER_KEY, ALICE, {
+      ticket: d!.ticket ?? null,
+      authorization: { confirmationKeyId: CONSOLE_KEY, mode: "Governed", policyDigest: DIGEST(503), policyName: "prod-strict", requester: d!.requester },
+    });
   }
 
   return null;
 }
 
-function record(ns: string, r: Restore, sent: Record<string, unknown>, key: string, approver: string): Response {
+function record(ns: string, r: Restore, sent: Record<string, unknown>, key: string, approver: string, over: Partial<Approval> = {}): Response {
   const text = JSON.stringify(sent);
   const existing = stored(ns).get(r.approvalRef.name);
   if (existing) {
     if (existing.body === text) return json(200, { item: settled(existing, r), replayed: true, requestId: requestId() });
     return problem(409, "state_conflict", `Another Approval already holds the name ${r.approvalRef.name}; it is never overwritten.`);
   }
-  const approval = approvalOf(ns, r.approvalRef.name, { planHash: r.planHash, approver, matchedKeyId: key, approvalSubject: r.approvalSubject });
+  const approval = approvalOf(ns, r.approvalRef.name, { planHash: r.planHash, approver, matchedKeyId: key, approvalSubject: r.approvalSubject, ...over });
   stored(ns).set(r.approvalRef.name, { approval, at: Date.now(), body: text });
   return json(201, { item: approval, requestId: requestId() });
 }
