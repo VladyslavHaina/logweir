@@ -16,6 +16,7 @@ import {
   session,
   withPoint,
 } from "./data";
+import { declareRestore } from "./themeA";
 
 const LATENCY_MS = 350;
 
@@ -89,7 +90,18 @@ function operationOf(r: Restore): OperationView {
   ];
   if (e >= 2 || done) conditions.push({ type: "Preparing", status: "True", reason: "CreatingTopics", message: `Creating ${r.newTopics.length} topics on ${r.target.clusterRef.name} with the source partition counts.`, lastTransitionTime: iso(since + 2000) });
   if (e >= 6 || done) conditions.push({ type: "Running", status: "True", reason: "Replaying", message: "Replaying records from the archive (runner phase 4 of 7).", lastTransitionTime: iso(since + 6000) });
-  if (e >= 20 || done) conditions.push({ type: "Verifying", status: "True", reason: "Sampling", message: "Comparing a 10,000-record sample with the archive, partition by partition.", lastTransitionTime: iso(since + 20000) });
+  const complete = r.coverage?.requested === "complete";
+  if (e >= 20 || done) {
+    conditions.push({
+      type: "Verifying",
+      status: "True",
+      reason: complete ? "Complete" : "Sampling",
+      message: complete
+        ? "Reading every restored record and comparing it with the archive, then mapping each captured consumer position."
+        : "Comparing a 10,000-record sample with the archive, partition by partition.",
+      lastTransitionTime: iso(since + 20000),
+    });
+  }
   if (done) conditions.push({ type: "Succeeded", status: "True", reason: "Verified", message: "Restore verified. The scorecard is signed and the controller verified it.", lastTransitionTime: iso(since + 27000) });
   return {
     kind: "restore",
@@ -116,16 +128,18 @@ function operationOf(r: Restore): OperationView {
     verification: done
       ? { state: "valid", verifiedAt: iso(since + 27000), matchedKeyId: "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe", payloadType: "scorecard" }
       : { state: "pending" },
-    verificationScope: { level: "sampled", recordsExpected: RESTORE_RECORDS, recordsSampled: 10_000, recordsSampledMatching: done ? 10_000 : 0 },
+    verificationScope: complete
+      ? { level: "sampled", coverage: "complete", recordsExpected: RESTORE_RECORDS, recordsSampled: RESTORE_RECORDS, recordsSampledMatching: done ? RESTORE_RECORDS : 0 }
+      : { level: "sampled", coverage: "sampled", recordsExpected: RESTORE_RECORDS, recordsSampled: 10_000, recordsSampledMatching: done ? 10_000 : 0 },
     trust: done ? { state: "verified", basis: "Current", signedAt: iso(since + 26000) } : { state: "pending", basis: "none" },
     evidence: done ? { payloadKey: `logweir/scorecards/${r.name}.json`, payloadSha256: "sha256:" + "4be1".repeat(16) } : {},
     completion: done
       ? {
           recordsExpected: RESTORE_RECORDS,
           recordsRestored: RESTORE_RECORDS,
-          recordsSampled: 10_000,
-          recordsSampledMatching: 10_000,
-          integrityLevel: "sampled",
+          recordsSampled: complete ? RESTORE_RECORDS : 10_000,
+          recordsSampledMatching: complete ? RESTORE_RECORDS : 10_000,
+          integrityLevel: "byte-fingerprint",
           newTopics: r.newTopics.map((name, i) => ({ name, partitions: [3, 1, 6][i] ?? 3 })),
         }
       : undefined,
@@ -204,6 +218,7 @@ async function route(request: Request): Promise<Response> {
       approvalRef: { name },
       approvalSubject: naming.originalName ? "originalName" : "ordinary",
       backupSetRef: body.backupSetRef,
+      coverage: { requested: body.coverage ?? "sampled", recorded: body.coverage ?? "sampled", covered: true },
       newTopics: (body.topicMapping ?? []).map((row) => row.target),
       planBytesLength: body.planBytes.length,
       planHash: body.planHash,
@@ -217,6 +232,7 @@ async function route(request: Request): Promise<Response> {
       operation: { state: "pending", terminal: false, verificationState: "pending", verifiedSuccess: false },
     };
     restores.unshift(created);
+    declareRestore(name, body.planBytes);
     liveSince.set(name, Date.now());
     return json(201, {
       item: created,

@@ -54,3 +54,11 @@ export function duration(seconds: number): string {
 export function count(n: number | null | undefined): string {
   return typeof n === "number" ? n.toLocaleString("en-US") : "Not recorded";
 }
+
+/** "604800000 (7 days)": a millisecond setting with its value in words, when that helps. */
+export function msValue(key: string, value: string): string {
+  const n = Number(value);
+  if (!key.endsWith(".ms") || !Number.isFinite(n) || n < 60_000) return value;
+  const days = n / 86_400_000;
+  return `${value} (${days >= 1 && Number.isInteger(days) ? `${days} days` : duration(n / 1000)})`;
+}

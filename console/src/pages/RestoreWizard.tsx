@@ -1,12 +1,14 @@
 // The restore wizard: five steps, each answering one question, one action at the end.
 // (The old console had six: archive and recovery point are one choice here.)
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Controller, useForm, useWatch, type Control } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
   Alert,
+  Breadcrumb,
+  BreadcrumbItem,
   Button,
   Card,
   CodeBlock,
@@ -25,7 +27,6 @@ import {
   FormSelectOption,
   HelperText,
   HelperTextItem,
-  Label,
   PageSection,
   Radio,
   Checkbox,
@@ -41,15 +42,20 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { useBackups, useConnections, useCreateRestore, usePoints } from "../api/queries";
 import type { Connection, CreateRestoreRequest, PointView } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { CheckStatus, ReachStatus } from "../components/Status";
+import { CheckStatus, ReachStatus, StatusLabel } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
-import { When, count, exactUtc } from "../components/When";
+import { When, count, exactUtc, msValue } from "../components/When";
 import { Ident } from "../components/Ident";
+import { useSha256 } from "../components/hash";
+import { useNarrow } from "../components/CompactList";
+import { DURING_RESTORE, TOPIC_CONFIG, TTL_CHOICES } from "../mock/themeA";
+import CheckIcon from "@patternfly/react-icons/dist/esm/icons/rh-ui-check-circle-fill-icon";
+import InfoIcon from "@patternfly/react-icons/dist/esm/icons/rh-ui-information-fill-icon";
 
 // ------------------------------------------------------------------ the form
 
 const TOPIC_NAME = /^[A-Za-z0-9._-]+$/;
-const TTL_WORDS = { "4h": "4 hours", "24h": "24 hours", "7d": "7 days" } as const;
+const ttlWords = (seconds: string) => TTL_CHOICES.find((c) => String(c.seconds) === seconds)?.words ?? `${seconds} s`;
 
 const schema = z
   .object({
@@ -57,11 +63,14 @@ const schema = z
     topics: z.array(z.string()).min(1, "Choose at least one topic."),
     timeMode: z.enum(["end", "earlier"]),
     time: z.string(),
+    coverage: z.enum(["complete", "sampled"]),
     target: z.string().min(1, "Choose a target cluster."),
     naming: z.enum(["prefix", "original"]),
     prefix: z.string(),
     clone: z.boolean(),
-    ttl: z.enum(["4h", "24h", "7d"]),
+    ttl: z.string(),
+    config: z.enum(["source", "defaults"]),
+    transition: z.boolean(),
     typed: z.string(),
   })
   .superRefine((v, ctx) => {
@@ -101,8 +110,10 @@ function targetName(v: Pick<Values, "naming" | "prefix">, topic: string): string
   return v.naming === "original" ? topic : `${v.prefix}${topic}`;
 }
 
+/** The plan the restore is created from (illustrative; the build uses the runner's plan grammar and its goldens). */
 function planText(v: Values, point: PointView): string {
   const at = v.timeMode === "end" ? String(point.recoveryPointAt) : `${String(point.recoveryPointAt).slice(0, 10)}T${v.time.length === 5 ? `${v.time}:00` : v.time}Z`;
+  const clone = v.clone && v.naming === "prefix";
   return [
     "apiVersion: logweir.io/v1",
     "kind: RestorePlan",
@@ -113,24 +124,63 @@ function planText(v: Values, point: PointView): string {
     "  destination: primary",
     "target:",
     `  cluster: ${v.target}`,
-    "  mode: newTopic",
+    `  mode: ${clone ? "scratch" : "newTopic"}`,
     `  originalName: ${v.naming === "original"}`,
+    ...(clone ? [`  teardown: {ttl_seconds: ${v.ttl}}`] : []),
+    ...(v.config === "source" ? [`  topic_configuration: {transition: ${v.transition ? "afterVerification" : "none"}}`] : []),
+    "sample:",
+    `  coverage: ${v.coverage}`,
     "topics:",
     ...v.topics.map((t) => `  - {source: ${t}, target: ${targetName(v, t)}}`),
-    ...(v.clone ? ["cleanup:", `  after: ${v.ttl}`] : []),
     "",
   ].join("\n");
-}
-
-async function sha256(text: string): Promise<string> {
-  if (!globalThis.crypto?.subtle) return "unavailable: this page is not in a secure context";
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return "sha256:" + Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // ------------------------------------------------------------------- steps
 
 function PointStep({ control, points, records }: { control: Control<Values>; points: PointView[]; records: Map<string, number | undefined> }) {
+  const narrow = useNarrow();
+  if (narrow) {
+    // Phones: one radio row per point, its time, age and size; every point here is verified.
+    return (
+      <>
+        <Title headingLevel="h2" size="xl">Which recovery point?</Title>
+        <Content component="p" className="lw-subtle">
+          Each point is a verified backup of orders-prod. The newest is first.
+        </Content>
+        <Controller
+          control={control}
+          name="pointId"
+          render={({ field }) => (
+            <div className="lw-list lw-list--rows" role="radiogroup" aria-label="Recovery points">
+              {points.slice(0, 8).map((p, i) => (
+                <div key={p.pointId} className="lw-list__row">
+                  <div className="lw-list__main">
+                    <Radio
+                      id={`point-${i}`}
+                      name="point"
+                      isChecked={field.value === p.pointId}
+                      onChange={() => field.onChange(p.pointId)}
+                      label={<strong>{exactUtc(String(p.recoveryPointAt))}</strong>}
+                      description={
+                        <>
+                          <When value={p.recoveryPointAt} />
+                          {i === 0 ? " · newest" : ""} · {count(records.get(p.backupId))} records
+                        </>
+                      }
+                    />
+                  </div>
+                  <div className="lw-list__end">
+                    <StatusLabel tone="success" text="Verified" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        />
+      </>
+    );
+  }
   return (
     <>
       <Title headingLevel="h2" size="xl">Which recovery point?</Title>
@@ -178,7 +228,7 @@ function PointStep({ control, points, records }: { control: Control<Values>; poi
                     <Td dataLabel="Topics">{(p.topics ?? []).map((t) => t.name).join(", ")}</Td>
                     <Td dataLabel="Records" className="lw-num">{count(records.get(p.backupId))}</Td>
                     <Td dataLabel="Evidence">
-                      <Label isCompact status="success">Verified</Label>
+                      <StatusLabel tone="success" text="Verified" />
                     </Td>
                   </Tr>
                 ))}
@@ -279,20 +329,104 @@ function WhatStep({ control, point }: { control: Control<Values>; point: PointVi
           )}
         />
       )}
+      <Controller
+        control={control}
+        name="coverage"
+        render={({ field }) => (
+          <FormGroup role="radiogroup" isStack label="How to verify" fieldId="coverage">
+            <Radio
+              id="coverage-complete"
+              name="coverage"
+              label="Complete: compare every restored record (recommended)"
+              description="Needed to switch consumer groups over: the captured positions are mapped while every record is read."
+              isChecked={field.value === "complete"}
+              onChange={() => field.onChange("complete")}
+            />
+            <Radio
+              id="coverage-sampled"
+              name="coverage"
+              label="Sampled: compare 10,000 records"
+              description="Faster for a large drill. Consumer positions are not mapped."
+              isChecked={field.value === "sampled"}
+              onChange={() => field.onChange("sampled")}
+            />
+          </FormGroup>
+        )}
+      />
     </Form>
   );
 }
 
-const CONFIG_ROWS = [
-  { topic: "orders", partitions: "3", replication: "3", cleanup: "delete", retention: "7 days" },
-  { topic: "orders-dlq", partitions: "1", replication: "3", cleanup: "delete", retention: "30 days" },
-  { topic: "payments", partitions: "6", replication: "3", cleanup: "compact", retention: "unlimited" },
-];
+function Keys({ values }: { values: Record<string, string> }) {
+  const entries = Object.entries(values);
+  if (entries.length === 0) return <span className="lw-subtle">None</span>;
+  return (
+    <ul className="lw-keys">
+      {entries.map(([k, v]) => (
+        <li key={k}>
+          {k}={msValue(k, v)}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The restore preflight's configuration diff for the chosen topics (PROD-04.2 §4.3), one block per topic. */
+function ConfigPreview({ topics, name, transition }: { topics: string[]; name: (t: string) => string; transition: boolean }) {
+  return (
+    <ul className="lw-topic-config" aria-label="Topic configuration preview">
+      {TOPIC_CONFIG.filter((t) => topics.includes(t.source)).map((t) => (
+        <li key={t.source}>
+          <div className="lw-topic-config__head">
+            <strong className="lw-break">{name(t.source)}</strong>
+            <span className="lw-subtle lw-small">
+              {t.partitions} {t.partitions === 1 ? "partition" : "partitions"} · replication {t.replication_factor.target}
+              {t.replication_factor.target === t.replication_factor.source ? ", as the source" : ` (source ${t.replication_factor.source}: ${t.replication_factor.reason})`}
+            </span>
+            {t.route === "desiredStateExport" && <StatusLabel tone="info" text="Owned by Strimzi" title={t.owner} />}
+          </div>
+          <DescriptionList isCompact className="lw-dl" orientation={{ sm: "vertical", md: "horizontal" }}>
+            <DescriptionListGroup>
+              <DescriptionListTerm>At creation</DescriptionListTerm>
+              <DescriptionListDescription>
+                <Keys values={t.at_creation} />
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>{transition ? "After verification" : "Held, not applied"}</DescriptionListTerm>
+              <DescriptionListDescription>
+                <Keys values={t.deferred} />
+                {t.route === "desiredStateExport" && (
+                  <div className="lw-subtle lw-small">{t.owner} owns this topic: these settings are written as KafkaTopic YAML for it, not applied.</div>
+                )}
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            {t.not_applied.length > 0 && (
+              <DescriptionListGroup>
+                <DescriptionListTerm>Not copied</DescriptionListTerm>
+                <DescriptionListDescription>
+                  <ul className="lw-keys">
+                    {t.not_applied.map((n) => (
+                      <li key={n.key}>
+                        {n.key} <span className="lw-subtle">({n.class})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </DescriptionListDescription>
+              </DescriptionListGroup>
+            )}
+          </DescriptionList>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function TargetStep({ control, targets }: { control: Control<Values>; targets: Connection[] }) {
   const values = useWatch({ control });
   const naming = values.naming ?? "prefix";
   const topics = values.topics ?? [];
+  const nameOf = (t: string) => targetName({ naming, prefix: values.prefix ?? "" }, t);
   return (
     <Form onSubmit={(e) => e.preventDefault()}>
       <Title headingLevel="h2" size="xl">Where to restore</Title>
@@ -366,8 +500,7 @@ function TargetStep({ control, targets }: { control: Control<Values>; targets: C
               <FormHelperText>
                 <HelperText>
                   <HelperTextItem variant={fieldState.error ? "error" : "default"}>
-                    {fieldState.error?.message ??
-                      `Creates ${topics.map((t) => targetName({ naming: "prefix", prefix: field.value }, t ?? "")).join(", ")}.`}
+                    {fieldState.error?.message ?? `Creates ${topics.map((t) => targetName({ naming: "prefix", prefix: field.value }, t ?? "")).join(", ")}.`}
                   </HelperTextItem>
                 </HelperText>
               </FormHelperText>
@@ -375,85 +508,103 @@ function TargetStep({ control, targets }: { control: Control<Values>; targets: C
           )}
         />
       )}
-      <FormGroup label="Clean up" fieldId="clone" role="group">
+      <FormGroup label="Temporary clone" fieldId="clone" role="group">
         <Controller
           control={control}
           name="clone"
           render={({ field }) => (
             <Switch
               id="clone"
-              label="Delete the restored topics automatically (a temporary clone)"
-              isChecked={field.value}
+              label="Delete the restored topics automatically"
+              isChecked={field.value && naming === "prefix"}
+              isDisabled={naming !== "prefix"}
               onChange={(_e, on) => field.onChange(on)}
             />
           )}
         />
-        {values.clone && (
-          <Controller
-            control={control}
-            name="ttl"
-            render={({ field }) => (
-              <FormSelect id="ttl" value={field.value} onChange={(_e, v) => field.onChange(v)} aria-label="Delete after" className="lw-ttl">
-                <FormSelectOption value="4h" label="after 4 hours" />
-                <FormSelectOption value="24h" label="after 24 hours" />
-                <FormSelectOption value="7d" label="after 7 days" />
-              </FormSelect>
-            )}
-          />
+        {values.clone && naming === "prefix" && (
+          <>
+            <Controller
+              control={control}
+              name="ttl"
+              render={({ field }) => (
+                <FormSelect id="ttl" value={field.value} onChange={(_e, v) => field.onChange(v)} aria-label="Delete after" className="lw-ttl">
+                  {TTL_CHOICES.map((c) => (
+                    <FormSelectOption key={c.seconds} value={String(c.seconds)} label={`after ${c.words}`} />
+                  ))}
+                </FormSelect>
+              )}
+            />
+            <ul className="lw-facts">
+              <li>
+                <CheckIcon className="lw-tone-success" aria-hidden="true" />
+                <span>{values.target} is in the trust policy's allowed clusters for clones, and it is not the source.</span>
+              </li>
+              <li>
+                <InfoIcon className="lw-tone-info" aria-hidden="true" />
+                <span>Only the topics this restore creates are deleted, and only while each still has the ID recorded at creation.</span>
+              </li>
+              <li>
+                <InfoIcon className="lw-tone-info" aria-hidden="true" />
+                <span>Restored records keep their x-original-offset and x-original-timestamp headers, so the clone stays verifiable.</span>
+              </li>
+              <li>
+                <InfoIcon className="lw-tone-info" aria-hidden="true" />
+                <span>A clone cannot be switched over: consumer groups stay where they are.</span>
+              </li>
+            </ul>
+          </>
         )}
         <FormHelperText>
           <HelperText>
-            <HelperTextItem>Only the topics this restore creates are deleted, and only on {values.target}.</HelperTextItem>
+            <HelperTextItem>
+              {naming === "prefix" ? `A clone is for inspecting data on ${values.target} for a while; the default keeps the topics.` : "A clone uses new topic names."}
+            </HelperTextItem>
           </HelperText>
         </FormHelperText>
       </FormGroup>
-      <div>
-        <Title headingLevel="h3" size="md">Topic configuration on {values.target}</Title>
-        <Content component="p" className="lw-subtle lw-small">
-          Partitions and replication as on the source. Settings marked "after verification" stay off while records are
-          written, so nothing is deleted or compacted early, and are applied once the restore is verified.
-        </Content>
-        <Table aria-label="Topic configuration preview" variant="compact" gridBreakPoint="grid-md">
-          <Thead>
-            <Tr>
-              <Th>Topic</Th>
-              <Th modifier="fitContent">Partitions</Th>
-              <Th modifier="fitContent">Replication</Th>
-              <Th>Cleanup policy</Th>
-              <Th>Retention</Th>
-            </Tr>
-          </Thead>
-          <Tbody>
-            {CONFIG_ROWS.filter((r) => topics.includes(r.topic)).map((r) => (
-              <Tr key={r.topic}>
-                <Td dataLabel="Topic">{targetName({ naming, prefix: values.prefix ?? "" }, r.topic)}</Td>
-                <Td dataLabel="Partitions" className="lw-num">{r.partitions}</Td>
-                <Td dataLabel="Replication" className="lw-num">{r.replication}</Td>
-                <Td dataLabel="Cleanup policy">
-                  {r.cleanup === "compact" ? (
-                    <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }}>
-                      <span>compact</span>
-                      <Label isCompact color="blue">after verification</Label>
-                    </Flex>
-                  ) : (
-                    r.cleanup
-                  )}
-                </Td>
-                <Td dataLabel="Retention">
-                  {r.retention === "unlimited" ? (
-                    "unlimited"
-                  ) : (
-                    <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }}>
-                      <span>{r.retention}</span>
-                      <Label isCompact color="blue">after verification</Label>
-                    </Flex>
-                  )}
-                </Td>
-              </Tr>
-            ))}
-          </Tbody>
-        </Table>
-      </div>
+      <Controller
+        control={control}
+        name="config"
+        render={({ field }) => (
+          <FormGroup role="radiogroup" isStack label="Topic configuration" fieldId="config">
+            <Radio
+              id="config-source"
+              name="config"
+              label="The source's, from the recovery point (recommended)"
+              description="Partitions, replication and settings as the point recorded them."
+              isChecked={field.value === "source"}
+              onChange={() => field.onChange("source")}
+            />
+            <Radio
+              id="config-defaults"
+              name="config"
+              label={`${values.target}'s defaults`}
+              description="The target's default replication and settings, as a restore always did."
+              isChecked={field.value === "defaults"}
+              onChange={() => field.onChange("defaults")}
+            />
+          </FormGroup>
+        )}
+      />
+      {values.config === "source" && (
+        <div>
+          <Controller
+            control={control}
+            name="transition"
+            render={({ field }) => (
+              <Checkbox
+                id="transition"
+                isChecked={field.value}
+                onChange={(_e, on) => field.onChange(on)}
+                label="Apply the held settings once the restore is verified"
+                description={`While records are written, Logweir holds ${Object.keys(DURING_RESTORE).slice(0, 4).join(", ")} and open timestamp bounds, so nothing restored is deleted, compacted, rejected or re-stamped before the verdict.`}
+              />
+            )}
+          />
+          <ConfigPreview topics={topics} name={nameOf} transition={values.transition ?? true} />
+        </div>
+      )}
     </Form>
   );
 }
@@ -543,8 +694,22 @@ function ReviewStep({ control, point, plan, hash }: { control: Control<Values>; 
           </DescriptionListDescription>
         </DescriptionListGroup>
         <DescriptionListGroup>
+          <DescriptionListTerm>Verification</DescriptionListTerm>
+          <DescriptionListDescription>
+            {v.coverage === "complete" ? "complete: every record; consumer positions are mapped" : "sampled: 10,000 records; no consumer positions"}
+          </DescriptionListDescription>
+        </DescriptionListGroup>
+        <DescriptionListGroup>
+          <DescriptionListTerm>Topic settings</DescriptionListTerm>
+          <DescriptionListDescription>
+            {v.config === "defaults" ? `${v.target}'s defaults` : v.transition ? "the source's; held ones applied after verification" : "the source's; held ones left at Logweir's values"}
+          </DescriptionListDescription>
+        </DescriptionListGroup>
+        <DescriptionListGroup>
           <DescriptionListTerm>Clean up</DescriptionListTerm>
-          <DescriptionListDescription>{v.clone ? `delete these topics after ${TTL_WORDS[v.ttl]}` : "keep the topics"}</DescriptionListDescription>
+          <DescriptionListDescription>
+            {v.clone && v.naming === "prefix" ? `a clone: its topics are deleted ${ttlWords(v.ttl)} after it finishes` : "keep the topics"}
+          </DescriptionListDescription>
         </DescriptionListGroup>
         <DescriptionListGroup>
           <DescriptionListTerm>Plan</DescriptionListTerm>
@@ -629,7 +794,6 @@ export function RestoreWizard() {
   const connections = useConnections(ns);
   const create = useCreateRestore(ns);
   const [checkDone, setCheckDone] = useState(false);
-  const [hash, setHash] = useState("computing...");
 
   const records = useMemo(() => new Map((backups.data ?? []).map((b) => [String(b.backupId), b.records ?? undefined])), [backups.data]);
   const preselected = useMemo(() => {
@@ -645,11 +809,14 @@ export function RestoreWizard() {
       topics: ["orders", "orders-dlq", "payments"],
       timeMode: "end",
       time: "",
+      coverage: "complete",
       target: "orders-dr",
       naming: "prefix",
       prefix: todayPrefix(),
       clone: false,
-      ttl: "24h",
+      ttl: "86400",
+      config: "source",
+      transition: true,
       typed: "",
     },
     resetOptions: { keepDirtyValues: true },
@@ -657,17 +824,19 @@ export function RestoreWizard() {
   const v = useWatch({ control: form.control }) as Values;
   const point = (points.data ?? []).find((p) => p.pointId === v.pointId);
   const plan = point ? planText(v, point) : "";
-
-  useEffect(() => {
-    let live = true;
-    void sha256(plan).then((h) => live && setHash(h));
-    return () => {
-      live = false;
-    };
-  }, [plan]);
+  const hash = useSha256(plan);
 
   const header = (
-    <PageHeader title="Restore a recovery point" description="Five steps. Nothing is created until the last one." />
+    <PageHeader
+      title="Restore a recovery point"
+      description="Five steps. Nothing is created until the last one."
+      breadcrumb={
+        <Breadcrumb className="lw-breadcrumb">
+          <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
+          <BreadcrumbItem isActive>New restore</BreadcrumbItem>
+        </Breadcrumb>
+      }
+    />
   );
   if (points.isPending || connections.isPending || backups.isPending) {
     return (
@@ -700,6 +869,7 @@ export function RestoreWizard() {
     const body: CreateRestoreRequest = {
       approvalRef: { name },
       backupSetRef: point.backupId,
+      coverage: values.coverage,
       deadlineSeconds: 3600,
       planBytes: plan,
       planHash: hash,
@@ -708,7 +878,7 @@ export function RestoreWizard() {
       sourceDestinationRef: { name: "primary" },
       target: {
         clusterRef: { name: values.target },
-        mode: "newTopic",
+        mode: values.clone && values.naming === "prefix" ? "scratch" : "newTopic",
         topicNaming: { prefix: values.naming === "original" ? "" : values.prefix, originalName: values.naming === "original" },
       },
       topicMapping: values.topics.map((t) => ({ source: t, target: targetName(values, t) })),

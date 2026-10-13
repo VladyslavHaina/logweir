@@ -27,11 +27,12 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { useBackup, usePoints } from "../api/queries";
 import type { Backup, PointView } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { RunStatus } from "../components/Status";
+import { CaptureStatus, RunStatus, TriggerText } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
 import { When, count } from "../components/When";
 import { Ident } from "../components/Ident";
-import { TriggerLabel, windowText } from "./Backups";
+import { windowText } from "./Backups";
+import { CompactList, useNarrow } from "../components/CompactList";
 
 function Term({ term, children }: { term: string; children: React.ReactNode }) {
   return (
@@ -73,9 +74,32 @@ function LiveProgress({ b }: { b: Backup }) {
   );
 }
 
+function positionsText(g: NonNullable<NonNullable<PointView["consumerPositions"]>["groups"]>[number]): string {
+  return g.positions
+    ? `${g.positions.related} partitions within the archived data${g.positions.notRelated ? `, ${g.positions.notRelated} outside it` : ""}`
+    : g.reason === "GroupTypeNotCaptured"
+      ? "Streams groups are not captured"
+      : (g.reason ?? "None");
+}
+
 function Groups({ point }: { point: PointView | undefined }) {
   const groups = point?.consumerPositions?.groups ?? [];
+  const narrow = useNarrow();
   if (!point) return <Content component="p" className="lw-subtle">This run has no recovery point.</Content>;
+  if (narrow) {
+    return (
+      <CompactList
+        flush
+        label="Consumer groups captured with this point"
+        items={groups.map((g) => ({
+          key: g.groupId,
+          title: g.groupId,
+          meta: `${g.groupType === "other" ? "streams / share" : g.groupType} · ${positionsText(g)}`,
+          status: <CaptureStatus captured={g.outcome === "captured"} reason={g.reason} />,
+        }))}
+      />
+    );
+  }
   return (
     <Table aria-label="Consumer groups captured with this point" variant="compact" gridBreakPoint="grid-md">
       <Thead>
@@ -92,21 +116,9 @@ function Groups({ point }: { point: PointView | undefined }) {
             <Td dataLabel="Group">{g.groupId}</Td>
             <Td dataLabel="Type">{g.groupType === "other" ? "streams / share" : g.groupType}</Td>
             <Td dataLabel="Captured">
-              {g.outcome === "captured" ? (
-                <Label isCompact status="success">Captured</Label>
-              ) : (
-                <Label isCompact color="grey" title={g.reason ?? undefined}>
-                  Not captured
-                </Label>
-              )}
+              <CaptureStatus captured={g.outcome === "captured"} reason={g.reason} />
             </Td>
-            <Td dataLabel="Positions">
-              {g.positions
-                ? `${g.positions.related} partitions within the archived data${g.positions.notRelated ? `, ${g.positions.notRelated} outside it` : ""}`
-                : g.reason === "GroupTypeNotCaptured"
-                  ? "Streams groups are not captured"
-                  : (g.reason ?? "None")}
-            </Td>
+            <Td dataLabel="Positions">{positionsText(g)}</Td>
           </Tr>
         ))}
       </Tbody>
@@ -211,7 +223,7 @@ export function BackupDetail() {
                   <Term term="Destination">{b.destinationRef?.name ?? "Inline archive"}</Term>
                   <Term term="Trigger">
                     <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }}>
-                      <TriggerLabel b={b} />
+                      <TriggerText b={b} />
                       {b.schedule && <span>from schedule {b.schedule}</span>}
                       {b.trigger?.retryOf && (
                         <span>

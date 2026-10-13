@@ -1,7 +1,8 @@
-// Theme A's cutover (PROD-04.2): review how each consumer group's committed position
-// translates into the restored topics, then switch the stopped groups over.
-// Mock data; the documents are provisional until decisions/PROD-04.2-cutover.md.
-import { useCallback, useEffect, useMemo, useState } from "react";
+// Theme A's cutover (PROD-04.2): review how each consumer group's captured position
+// maps onto the restored topics and what the target group looks like now (the
+// Switchover preflight), then create a Switchover for the groups that are ready.
+// Mock data in the shapes of decisions/PROD-04.2-cutover.md (src/mock/themeA.ts).
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
@@ -13,6 +14,8 @@ import {
   CardHeader,
   CardTitle,
   Checkbox,
+  CodeBlock,
+  CodeBlockCode,
   Content,
   DescriptionList,
   DescriptionListDescription,
@@ -21,35 +24,69 @@ import {
   ExpandableSection,
   Flex,
   FlexItem,
-  FormGroup,
-  FormHelperText,
-  HelperText,
-  HelperTextItem,
-  Label,
   PageSection,
   ProgressStep,
   ProgressStepper,
-  TextInput,
-  Title,
 } from "@patternfly/react-core";
 import { ExpandableRowContent, Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
+import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import { useRestore } from "../api/queries";
-import { reviewFor, verdictOf, type GroupReview } from "../mock/cutover";
+import type { Restore } from "../api/types";
+import {
+  MAPPING_RULE,
+  UNAVAILABLE_WORDS,
+  planYaml,
+  reviewFor,
+  switchoverStatus,
+  themeAOf,
+  type MappingEntry,
+  type ReviewGroup,
+} from "../mock/themeA";
 import { PageHeader } from "../components/PageHeader";
-import { MappingStatus, VerdictStatus } from "../components/Status";
-import { ErrorState, LoadingRows } from "../components/States";
+import { MappingStatus, OutcomeStatus, PhaseStatus, VerdictStatus } from "../components/Status";
+import { Empty, ErrorState, LoadingRows } from "../components/States";
 import { count } from "../components/When";
+import { Ident } from "../components/Ident";
+import { useSha256 } from "../components/hash";
+import { CompactList, useNarrow } from "../components/CompactList";
 
 type Step = "review" | "confirm" | "done";
 
-function summary(g: GroupReview): string {
-  const n = (m: string) => g.rows.filter((r) => r.mapping === m).length;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function classCounts(entries: MappingEntry[]) {
+  const n = (c: MappingEntry["class"]) => entries.filter((e) => e.class === c).length;
+  return { exact: n("exact"), approximate: n("approximate"), unavailable: n("unavailable"), skipped: entries.reduce((s, e) => s + (e.skipped ?? 0), 0) };
+}
+
+/** "3 exact · 1 approximate" with the class names, for a group or a plan. */
+function Positions({ entries, notCaptured }: { entries: MappingEntry[]; notCaptured?: string }) {
+  if (notCaptured) return <span className="lw-subtle">No position was captured</span>;
+  const c = classCounts(entries);
   const parts = [
-    n("exact") && `${n("exact")} exact`,
-    n("approximate") && `${n("approximate")} approximate`,
-    n("unavailable") && `${n("unavailable")} unavailable`,
+    c.exact > 0 && `${c.exact} exact`,
+    c.approximate > 0 && `${c.approximate} approximate`,
+    c.unavailable > 0 && `${c.unavailable} unavailable`,
   ].filter(Boolean);
-  return parts.join(" · ");
+  return <span>{parts.join(" · ")}</span>;
+}
+
+/** The target group now, from the Switchover preflight. */
+function targetText(g: ReviewGroup): string {
+  const s = g.state;
+  if (g.notCaptured || !s) return "Not checked";
+  if (!s.visible) return "Hidden from Logweir's principal";
+  if (!s.exists) return g.verdict === "ready" ? "Absent: created by the switchover" : "Absent";
+  if (s.members > 0) return `${plural(s.members, "member")} connected (${s.state})`;
+  if (Object.keys(s.committed).length) return g.verdict === "alreadyApplied" ? "Stopped; positions equal the plan" : "Stopped; positions differ from the plan";
+  return "Stopped; no positions yet";
+}
+
+function why(e: MappingEntry): string {
+  if (e.class === "exact") return "First restored record at or after the position";
+  if (e.class === "approximate") return `${plural(e.skipped ?? 0, "unread record")} left out by the restore's end time`;
+  const name = e.reason ?? "";
+  return UNAVAILABLE_WORDS[name.split(":")[0]!] ?? name;
 }
 
 function Legend() {
@@ -59,29 +96,29 @@ function Legend() {
       <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "14ch" }}>
         <DescriptionListGroup>
           <DescriptionListTerm>
-            <MappingStatus mapping="exact" />
+            <MappingStatus cls="exact" />
           </DescriptionListTerm>
           <DescriptionListDescription>
-            The group resumes at the first restored record whose original offset (the x-original-offset header) is at or
-            after its committed offset. Nothing is skipped or read twice.
+            The group resumes at the first restored record whose original offset (its last x-original-offset header) is
+            at or after the captured position. Nothing it had not read is skipped. Rule: <span className="lw-mono">{MAPPING_RULE}</span>.
           </DescriptionListDescription>
         </DescriptionListGroup>
         <DescriptionListGroup>
           <DescriptionListTerm>
-            <MappingStatus mapping="approximate" />
+            <MappingStatus cls="approximate" />
           </DescriptionListTerm>
           <DescriptionListDescription>
-            The committed offset was the end of the partition when the backup ran, so the group resumes at the end of the
-            restored partition. Safe, but not tied to one record.
+            The same rule, but the restore's own selection (its start or end time) left out records the group had not read
+            yet. The count is stated. Verification still passed.
           </DescriptionListDescription>
         </DescriptionListGroup>
         <DescriptionListGroup>
           <DescriptionListTerm>
-            <MappingStatus mapping="unavailable" />
+            <MappingStatus cls="unavailable" />
           </DescriptionListTerm>
           <DescriptionListDescription>
-            No restored record corresponds to the position, or the group was not captured. Logweir never guesses: the
-            group is left out, and you reset it yourself if you need it.
+            No restored record corresponds to the position, for a named reason (for example BeforeArchive, ArchiveGap or
+            PartitionNotRestored). Logweir never guesses: a group with such a partition is left out.
           </DescriptionListDescription>
         </DescriptionListGroup>
       </DescriptionList>
@@ -89,103 +126,124 @@ function Legend() {
   );
 }
 
-function ReviewTable({
-  groups,
-  selected,
-  setSelected,
-  target,
-}: {
-  groups: GroupReview[];
-  selected: Set<string>;
-  setSelected: (s: Set<string>) => void;
-  target: string;
-}) {
-  // Wide screens open two groups to show both an exact and a blocked case; phones start closed.
-  const [expanded, setExpanded] = useState<Set<string>>(() =>
-    window.matchMedia?.("(min-width: 992px)").matches ? new Set(["orders-billing", "orders-fraud"]) : new Set(),
-  );
-  const toggle = (set: Set<string>, key: string) => {
-    const next = new Set(set);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    return next;
-  };
+/** One group's partitions, on an inset panel; the same column widths in every group. */
+function Partitions({ g }: { g: ReviewGroup }) {
+  if (g.notCaptured) {
+    return (
+      <div className="lw-inset">
+        <Content component="p" className="lw-inset__note">
+          The backup did not capture this group (<span className="lw-mono">{g.notCaptured}</span>): streams groups are not
+          captured, so there is no position to translate. Reset it by hand if its application moves to the target.
+        </Content>
+      </div>
+    );
+  }
   return (
-    <Table aria-label="Consumer groups and their translated positions" gridBreakPoint="grid-lg" isExpandable>
+    <div className="lw-inset">
+      <Table aria-label={`Partitions of ${g.source}`} variant="compact" gridBreakPoint="grid-md">
+        <Thead>
+          <Tr>
+            <Th width={25}>Partition</Th>
+            <Th width={15} className="lw-right" modifier="nowrap">
+              On the source
+            </Th>
+            <Th width={15} className="lw-right" modifier="nowrap">
+              Resumes at
+            </Th>
+            <Th width={15}>Translation</Th>
+            <Th width={30}>Why</Th>
+          </Tr>
+        </Thead>
+        <Tbody>
+          {g.entries.map((e) => (
+            <Tr key={`${e.topic}-${e.partition}`}>
+              <Td dataLabel="Partition" modifier="nowrap">
+                {e.target_topic} / {e.partition}
+              </Td>
+              <Td dataLabel="On the source" className="lw-num lw-right">
+                {count(e.position)}
+              </Td>
+              <Td dataLabel="Resumes at" className="lw-num lw-right">
+                {e.target_offset === undefined ? "None" : count(e.target_offset)}
+              </Td>
+              <Td dataLabel="Translation">
+                <MappingStatus cls={e.class} title={e.reason} />
+              </Td>
+              <Td dataLabel="Why">
+                <span className="lw-subtle">{why(e)}</span>
+                {e.reason && <div className="lw-reason">{e.reason}</div>}
+              </Td>
+            </Tr>
+          ))}
+        </Tbody>
+      </Table>
+      {g.activeAtCapture && (
+        <Content component="p" className="lw-subtle lw-small lw-inset__note">
+          This group was active when its positions were captured, so a few records it had already read may be read again.
+          None is skipped.
+        </Content>
+      )}
+    </div>
+  );
+}
+
+function selectable(g: ReviewGroup) {
+  return g.verdict === "ready" || g.verdict === "alreadyApplied";
+}
+
+function toggled(set: Set<string>, key: string): Set<string> {
+  const next = new Set(set);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
+function ReviewTable({ groups, selected, setSelected, target }: { groups: ReviewGroup[]; selected: Set<string>; setSelected: (s: Set<string>) => void; target: string }) {
+  // Wide screens open a ready group and a blocked one; phones list the groups instead.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["orders-billing", "orders-fraud"]));
+  return (
+    <Table aria-label="Consumer groups and their translated positions" isExpandable>
       <Thead>
         <Tr>
           <Th screenReaderText="Show partitions" />
           <Th screenReaderText="Include" />
-          <Th>Group</Th>
-          <Th>Partitions</Th>
-          <Th>Translation</Th>
-          <Th>On {target}</Th>
-          <Th>Verdict</Th>
+          <Th width={25}>Group</Th>
+          <Th width={25}>Verdict</Th>
+          <Th width={20}>Positions</Th>
+          <Th width={30}>On {target} now</Th>
         </Tr>
       </Thead>
       {groups.map((g, i) => {
-        const verdict = verdictOf(g);
-        const isOpen = expanded.has(g.group);
+        const isOpen = expanded.has(g.source);
         return (
-          <Tbody key={g.group} isExpanded={isOpen}>
+          <Tbody key={g.source} isExpanded={isOpen}>
             <Tr>
-              <Td
-                expand={{ rowIndex: i, isExpanded: isOpen, onToggle: () => setExpanded(toggle(expanded, g.group)), expandId: `exp-${g.group}` }}
-              />
+              <Td expand={{ rowIndex: i, isExpanded: isOpen, onToggle: () => setExpanded(toggled(expanded, g.source)), expandId: `exp-${g.source}` }} />
               <Td
                 select={{
                   rowIndex: i,
-                  isSelected: selected.has(g.group),
-                  isDisabled: verdict !== "ready",
-                  onSelect: () => setSelected(toggle(selected, g.group)),
+                  isSelected: selected.has(g.source),
+                  isDisabled: !selectable(g),
+                  onSelect: () => setSelected(toggled(selected, g.source)),
                 }}
               />
-              <Td dataLabel="Group" modifier="nowrap">
-                <strong>{g.group}</strong>
-                <div className="lw-subtle lw-small">{g.type === "other" ? "streams group" : `${g.type} group`}</div>
-              </Td>
-              <Td dataLabel="Partitions" className="lw-num">{g.rows.length}</Td>
-              <Td dataLabel="Translation">{summary(g)}</Td>
-              <Td dataLabel={`On ${target}`}>
-                {g.activeMembers > 0 ? (
-                  <Label isCompact status="warning">{g.activeMembers} members connected</Label>
-                ) : (
-                  "No members connected"
-                )}
+              <Td dataLabel="Group">
+                <strong>{g.source}</strong>
+                <div className="lw-subtle lw-small">{g.groupType} group</div>
               </Td>
               <Td dataLabel="Verdict">
-                <VerdictStatus verdict={verdict} />
+                <VerdictStatus verdict={g.verdict} title={g.reason} />
+                {g.reason && g.verdict !== "alreadyApplied" && <div className="lw-reason">{g.reason}</div>}
               </Td>
+              <Td dataLabel="Positions">
+                <Positions entries={g.entries} notCaptured={g.notCaptured} />
+              </Td>
+              <Td dataLabel={`On ${target} now`}>{targetText(g)}</Td>
             </Tr>
             <Tr isExpanded={isOpen}>
-              <Td colSpan={7} noPadding>
+              <Td colSpan={6} noPadding>
                 <ExpandableRowContent>
-                  <Table aria-label={`Partitions of ${g.group}`} variant="compact" gridBreakPoint="grid-md" className="lw-nested">
-                    <Thead>
-                      <Tr>
-                        <Th>Partition</Th>
-                        <Th modifier="wrap">Committed on the source</Th>
-                        <Th modifier="wrap">Resumes at on {target}</Th>
-                        <Th>Translation</Th>
-                        <Th width={40}>Why</Th>
-                      </Tr>
-                    </Thead>
-                    <Tbody>
-                      {g.rows.map((r) => (
-                        <Tr key={`${r.topic}-${r.partition}`}>
-                          <Td dataLabel="Partition">
-                            {r.topic} / {r.partition}
-                          </Td>
-                          <Td dataLabel="Committed on the source" className="lw-num">{r.committed === null ? "Not captured" : count(r.committed)}</Td>
-                          <Td dataLabel={`Resumes at on ${target}`} className="lw-num">{r.target === null ? "None" : count(r.target)}</Td>
-                          <Td dataLabel="Translation">
-                            <MappingStatus mapping={r.mapping} />
-                          </Td>
-                          <Td dataLabel="Why" className="lw-subtle">{r.why}</Td>
-                        </Tr>
-                      ))}
-                    </Tbody>
-                  </Table>
+                  <Partitions g={g} />
                 </ExpandableRowContent>
               </Td>
             </Tr>
@@ -196,63 +254,390 @@ function ReviewTable({
   );
 }
 
-function Apply({ groups, onFinished }: { groups: GroupReview[]; onFinished: () => void }) {
-  const [applied, setApplied] = useState(0);
-  useEffect(() => {
-    if (applied >= groups.length) {
-      onFinished();
-      return undefined;
-    }
-    const t = window.setTimeout(() => setApplied(applied + 1), 900);
-    return () => window.clearTimeout(t);
-  }, [applied, groups.length, onFinished]);
+/** Phones: one block per group, its partitions behind a toggle. */
+function ReviewCards({ groups, selected, setSelected, target }: { groups: ReviewGroup[]; selected: Set<string>; setSelected: (s: Set<string>) => void; target: string }) {
+  const [open, setOpen] = useState<Set<string>>(new Set());
   return (
-    <ol className="lw-checks" aria-live="polite">
-      {groups.map((g, i) => (
-        <li key={g.group}>
-          <span>
-            {g.group}: {g.rows.length} positions
-          </span>
-          {i < applied ? (
-            <Label isCompact status="success">Committed</Label>
-          ) : i === applied ? (
-            <Label isCompact color="blue">Committing</Label>
-          ) : (
-            <Label isCompact color="grey">Waiting</Label>
-          )}
+    <ul className="lw-list" aria-label="Consumer groups and their translated positions">
+      {groups.map((g) => (
+        <li key={g.source} className="lw-group-card">
+          <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} alignItems={{ default: "alignItemsCenter" }} flexWrap={{ default: "nowrap" }} gap={{ default: "gapSm" }}>
+            <FlexItem className="lw-min0">
+              <Checkbox
+                id={`pick-${g.source}`}
+                isChecked={selected.has(g.source)}
+                isDisabled={!selectable(g)}
+                onChange={() => setSelected(toggled(selected, g.source))}
+                label={<strong>{g.source}</strong>}
+              />
+            </FlexItem>
+            <FlexItem>
+              <VerdictStatus verdict={g.verdict} title={g.reason} />
+            </FlexItem>
+          </Flex>
+          <div className="lw-list__meta lw-gap-top">
+            <Positions entries={g.entries} notCaptured={g.notCaptured} /> · {target}: {targetText(g)}
+          </div>
+          {g.reason && g.verdict !== "alreadyApplied" && <div className="lw-reason">{g.reason}</div>}
+          <ExpandableSection
+            toggleText={open.has(g.source) ? "Hide partitions" : `Show ${g.notCaptured ? "why" : plural(g.entries.length, "partition")}`}
+            isExpanded={open.has(g.source)}
+            onToggle={() => setOpen(toggled(open, g.source))}
+          >
+            {g.notCaptured ? (
+              <Content component="p" className="lw-small">
+                Not captured (<span className="lw-mono">{g.notCaptured}</span>): there is no position to translate.
+              </Content>
+            ) : (
+              <CompactList
+                flush
+                label={`Partitions of ${g.source}`}
+                items={g.entries.map((e) => ({
+                  key: `${e.topic}-${e.partition}`,
+                  title: `${e.target_topic} / ${e.partition}`,
+                  meta: `${count(e.position)} → ${e.target_offset === undefined ? "none" : count(e.target_offset)} · ${why(e)}`,
+                  status: <MappingStatus cls={e.class} title={e.reason} />,
+                }))}
+              />
+            )}
+          </ExpandableSection>
         </li>
       ))}
-    </ol>
+    </ul>
   );
 }
 
+function Review({ restore, groups, round, onCheck, checking, selected, setSelected, onContinue }: {
+  restore: Restore;
+  groups: ReviewGroup[];
+  round: number;
+  onCheck: () => void;
+  checking: boolean;
+  selected: Set<string>;
+  setSelected: (s: Set<string>) => void;
+  onContinue: () => void;
+}) {
+  const narrow = useNarrow(991);
+  const navigate = useNavigate();
+  const target = restore.target.clusterRef.name;
+  const by = (v: ReviewGroup["verdict"]) => groups.filter((g) => g.verdict === v);
+  const waiting = by("stopConsumers");
+  const blocked = by("blocked");
+  const chosen = groups.filter((g) => selected.has(g.source));
+  const props = { groups, selected, setSelected, target };
+  return (
+    <PageSection>
+      <Card>
+        <CardHeader>
+          <CardTitle component="h2">{plural(groups.length, "consumer group")} captured with this recovery point</CardTitle>
+        </CardHeader>
+        <CardBody>
+          <ul className="lw-verdicts" aria-label="Groups by verdict">
+            {(["ready", "alreadyApplied", "stopConsumers", "blocked"] as const).map((v) => (
+              <li key={v}>
+                <VerdictStatus verdict={v} />
+                <strong className="lw-num">{by(v).length}</strong>
+              </li>
+            ))}
+          </ul>
+          <Legend />
+          {narrow ? <ReviewCards {...props} /> : <ReviewTable {...props} />}
+          {waiting.length > 0 && (
+            <Alert
+              isInline
+              variant="warning"
+              className="lw-gap-top"
+              title={`${waiting.map((g) => g.source).join(", ")} still ${waiting.length === 1 ? "has" : "have"} consumers connected to ${target}`}
+              actionLinks={
+                <Button variant="link" isInline isLoading={checking} onClick={onCheck}>
+                  {checking ? "Checking" : "Check again"}
+                </Button>
+              }
+            >
+              A switchover now would refuse {waiting.length === 1 ? "it" : "them"} (GroupActive): the broker accepts a position
+              only while a group has no members. Stop those consumers, then check again.
+            </Alert>
+          )}
+          {blocked.length > 0 && (
+            <Alert isInline variant="danger" title={`${blocked.map((g) => g.source).join(" and ")} will be left out`} className="lw-gap-top">
+              Each has a position with no restored record to resume from, or none was captured. Open the group to see why,
+              and reset it by hand on {target} if its application moves there.
+            </Alert>
+          )}
+          {round > 0 && waiting.length === 0 && (
+            <Content component="p" className="lw-subtle lw-small lw-gap-top">
+              Checked again just now: no group has consumers connected to {target}.
+            </Content>
+          )}
+        </CardBody>
+      </Card>
+      <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
+        <FlexItem>
+          <Button variant="primary" isDisabled={chosen.length === 0} onClick={onContinue}>
+            Continue with {plural(chosen.length, "group")}
+          </Button>
+        </FlexItem>
+        <FlexItem>
+          <Button variant="link" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns: restore.namespace, name: restore.name } })}>
+            Back to the restore
+          </Button>
+        </FlexItem>
+      </Flex>
+    </PageSection>
+  );
+}
+
+function Confirm({ restore, chosen, left, onBack, onConfirm }: { restore: Restore; chosen: ReviewGroup[]; left: ReviewGroup[]; onBack: () => void; onConfirm: () => void }) {
+  const [stopped, setStopped] = useState(false);
+  const [showPlan, setShowPlan] = useState(false);
+  const t = themeAOf(restore);
+  const plan = useMemo(() => planYaml(restore, chosen, t.scorecardSha256, t.mappingSha256), [restore, chosen, t.scorecardSha256, t.mappingSha256]);
+  const hash = useSha256(plan);
+  const target = restore.target.clusterRef.name;
+  const entries = chosen.flatMap((g) => g.entries);
+  const c = classCounts(entries);
+  const created = chosen.filter((g) => g.state?.exists === false);
+  return (
+    <PageSection>
+      <Card>
+        <CardHeader>
+          <CardTitle component="h2">
+            Switch {plural(chosen.length, "group")} over on {target}
+          </CardTitle>
+        </CardHeader>
+        <CardBody>
+          <DescriptionList isCompact className="lw-dl" orientation={{ sm: "vertical", md: "horizontal" }}>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Groups</DescriptionListTerm>
+              <DescriptionListDescription>
+                <ul className="lw-plain-list">
+                  {chosen.map((g) => (
+                    <li key={g.source}>
+                      {g.source}
+                      <span className="lw-subtle">
+                        {g.state?.exists === false ? " (created on the target)" : g.verdict === "alreadyApplied" ? " (already at these positions: no commit)" : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Positions</DescriptionListTerm>
+              <DescriptionListDescription>
+                {entries.length}: {c.exact} exact, {c.approximate} approximate
+                {c.skipped > 0 && ` (${plural(c.skipped, "unread record")} left out by the restore's end time)`}
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Each partition</DescriptionListTerm>
+              <DescriptionListDescription>
+                Committed only if the group has no position there now (<span className="lw-mono">expected: none</span>). A group
+                that moved since this review is refused whole (TargetPositionsChanged) and nothing is committed for it.
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Saved first</DescriptionListTerm>
+              <DescriptionListDescription>
+                Every group's current positions on {target}, in the signed switchover record, before any commit.
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Left out</DescriptionListTerm>
+              <DescriptionListDescription>
+                {left.length === 0
+                  ? "None"
+                  : left.map((g) => (
+                      <div key={g.source}>
+                        {g.source} <span className="lw-reason">{g.reason ?? "not chosen"}</span>
+                      </div>
+                    ))}
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Approval</DescriptionListTerm>
+              <DescriptionListDescription>
+                {restore.namespace} uses one-person confirmation: confirming here approves it. A two-person namespace would
+                show a second approver every group and position first.
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Bound to</DescriptionListTerm>
+              <DescriptionListDescription>
+                <div>
+                  Restore {restore.name}'s signed scorecard <Ident value={t.scorecardSha256} label="scorecard sha256" />
+                </div>
+                <div>
+                  and its positions mapping <Ident value={t.mappingSha256} label="positions mapping sha256" />
+                </div>
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+            <DescriptionListGroup>
+              <DescriptionListTerm>Plan</DescriptionListTerm>
+              <DescriptionListDescription>
+                <Ident value={hash} label="switchover plan sha256" />
+              </DescriptionListDescription>
+            </DescriptionListGroup>
+          </DescriptionList>
+          <ExpandableSection className="lw-gap-top" toggleText={showPlan ? "Hide the plan" : "Show the plan"} isExpanded={showPlan} onToggle={(_e, o) => setShowPlan(o)}>
+            <CodeBlock>
+              <CodeBlockCode>{plan}</CodeBlockCode>
+            </CodeBlock>
+          </ExpandableSection>
+          <Alert isInline variant="info" title="Undoing a switchover has limits" className="lw-gap-top">
+            A rollback plan built from the record puts the saved positions back only while no consumer has committed on{" "}
+            {target} since; after that it is refused and names the records read.
+            {created.length > 0 &&
+              ` ${created.map((g) => g.source).join(", ")} had no position before, and an absent position cannot be put back through Logweir.`}
+          </Alert>
+          <Checkbox
+            id="stopped"
+            className="lw-gap-top"
+            isChecked={stopped}
+            onChange={(_e, on) => setStopped(on)}
+            label="The consumers of these groups stay stopped until the switchover finishes."
+          />
+        </CardBody>
+      </Card>
+      <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
+        <FlexItem>
+          <Button variant="primary" icon={<ExchangeAltIcon />} isDisabled={!stopped || hash.startsWith("computing")} onClick={onConfirm}>
+            Switch over {plural(chosen.length, "group")}
+          </Button>
+        </FlexItem>
+        <FlexItem>
+          <Button variant="secondary" onClick={onBack}>
+            Back
+          </Button>
+        </FlexItem>
+      </Flex>
+    </PageSection>
+  );
+}
+
+function Done({ restore, chosen, left, onFinished }: { restore: Restore; chosen: ReviewGroup[]; left: ReviewGroup[]; onFinished: () => void }) {
+  const navigate = useNavigate();
+  const [done, setDone] = useState(0);
+  const t = themeAOf(restore);
+  const runId = "01M3" + t.mappingSha256.slice(7, 29).toUpperCase();
+  const status = switchoverStatus(chosen, done, runId);
+  const finished = status.phase === "Succeeded";
+  const target = restore.target.clusterRef.name;
+  useEffect(() => {
+    if (done >= chosen.length) {
+      onFinished();
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setDone(done + 1), done === 0 ? 1100 : 800);
+    return () => window.clearTimeout(timer);
+  }, [done, chosen.length, onFinished]);
+  const n = status.counts;
+  const narrow = useNarrow();
+  const note = (g: (typeof status.groups)[number]) =>
+    g.outcome === null ? "Waiting its turn" : g.created ? `Group created on ${target}` : g.outcome === "alreadyApplied" ? "Positions already equal the plan; nothing committed" : "Prior positions recorded, then committed";
+  return (
+    <PageSection>
+      <Card>
+        <CardHeader>
+          <Flex alignItems={{ default: "alignItemsCenter" }} gap={{ default: "gapSm" }}>
+            <CardTitle component="h2">Switchover {restore.name}-sw1</CardTitle>
+            <PhaseStatus phase={status.phase} />
+          </Flex>
+        </CardHeader>
+        <CardBody>
+          {narrow ? (
+            <CompactList
+              flush
+              label="Outcome per group"
+              items={status.groups.map((g) => ({
+                key: g.source,
+                title: g.source,
+                meta: `${plural(g.partitions, "partition")} · ${note(g)}`,
+                status: <OutcomeStatus outcome={g.outcome} reason={g.reason} />,
+              }))}
+            />
+          ) : (
+          <Table aria-label="Outcome per group" variant="compact" aria-live="polite">
+            <Thead>
+              <Tr>
+                <Th width={30}>Group</Th>
+                <Th width={25}>Outcome</Th>
+                <Th width={15} className="lw-right">
+                  Partitions
+                </Th>
+                <Th width={30}>Note</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {status.groups.map((g) => (
+                <Tr key={g.source}>
+                  <Td dataLabel="Group">{g.source === g.target ? g.source : `${g.source} → ${g.target}`}</Td>
+                  <Td dataLabel="Outcome">
+                    <OutcomeStatus outcome={g.outcome} reason={g.reason} />
+                  </Td>
+                  <Td dataLabel="Partitions" className="lw-num lw-right">
+                    {g.partitions}
+                  </Td>
+                  <Td dataLabel="Note" className="lw-subtle">
+                    {note(g)}
+                  </Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+          )}
+          <Content component="p" className="lw-subtle lw-small lw-gap-top">
+            {n.applied} applied · {n.alreadyApplied} already applied · {n.refused} refused · {n.failed} failed · {n.untouched} not reached yet
+          </Content>
+          {finished && (
+            <>
+              <DescriptionList isCompact className="lw-dl lw-gap-top" orientation={{ sm: "vertical", md: "horizontal" }}>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Switchover record</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    <Ident value={status.evidence?.recordKey ?? ""} label="switchover record key" />
+                    <div className="lw-subtle lw-small">Signed; the controller verified it. Every partition's position before and after.</div>
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              </DescriptionList>
+              <Alert isInline variant="success" title={`Start your consumers on ${target}`} className="lw-gap-top">
+                {chosen.map((g) => g.source).join(", ")} now resume at the translated positions.
+                {left.length > 0 && ` Still to do by hand: ${left.map((g) => g.source).join(", ")}.`}
+              </Alert>
+            </>
+          )}
+        </CardBody>
+      </Card>
+      {finished && (
+        <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
+          <FlexItem>
+            <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns: restore.namespace, name: restore.name } })}>
+              Back to the restore
+            </Button>
+          </FlexItem>
+          <FlexItem>
+            <Button variant="link" onClick={() => void navigate({ to: "/$ns", params: { ns: restore.namespace } })}>
+              Overview
+            </Button>
+          </FlexItem>
+        </Flex>
+      )}
+    </PageSection>
+  );
+}
+
+const STEPS = ["Review positions", "Confirm", "Switched over"];
+
 export function Cutover() {
   const { ns, name } = useParams({ from: "/$ns/restores/$name/cutover" });
-  const navigate = useNavigate();
   const restore = useRestore(ns, name);
-  const [groups, setGroups] = useState<GroupReview[]>(() => reviewFor(name));
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(groups.filter((g) => verdictOf(g) === "ready").map((g) => g.group)));
-  const [step, setStep] = useState<Step>("review");
+  const [round, setRound] = useState(0);
   const [checking, setChecking] = useState(false);
-  const [stopped, setStopped] = useState(false);
-  const [typed, setTyped] = useState("");
+  const [step, setStep] = useState<Step>("review");
+  const groups = useMemo(() => (restore.data ? reviewFor(restore.data, round) : []), [restore.data, round]);
+  const [selected, setSelected] = useState<Set<string> | null>(null);
   const [finished, setFinished] = useState(false);
-  const markFinished = useCallback(() => setFinished(true), []);
-
-  const target = restore.data?.target.clusterRef.name ?? "orders-dr";
-  const chosen = useMemo(() => groups.filter((g) => selected.has(g.group)), [groups, selected]);
-  const waiting = groups.filter((g) => verdictOf(g) === "stopConsumers");
-  const blocked = groups.filter((g) => verdictOf(g) === "blocked");
-  const positions = chosen.flatMap((g) => g.rows);
-
-  const checkAgain = () => {
-    setChecking(true);
-    window.setTimeout(() => {
-      setGroups((gs) => gs.map((g) => ({ ...g, activeMembers: 0 })));
-      setSelected((s) => new Set([...s, ...waiting.map((g) => g.group)]));
-      setChecking(false);
-    }, 1400);
-  };
+  const picked = selected ?? new Set(groups.filter(selectable).map((g) => g.source));
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
@@ -262,220 +647,88 @@ export function Cutover() {
     </Breadcrumb>
   );
 
-  if (restore.isPending) {
+  if (restore.isPending || restore.isError) {
     return (
       <>
         <PageHeader title="Switch consumers over" breadcrumb={breadcrumb} />
-        <PageSection>
-          <LoadingRows rows={6} />
-        </PageSection>
+        <PageSection>{restore.isPending ? <LoadingRows rows={6} /> : <ErrorState error={restore.error} />}</PageSection>
       </>
     );
   }
-  if (restore.isError) {
+
+  const r = restore.data;
+  const t = themeAOf(r);
+  const target = r.target.clusterRef.name;
+  if (t.mapping !== "written") {
+    const [title, body] =
+      t.mapping === "sampled"
+        ? ["No positions to switch over", "This restore was verified on a sample. Positions are mapped only by a complete verification (VerificationNotComplete); restore again with complete verification to switch consumers over."]
+        : t.mapping === "scratch"
+          ? ["A clone cannot be switched over", "This restore is a temporary clone, deleted when it expires (RestoreIsScratch)."]
+          : ["The restore has not finished", "Positions are mapped when the restore passes its complete verification (RestoreNotSucceeded)."];
     return (
       <>
         <PageHeader title="Switch consumers over" breadcrumb={breadcrumb} />
         <PageSection>
-          <ErrorState error={restore.error} />
+          <Card>
+            <Empty title={title}>{body}</Empty>
+          </Card>
         </PageSection>
       </>
     );
   }
 
+  const chosen = groups.filter((g) => picked.has(g.source) && selectable(g));
+  const left = groups.filter((g) => !chosen.includes(g));
   const stepIndex = step === "review" ? 0 : step === "confirm" ? 1 : 2;
-  const steps = ["Review positions", "Confirm", "Switched over"];
+
+  const checkAgain = () => {
+    setChecking(true);
+    window.setTimeout(() => {
+      const next = reviewFor(r, round + 1);
+      // Groups that became ready join the selection; nothing chosen is dropped silently.
+      setSelected(new Set([...picked, ...next.filter((g) => g.verdict === "ready").map((g) => g.source)]));
+      setRound(round + 1);
+      setChecking(false);
+    }, 1200);
+  };
 
   return (
     <>
       <PageHeader
         title="Switch consumers over"
         breadcrumb={breadcrumb}
-        description={`Move consumer groups to the restored topics on ${target}. Logweir translates each committed position, checks the groups are stopped, then commits. Nothing happens to your consumers until you confirm.`}
+        description={`Move consumer groups to the restored topics on ${target}. Each captured position was mapped by the restore's complete verification; the groups must be stopped. Nothing changes on ${target} until you confirm.`}
       />
       <PageSection>
         <ProgressStepper isCenterAligned aria-label="Cutover steps" className="lw-stepper">
-          {steps.map((s, i) => (
+          {STEPS.map((s, i) => (
             <ProgressStep
               key={s}
               id={`co-${i}`}
               titleId={`co-${i}-t`}
               variant={i < stepIndex || (i === 2 && finished) ? "success" : i === stepIndex ? "info" : "pending"}
-              isCurrent={i === stepIndex}
+              isCurrent={i === stepIndex && !finished}
             >
               {s}
             </ProgressStep>
           ))}
         </ProgressStepper>
       </PageSection>
-
       {step === "review" && (
-        <PageSection>
-          <Card>
-            <CardHeader>
-              <CardTitle component="h2">
-                {groups.length} consumer groups were captured with this recovery point
-              </CardTitle>
-            </CardHeader>
-            <CardBody>
-              <Flex gap={{ default: "gapMd" }} className="lw-chips">
-                <span><VerdictStatus verdict="ready" /> {groups.filter((g) => verdictOf(g) === "ready").length} can switch now</span>
-                <span><VerdictStatus verdict="stopConsumers" /> {waiting.length} still have consumers connected</span>
-                <span><VerdictStatus verdict="blocked" /> {blocked.length} cannot be switched</span>
-              </Flex>
-              <Legend />
-              <ReviewTable groups={groups} selected={selected} setSelected={setSelected} target={target} />
-              {waiting.length > 0 && (
-                <Alert
-                  isInline
-                  variant="warning"
-                  title={`${waiting.map((g) => g.group).join(", ")} still ${waiting.length === 1 ? "has" : "have"} consumers connected to ${target}`}
-                  actionLinks={
-                    <Button variant="link" isInline isLoading={checking} onClick={checkAgain}>
-                      {checking ? "Checking" : "Check again"}
-                    </Button>
-                  }
-                >
-                  A group is only switched while no consumer is connected, so a live group is never moved under its feet.
-                  Stop those consumers, then check again.
-                </Alert>
-              )}
-              {blocked.length > 0 && (
-                <Alert isInline variant="danger" title={`${blocked.map((g) => g.group).join(" and ")} will be left out`} className="lw-gap-top">
-                  Each has a position with no restored record to resume from. Open the group above to see why. Reset it by
-                  hand on {target} if its application needs to run there.
-                </Alert>
-              )}
-            </CardBody>
-          </Card>
-          <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
-            <FlexItem>
-              <Button variant="primary" isDisabled={chosen.length === 0} onClick={() => setStep("confirm")}>
-                Continue with {chosen.length} {chosen.length === 1 ? "group" : "groups"}
-              </Button>
-            </FlexItem>
-            <FlexItem>
-              <Button variant="link" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns, name } })}>
-                Back to the restore
-              </Button>
-            </FlexItem>
-          </Flex>
-        </PageSection>
+        <Review
+          restore={r}
+          groups={groups}
+          round={round}
+          onCheck={checkAgain}
+          checking={checking}
+          selected={picked}
+          setSelected={setSelected}
+          onContinue={() => setStep("confirm")}
+        />
       )}
-
-      {step === "confirm" && (
-        <PageSection>
-          <Card>
-            <CardHeader>
-              <CardTitle component="h2">
-                Switch {chosen.length} {chosen.length === 1 ? "group" : "groups"} over on {target}
-              </CardTitle>
-            </CardHeader>
-            <CardBody>
-              <DescriptionList isHorizontal isCompact horizontalTermWidthModifier={{ default: "18ch" }}>
-                <DescriptionListGroup>
-                  <DescriptionListTerm>Groups</DescriptionListTerm>
-                  <DescriptionListDescription>{chosen.map((g) => g.group).join(", ")}</DescriptionListDescription>
-                </DescriptionListGroup>
-                <DescriptionListGroup>
-                  <DescriptionListTerm>Positions committed</DescriptionListTerm>
-                  <DescriptionListDescription>
-                    {positions.length} ({positions.filter((p) => p.mapping === "exact").length} exact,{" "}
-                    {positions.filter((p) => p.mapping === "approximate").length} approximate)
-                  </DescriptionListDescription>
-                </DescriptionListGroup>
-                <DescriptionListGroup>
-                  <DescriptionListTerm>Saved first</DescriptionListTerm>
-                  <DescriptionListDescription>
-                    The groups' current positions on {target}, kept in the switchover record {name}-switchover.
-                  </DescriptionListDescription>
-                </DescriptionListGroup>
-                <DescriptionListGroup>
-                  <DescriptionListTerm>Left out</DescriptionListTerm>
-                  <DescriptionListDescription>
-                    {groups.filter((g) => !selected.has(g.group)).map((g) => g.group).join(", ") || "None"}
-                  </DescriptionListDescription>
-                </DescriptionListGroup>
-                <DescriptionListGroup>
-                  <DescriptionListTerm>Approval</DescriptionListTerm>
-                  <DescriptionListDescription>One-person confirmation in {ns}: you confirm here.</DescriptionListDescription>
-                </DescriptionListGroup>
-              </DescriptionList>
-              <Alert isInline variant="info" title="Undoing a switchover has a limit" className="lw-gap-top">
-                The saved positions can be put back only until a consumer commits on {target}. Once your applications run,
-                the switchover record is a history of what was there, not an undo.
-              </Alert>
-              <Title headingLevel="h3" size="md" className="lw-gap-top">
-                Confirm
-              </Title>
-              <Checkbox
-                id="stopped"
-                isChecked={stopped}
-                onChange={(_e, on) => setStopped(on)}
-                label="The consumers of these groups are stopped, and stay stopped until this finishes."
-              />
-              <FormGroup label={`Type ${target} to confirm`} fieldId="confirm-target" className="lw-gap-top lw-confirm">
-                <TextInput id="confirm-target" value={typed} onChange={(_e, v) => setTyped(v)} autoComplete="off" />
-                <FormHelperText>
-                  <HelperText>
-                    <HelperTextItem>The cluster whose consumer group positions change.</HelperTextItem>
-                  </HelperText>
-                </FormHelperText>
-              </FormGroup>
-            </CardBody>
-          </Card>
-          <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
-            <FlexItem>
-              <Button variant="danger" isDisabled={!stopped || typed !== target} onClick={() => setStep("done")}>
-                Switch over {chosen.length} {chosen.length === 1 ? "group" : "groups"}
-              </Button>
-            </FlexItem>
-            <FlexItem>
-              <Button variant="secondary" onClick={() => setStep("review")}>
-                Back
-              </Button>
-            </FlexItem>
-          </Flex>
-        </PageSection>
-      )}
-
-      {step === "done" && (
-        <PageSection>
-          <Card>
-            <CardHeader>
-              <CardTitle component="h2">{finished ? "Switched over" : "Committing positions"}</CardTitle>
-            </CardHeader>
-            <CardBody>
-              <Apply groups={chosen} onFinished={markFinished} />
-              {finished && (
-                <Alert isInline variant="success" title={`Start your consumers on ${target}`}>
-                  {chosen.map((g) => g.group).join(" and ")} now resume at the translated positions. The switchover record{" "}
-                  {name}-switchover lists every position before and after, and it is kept with the restore's evidence.
-                </Alert>
-              )}
-              {finished && blocked.length > 0 && (
-                <Content component="p" className="lw-gap-top">
-                  Still to do by hand: {blocked.map((g) => g.group).join(", ")}.
-                </Content>
-              )}
-            </CardBody>
-          </Card>
-          {finished && (
-            <Flex className="lw-gap-top" gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
-              <FlexItem>
-                <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns, name } })}>
-                  Back to the restore
-                </Button>
-              </FlexItem>
-              <FlexItem>
-                <Button variant="link" onClick={() => void navigate({ to: "/$ns", params: { ns } })}>
-                  Overview
-                </Button>
-              </FlexItem>
-            </Flex>
-          )}
-        </PageSection>
-      )}
+      {step === "confirm" && <Confirm restore={r} chosen={chosen} left={left} onBack={() => setStep("review")} onConfirm={() => setStep("done")} />}
+      {step === "done" && <Done restore={r} chosen={chosen} left={left} onFinished={() => setFinished(true)} />}
     </>
   );
 }

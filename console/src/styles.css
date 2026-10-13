@@ -1,24 +1,247 @@
-/* The console's own styles: a thin layer over PatternFly 6. Every colour and
-   length is a PatternFly token, so light, dark and high-contrast follow it. */
+/* The console's own styles: a thin layer over PatternFly 6.
+   1. Theme tokens: Logweir's accent (#0b5cad) through PatternFly's brand tokens,
+      and four surface levels (masthead, sidebar, page, card) plus raised menus,
+      for light and dark. Components keep reading PatternFly's tokens.
+   2. A few console classes (`lw-*`). Every colour and length they use is a token. */
 
-body {
-  background: var(--pf-t--global--background--color--secondary--default);
+/* ------------------------------------------------------------ theme tokens */
+:root {
+  --pf-t--global--color--brand--default: #0b5cad;
+  --pf-t--global--color--brand--hover: #084a8c;
+  --pf-t--global--color--brand--clicked: #06396b;
+  --pf-t--global--color--brand--accent--default: #0b5cad;
+  --pf-t--global--color--brand--accent--hover: #084a8c;
+  --pf-t--global--color--brand--accent--clicked: #06396b;
+  --pf-t--global--color--brand--subtle--default: #e8f1fb;
+  --pf-t--global--color--brand--subtle--hover: #d3e4f7;
+  --pf-t--global--color--brand--subtle--clicked: #d3e4f7;
+  --pf-t--global--border--color--brand--default: #0b5cad;
+  --pf-t--global--border--color--brand--hover: #084a8c;
+  --pf-t--global--border--color--brand--clicked: #06396b;
+  --pf-t--global--border--color--brand--accent--default: #0b5cad;
+  --pf-t--global--border--color--brand--subtle--default: #9cc2ea;
+  --pf-t--global--icon--color--brand--default: #0b5cad;
+  --pf-t--global--icon--color--brand--hover: #084a8c;
+  --pf-t--global--icon--color--brand--clicked: #06396b;
+  --pf-t--global--icon--color--brand--accent--default: #0b5cad;
+  --pf-t--global--text--color--brand--default: #0b5cad;
+  --pf-t--global--text--color--brand--hover: #084a8c;
+  --pf-t--global--text--color--brand--clicked: #06396b;
+  --pf-t--global--text--color--link--default: #0b5cad;
+  --pf-t--global--text--color--link--hover: #084a8c;
+  --pf-t--global--text--color--link--visited: #0b5cad;
+  --pf-t--global--focus-ring--color--default: #0b5cad;
+  /* Links: a solid line where PatternFly draws one; lists and tables drop it (below). */
+  --pf-t--global--text-decoration--link--style--default: solid;
+  --pf-t--global--text-decoration--link--style--hover: solid;
+
+  /* Surfaces, from the outside in. */
+  --lw-masthead: #ffffff;
+  --lw-masthead-border: #e1e5ea;
+  --lw-sidebar: #eef1f4;
+  --lw-page: #f7f8fa;
+  --lw-page-border: #e1e5ea;
+  --pf-t--global--background--color--secondary--default: var(--lw-sidebar);
+  --pf-t--global--background--color--floating--secondary--default: var(--lw-sidebar);
+  --pf-t--global--background--color--primary--default: #ffffff;
+  --pf-t--global--background--color--primary--hover: #f2f4f7;
+  --pf-t--global--background--color--primary--clicked: #e9edf2;
+  --pf-t--global--background--color--floating--default: #ffffff;
+  --pf-t--global--border--color--subtle: #dde2e8;
+  --pf-t--global--border--color--default: #dde2e8;
+  --lw-card-shadow: 0 1px 2px rgb(16 24 40 / 0.06);
+  --lw-inset: #f3f5f8;
+
+  /* Status, one set for labels, the run strip and counts. */
+  --lw-ok: #3d7317;
+  --lw-warn: #c58a00;
+  --lw-bad: #b1380b;
+  --lw-run: #3f86d0;
+  --lw-ok-tint: #eef6e8;
+  --lw-warn-tint: #fdf5dd;
+  --lw-bad-tint: #fcede7;
+  --lw-info-tint: #e8f1fb;
+  --lw-neutral-border: #a8b0ba;
+  --lw-on-status: #ffffff;
+  --lw-nav-current-text: #0b5cad;
 }
 
+:root.pf-v6-theme-dark {
+  /* The accent stays strong in dark mode: white text on it is 4.8:1. */
+  --pf-t--global--color--brand--default: #2a72c8;
+  --pf-t--global--color--brand--hover: #2366b5;
+  --pf-t--global--color--brand--clicked: #1d5aa0;
+  --pf-t--global--color--brand--accent--default: #5c9de3;
+  --pf-t--global--color--brand--accent--hover: #7db0e8;
+  --pf-t--global--color--brand--accent--clicked: #7db0e8;
+  --pf-t--global--color--brand--subtle--default: #173556;
+  --pf-t--global--color--brand--subtle--hover: #1d4069;
+  --pf-t--global--color--brand--subtle--clicked: #1d4069;
+  --pf-t--global--border--color--brand--default: #5c9de3;
+  --pf-t--global--border--color--brand--hover: #7db0e8;
+  --pf-t--global--border--color--brand--clicked: #7db0e8;
+  --pf-t--global--border--color--brand--accent--default: #5c9de3;
+  --pf-t--global--border--color--brand--subtle--default: #2a5d93;
+  --pf-t--global--icon--color--brand--default: #8cbdf0;
+  --pf-t--global--icon--color--brand--hover: #b5d5f6;
+  --pf-t--global--icon--color--brand--clicked: #b5d5f6;
+  --pf-t--global--icon--color--brand--accent--default: #8cbdf0;
+  --pf-t--global--text--color--brand--default: #8cbdf0;
+  --pf-t--global--text--color--brand--hover: #b5d5f6;
+  --pf-t--global--text--color--brand--clicked: #b5d5f6;
+  --pf-t--global--text--color--on-brand--default: #ffffff;
+  --pf-t--global--text--color--on-brand--hover: #ffffff;
+  --pf-t--global--text--color--on-brand--clicked: #ffffff;
+  --pf-t--global--icon--color--on-brand--default: #ffffff;
+  --pf-t--global--icon--color--on-brand--hover: #ffffff;
+  --pf-t--global--icon--color--on-brand--clicked: #ffffff;
+  --pf-t--global--text--color--link--default: #8cbdf0;
+  --pf-t--global--text--color--link--hover: #b5d5f6;
+  --pf-t--global--text--color--link--visited: #8cbdf0;
+  --pf-t--global--focus-ring--color--default: #8cbdf0;
+
+  --lw-masthead: #0e1013;
+  --lw-masthead-border: #23282e;
+  --lw-sidebar: #15181c;
+  --lw-page: #1b1f24;
+  --lw-page-border: #2a2f36;
+  --pf-t--global--background--color--primary--default: #23282e;
+  --pf-t--global--background--color--primary--hover: #2b3037;
+  --pf-t--global--background--color--primary--clicked: #323840;
+  --pf-t--global--background--color--floating--default: #2d333a;
+  --pf-t--global--background--color--floating--hover: #363c44;
+  --pf-t--global--background--color--floating--clicked: #363c44;
+  --pf-t--global--background--color--control--default: #1d2126;
+  --pf-t--global--border--color--subtle: #343a42;
+  --pf-t--global--border--color--default: #3a4048;
+  --lw-card-shadow: none;
+  --lw-inset: #1d2126;
+
+  --lw-ok: #5ba346;
+  --lw-warn: #d9a527;
+  --lw-bad: #e0613a;
+  --lw-run: #4d93e0;
+  --lw-ok-tint: rgb(91 163 70 / 0.16);
+  --lw-warn-tint: rgb(217 165 39 / 0.14);
+  --lw-bad-tint: rgb(224 97 58 / 0.16);
+  --lw-info-tint: rgb(77 147 224 / 0.16);
+  --lw-neutral-border: #5f6873;
+  --lw-on-status: #ffffff;
+  --lw-nav-current-text: #ffffff;
+}
+
+body {
+  background: var(--lw-sidebar);
+}
+
+/* --------------------------------------------------------------- surfaces */
+.pf-v6-c-masthead {
+  --pf-v6-c-masthead--BackgroundColor: var(--lw-masthead);
+  border-block-end: 1px solid var(--lw-masthead-border);
+}
+.pf-v6-c-page {
+  --pf-v6-c-page__main-container--BackgroundColor: var(--lw-page);
+  --pf-v6-c-page__main-container--BorderColor: var(--lw-page-border);
+  --pf-v6-c-page__main-section--BackgroundColor: transparent;
+}
+.pf-v6-c-card {
+  box-shadow: var(--lw-card-shadow);
+}
+
+/* ------------------------------------------------------------------ links */
+/* In tables, lists, breadcrumbs and card footers a link is the row's name or
+   its only action, so it needs no line until hover. Inline links in prose keep it. */
+.pf-v6-c-table a,
+.pf-v6-c-breadcrumb a,
+.pf-v6-c-card__footer a,
+.lw-plain-links a,
+.lw-list a {
+  text-decoration-line: none;
+}
+.pf-v6-c-table a:hover,
+.pf-v6-c-breadcrumb a:hover,
+.pf-v6-c-card__footer a:hover,
+.lw-plain-links a:hover,
+.lw-list a:hover {
+  text-decoration-line: underline;
+}
+
+/* ----------------------------------------------------------------- labels */
+/* One status style: an outline label with a light tint, the status colour on
+   its border and icon, and the regular text colour, in both themes. */
+.pf-v6-c-label.pf-m-outline {
+  --pf-v6-c-label--Color: var(--pf-t--global--text--color--regular);
+  --pf-v6-c-label--BorderColor: var(--lw-neutral-border);
+  --pf-v6-c-label__icon--Color: var(--pf-t--global--icon--color--subtle);
+}
+.pf-v6-c-label.pf-m-outline.pf-m-success {
+  --pf-v6-c-label--BorderColor: var(--lw-ok);
+  --pf-v6-c-label__icon--Color: var(--lw-ok);
+  --pf-v6-c-label--BackgroundColor: var(--lw-ok-tint);
+}
+.pf-v6-c-label.pf-m-outline.pf-m-warning {
+  --pf-v6-c-label--BorderColor: var(--lw-warn);
+  --pf-v6-c-label__icon--Color: var(--lw-warn);
+  --pf-v6-c-label--BackgroundColor: var(--lw-warn-tint);
+}
+.pf-v6-c-label.pf-m-outline.pf-m-danger {
+  --pf-v6-c-label--BorderColor: var(--lw-bad);
+  --pf-v6-c-label__icon--Color: var(--lw-bad);
+  --pf-v6-c-label--BackgroundColor: var(--lw-bad-tint);
+}
+.pf-v6-c-label.pf-m-outline.pf-m-info,
+.pf-v6-c-label.pf-m-outline.pf-m-blue {
+  --pf-v6-c-label--BorderColor: var(--lw-run);
+  --pf-v6-c-label__icon--Color: var(--lw-run);
+  --pf-v6-c-label--BackgroundColor: var(--lw-info-tint);
+}
+.pf-v6-c-label .pf-v6-c-spinner {
+  --pf-v6-c-spinner--Color: var(--lw-run);
+}
+
+/* ----------------------------------------------------------------- alerts */
+/* Inline alerts: the status colour on the border and icon, a light tint, and
+   the regular text colour for the title, so warnings do not glare in dark mode. */
+.pf-v6-c-alert.pf-m-inline {
+  --pf-v6-c-alert__title--Color: var(--pf-t--global--text--color--regular);
+}
+.pf-v6-c-alert.pf-m-inline.pf-m-success {
+  --pf-v6-c-alert--BorderColor: var(--lw-ok);
+  --pf-v6-c-alert__icon--Color: var(--lw-ok);
+  --pf-v6-c-alert--BackgroundColor: var(--lw-ok-tint);
+}
+.pf-v6-c-alert.pf-m-inline.pf-m-warning {
+  --pf-v6-c-alert--BorderColor: var(--lw-warn);
+  --pf-v6-c-alert__icon--Color: var(--lw-warn);
+  --pf-v6-c-alert--BackgroundColor: var(--lw-warn-tint);
+}
+.pf-v6-c-alert.pf-m-inline.pf-m-danger {
+  --pf-v6-c-alert--BorderColor: var(--lw-bad);
+  --pf-v6-c-alert__icon--Color: var(--lw-bad);
+  --pf-v6-c-alert--BackgroundColor: var(--lw-bad-tint);
+}
+.pf-v6-c-alert.pf-m-inline.pf-m-info {
+  --pf-v6-c-alert--BorderColor: var(--lw-run);
+  --pf-v6-c-alert__icon--Color: var(--lw-run);
+  --pf-v6-c-alert--BackgroundColor: var(--lw-info-tint);
+}
+
+/* ------------------------------------------------------------------ utils */
+.lw-right {
+  text-align: end;
+}
 .lw-subtle {
   color: var(--pf-t--global--text--color--subtle);
 }
 .lw-small {
   font-size: var(--pf-t--global--font--size--sm);
 }
+.lw-mono {
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--sm);
+}
 .lw-break {
   overflow-wrap: anywhere;
-}
-.lw-ellipsis {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .lw-min0 {
   min-width: 0;
@@ -41,6 +264,14 @@ body {
     display: inline;
   }
 }
+.lw-inline-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--xs);
+}
+.lw-inline-icon svg {
+  color: var(--pf-t--global--icon--color--subtle);
+}
 
 /* ---------------------------------------------------------------- masthead */
 .lw-logo {
@@ -51,10 +282,10 @@ body {
   text-decoration: none;
 }
 .lw-logo__tile {
-  fill: var(--pf-t--global--color--brand--default);
+  fill: #0b5cad;
 }
 .lw-logo__weir {
-  fill: var(--pf-t--global--text--color--on-brand--default);
+  fill: #ffffff;
 }
 .lw-logo__word {
   font-family: var(--pf-t--global--font--family--heading);
@@ -68,11 +299,146 @@ body {
 .pf-v6-c-masthead {
   --pf-v6-c-masthead__logo--Width: auto;
 }
+.lw-prototype {
+  --pf-v6-c-label--BorderColor: var(--pf-t--global--border--color--default);
+  color: var(--pf-t--global--text--color--subtle);
+}
+.lw-user-toggle .lw-avatar {
+  margin-inline-end: var(--pf-t--global--spacer--sm);
+}
+.lw-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  background: var(--pf-t--global--color--brand--default);
+  color: var(--pf-t--global--text--color--on-brand--default);
+  font-size: var(--pf-t--global--font--size--xs);
+  font-weight: var(--pf-t--global--font--weight--body--bold);
+  letter-spacing: 0.02em;
+}
+.lw-user-head {
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  max-width: 18rem;
+}
+.lw-user-head__roles {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
 @media (max-width: 575px) {
   .lw-ns-toggle__label,
   .lw-logo__word {
     display: none;
   }
+}
+
+/* ------------------------------------------------------------------- nav */
+.pf-v6-c-nav {
+  --pf-v6-c-nav__section-title--FontSize: var(--pf-t--global--font--size--xs);
+  --pf-v6-c-nav__section-title--FontWeight: var(--pf-t--global--font--weight--body--bold);
+  --pf-v6-c-nav__section-title--Color: var(--pf-t--global--text--color--subtle);
+  --pf-v6-c-nav__section-title--PaddingBlockEnd: var(--pf-t--global--spacer--xs);
+  --pf-v6-c-nav--RowGap: var(--pf-t--global--spacer--lg);
+  --pf-v6-c-nav__list--RowGap: var(--pf-t--global--spacer--xs);
+  --pf-v6-c-nav__link--AlignItems: center;
+  --pf-v6-c-nav__link--Color: var(--pf-t--global--text--color--regular);
+  --pf-v6-c-nav__link--m-current--BackgroundColor: var(--pf-t--global--color--brand--subtle--default);
+  --pf-v6-c-nav__link--m-current--Color: var(--lw-nav-current-text);
+  --pf-v6-c-nav__link--m-current__link-icon--Color: var(--pf-t--global--icon--color--brand--default);
+  --pf-v6-c-nav__item--accent--color: var(--pf-t--global--color--brand--accent--default);
+  --pf-v6-c-nav__item--accent--size: 3px;
+}
+.pf-v6-c-nav__section-title {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.pf-v6-c-nav__link-icon {
+  color: var(--pf-t--global--icon--color--subtle);
+}
+.pf-v6-c-nav__link.pf-m-current {
+  font-weight: var(--pf-t--global--font--weight--body--bold);
+}
+.pf-v6-c-nav__link-text {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--sm);
+  min-width: 0;
+}
+.lw-nav__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lw-count {
+  flex: none;
+  min-width: 1.5rem;
+  padding: 0 var(--pf-t--global--spacer--xs);
+  border-radius: 999px;
+  font-size: var(--pf-t--global--font--size--xs);
+  font-weight: var(--pf-t--global--font--weight--body--bold);
+  line-height: 1.25rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--lw-on-status);
+  background: var(--pf-t--global--color--brand--default);
+}
+.lw-count--danger {
+  background: var(--lw-bad);
+}
+.lw-count--warning {
+  background: var(--lw-warn);
+  color: #1f1f1f;
+}
+
+/* The icon rail: the sidebar collapsed on a wide screen. Labels stay in the
+   accessible name; a tooltip shows them on hover and focus. */
+@media (min-width: 75rem) {
+  .pf-v6-c-page.lw-rail {
+    --pf-v6-c-page__sidebar--xl--Width: 4.5rem;
+  }
+  .lw-rail .pf-v6-c-nav__section-title,
+  .lw-rail .lw-nav__text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .lw-rail .pf-v6-c-nav__section {
+    padding-block-start: var(--pf-t--global--spacer--md);
+    border-block-start: 1px solid var(--pf-t--global--border--color--default);
+  }
+  .lw-rail .pf-v6-c-nav {
+    --pf-v6-c-nav--RowGap: var(--pf-t--global--spacer--md);
+  }
+  .lw-rail .pf-v6-c-nav__link {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .lw-rail .pf-v6-c-nav__link-icon {
+    font-size: var(--pf-t--global--icon--size--lg);
+  }
+  .pf-v6-c-page.lw-rail > .pf-v6-c-masthead {
+    --pf-v6-c-masthead--m-display-inline--GridTemplateColumns: max-content 1fr;
+  }
+  .lw-rail .lw-count {
+    position: absolute;
+    inset-block-start: 1px;
+    inset-inline-start: calc(50% + 0.25rem);
+    min-width: 1.1rem;
+    line-height: 1.1rem;
+    padding: 0 3px;
+    font-size: 0.6875rem;
+  }
+}
+
+/* The drawer on narrow screens: a backdrop under the sidebar closes it. */
+.lw-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--pf-t--global--z-index--sm) - 1);
+  background: rgb(3 7 12 / 0.45);
 }
 
 /* ------------------------------------------------------------ page header */
@@ -85,7 +451,7 @@ body {
 }
 .lw-page-header__description {
   margin-top: var(--pf-t--global--spacer--xs);
-  max-width: 70ch;
+  max-width: 72ch;
 }
 .lw-page-header__actions {
   flex: 0 0 auto;
@@ -99,6 +465,47 @@ body {
   font-family: var(--pf-t--global--font--family--mono);
   font-size: var(--pf-t--global--font--size--sm);
   color: var(--pf-t--global--text--color--subtle);
+}
+
+/* --------------------------------------------------------- compact lists */
+/* A list row for phones: the name, its status and one line of context. */
+.lw-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lw-list > li + li,
+.lw-list--rows > .lw-list__row + .lw-list__row {
+  border-top: 1px solid var(--pf-t--global--border--color--default);
+}
+.lw-list__row {
+  display: flex;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--sm);
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  min-height: 3.5rem;
+}
+.lw-list__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lw-list__title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--pf-t--global--font--weight--body--bold);
+}
+.lw-list__meta {
+  display: block;
+  font-size: var(--pf-t--global--font--size--sm);
+  color: var(--pf-t--global--text--color--subtle);
+}
+.lw-list__end {
+  flex: none;
+}
+.lw-list--flush .lw-list__row {
+  padding-inline: 0;
 }
 
 /* --------------------------------------------------------------- overview */
@@ -117,19 +524,30 @@ body {
   margin-top: var(--pf-t--global--spacer--xs);
 }
 .lw-tone-success {
-  color: var(--pf-t--global--icon--color--status--success--default);
+  color: var(--lw-ok);
 }
 .lw-tone-danger {
-  color: var(--pf-t--global--icon--color--status--danger--default);
+  color: var(--lw-bad);
 }
 .lw-tone-warning {
-  color: var(--pf-t--global--icon--color--status--warning--default);
+  color: var(--lw-warn);
 }
-.lw-attention > li + li {
-  margin-top: var(--pf-t--global--spacer--md);
+.lw-attention {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--pf-t--global--spacer--md) var(--pf-t--global--spacer--xl);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lw-attention > li {
+  display: flex;
+  gap: var(--pf-t--global--spacer--sm);
+  align-items: flex-start;
 }
 .lw-attention__icon {
   padding-top: 2px;
+  flex: none;
 }
 
 .lw-strip + .lw-strip {
@@ -155,20 +573,22 @@ body {
   background: var(--pf-t--global--border--color--default);
 }
 .lw-strip__cells .lw-strip__cell:focus-visible {
-  outline: 2px solid var(--pf-t--global--color--brand--default);
+  outline: 2px solid var(--pf-t--global--focus-ring--color--default);
   outline-offset: 2px;
 }
 .lw-strip__cell--ok {
-  background: var(--pf-t--global--color--status--success--default);
+  background: var(--lw-ok);
 }
+/* Failed cells carry a pattern too, so the strip does not rely on hue alone. */
 .lw-strip__cell--retried {
-  background: var(--pf-t--global--color--status--warning--default);
+  background: var(--lw-warn);
 }
 .lw-strip__cell--failed {
-  background: var(--pf-t--global--color--status--danger--default);
+  background: var(--lw-bad)
+    repeating-linear-gradient(135deg, rgb(255 255 255 / 0.28) 0 2px, transparent 2px 6px);
 }
 .lw-strip__cell--running {
-  background: var(--pf-t--global--color--nonstatus--blue--default);
+  background: var(--lw-run);
 }
 .lw-legend {
   display: flex;
@@ -215,10 +635,10 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--pf-t--global--color--status--success--default);
+  background: var(--lw-ok);
 }
 .lw-timeline--live li:first-child::before {
-  background: var(--pf-t--global--color--nonstatus--blue--default);
+  background: var(--lw-run);
 }
 .lw-timeline li:last-child {
   padding-bottom: 0;
@@ -227,6 +647,10 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+.lw-kv-table td,
+.lw-kv-table th {
+  vertical-align: top;
 }
 
 /* ----------------------------------------------------------------- wizard */
@@ -258,33 +682,160 @@ body {
   max-width: 14rem;
   margin-top: var(--pf-t--global--spacer--sm);
 }
+.lw-topic-config {
+  list-style: none;
+  margin: var(--pf-t--global--spacer--md) 0 0;
+  padding: 0;
+}
+.lw-topic-config > li {
+  padding: var(--pf-t--global--spacer--md) 0;
+  border-top: 1px solid var(--pf-t--global--border--color--default);
+}
+.lw-topic-config__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--pf-t--global--spacer--xs) var(--pf-t--global--spacer--md);
+  margin-bottom: var(--pf-t--global--spacer--sm);
+}
+.lw-keys {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--sm);
+  overflow-wrap: anywhere;
+}
+.lw-facts {
+  list-style: none;
+  margin: var(--pf-t--global--spacer--sm) 0 0;
+  padding: 0;
+}
+.lw-facts li {
+  display: flex;
+  gap: var(--pf-t--global--spacer--sm);
+  align-items: baseline;
+}
+.lw-facts li + li {
+  margin-top: var(--pf-t--global--spacer--xs);
+}
+.lw-facts svg {
+  flex: none;
+  position: relative;
+  top: 2px;
+}
 
 /* ---------------------------------------------------------------- cutover */
-.lw-chips {
-  margin-bottom: var(--pf-t--global--spacer--md);
-}
-.lw-chips > span {
-  display: inline-flex;
+.lw-verdicts {
+  display: flex;
   flex-wrap: wrap;
+  gap: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--lg);
+  list-style: none;
+  margin: 0 0 var(--pf-t--global--spacer--md);
+  padding: 0;
+}
+.lw-verdicts li {
+  display: inline-flex;
   align-items: center;
-  gap: var(--pf-t--global--spacer--xs);
+  gap: var(--pf-t--global--spacer--sm);
 }
-.lw-chips .pf-v6-c-label {
-  flex-shrink: 0;
+/* An open group: its partitions sit on an inset panel, columns aligned across groups. */
+.lw-inset {
+  margin: 0 var(--pf-t--global--spacer--md) var(--pf-t--global--spacer--md);
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  background: var(--lw-inset);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--medium);
 }
-.lw-nested {
-  background: transparent;
+.lw-inset .pf-v6-c-table {
+  --pf-v6-c-table--BackgroundColor: transparent;
+  table-layout: fixed;
 }
-.lw-confirm {
-  max-width: 24rem;
+.lw-inset__note {
+  margin: var(--pf-t--global--spacer--sm) 0;
+}
+.lw-reason {
+  font-family: var(--pf-t--global--font--family--mono);
+  font-size: var(--pf-t--global--font--size--xs);
+  color: var(--pf-t--global--text--color--subtle);
 }
 .lw-getting-started {
   margin-top: var(--pf-t--global--spacer--lg);
 }
+.lw-group-card + .lw-group-card {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
 
-/* A status label inside a stacked table cell wraps rather than cutting its words. */
+/* A status label inside a stacked table cell wraps rather than cutting its words,
+   and keeps its own width instead of filling the cell. */
 @media (max-width: 991px) {
   .pf-v6-c-table .pf-v6-c-label__text {
     white-space: normal;
+  }
+  .pf-v6-c-table td > .pf-v6-c-label {
+    justify-self: start;
+  }
+}
+/* A description list that is horizontal from the md breakpoint, with room for two-word terms. */
+.pf-v6-c-description-list.lw-dl {
+  --pf-v6-c-description-list--m-horizontal__term--width: 11rem;
+}
+.pf-v6-c-description-list.lw-dl--narrow {
+  --pf-v6-c-description-list--m-horizontal__term--width: 9rem;
+}
+.pf-v6-c-wizard__footer {
+  column-gap: var(--pf-t--global--spacer--sm);
+}
+/* The current step of a stepper is the accent, not PatternFly's purple "info". */
+.pf-v6-c-progress-stepper {
+  --pf-v6-c-progress-stepper__step--m-info__step-icon--Color: var(--pf-t--global--icon--color--brand--default);
+}
+.lw-group-card {
+  padding: var(--pf-t--global--spacer--md) 0;
+}
+.lw-group-card .pf-v6-c-expandable-section {
+  margin-top: var(--pf-t--global--spacer--xs);
+}
+.lw-tone-info {
+  color: var(--lw-run);
+}
+/* PatternFly colours a sorted column's header with the brand fill colour; text needs the text tone. */
+.pf-v6-c-table {
+  --pf-v6-c-table__sort--m-selected__button--Color: var(--pf-t--global--text--color--brand--default);
+  --pf-v6-c-table__sort--m-selected__sort-indicator--Color: var(--pf-t--global--icon--color--brand--default);
+}
+.lw-grow {
+  flex: 1 1 100%;
+}
+.lw-pager {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
+  border-top: 1px solid var(--pf-t--global--border--color--default);
+}
+/* A plan's long lines wrap inside the code block instead of widening the page,
+   and nothing in the main area can push the page wider than the window. */
+.pf-v6-c-code-block__pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pf-v6-c-page__main-container {
+  min-width: 0;
+}
+/* PatternFly's visually hidden text has no size, so a long hidden value (a full
+   hash behind a shortened one) widens a card on a phone. Give it the usual 1 px. */
+.pf-v6-screen-reader:not(.pf-m-full-size) {
+  width: 1px;
+  height: 1px;
+}
+/* Phones show the four numbers two by two. */
+@media (max-width: 575px) {
+  .pf-v6-c-card.lw-stat {
+    --pf-v6-c-card--child--PaddingInlineStart: var(--pf-t--global--spacer--md);
+    --pf-v6-c-card--child--PaddingInlineEnd: var(--pf-t--global--spacer--md);
+  }
+  .lw-stat__value {
+    font-size: var(--pf-t--global--font--size--lg);
+    white-space: nowrap;
   }
 }

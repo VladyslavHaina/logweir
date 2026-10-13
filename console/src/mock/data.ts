@@ -20,7 +20,7 @@ export function requestId(): string {
 }
 
 /** Deterministic hex from a seed (mulberry32), so ids look real and stay stable. */
-function hex(seed: number, length: number): string {
+export function hex(seed: number, length: number): string {
   let a = Math.floor(seed) >>> 0;
   let out = "";
   while (out.length < length) {
@@ -282,9 +282,10 @@ export const backups: Backup[] = [manual, ...hourly, ...analytics].sort((a, b) =
 // ------------------------------------------------------------- recovery points
 
 export const CONSUMER_GROUPS = [
-  { groupId: "orders-billing", groupType: "classic", outcome: "captured" },
-  { groupId: "orders-shipping", groupType: "consumer", outcome: "captured" },
-  { groupId: "orders-fraud", groupType: "classic", outcome: "captured" },
+  { groupId: "orders-billing", groupType: "classic", outcome: "captured", active: false, related: 4, notRelated: 0 },
+  { groupId: "orders-shipping", groupType: "consumer", outcome: "captured", active: true, related: 3, notRelated: 0 },
+  { groupId: "orders-reporting", groupType: "classic", outcome: "captured", active: false, related: 2, notRelated: 0 },
+  { groupId: "orders-fraud", groupType: "classic", outcome: "captured", active: false, related: 2, notRelated: 1 },
   { groupId: "orders-audit-stream", groupType: "other", outcome: "excluded", reason: "GroupTypeNotCaptured" },
 ] as const;
 
@@ -321,8 +322,8 @@ export function pointOf(backup: Backup): PointView {
               groupId: g.groupId,
               groupType: g.groupType,
               outcome: g.outcome,
-              active: true,
-              positions: { related: g.groupId === "orders-fraud" ? 5 : 6, beyondEnd: 0, failed: 0, neverCommitted: 0, notObserved: 0, notRelated: g.groupId === "orders-fraud" ? 1 : 0 },
+              active: g.active,
+              positions: { related: g.related, beyondEnd: 0, failed: 0, neverCommitted: 0, notObserved: 0, notRelated: g.notRelated },
             }
           : { groupId: g.groupId, groupType: g.groupType, outcome: g.outcome, reason: g.reason },
       ),
@@ -334,6 +335,27 @@ export function pointOf(backup: Backup): PointView {
 
 export const restores: Restore[] = [
   {
+    name: "orders-clone-k3v9d",
+    namespace: "team-a",
+    uid: uid(78),
+    resourceVersion: "62010",
+    createdAt: iso(NOW - HOUR),
+    approvalRef: { name: "orders-clone-k3v9d" },
+    approvalSubject: "ordinary",
+    backupSetRef: "01JB" + hex(905, 22).toUpperCase(),
+    coverage: { requested: "sampled", recorded: "sampled", covered: true },
+    deadlineSeconds: 3600,
+    newTopics: ["clone-orders", "clone-orders-dlq", "clone-payments"],
+    operation: { state: "succeeded", stateReason: "Ok", terminal: true, verificationState: "valid", verifiedSuccess: true, exitCode: 0, outcome: "pass" },
+    planBytesLength: 2266,
+    planHash: "sha256:" + hex(906, 64),
+    pointInTime: iso(slot(1) + 3 * MINUTE),
+    sourceArchive: { url: "logweir-destination://primary" },
+    target: { clusterRef: { name: "orders-dr" }, mode: "scratch", originalName: false, topicPrefix: "clone-" },
+  },
+  {
+    // Theme A's demo: restored up to 12:57, just before a bad deploy, under the
+    // original names, with a complete verification so positions can be mapped.
     name: "orders-recovery-q4m8x",
     namespace: "team-a",
     uid: uid(76),
@@ -342,13 +364,13 @@ export const restores: Restore[] = [
     approvalRef: { name: "orders-recovery-q4m8x" },
     approvalSubject: "originalName",
     backupSetRef: "01JB" + hex(903, 22).toUpperCase(),
-    coverage: { requested: "sampled", recorded: "sampled", covered: true },
+    coverage: { requested: "complete", recorded: "complete", covered: true },
     deadlineSeconds: 3600,
     newTopics: ["orders", "orders-dlq", "payments"],
     operation: { state: "succeeded", stateReason: "Ok", terminal: true, verificationState: "valid", verifiedSuccess: true, exitCode: 0, outcome: "pass" },
     planBytesLength: 2301,
     planHash: "sha256:" + hex(904, 64),
-    pointInTime: iso(slot(3) + 3 * MINUTE),
+    pointInTime: iso(slot(3) - 3 * MINUTE),
     sourceArchive: { url: "logweir-destination://primary" },
     target: { clusterRef: { name: "orders-dr" }, mode: "newTopic", originalName: true, topicPrefix: "" },
   },

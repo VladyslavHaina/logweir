@@ -16,12 +16,9 @@ import {
   DropdownItem,
   DropdownList,
   Flex,
-  FlexItem,
   Gallery,
   Grid,
   GridItem,
-  List,
-  ListItem,
   MenuToggle,
   PageSection,
   Progress,
@@ -31,9 +28,9 @@ import {
   Stack,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
-import ExclamationCircleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon";
-import ExclamationTriangleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-triangle-icon";
-import CheckCircleIcon from "@patternfly/react-icons/dist/esm/icons/check-circle-icon";
+import ErrorIcon from "@patternfly/react-icons/dist/esm/icons/rh-ui-error-fill-icon";
+import WarningIcon from "@patternfly/react-icons/dist/esm/icons/rh-ui-warning-fill-icon";
+import CheckIcon from "@patternfly/react-icons/dist/esm/icons/rh-ui-check-circle-fill-icon";
 import ArrowRightIcon from "@patternfly/react-icons/dist/esm/icons/arrow-right-icon";
 import { useBackUpNow, useBackups, useConnections, useProtection, useRestores, useSchedules } from "../api/queries";
 import type { Backup, ProtectionPolicy, Restore, Schedule } from "../api/types";
@@ -41,9 +38,9 @@ import { PageHeader } from "../components/PageHeader";
 import { HealthStatus, RunStatus } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
 import { When, duration } from "../components/When";
+import { CompactList, useNarrow } from "../components/CompactList";
+import { DAY_MS, attentionItems, type Attention } from "../app/attention";
 import { GettingStarted } from "./GettingStarted";
-
-const DAY_MS = 86_400_000;
 
 function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
   const [open, setOpen] = useState(false);
@@ -93,7 +90,7 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
 }
 
 function Stat({ title, value, detail, tone }: { title: string; value: string; detail: React.ReactNode; tone?: "danger" | "warning" | "success" }) {
-  const Icon = tone === "danger" ? ExclamationCircleIcon : tone === "warning" ? ExclamationTriangleIcon : tone === "success" ? CheckCircleIcon : null;
+  const Icon = tone === "danger" ? ErrorIcon : tone === "warning" ? WarningIcon : tone === "success" ? CheckIcon : null;
   return (
     <Card isFullHeight className="lw-stat" component="section" aria-label={title}>
       <CardHeader>
@@ -102,7 +99,7 @@ function Stat({ title, value, detail, tone }: { title: string; value: string; de
         </CardTitle>
       </CardHeader>
       <CardBody>
-        <Flex alignItems={{ default: "alignItemsCenter" }} gap={{ default: "gapSm" }}>
+        <Flex alignItems={{ default: "alignItemsCenter" }} gap={{ default: "gapSm" }} flexWrap={{ default: "nowrap" }}>
           {Icon && <Icon className={`lw-tone-${tone}`} aria-hidden="true" />}
           <span className="lw-stat__value">{value}</span>
         </Flex>
@@ -165,70 +162,31 @@ function PolicyTable({ policies }: { policies: ProtectionPolicy[] }) {
   );
 }
 
-type Attention = { key: string; tone: "danger" | "warning"; title: string; detail: string; to: string; action: string };
-
-function attentionItems(ns: string, policies: ProtectionPolicy[], backups: Backup[], unreachable: { name: string; reason?: string | null; observedAt?: string | null }[]): Attention[] {
-  const items: Attention[] = [];
-  for (const c of unreachable) {
-    items.push({
-      key: `conn-${c.name}`,
-      tone: "danger",
-      title: `${c.name} is unreachable`,
-      detail: `The controller could not reach its brokers (${c.reason ?? "no reason given"}). Backups from it fail until it is reachable.`,
-      to: `/${ns}/connections`,
-      action: "Open connections",
-    });
-  }
-  for (const p of policies.filter((x) => x.health && x.health !== "Healthy")) {
-    items.push({
-      key: `policy-${p.name}`,
-      tone: p.health === "Unprotected" ? "danger" : "warning",
-      title: `${p.name} is ${p.health === "Unprotected" ? "not protected" : "at risk"}`,
-      detail: `${p.consecutiveFailedRuns ?? 0} backups in a row failed; the objective allows ${p.objectives.maxConsecutiveFailedRuns}.`,
-      to: `/${ns}/backups`,
-      action: "See the failed runs",
-    });
-  }
-  const failedRecently = backups.filter((b) => b.operation.state === "failed" && Date.now() - Date.parse(String(b.createdAt)) < DAY_MS);
-  const retried = failedRecently.filter((b) => backups.some((r) => r.trigger?.retryOf?.name === b.name && r.operation.verifiedSuccess));
-  if (retried.length > 0) {
-    items.push({
-      key: "retried",
-      tone: "warning",
-      title: `${retried.length} backup ${retried.length === 1 ? "run" : "runs"} failed and succeeded on retry`,
-      detail: `${retried.map((b) => b.name).join(", ")}: no point is missing, but the deadline may be too tight.`,
-      to: `/${ns}/backups/${retried[0]!.name}`,
-      action: "Open the failed run",
-    });
-  }
-  return items;
-}
-
 function NeedsAttention({ items }: { items: Attention[] }) {
   if (items.length === 0) {
     return (
       <Content component="p" className="lw-subtle">
-        <CheckCircleIcon className="lw-tone-success" /> Nothing needs you right now.
+        <CheckIcon className="lw-tone-success" /> Nothing needs you right now.
       </Content>
     );
   }
   return (
-    <List isPlain className="lw-attention">
+    <ul className="lw-attention lw-plain-links">
       {items.map((item) => (
-        <ListItem key={item.key}>
-          <Flex gap={{ default: "gapSm" }} flexWrap={{ default: "nowrap" }} alignItems={{ default: "alignItemsFlexStart" }}>
-            <FlexItem className="lw-attention__icon">
-              {item.tone === "danger" ? <ExclamationCircleIcon className="lw-tone-danger" /> : <ExclamationTriangleIcon className="lw-tone-warning" />}
-            </FlexItem>
-            <FlexItem>
-              <strong>{item.title}</strong>
-              <div className="lw-subtle">{item.detail}</div>
-              <a href={`#${item.to}`}>{item.action}</a>
-            </FlexItem>
-          </Flex>
-        </ListItem>
+        <li key={item.key}>
+          <span className="lw-attention__icon">
+            {item.tone === "danger" ? <ErrorIcon className="lw-tone-danger" /> : <WarningIcon className="lw-tone-warning" />}
+          </span>
+          <div>
+            <strong>{item.title}</strong>
+            <div className="lw-subtle">{item.detail}</div>
+            <a href={`#${item.to}`}>
+              {item.action} <ArrowRightIcon />
+            </a>
+          </div>
+        </li>
       ))}
-    </List>
+    </ul>
   );
 }
 
@@ -276,30 +234,38 @@ function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; re
     .sort((a, b) => b.at.localeCompare(a.at))
     .slice(0, 6);
   return (
-    <List isPlain isBordered className="lw-activity">
-      {rows.map((row) => (
-        <ListItem key={row.kind + row.name}>
-          <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} alignItems={{ default: "alignItemsCenter" }} gap={{ default: "gapSm" }} flexWrap={{ default: "nowrap" }}>
-            <FlexItem className="lw-min0">
-              <div className="lw-subtle lw-small">
-                {row.kind} · <When value={row.at} />
-              </div>
-              <Link
-                to={row.kind === "Backup" ? "/$ns/backups/$name" : "/$ns/restores/$name"}
-                params={{ ns, name: row.name }}
-                className="lw-ellipsis"
-                title={row.name}
-              >
-                {row.name}
-              </Link>
-            </FlexItem>
-            <FlexItem>
-              <RunStatus op={row.op} />
-            </FlexItem>
-          </Flex>
-        </ListItem>
-      ))}
-    </List>
+    <CompactList
+      flush
+      label="Recent backups and restores"
+      items={rows.map((row) => ({
+        key: row.kind + row.name,
+        href: `#/${ns}/${row.kind === "Backup" ? "backups" : "restores"}/${row.name}`,
+        title: row.name,
+        meta: (
+          <>
+            {row.kind} · <When value={row.at} />
+          </>
+        ),
+        status: <RunStatus op={row.op} />,
+      }))}
+    />
+  );
+}
+
+/** Phones: a policy is one row, its name, its status and the newest point's age. */
+function PolicyList({ ns, policies }: { ns: string; policies: ProtectionPolicy[] }) {
+  return (
+    <CompactList
+      flush
+      label="Protection policies"
+      items={policies.map((p) => ({
+        key: p.name,
+        href: `#/${ns}/protection`,
+        title: p.name,
+        meta: `${ageVsObjective(p).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
+        status: <HealthStatus health={p.health} />,
+      }))}
+    />
   );
 }
 
@@ -311,6 +277,7 @@ export function Overview() {
   const restores = useRestores(ns);
   const connections = useConnections(ns);
   const schedules = useSchedules(ns);
+  const narrow = useNarrow();
 
   const queries = [protection, backups, restores, connections, schedules];
   const failed = queries.find((q) => q.isError);
@@ -383,16 +350,13 @@ export function Overview() {
   const verified = lastDay.filter((b) => b.operation.verifiedSuccess).length;
   const failedRuns = lastDay.filter((b) => b.operation.state === "failed").length;
   const running = runs.filter((b) => !b.operation.terminal).length;
-  const unreachable = conns
-    .filter((c) => c.reachability.state === "unreachable")
-    .map((c) => ({ name: c.name, reason: c.reachability.reason, observedAt: c.reachability.observedAt }));
-  const attention = attentionItems(ns, policies, runs, unreachable);
+  const attention = attentionItems(ns, policies, runs, conns);
 
   return (
     <>
       {header}
       <PageSection>
-        <Gallery hasGutter minWidths={{ default: "100%", sm: "220px" }}>
+        <Gallery hasGutter minWidths={{ default: "150px", sm: "220px" }}>
           <Stat
             title="Protection"
             value={`${protectedCount} of ${policies.length}`}
@@ -424,16 +388,24 @@ export function Overview() {
         </Gallery>
       </PageSection>
       <PageSection>
+        <Card>
+          <CardHeader>
+            <CardTitle component="h2">Needs attention</CardTitle>
+          </CardHeader>
+          <CardBody>
+            <NeedsAttention items={attention} />
+          </CardBody>
+        </Card>
+      </PageSection>
+      <PageSection>
         <Grid hasGutter>
-          <GridItem lg={8}>
+          <GridItem lg={7} xl={8}>
             <Stack hasGutter>
               <Card>
                 <CardHeader>
                   <CardTitle component="h2">Protection policies</CardTitle>
                 </CardHeader>
-                <CardBody>
-                  <PolicyTable policies={policies} />
-                </CardBody>
+                <CardBody>{narrow ? <PolicyList ns={ns} policies={policies} /> : <PolicyTable policies={policies} />}</CardBody>
                 <CardFooter>
                   <Link to="/$ns/$section" params={{ ns, section: "protection" }}>
                     All protection policies <ArrowRightIcon />
@@ -458,30 +430,20 @@ export function Overview() {
               </Card>
             </Stack>
           </GridItem>
-          <GridItem lg={4}>
-            <Stack hasGutter>
-              <Card>
-                <CardHeader>
-                  <CardTitle component="h2">Needs attention</CardTitle>
-                </CardHeader>
-                <CardBody>
-                  <NeedsAttention items={attention} />
-                </CardBody>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle component="h2">Recent activity</CardTitle>
-                </CardHeader>
-                <CardBody>
-                  <Activity ns={ns} backups={runs} restores={restores.data ?? []} />
-                </CardBody>
-                <CardFooter>
-                  <Link to="/$ns/backups" params={{ ns }}>
-                    All backups <ArrowRightIcon />
-                  </Link>
-                </CardFooter>
-              </Card>
-            </Stack>
+          <GridItem lg={5} xl={4}>
+            <Card isFullHeight>
+              <CardHeader>
+                <CardTitle component="h2">Recent activity</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <Activity ns={ns} backups={runs} restores={restores.data ?? []} />
+              </CardBody>
+              <CardFooter>
+                <Link to="/$ns/backups" params={{ ns }}>
+                  All backups <ArrowRightIcon />
+                </Link>
+              </CardFooter>
+            </Card>
           </GridItem>
         </Grid>
       </PageSection>

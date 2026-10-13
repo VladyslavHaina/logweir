@@ -1,18 +1,36 @@
 // Every restore in the namespace, newest first.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { Button, Card, Label, PageSection } from "@patternfly/react-core";
+import { Button, Card, PageSection } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import HistoryIcon from "@patternfly/react-icons/dist/esm/icons/history-icon";
 import { useRestores } from "../api/queries";
 import { PageHeader } from "../components/PageHeader";
 import { RunStatus } from "../components/Status";
 import { Empty, ErrorState, LoadingRows } from "../components/States";
-import { When, exactUtc } from "../components/When";
+import { When, exactUtc, relative } from "../components/When";
+import { CompactList, useNarrow } from "../components/CompactList";
+import { themeAOf } from "../mock/themeA";
+import type { Restore } from "../api/types";
+
+/** What kind of restore this is, in a few words: names, clone expiry, verification. */
+function facts(r: Restore): string {
+  const clone = themeAOf(r).clone;
+  const kind = clone
+    ? clone.phase === "Removed"
+      ? "clone, removed"
+      : `clone, deletes ${relative(clone.expiresAt)}`
+    : r.target.originalName
+      ? "original names"
+      : `prefix ${r.target.topicPrefix}`;
+  const coverage = r.coverage?.requested === "complete" ? "complete verification" : "sampled verification";
+  return `${kind} · ${coverage}`;
+}
 
 export function Restores() {
   const { ns } = useParams({ from: "/$ns/restores" });
   const navigate = useNavigate();
   const restores = useRestores(ns);
+  const narrow = useNarrow();
   const start = () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} });
   return (
     <>
@@ -38,7 +56,7 @@ export function Restores() {
               title="No restores yet"
               icon={HistoryIcon}
               actions={
-                <Button variant="primary" onClick={start}>
+                <Button variant="secondary" onClick={start}>
                   Restore a point
                 </Button>
               }
@@ -46,6 +64,21 @@ export function Restores() {
               A restore writes a recovery point into new topics and verifies what it wrote. Start with a drill on a test
               cluster.
             </Empty>
+          ) : narrow ? (
+            <CompactList
+              label="Restores"
+              items={(restores.data ?? []).map((r) => ({
+                key: r.name,
+                href: `#/${ns}/restores/${r.name}`,
+                title: r.name,
+                meta: (
+                  <>
+                    <When value={r.createdAt} /> · {facts(r)}
+                  </>
+                ),
+                status: <RunStatus op={r.operation} />,
+              }))}
+            />
           ) : (
             <Table aria-label="Restores" variant="compact" gridBreakPoint="grid-md">
               <Thead>
@@ -53,8 +86,8 @@ export function Restores() {
                   <Th>Name</Th>
                   <Th>Status</Th>
                   <Th>Into</Th>
-                  <Th>Point in time</Th>
-                  <Th>Started</Th>
+                  <Th modifier="nowrap">Point in time</Th>
+                  <Th modifier="nowrap">Started</Th>
                 </Tr>
               </Thead>
               <Tbody>
@@ -64,21 +97,17 @@ export function Restores() {
                       <Link to="/$ns/restores/$name" params={{ ns, name: r.name }} className="lw-break">
                         {r.name}
                       </Link>
-                      {r.target.originalName && (
-                        <>
-                          {" "}
-                          <Label isCompact color="orange">Original names</Label>
-                        </>
-                      )}
+                      <div className="lw-subtle lw-small">{facts(r)}</div>
                     </Td>
                     <Td dataLabel="Status">
                       <RunStatus op={r.operation} />
                     </Td>
                     <Td dataLabel="Into">
-                      {r.target.clusterRef.name}: {r.newTopics.join(", ")}
+                      {r.target.clusterRef.name}
+                      <div className="lw-subtle lw-small">{r.newTopics.join(", ")}</div>
                     </Td>
-                    <Td dataLabel="Point in time">{exactUtc(r.pointInTime)}</Td>
-                    <Td dataLabel="Started">
+                    <Td dataLabel="Point in time" modifier="nowrap">{exactUtc(r.pointInTime)}</Td>
+                    <Td dataLabel="Started" modifier="nowrap">
                       <When value={r.createdAt} />
                     </Td>
                   </Tr>

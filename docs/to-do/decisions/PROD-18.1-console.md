@@ -124,7 +124,7 @@ About 30 lines in `crates/logweir-api/src/assets.rs`, plus its tests:
 
 ### 4.1 Navigation and pages
 
-The masthead holds the brand, the **namespace selector**, the theme switch and the user menu. The user menu shows the roles in this namespace and Sign out. A left navigation, grouped by what the operator is doing, collapses behind the hamburger below 1200 px. Capability flags from `/session` hide what the role cannot use, as today.
+The masthead holds the brand, the **namespace selector** and the user menu. The user menu shows the name, the roles in this namespace, **Appearance** (System, Light, Dark) and Sign out. A left navigation, grouped by what the operator is doing, gives every item an icon and shows counts where they help: needs attention on Overview, failed backups in the last 24 hours on Backups, and requests waiting for you on Approvals (only a two-person namespace has any). On a wide screen it collapses to an icon rail; below 1200 px it is a drawer with a backdrop that Escape closes. Capability flags from `/session` hide what the role cannot use, as today.
 
 | Group | Page (route under `#/<ns>/`) | Primary action | Replaces |
 | --- | --- | --- | --- |
@@ -156,10 +156,10 @@ The masthead holds the brand, the **namespace selector**, the theme switch and t
 4. **Approvals** (OD-8). One-person namespace: creating the restore confirms it. Two-person: the restore page says it waits for a second person; the approver's Approvals page lists it and its request page shows the scope, plan and typed names, then **Approve**. Strict: the CLI commands and a text upload, which refuses anything that looks like a private key, as today.
 5. **Theme A cutover** (screens 12–14), shown on a verified restore as **Switch consumers over**.
    1. **Review positions.** Each consumer group shows per-partition translations: **Exact**, **Approximate** (the partition end) or **Unavailable** (with the reason). It also shows whether consumers are still connected on the target, and a verdict: Ready, Stop consumers first, or Blocked. Blocked groups are left out, never guessed. "Check again" re-reads the target.
-   2. **Confirm.** Positions committed, positions saved first, groups left out, the approval mode, the undo limit, and a typed cluster name.
+   2. **Confirm.** The groups, the positions committed (compare-and-set, `expected: none`), positions saved first, groups left out with their reason, the approval mode (a switchover follows the namespace's mode, OD-17), the plan hash and plan, and the undo limit.
    3. **Switched over.** Per-group commit progress and the switchover record.
 
-   The post-verification configuration transition (PROD-05.2) is a restore-page action, "Apply the source's settings now". A clone shows "Deletes in 23 h" on Restores and its clean-up result on its page. The field names follow `decisions/PROD-04.2-cutover.md` (in progress in `claude/v2a-design`); the prototype's `src/mock/cutover.ts` shapes are provisional.
+   The topic configuration (PROD-05.2) is chosen in the wizard, with the restore preflight's per-topic preview, and its transition runs after the verdict; the restore page shows `Restore.status.topicConfiguration` before and after. A clone (scratch mode with a TTL) shows "deletes in 23 hours" on Restores and `status.clone.expiresAt` and its clean-up on its page. The prototype's `src/mock/themeA.ts` follows the shapes in `decisions/PROD-04.2-cutover.md`; the build replaces it with the theme A API.
 
 ### 4.3 The Overview (what a presenter opens first)
 
@@ -178,8 +178,8 @@ A presenter's path through it: Overview → Backups → a backup → Restore thi
 - **Empty:** what the page is for, and the one action that fills it.
 - **Error:** a headline chosen by status (not found, no access, the service had a problem), then the server's message verbatim, then the status, the code and the request id, and Try again. A write with an unknown outcome keeps today's rule: "it may or may not exist; submitting again is safe" (same `Idempotency-Key`). Signed out, unavailable and no-role namespace each have their own full-page state, as in `ui/README.md`.
 - **Live updates:** one `EventSource` per open operation (`/operations/{kind}/{name}/events`) writes into the query cache. Lists re-read every 1.5 s only while a run in them is in progress, and otherwise on focus. The prototype re-reads its mock.
-- **Dark mode:** PatternFly's dark theme, following the system. The masthead switch overrides it for the life of the page, with no browser storage ([open point 5](#6-open-points-for-the-owner)). PatternFly's high-contrast theme is available later at no cost.
-- **Widths:** checked at 1440 px and 390 px with no horizontal scroll. Tables become labelled rows below 768 or 992 px, and the wizard's step list becomes a drop-down. Run-strip cells are at least 24 px, the WCAG 2.2 target size (found by axe on the prototype and fixed).
+- **Theme:** PatternFly's light and dark themes with Logweir's accent (`#0b5cad`) set through PatternFly's brand tokens, and four surface levels (masthead, sidebar, page, card) plus raised menus, in `src/styles.css`. In dark mode the accent stays strong (white on it is 4.8:1). One status style everywhere: an outline label with an icon and a light tint. It follows the system; the user menu's Appearance choice overrides it for the life of the page, with no browser storage ([open point 5](#6-open-points-for-the-owner)). PatternFly's high-contrast theme is available later at no cost.
+- **Widths:** checked at 1440 px and 390 px with no horizontal scroll. On a phone, lists become compact rows (name, status, time; the rest on the item's page), and the wizard's step list becomes a drop-down. Run-strip cells are at least 24 px, the WCAG 2.2 target size (found by axe on the prototype and fixed).
 - **Words:**
   - status is always a word plus an icon plus a colour;
   - "Verified" only when the controller verified signed evidence, never "verified in your browser";
@@ -187,7 +187,7 @@ A presenter's path through it: Overview → Backups → a backup → Restore thi
   - a missing value is "Not recorded", never "-";
   - long identifiers are shortened, with copy;
   - internal reason codes are secondary text only;
-  - one primary action per page; a change to positions or names asks for typed confirmation;
+  - one primary action per page; a restore under the original names asks for typed confirmation (OD-10);
   - the button says what happens: "Create restore", "Switch over 2 groups".
 
 ## 5. Migration plan
@@ -227,6 +227,8 @@ New code lives in `console/` beside `ui/`. During development it runs with `vite
 - **End-to-end:** `scripts/prod16-1-ui-e2e.mjs` and `scripts/console-steps.mjs` drive the six-step wizard by element ids. Its offline guard is `scripts/console_steps.py`. They become `console/e2e/*.spec.ts` (`@playwright/test`), using role locators against compose or the PoC, plus axe on each screen and the CSP row. `console_steps.py` is retired, because role locators and TypeScript replace what it guarded.
 
 ## 6. Open points for the owner
+
+**Decided 2026-10-13** (OD-16 amended): every point as recommended.
 
 | # | Question | Options | Recommendation |
 | --- | --- | --- | --- |

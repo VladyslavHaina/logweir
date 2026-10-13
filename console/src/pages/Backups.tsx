@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Button,
   Card,
-  Label,
   PageSection,
   Pagination,
   SearchInput,
@@ -20,7 +19,8 @@ import CubesIcon from "@patternfly/react-icons/dist/esm/icons/cubes-icon";
 import { useBackups } from "../api/queries";
 import type { Backup } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { RunStatus } from "../components/Status";
+import { RunStatus, TriggerText } from "../components/Status";
+import { CompactList, useNarrow } from "../components/CompactList";
 import { Empty, ErrorState, LoadingRows } from "../components/States";
 import { When, count } from "../components/When";
 
@@ -40,14 +40,6 @@ function matches(b: Backup, filter: Filter): boolean {
   return true;
 }
 
-export function TriggerLabel({ b }: { b: Backup }) {
-  const kind = b.trigger?.kind ?? (b.triggeredBy === "manual" ? "Manual" : "Scheduled");
-  if (kind === "Retry") return <Label isCompact color="orange">Retry {b.trigger?.attempt}</Label>;
-  if (kind === "Manual") return <Label isCompact color="purple">Manual</Label>;
-  if (kind === "CatchUp") return <Label isCompact color="teal">Catch-up</Label>;
-  return <Label isCompact variant="outline">Scheduled</Label>;
-}
-
 export function windowText(b: Backup): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";
   const t = (ms: number) => new Date(ms).toISOString().slice(11, 16);
@@ -63,6 +55,7 @@ export function Backups() {
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(10);
   const [sortDesc, setSortDesc] = useState(true);
+  const narrow = useNarrow();
 
   const rows = useMemo(() => {
     const all = backups.data ?? [];
@@ -74,6 +67,17 @@ export function Backups() {
   }, [backups.data, search, filter, sortDesc]);
 
   const shown = rows.slice((page - 1) * perPage, page * perPage);
+  const pager = (
+    <Pagination
+      itemCount={rows.length}
+      perPage={perPage}
+      page={page}
+      onSetPage={(_e, p) => setPage(p)}
+      onPerPageSelect={(_e, pp) => { setPerPage(pp); setPage(1); }}
+      isCompact
+      titles={{ paginationAriaLabel: "Backups pages" }}
+    />
+  );
   const sortStarted: ThProps["sort"] = {
     sortBy: { index: 6, direction: sortDesc ? "desc" : "asc" },
     onSort: () => setSortDesc(!sortDesc),
@@ -95,7 +99,7 @@ export function Backups() {
         <Card>
           <Toolbar clearAllFilters={() => { setSearch(""); setFilter("all"); }}>
             <ToolbarContent>
-              <ToolbarItem>
+              <ToolbarItem className={narrow ? "lw-grow" : undefined}>
                 <SearchInput
                   aria-label="Find a backup by name or source"
                   placeholder="Find by name or source"
@@ -117,17 +121,7 @@ export function Backups() {
                   ))}
                 </ToggleGroup>
               </ToolbarItem>
-              <ToolbarItem variant="pagination" align={{ default: "alignEnd" }}>
-                <Pagination
-                  itemCount={rows.length}
-                  perPage={perPage}
-                  page={page}
-                  onSetPage={(_e, p) => setPage(p)}
-                  onPerPageSelect={(_e, pp) => { setPerPage(pp); setPage(1); }}
-                  isCompact
-                  titles={{ paginationAriaLabel: "Backups pages" }}
-                />
-              </ToolbarItem>
+              {!narrow && <ToolbarItem variant="pagination" align={{ default: "alignEnd" }}>{pager}</ToolbarItem>}
             </ToolbarContent>
           </Toolbar>
           {backups.isPending ? (
@@ -153,6 +147,24 @@ export function Backups() {
             >
               Nothing matches these filters.
             </Empty>
+          ) : narrow ? (
+            <>
+            <CompactList
+              label="Backups"
+              items={shown.map((b) => ({
+                key: b.name,
+                href: `#/${ns}/backups/${b.name}`,
+                title: b.name,
+                meta: (
+                  <>
+                    <When value={b.createdAt} /> · {b.trigger?.kind === "Retry" ? `retry ${b.trigger.attempt}` : (b.trigger?.kind ?? "Scheduled").toLowerCase()} · {b.sourceRef.name}
+                  </>
+                ),
+                status: <RunStatus op={b.operation} />,
+              }))}
+            />
+            <div className="lw-pager">{pager}</div>
+            </>
           ) : (
             <Table aria-label="Backups" variant="compact" gridBreakPoint="grid-lg">
               <Thead>
@@ -180,7 +192,7 @@ export function Backups() {
                       <RunStatus op={b.operation} />
                     </Td>
                     <Td dataLabel="Trigger">
-                      <TriggerLabel b={b} />
+                      <TriggerText b={b} />
                     </Td>
                     <Td dataLabel="Source">{b.sourceRef.name}</Td>
                     <Td dataLabel="Records" className="lw-num">{b.operation.terminal ? count(b.records) : "Counting"}</Td>
