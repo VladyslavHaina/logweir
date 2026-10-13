@@ -17,6 +17,7 @@ import {
   withPoint,
 } from "./data";
 import { declareRestore } from "./themeA";
+import { switchoversMock } from "./switchovers";
 
 const LATENCY_MS = 350;
 
@@ -263,6 +264,7 @@ async function route(request: Request): Promise<Response> {
     return json(200, { ...page(points), truncated: false, viewExpired: false });
   }
 
+  { const so = await switchoversMock(request); if (so) return so; }
   return problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
 }
 
