@@ -311,7 +311,7 @@ spec:
                     - connectionRef
                     type: object
                   switchover:
-                    description: 'The switchover block, for `operation: Switchover` (PROD-04.2).'
+                    description: 'The switchover block, for `operation: Switchover`: the review before a `Switchover`.'
                     nullable: true
                     properties:
                       groups:

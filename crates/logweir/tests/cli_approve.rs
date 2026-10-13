@@ -226,7 +226,7 @@ fn the_subject_kind_values_are_the_wire_spellings() {
     assert_eq!(out.status.code(), Some(0));
     let help = String::from_utf8(out.stdout).unwrap();
     assert!(
-        help.contains("[possible values: Restore, Backup]"),
+        help.contains("[possible values: Restore, Backup, Switchover]"),
         "the capitalised wire spellings, in the order the enum declares them \
          (`RehearsalSchedule` left with the withdrawn standing signer): {help}"
     );

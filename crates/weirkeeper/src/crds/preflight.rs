@@ -354,7 +354,8 @@ pub struct PreflightRequest {
     /// The connection block, for `operation: SourceConnection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_connection: Option<SourceConnectionPreflightRequest>,
-    /// The switchover block, for `operation: Switchover` (PROD-04.2).
+    /// The switchover block, for `operation: Switchover`: the review before a
+    /// `Switchover`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switchover: Option<SwitchoverPreflightRequest>,
     /// Checks to leave out. **A skipped blocking check keeps the overall state

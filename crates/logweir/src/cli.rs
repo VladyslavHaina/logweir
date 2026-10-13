@@ -904,7 +904,8 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
-    /// PROD-04.2: an approval for a `Switchover`; `--spec` is its plan.
+    // An approval for a `Switchover`; `--spec` is its plan. A plain comment:
+    // a doc comment on a variant switches clap's help to its long list.
     #[value(name = "Switchover")]
     Switchover,
 }

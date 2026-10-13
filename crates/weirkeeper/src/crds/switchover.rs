@@ -28,7 +28,7 @@ pub const MAX_STATUS_GROUPS: usize = logweir_core::switchover::MAX_GROUPS;
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "Switchover",
-    doc = "Apply reviewed consumer positions from a verified Restore's signed positions mapping to stopped consumer groups on that restore's target (PROD-04.2). Each group is compare-and-set against the plan; the broker refuses a group that has members. Executed as a Job; nothing commits a position automatically after a restore. `spec` is immutable: the approval binds `planBytes`.",
+    doc = "Apply reviewed consumer positions from a verified Restore's signed positions mapping to stopped consumer groups on that restore's target. Each group is compare-and-set against the plan; the broker refuses a group that has members. Executed as a Job; nothing commits a position automatically after a restore. `spec` is immutable: the approval binds `planBytes`.",
     plural = "switchovers",
     singular = "switchover",
     namespaced,
