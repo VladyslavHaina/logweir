@@ -618,7 +618,7 @@ the CRDs stay.
 
 ## Upgrade rehearsals
 
-[docs/release-handoff.md](../../docs/release-handoff.md) records the two
+The `v0.2.0-rc.1` entry of [docs/release-notes.md](../../docs/release-notes.md) records the two
 rehearsals run on 2026-09-24, from published builds to the PoC's first
 publication (`86a554e6`); run again, each upgrades to the release in
 `versions.env`. Neither older build can

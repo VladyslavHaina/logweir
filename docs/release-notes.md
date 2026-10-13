@@ -2298,7 +2298,7 @@ execution-claim set check, receipt and catalog format 1.2.0, the pin's read
 by version id) and FX-4's format 1.1.0, which has no item of its own. No tag is
 cut at `fdb48cd8`, so the candidate record below is `v0.2.0-rc.1`'s. The
 shipped task list, the publications the PoC ran, the tested environments and
-the results are in [release-handoff.md](release-handoff.md).
+the results were in the release handoff of `fdb48cd8`, now in git history.
 
 ### Candidate record
 
@@ -2353,7 +2353,7 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   Helm from the published OCI chart and its `sha-` images, with no post-install
   patch. Installed at `86a554e6`, upgraded from `v0.1.5` and from
   `sha-f49849d…`, rolled back, and upgraded in place five times, the last to
-  `fdb48cd8` on 2026-09-25 ([release-handoff.md](release-handoff.md)).
+  `fdb48cd8` on 2026-09-25.
 - **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
   beside the images and versioned with them ([install.md](install.md), *(c) The
   Helm chart*); each publication pulls anonymously and names its own commit's
@@ -3065,7 +3065,7 @@ scorecards stay valid.
   item 30 adds complete coverage after it.
 - **The independent verifier** (`docs/verify_scorecard.py`) checks the same
   signed documents with no Logweir code ([verify-a-scorecard.md](verify-a-scorecard.md)).
-- **Tested environments** are named in [release-handoff.md](release-handoff.md):
+- **Tested environments:**
   docker-desktop Kubernetes with a SCRAM (and private-CA TLS) Kafka and MinIO;
   the PoC profile on docker-desktop; and the GitHub Actions Compose suite.
   Nothing here was run against AWS S3, MSK, EKS, a corporate identity provider
@@ -3151,8 +3151,7 @@ identity adopting a hand-provisioned signer, the console arriving) and from
 `sha-f49849d…`, each to the first PoC publication `86a554e6`, which crosses
 items 1–13, and each rolled back; then in place to `02dc44b6` (items 14, 15 and
 17), `b748fd5f` (16, 18 and 19), `a54fb823` (20), `815249cb` and `fdb48cd8` (no
-item, console-only fixes). [release-handoff.md](release-handoff.md) names the
-digests and what each round showed. An upgrade from `sha-7b0277b…` crosses items
+item, console-only fixes). An upgrade from `sha-7b0277b…` crosses items
 1–4 and 11–20. An upgrade from `fdb48cd8` crosses items 21, 22, 23, 24, 25, 26
 and 27, and item 11's FX-7 additions: grant `s3:GetObjectVersion` before the
 upgrade, or a pinned point whose current version differs fails closed at the
@@ -3175,7 +3174,7 @@ policy or roster ([keys.md](keys.md)).
   profile on docker-desktop, from published charts and images only: a clean
   install at `86a554e6`, two upgrades to it with rollbacks, and five in-place
   upgrades, after which all 356 backup receipts still passed the independent
-  verifier ([release-handoff.md](release-handoff.md)).
+  verifier.
   [UNVERIFIED — R2's pre-upgrade retention, mount-failure and point-bound-restore states were not set up.]
 - **The large catalog was measured live at 258 real points, not 1,000**
   ([stability.md](stability.md#measured-scale-limits-plat-202)); the console

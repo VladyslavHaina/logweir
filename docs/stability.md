@@ -91,7 +91,6 @@ writes.
 | Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
 | Put receipt, teardown attestation | 1.0.0 | [verify-a-scorecard.md](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Approval document v1, authorization document v2 (2.0.0–2.2.0), standing rehearsal authorization (1.0.0, 1.1.0) | as listed | [formats/approval-documents.md](formats/approval-documents.md) |
-| Protection event (unsigned, no longer written) | 1.0.0 | [formats/protection-event.md](formats/protection-event.md) |
 
 ### Format policy
 
