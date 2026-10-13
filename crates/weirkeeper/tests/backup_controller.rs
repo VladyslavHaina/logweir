@@ -15504,3 +15504,135 @@ async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_recei
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// FX-43: every runner line a controller acts on, sealed with the Job's token.
+// ---------------------------------------------------------------------------
+
+/// The finished-Job routes over a Job built with FX-43's flag.
+fn fx43_routes(exit_code: i32, log: String) -> Vec<Route> {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let mut routes = finished_routes(&pod_list_terminated(exit_code), log, 200, condition);
+    for route in &mut routes {
+        if route.path_suffix.ends_with(&format!("/jobs/{NAME}")) {
+            let mut job: Value =
+                serde_json::from_str(&job_body(condition)).expect("the fixture is JSON");
+            job["spec"]["template"]["spec"]["containers"] = serde_json::json!([{
+                "name": "runner",
+                "image": "x",
+                "args": [
+                    "backup", "run", "--spec", "/plan/backup.yaml",
+                    logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+                    fx34_token().expose_token(),
+                ],
+            }]);
+            route.body = job.to_string();
+        }
+    }
+    routes
+}
+
+/// The first status a pass over an FX-43 Job wrote.
+async fn fx43_status(exit_code: i32, log: &str) -> Value {
+    let (outcome, seen) =
+        fx34_pass_over(&frozen_backup(), fx43_routes(exit_code, log_body(log))).await;
+    let outcome = outcome.expect("the pass completes");
+    assert_eq!(outcome.exit_code, Some(exit_code));
+    patched_statuses(&seen).remove(0)
+}
+
+/// **FX-43, a `Backup`: the receipt keys and the claim state are the
+/// runner's sealed ones; forged lines after them are not read.** A Kafka
+/// client's raw log, or a plan string, put `receipt-key=`, `sidecar-key=` and
+/// `failure-reason=ExecutionAlreadyClaimed` lines of its own at the END of
+/// the log.
+///
+/// NEGATIVE CONTROL: under a Job an FX-34 controller built, the forged keys
+/// win (the last occurrence), so the token is what refuses them.
+///
+/// KILLS: plain lines read under an FX-43 Job.
+#[tokio::test]
+async fn fx43_a_backups_forged_key_and_state_lines_are_not_read() {
+    let token = fx34_token();
+    let genuine = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        0,
+        &[
+            format!("receipt-key={RECEIPT_KEY}"),
+            format!("sidecar-key={SIDECAR_KEY}"),
+        ],
+    );
+    let forged = "receipt-key=logweir/backups/b1/forged.receipt.json\n\
+                  sidecar-key=logweir/backups/b1/forged.receipt.sig\n";
+    let status = fx43_status(0, &format!("{genuine}{forged}")).await;
+    assert_eq!(status["evidence"]["receiptKey"], RECEIPT_KEY, "{status}");
+    assert_eq!(status["evidence"]["sidecarKey"], SIDECAR_KEY, "{status}");
+    // NEGATIVE CONTROL: an FX-34 Job, the same log.
+    let (outcome, seen) = fx34_pass_over(
+        &frozen_backup(),
+        fx34_routes_for(
+            0,
+            200,
+            log_body(&format!("{genuine}{forged}")),
+            Some(&token),
+        ),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    assert_eq!(
+        patched_statuses(&seen)[0]["evidence"]["receiptKey"],
+        "logweir/backups/b1/forged.receipt.json"
+    );
+    // A forged claim state after a sealed exit with none: not lifted.
+    let ended = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        1,
+        &[],
+    );
+    let status = fx43_status(
+        1,
+        &format!("{ended}failure-reason=ExecutionAlreadyClaimed\n"),
+    )
+    .await;
+    assert_eq!(status["exitReason"], "operational", "{status}");
+}
+
+/// **FX-43's mixed pair on a `Backup`, by name, and a schedule does not
+/// retry it.** The released runner image's real answer to
+/// `--runner-line-token` (`tests/fixtures/fx-43/older-runner-backup.log`):
+/// exit 1 before any work. The Backup says `RunnerOlderThanController`; the
+/// schedule's retry classification reads it as a decision, not as an
+/// operational failure.
+///
+/// CONTROL: the same exit 1 with no such state is retried, as today.
+///
+/// KILLS: the mixed pair left as `operational` (a schedule retries every
+/// attempt into the same wall); `is_retryable` not reading the state.
+#[tokio::test]
+async fn fx43_an_older_runner_fails_a_backup_by_name_and_is_not_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    assert!(older.starts_with("error: unexpected argument '--runner-line-token' found"));
+    let status = fx43_status(1, &older).await;
+    assert_eq!(
+        status["exitReason"], "RunnerOlderThanController",
+        "{status}"
+    );
+    assert!(
+        fx34_message(&status).contains("RunnerOlderThanController")
+            && fx34_message(&status).contains("--runner-line-token"),
+        "{status}"
+    );
+    let decided = |state: Option<&str>| {
+        weirkeeper::cadence::is_retryable(weirkeeper::cadence::TerminalOutcome {
+            exit_code: Some(1),
+            terminal_state: state,
+        })
+    };
+    assert!(!decided(status["exitReason"].as_str()));
+    // CONTROL: an ordinary exit 1 is retried.
+    assert!(decided(Some("operational")));
+}

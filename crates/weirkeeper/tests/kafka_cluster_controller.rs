@@ -3896,3 +3896,127 @@ async fn the_probe_log_read_asks_for_a_bounded_tail() {
         "{seen:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-43: the probe's lines, sealed with its Job's token.
+// ---------------------------------------------------------------------------
+
+/// A token for these rows, assembled so that no source line holds a
+/// secret-shaped literal.
+fn fx43_token() -> logweir_core::refusal_detail::LineToken {
+    logweir_core::refusal_detail::LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+
+/// [`finished_routes`] over a probe Job built with FX-43's flag.
+fn fx43_routes(exit_code: i32, log: String) -> Vec<Route> {
+    let mut routes = finished_routes(exit_code, log);
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix == format!("/jobs/{JOB}") {
+            let mut job: Value =
+                serde_json::from_str(&job_body("Complete")).expect("the fixture is JSON");
+            job["spec"]["template"]["spec"]["containers"] = serde_json::json!([{
+                "name": "runner",
+                "image": "x",
+                "args": [
+                    "cluster-probe", "--bootstrap", "b0.orders:9092",
+                    logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+                    fx43_token().expose_token(),
+                ],
+            }]);
+            route.body = job.to_string();
+        }
+    }
+    routes
+}
+
+async fn fx43_probe_status(routes: Vec<Route>) -> Value {
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    patched_statuses(&seen).remove(0)
+}
+
+/// **FX-43: a probe's cluster id is its sealed line, and one a bootstrap
+/// address or a broker got into the log is not read.** The Kafka client logs
+/// an address it cannot resolve BY NAME, so an address holding a line break
+/// (refused at every entry now, and escaped by the pump) used to put a
+/// `cluster-id=` line of its own after the probe's, and the `Restore` and
+/// `Backup` rails compare that id.
+///
+/// NEGATIVE CONTROL: a probe Job with no token (an older controller's) reads
+/// the last line, as before, and takes the forged id.
+///
+/// KILLS: plain lines read under an FX-43 probe Job; another Job's seal
+/// accepted.
+#[tokio::test]
+async fn fx43_a_forged_cluster_id_line_is_not_read() {
+    let genuine = logweir_core::runner_line::final_block(
+        Some((
+            &fx43_token(),
+            logweir_core::runner_line::LineScope::EveryLine,
+        )),
+        0,
+        &[
+            format!("{CLUSTER_ID_PREFIX}{CLUSTER_ID}"),
+            format!("{REACHABLE_PREFIX}true"),
+        ],
+    );
+    let forged = "cluster-id=VICTIM00000000000000000\nreachable=true\n";
+    let log = log_body(&format!("{genuine}{forged}"));
+    let status = fx43_probe_status(fx43_routes(0, log.clone())).await;
+    assert_eq!(status["clusterId"], CLUSTER_ID, "{status}");
+    assert_eq!(status["reachable"], true, "{status}");
+    // NEGATIVE CONTROL: a probe Job with no token.
+    let status = fx43_probe_status(finished_routes(0, log)).await;
+    assert_eq!(status["clusterId"], "VICTIM00000000000000000", "{status}");
+}
+
+/// **FX-43's mixed pair on a probe, by name.** The released runner image's
+/// real answer to `cluster-probe --runner-line-token`
+/// (`tests/fixtures/fx-43/older-runner-probe.log`): exit 1, before it dials.
+/// `reachable` is cleared and the reason names the pair; nothing of the log
+/// is read, a forged `reachable=true` included.
+///
+/// KILLS: the older probe's log read as "unreachable" or as anything at all.
+#[tokio::test]
+async fn fx43_an_older_probe_is_named_and_nothing_of_its_log_is_read() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-probe.log"),
+    )
+    .expect("the captured older runner's stderr");
+    assert!(older.starts_with("error: unexpected argument '--runner-line-token' found"));
+    let forged = format!("{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}true\n");
+    let status = fx43_probe_status(fx43_routes(1, format!("{older}{forged}"))).await;
+    assert_eq!(status["reason"], "RunnerOlderThanController", "{status}");
+    assert!(status["reachable"].is_null(), "{status}");
+    assert!(status.get("clusterId").is_none(), "{status}");
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("--runner-line-token") && message.contains("runnerImage"),
+        "{message}"
+    );
+    assert_eq!(status["conditions"][0]["status"], "Unknown", "{status}");
+}
+
+/// **A created probe Job carries a fresh FX-43 token as the runner's last two
+/// arguments.** KILLS: the probe left without a token (its lines would be
+/// read as an older controller's).
+#[tokio::test]
+async fn fx43_a_created_probe_job_carries_the_line_token() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(creating_routes());
+    reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the probe Job is created");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    let posted: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_value(posted_job(&seen)).expect("a Job");
+    assert!(matches!(
+        job::job_token(&posted),
+        job::JobToken::EveryLine(_)
+    ));
+}

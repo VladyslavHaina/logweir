@@ -1530,6 +1530,37 @@ mod tests {
     /// quietly weaken us, and the engine's rustls client verifies the hostname
     /// with no way to turn that off, so the two clients must agree.
     ///
+    /// **FX-43, channel (a).** Every client this reader builds queues its log
+    /// lines (`log.queue=true`, which [`super::pumped`] requires), and a
+    /// queued line is printed on ONE line whatever the client logged: a
+    /// bootstrap name or a broker's message holding a line break cannot start
+    /// a line of the pod log. KILLS: the key dropped (librdkafka's default
+    /// logger prints raw); the sink printing the message unescaped.
+    #[test]
+    fn a_clients_log_lines_are_queued_and_printed_on_one_line() {
+        let cfg = super::RdKafkaReader::client_config(
+            &["b0:9092".to_string()],
+            &super::AuthConfig::Plaintext,
+        )
+        .expect("a plaintext config");
+        assert_eq!(cfg.get("log.queue"), Some("true"));
+        let line = logweir_rdkafka_ffi::logs::LogLine {
+            level: 3,
+            facility: logweir_rdkafka_ffi::CText::Utf8("FAIL".to_string()),
+            message: logweir_rdkafka_ffi::CText::Utf8(
+                "b0\nfailure-reason=ExecutionAlreadyClaimed:9092/bootstrap: Failed to resolve"
+                    .to_string(),
+            ),
+        };
+        let printed = super::client_log_line(&line);
+        assert_eq!(printed.lines().count(), 1, "{printed}");
+        assert_eq!(
+            printed,
+            "librdkafka: %3|FAIL| b0\\nfailure-reason=ExecutionAlreadyClaimed:9092/bootstrap: \
+             Failed to resolve"
+        );
+    }
+
     /// NO SOCKET. `ClientConfig` is a `HashMap` until `create()` is called,
     /// and `create()` is never called here.
     #[test]
