@@ -159,10 +159,13 @@ impl StaticAssets {
         if is_dir(&pages) {
             collect(&pages, "pages/", content_type_for, &mut files)?;
         }
-        let next = dir.join(NEXT_DIR);
+        // Joined WITHOUT the key's trailing slash: `next/` would make the
+        // operating system resolve a symbolic link named `next` before
+        // `symlink_metadata` could refuse it.
+        let next = dir.join(NEXT_DIR.trim_end_matches('/'));
         if is_dir(&next) {
             collect(&next, NEXT_DIR, content_type_for, &mut files)?;
-            let hashed = dir.join(NEXT_ASSETS_DIR);
+            let hashed = dir.join(NEXT_ASSETS_DIR.trim_end_matches('/'));
             if is_dir(&hashed) {
                 collect(
                     &hashed,

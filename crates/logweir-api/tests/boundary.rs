@@ -686,6 +686,117 @@ async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// **THE PREVIEW FOLLOWS NO SYMLINK** (PROD-18.1 R1 review L3). A link inside
+/// `next/assets/` could point anywhere the process can read, and `next` itself
+/// as a link would serve a directory the image never put there. `assets.rs`
+/// reads neither: `symlink_metadata` (on a path joined without the trailing
+/// slash, which would resolve the link first) and the walk's `file_type` do not
+/// follow links, so each is absent, never served.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_preview_follows_no_symlink() {
+    let root = support::repo_root();
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let tmp = std::env::temp_dir();
+    let layout = |name: &str| {
+        let dir = tmp.join(format!("logweir-api-ui-link-{name}-{unique}"));
+        for rel in shipped_ui_files() {
+            let to = dir.join(rel.strip_prefix("ui/").unwrap());
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(root.join(&rel), to).unwrap();
+        }
+        dir
+    };
+    // A file outside the UI directory, with a name the preview would serve.
+    let outside = tmp.join(format!("logweir-api-ui-link-outside-{unique}.js"));
+    std::fs::write(&outside, b"not part of the console").unwrap();
+
+    // 1. A linked file among the hashed files.
+    let dir = layout("file");
+    std::fs::create_dir_all(dir.join("next/assets")).unwrap();
+    std::fs::write(dir.join("next/index.html"), b"<!doctype html>").unwrap();
+    std::fs::write(dir.join("next/assets/index-Real.js"), b"console.log(1)").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("next/assets/index-Linked.js")).unwrap();
+    let app = TestApp::with(
+        support::FakeKube::new(),
+        support::Options {
+            ui_dir: dir.clone(),
+            ..Default::default()
+        },
+    );
+    // Control: the real file beside it is served, so the preview itself is on.
+    assert_eq!(app.get("/ui/next/assets/index-Real.js").await.status, 200);
+    app.get("/ui/next/assets/index-Linked.js")
+        .await
+        .assert_problem(404, "not_found");
+
+    // 2. `next` itself a link to a directory holding a page.
+    let linked = layout("dir");
+    let real = linked.join("real-next");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("index.html"), b"<!doctype html>").unwrap();
+    std::os::unix::fs::symlink(&real, linked.join("next")).unwrap();
+    let app2 = TestApp::with(
+        support::FakeKube::new(),
+        support::Options {
+            ui_dir: linked.clone(),
+            ..Default::default()
+        },
+    );
+    assert!(app2
+        .state
+        .assets()
+        .paths()
+        .iter()
+        .all(|p| !p.starts_with(logweir_api::assets::NEXT_DIR)));
+    for path in ["/ui/next/", "/ui/next"] {
+        app2.get(path).await.assert_problem(404, "not_found");
+    }
+    // 3. `next/assets` a link to a directory of hashed files.
+    let hashed = layout("assets");
+    std::fs::create_dir_all(hashed.join("next")).unwrap();
+    std::fs::write(hashed.join("next/index.html"), b"<!doctype html>").unwrap();
+    let elsewhere = hashed.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("index-Linked.js"), b"console.log(2)").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, hashed.join("next/assets")).unwrap();
+    let app4 = TestApp::with(
+        support::FakeKube::new(),
+        support::Options {
+            ui_dir: hashed.clone(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(app4.get("/ui/next/").await.status, 200);
+    app4.get("/ui/next/assets/index-Linked.js")
+        .await
+        .assert_problem(404, "not_found");
+
+    // Control: the same tree with a real `next/` serves the page.
+    std::fs::remove_file(linked.join("next")).unwrap();
+    std::fs::rename(&real, linked.join("next")).unwrap();
+    let app3 = TestApp::with(
+        support::FakeKube::new(),
+        support::Options {
+            ui_dir: linked.clone(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(app3.get("/ui/next/").await.status, 200);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&linked).unwrap();
+    std::fs::remove_dir_all(&hashed).unwrap();
+    std::fs::remove_file(&outside).unwrap();
+}
+
 /// The served policy as `directive -> sources`, and the sources a fetch of
 /// `directive` is actually held to (CSP3 §6.8.3: an absent fetch directive
 /// falls back to `default-src`).

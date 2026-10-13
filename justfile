@@ -784,6 +784,8 @@ console:
 image-console:
     docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.console -t logweir-console:check .
 
-# Build the console image and assert it. Requires Docker.
+# Build the console image and assert it. Requires Docker. The check holds the
+# image's /ui/next to this tree's console build, so that is built first.
 smoke-console: image-console
+    cd console && npm ci && npx vite build
     bash scripts/check-image-api.sh logweir-console:check

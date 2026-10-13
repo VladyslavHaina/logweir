@@ -37,10 +37,16 @@ fn all_workflows_parse_and_default_to_read_only() {
 fn main_publication_requires_quality_and_integration_success() {
     let ci = workflow("ci.yml");
     let publish = &ci["jobs"]["publish"];
-    assert_eq!(dependencies(publish), ["check", "e2e"]);
+    assert_eq!(dependencies(publish), ["check", "e2e", "console"]);
+    // The console job's gates hold the image as well; its skip (no console
+    // change) passes, a skipped check or e2e does not, and a failure never does.
     assert_eq!(
         publish["if"].as_str(),
-        Some("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+        Some(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() \
+             && needs.check.result == 'success' && needs.e2e.result == 'success' \
+             && needs.console.result != 'failure'"
+        )
     );
     assert_eq!(
         publish["uses"].as_str(),
@@ -69,6 +75,27 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
         .position(|s| s["run"] == "bash scripts/ci-images.sh candidates")
         .unwrap();
     assert!(check < login && login < push);
+    // NO npm CODE WHERE THE CREDENTIALS ARE (PROD-18.1 review M1). The console
+    // build the image check compares with runs in `console-dist`, which holds no
+    // secret and pushes nothing; `build`, which logs in and pushes, takes only
+    // its files.
+    assert_eq!(dependencies(&images["jobs"]["build"]), ["console-dist"]);
+    for step in steps {
+        let run = step["run"].as_str().unwrap_or("");
+        let uses = step["uses"].as_str().unwrap_or("");
+        assert!(
+            !run.contains("npm") && !run.contains("npx") && !uses.starts_with("actions/setup-node"),
+            "images.yml `build` runs npm code beside the registry credentials: {step:?}"
+        );
+    }
+    let dist = serde_yaml::to_string(&images["jobs"]["console-dist"]).unwrap();
+    assert!(dist.contains("npm ci && npx vite build"));
+    assert!(
+        !dist.contains("secrets.")
+            && !dist.contains("login-action")
+            && dist.contains("persist-credentials: false"),
+        "console-dist must hold no credential: {dist}"
+    );
     let mut builds = 0;
     for (index, step) in steps.iter().enumerate() {
         if step["uses"]
@@ -1013,8 +1040,13 @@ fn the_console_job_runs_when_the_console_or_its_schema_changed() {
     assert_eq!(console(&page, &rust), "console=false");
     let schema = commit(dir, "schemas/logweir-api-v1.openapi.json");
     assert_eq!(console(&rust, &schema), "console=true");
+    // The API's recorded documents the console tests import.
+    let fixture = commit(dir, "ui/tests/fixtures/console/session.json");
+    assert_eq!(console(&schema, &fixture), "console=true");
+    let other_fixture = commit(dir, "ui/tests/fixtures/set-ids.json");
+    assert_eq!(console(&fixture, &other_fixture), "console=false");
     let other_schema = commit(dir, "schemas/logweir-receipt.json");
-    assert_eq!(console(&schema, &other_schema), "console=false");
+    assert_eq!(console(&other_fixture, &other_schema), "console=false");
     let lookalike = commit(dir, "console-notes/x.md");
     assert_eq!(console(&other_schema, &lookalike), "console=false");
     assert_eq!(console("", &lookalike), "console=true");

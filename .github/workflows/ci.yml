@@ -182,8 +182,11 @@ jobs:
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, e2e]
+    # The console job's gates (audit, licences, ESLint, Vitest) hold the image
+    # too. It is skipped when neither console/ nor its inputs changed, and a
+    # skip passes here; a skipped check or e2e still skips publication.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.check.result == 'success' && needs.e2e.result == 'success' && needs.console.result != 'failure'
+    needs: [check, e2e, console]
     # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
     # workflow's jobs get no more than this job grants.
     permissions:

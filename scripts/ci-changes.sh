@@ -40,7 +40,7 @@ fi
 
 changed="$(git diff --name-only "$base" "$head")"
 if [[ "$question" == console ]]; then
-  if grep -qE '^(console/|schemas/logweir-api-v1\.openapi\.json$)' <<< "$changed"; then
+  if grep -qE '^(console/|ui/tests/fixtures/console/|schemas/logweir-api-v1\.openapi\.json$)' <<< "$changed"; then
     echo "console=true"
   else
     echo "console=false"
