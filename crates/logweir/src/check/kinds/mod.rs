@@ -136,8 +136,8 @@ pub trait Wiring {
     ) -> Result<Box<dyn crate::switchover::target::SwitchoverTarget>, CheckFailure> {
         let servers = crate::check::kafka::bootstrap(plan)?;
         let auth = crate::check::kafka::auth_config(plan)?;
-        let reader = logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&servers, auth)
-            .map_err(|e| CheckFailure::new(CheckCode::BrokerUnreachable, e.to_string()))?;
+        let reader = crate::switchover::dial(&servers, auth)
+            .map_err(|e| CheckFailure::new(CheckCode::BrokerUnreachable, e))?;
         Ok(Box::new(reader))
     }
 }

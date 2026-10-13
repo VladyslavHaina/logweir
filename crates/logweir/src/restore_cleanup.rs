@@ -409,8 +409,8 @@ fn verified_scorecard(
     }
     let key = format!("logweir/drills/{run_id}.json");
     let sidecar_key = format!("logweir/drills/{run_id}.sig");
-    let read = |key: &str, cap: u64| -> Result<Vec<u8>, DrillError> {
-        match store.get_capped(key, cap) {
+    let read = |key: &str, max_bytes: u64| -> Result<Vec<u8>, DrillError> {
+        match store.get_capped(key, max_bytes) {
             Ok((bytes, _)) => Ok(bytes),
             Err(StoreError::NotFound(_)) => Err(refuse(format!(
                 "{key} is not in the evidence store: without the run's signed record nothing \

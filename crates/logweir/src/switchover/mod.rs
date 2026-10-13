@@ -166,8 +166,8 @@ fn verified_evidence(
 }
 
 /// One capped read from the evidence store, its failure in words.
-fn store_read(store: &Store, key: &str, cap: u64) -> Result<Vec<u8>, String> {
-    match store.get_capped(key, cap) {
+fn store_read(store: &Store, key: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    match store.get_capped(key, max_bytes) {
         Ok((bytes, _)) => Ok(bytes),
         Err(StoreError::NotFound(_)) => Err(format!("{key} is not in the evidence store")),
         Err(e) => Err(format!("{key} could not be read: {e}")),
@@ -679,8 +679,18 @@ fn target_reader(
         .map_err(|e| e.to_string())?
         .with_client_certificate(cert)
         .map_err(|e| e.to_string())?;
-    logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&spec.target.bootstrap_servers, auth)
-        .map_err(|e| e.to_string())
+    dial(&spec.target.bootstrap_servers, auth)
+}
+
+/// The one function here that dials (interface I1): the target reader for
+/// `switchover run` ([`target_reader`]) and for the `switchoverReadiness`
+/// check (`check::kinds::Wiring::switchover_target`), over an auth each built
+/// through `AuthConfig::from_spec`.
+pub(crate) fn dial(
+    servers: &[String],
+    auth: logweir_kafka::reader::AuthConfig,
+) -> Result<logweir_kafka::rdkafka_reader::RdKafkaReader, String> {
+    logweir_kafka::rdkafka_reader::RdKafkaReader::connect(servers, auth).map_err(|e| e.to_string())
 }
 
 /// The record's untouched groups for a whole-run refusal.
