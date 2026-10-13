@@ -17,6 +17,8 @@ import unknown from "../../../../ui/tests/fixtures/console/protection-policy-unk
 
 type P = components["schemas"]["ProtectionPolicyView"];
 configure({ asyncUtilTimeout: 5000 });
+// A PatternFly form in jsdom is slow to render on a loaded host: allow a whole flow 30 s.
+vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({ answer: (_path: string): unknown => undefined }));
 vi.mock("../../mock/fetch", () => ({

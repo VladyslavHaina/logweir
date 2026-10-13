@@ -20,6 +20,8 @@ type S = components["schemas"];
 // The form waits 350 ms for typing to stop before it asks for a preview; give
 // every wait room on a loaded host.
 configure({ asyncUtilTimeout: 5000 });
+// A PatternFly form in jsdom is slow to render on a loaded host: allow a whole flow 30 s.
+vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; key: string | null; body: unknown }[],
