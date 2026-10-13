@@ -567,10 +567,13 @@ fn the_release_tests_call_can_never_reach_ci_publish() {
             other => panic!("{name} has invalid permissions: {other:?}"),
         };
         if write_scope || !job["secrets"].is_null() {
-            assert_eq!(
-                job["if"].as_str(),
-                Some(MAIN_PUSH),
-                "ci.yml's {name} asks for a write scope or secrets, so it must run only on a push to main"
+            // The push-to-main test, alone or ANDed with more conditions (publish
+            // also waits on its gates); an `||` anywhere could reopen it.
+            let condition = job["if"].as_str().unwrap_or("");
+            let rest = condition.strip_prefix(MAIN_PUSH);
+            assert!(
+                rest.is_some_and(|r| (r.is_empty() || r.starts_with(" && ")) && !r.contains("||")),
+                "ci.yml's {name} asks for a write scope or secrets, so it must run only on a push to main: {condition}"
             );
             credentialed.push(name.to_string());
         }
