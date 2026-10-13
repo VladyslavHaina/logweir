@@ -436,164 +436,61 @@ async fn unsafe_methods_need_the_exact_origin_and_json_before_anything_else() {
     );
 }
 
-/// The shipped UI files, selected the way `crates/logweir/tests/chart_lint.rs`
-/// selects them: everything under `ui/` except Markdown and `ui/tests/`.
-fn shipped_ui_files() -> Vec<String> {
-    let root = support::repo_root();
-    let mut out = Vec::new();
-    let mut stack = vec![root.join("ui")];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            if path.is_dir() {
-                if rel != "ui/tests" {
-                    stack.push(path);
-                }
-            } else if !rel.ends_with(".md") {
-                out.push(rel);
-            }
-        }
-    }
-    out.sort();
-    out
+/// The test UI directory, laid out like `console/dist` (`tests/fixtures/ui`).
+fn fixture_ui() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui")
 }
 
-/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE FILE DOES NOT: the
-/// marker must come from this service and only
-/// from it.
-#[tokio::test]
-async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
-    let app = TestApp::new();
-    let served = app.get("/ui/runtime.js").await;
-    assert_eq!(served.status, 200);
-    let text = String::from_utf8(served.body.clone()).unwrap();
-    assert!(
-        text.contains("window.LOGWEIR_CONSOLE = Object.freeze({ servedBy: \"logweir-api\" });"),
-        "the served runtime.js names the console: {text}"
-    );
-    assert!(
-        text.contains(
-            "window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({ allowed: [], selected: \"\" });"
-        ),
-        "and keeps the empty namespace context app.js reads: {text}"
-    );
-    assert_eq!(
-        served.header("content-type").as_deref(),
-        Some("text/javascript; charset=utf-8")
-    );
-    let file = std::fs::read_to_string(support::repo_root().join("ui/runtime.js")).unwrap();
-    // Its comment may NAME the marker (to say it must never set it); no line
-    // of code may.
-    assert!(
-        !file
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .any(|line| line.contains("LOGWEIR_CONSOLE")),
-        "the legacy file never claims to be the console"
-    );
-    assert!(text.is_ascii(), "every served script is plain ASCII");
-}
-
-#[tokio::test]
-async fn every_shipped_asset_is_served_byte_for_byte() {
-    let app = TestApp::new();
-    let files = shipped_ui_files();
-    // TWENTY-SIX, including `operation-watch.js` and the three pages
-    // `#/operations`, `#/protection` and `#/catalog` are rendered by.
-    // The number is asserted rather than taken from the tree: a count read from
-    // the same directory the server serves from stays green when files are
-    // deleted from both sides at once.
-    assert_eq!(
-        files.len(),
-        26,
-        "the shipped UI is twenty-six files: {files:?}"
-    );
-    for rel in &files {
-        // ONE FILE IS THE SERVICE'S OWN: `runtime.js` is served
-        // compiled in, carrying the console marker, in place of the legacy
-        // file's empty context. Every other file is its bytes on disk.
-        let source = if rel == "ui/runtime.js" {
-            logweir_api::assets::CONSOLE_RUNTIME_JS.as_bytes().to_vec()
-        } else {
-            std::fs::read(support::repo_root().join(rel)).unwrap()
-        };
-        let url = format!("/{rel}");
-        let response = app.get(&url).await;
-        assert_eq!(response.status, 200, "{url}");
-        assert_eq!(response.body, source, "{url} bytes differ from {rel}");
-        let expected_type = if rel.ends_with(".js") {
-            "text/javascript; charset=utf-8"
-        } else if rel.ends_with(".css") {
-            "text/css; charset=utf-8"
-        } else {
-            "text/html; charset=utf-8"
-        };
-        assert_eq!(
-            response.header("content-type").as_deref(),
-            Some(expected_type)
-        );
-        assert_eq!(
-            response.header("cache-control").as_deref(),
-            Some("no-cache")
-        );
-    }
-    let index = app.get("/ui/").await;
-    assert_eq!(
-        index.body,
-        std::fs::read(support::repo_root().join("ui/index.html")).unwrap()
-    );
-}
-
-/// THE REBUILT CONSOLE'S PREVIEW (PROD-18.1 R1) SITS BESIDE THE OLD ONE AND
-/// CHANGES NOTHING AT `/ui/`. The UI directory is laid out as the image lays it
-/// out: the shipped `ui/` files plus the console's build at `next/`. Every old
-/// file is still served byte for byte with `no-cache`, and the old path set is
-/// exactly what the plain `ui/` directory gives; the preview's page is
-/// `/ui/next/`, its hashed files are `immutable`, and fonts and images are
-/// selected only among them.
-#[tokio::test]
-async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
-    let root = support::repo_root();
-    let dir = std::env::temp_dir().join(format!(
-        "logweir-api-ui-next-{}-{}",
+/// A fresh directory under the system's temporary one.
+fn temp_ui(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "logweir-api-ui-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
-    for rel in shipped_ui_files() {
-        let to = dir.join(rel.strip_prefix("ui/").unwrap());
-        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-        std::fs::copy(root.join(&rel), to).unwrap();
-    }
-    let next = dir.join("next");
-    std::fs::create_dir_all(next.join("assets/deeper")).unwrap();
-    std::fs::create_dir_all(next.join(".vite")).unwrap();
+    ))
+}
+
+/// THE CONSOLE'S BUILD IS SERVED AT `/ui/` AND NOTHING ELSE OF ITS DIRECTORY
+/// (PROD-18.1 R8). The directory is laid out as `console/dist` is: the page is
+/// `/ui/`, `no-cache`; every hashed file is its bytes on disk, `immutable`;
+/// fonts and images are selected only among the hashed files. What a build
+/// also writes, and anything else, is never served: a page or a source map
+/// among the hashed files, an older font format, a font beside the page, a
+/// deeper directory, Markdown, the licences in `.vite/`. The old console's
+/// paths are gone: no `pages/`, no served `runtime.js`, no `/ui/next/`.
+#[tokio::test]
+async fn the_console_build_is_served_at_ui_and_nothing_else() {
+    let dir = temp_ui("build");
+    std::fs::create_dir_all(dir.join("assets/deeper")).unwrap();
+    std::fs::create_dir_all(dir.join(".vite")).unwrap();
+    std::fs::create_dir_all(dir.join("pages")).unwrap();
+    std::fs::create_dir_all(dir.join("next/assets")).unwrap();
     let page =
         b"<!doctype html><script type=\"module\" src=\"./assets/index-AbC_1-x.js\"></script>";
-    let write = |rel: &str, bytes: &[u8]| std::fs::write(next.join(rel), bytes).unwrap();
+    let write = |rel: &str, bytes: &[u8]| std::fs::write(dir.join(rel), bytes).unwrap();
     write("index.html", page);
     write("assets/index-AbC_1-x.js", b"console.log(1)");
     write("assets/index-DeF.css", b"a{}");
     write("assets/RedHatTextVF-Gh_i.woff2", b"wOF2");
     write("assets/PF-Bkg-Jk.svg", b"<svg/>");
-    // Never selected: a page among the hashed files, a source map, an older font
-    // format, a font outside assets/, a deeper directory, Markdown, a dot-directory.
-    write("assets/stray.html", b"x");
-    write("assets/index-AbC_1-x.js.map", b"{}");
-    write("assets/old.woff", b"x");
-    write("font.woff2", b"x");
-    write("assets/deeper/x.js", b"x");
-    write("README.md", b"x");
-    write(".vite/license.md", b"x");
-
-    let plain = TestApp::new();
+    for never in [
+        "assets/stray.html",
+        "assets/index-AbC_1-x.js.map",
+        "assets/old.woff",
+        "font.woff2",
+        "assets/deeper/x.js",
+        "README.md",
+        ".vite/license.md",
+        "pages/backups.js",
+        "runtime.js.map",
+        "next/index.html",
+        "next/assets/index-AbC_1-x.js",
+    ] {
+        write(never, b"x");
+    }
     let app = TestApp::with(
         support::FakeKube::new(),
         support::Options {
@@ -601,32 +498,19 @@ async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
             ..Default::default()
         },
     );
-    let old: Vec<String> = app
-        .state
-        .assets()
-        .paths()
-        .into_iter()
-        .filter(|p| !p.starts_with(logweir_api::assets::NEXT_DIR))
-        .collect();
     assert_eq!(
-        old,
-        plain.state.assets().paths(),
-        "/ui/ serves the same paths"
+        app.state.assets().paths(),
+        [
+            "assets/PF-Bkg-Jk.svg",
+            "assets/RedHatTextVF-Gh_i.woff2",
+            "assets/index-AbC_1-x.js",
+            "assets/index-DeF.css",
+            logweir_api::assets::ICON_PATH,
+            "index.html",
+        ],
+        "exactly the build's page, its hashed files and the compiled-in icon"
     );
-    for rel in shipped_ui_files() {
-        let url = format!("/{rel}");
-        let (before, after) = (plain.get(&url).await, app.get(&url).await);
-        assert_eq!(after.status, 200, "{url}");
-        assert_eq!(after.body, before.body, "{url} bytes differ");
-        assert_eq!(after.header("content-type"), before.header("content-type"));
-        assert_eq!(after.header("cache-control").as_deref(), Some("no-cache"));
-    }
-    assert_eq!(
-        app.get("/ui/").await.body,
-        std::fs::read(root.join("ui/index.html")).unwrap()
-    );
-
-    let index = app.get("/ui/next/").await;
+    let index = app.get("/ui/").await;
     assert_eq!(index.status, 200);
     assert_eq!(index.body, page);
     assert_eq!(
@@ -638,17 +522,19 @@ async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
         index.header("content-security-policy").as_deref(),
         Some(CSP)
     );
-    for (path, kind) in [
+    for (path, kind, bytes) in [
         (
-            "/ui/next/assets/index-AbC_1-x.js",
+            "/ui/assets/index-AbC_1-x.js",
             "text/javascript; charset=utf-8",
+            &b"console.log(1)"[..],
         ),
-        ("/ui/next/assets/index-DeF.css", "text/css; charset=utf-8"),
-        ("/ui/next/assets/RedHatTextVF-Gh_i.woff2", "font/woff2"),
-        ("/ui/next/assets/PF-Bkg-Jk.svg", "image/svg+xml"),
+        ("/ui/assets/index-DeF.css", "text/css; charset=utf-8", b"a{}"),
+        ("/ui/assets/RedHatTextVF-Gh_i.woff2", "font/woff2", b"wOF2"),
+        ("/ui/assets/PF-Bkg-Jk.svg", "image/svg+xml", b"<svg/>"),
     ] {
         let response = app.get(path).await;
         assert_eq!(response.status, 200, "{path}");
+        assert_eq!(response.body, bytes, "{path}");
         assert_eq!(response.header("content-type").as_deref(), Some(kind));
         assert_eq!(
             response.header("cache-control").as_deref(),
@@ -660,140 +546,105 @@ async fn the_preview_console_is_served_at_ui_next_and_ui_is_unchanged() {
             Some(CSP)
         );
     }
-    let moved = app.get("/ui/next").await;
-    assert_eq!(moved.status, 308);
-    assert_eq!(moved.header("location").as_deref(), Some("/ui/next/"));
     for path in [
-        "/ui/next/assets/stray.html",
-        "/ui/next/assets/index-AbC_1-x.js.map",
-        "/ui/next/assets/old.woff",
-        "/ui/next/font.woff2",
-        "/ui/next/assets/deeper/x.js",
-        "/ui/next/README.md",
-        "/ui/next/.vite/license.md",
-        "/ui/next/assets/",
-        "/ui/next/index.html/",
-        "/ui/next/assets/../index.html",
-        "/ui/next//index.html",
+        "/ui/assets/stray.html",
+        "/ui/assets/index-AbC_1-x.js.map",
+        "/ui/assets/old.woff",
+        "/ui/font.woff2",
+        "/ui/assets/deeper/x.js",
+        "/ui/README.md",
+        "/ui/.vite/license.md",
+        "/ui/pages/backups.js",
+        "/ui/runtime.js",
+        "/ui/next/",
+        "/ui/next",
+        "/ui/next/assets/index-AbC_1-x.js",
+        "/ui/assets/",
+        "/ui/assets",
+        "/ui/index.html/",
+        "/ui/assets/../index.html",
+        "/ui//index.html",
     ] {
         app.get(path).await.assert_problem(404, "not_found");
-    }
-    // Without a `next/` directory there is no preview, and no redirect to one.
-    for path in ["/ui/next/", "/ui/next"] {
-        plain.get(path).await.assert_problem(404, "not_found");
     }
     assert!(app.fake.requests().is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// **THE PREVIEW FOLLOWS NO SYMLINK** (PROD-18.1 R1 review L3). A link inside
-/// `next/assets/` could point anywhere the process can read, and `next` itself
-/// as a link would serve a directory the image never put there. `assets.rs`
-/// reads neither: `symlink_metadata` (on a path joined without the trailing
-/// slash, which would resolve the link first) and the walk's `file_type` do not
-/// follow links, so each is absent, never served.
+/// **THE UI DIRECTORY FOLLOWS NO SYMLINK** (PROD-18.1 R1 review L3). A link
+/// inside `assets/` could point anywhere the process can read, and `assets`
+/// itself as a link would serve a directory the image never put there.
+/// `assets.rs` reads neither: `symlink_metadata` (on a path joined without the
+/// trailing slash, which would resolve the link first) and the walk's
+/// `file_type` do not follow links, so each is absent, never served.
 #[cfg(unix)]
 #[tokio::test]
-async fn the_preview_follows_no_symlink() {
-    let root = support::repo_root();
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let tmp = std::env::temp_dir();
-    let layout = |name: &str| {
-        let dir = tmp.join(format!("logweir-api-ui-link-{name}-{unique}"));
-        for rel in shipped_ui_files() {
-            let to = dir.join(rel.strip_prefix("ui/").unwrap());
-            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-            std::fs::copy(root.join(&rel), to).unwrap();
-        }
-        dir
-    };
-    // A file outside the UI directory, with a name the preview would serve.
-    let outside = tmp.join(format!("logweir-api-ui-link-outside-{unique}.js"));
+async fn the_ui_directory_follows_no_symlink() {
+    let page = b"<!doctype html>";
+    let outside = temp_ui("outside").with_extension("js");
     std::fs::write(&outside, b"not part of the console").unwrap();
+    let app_for = |dir: &std::path::Path| {
+        TestApp::with(
+            support::FakeKube::new(),
+            support::Options {
+                ui_dir: dir.to_path_buf(),
+                ..Default::default()
+            },
+        )
+    };
 
     // 1. A linked file among the hashed files.
-    let dir = layout("file");
-    std::fs::create_dir_all(dir.join("next/assets")).unwrap();
-    std::fs::write(dir.join("next/index.html"), b"<!doctype html>").unwrap();
-    std::fs::write(dir.join("next/assets/index-Real.js"), b"console.log(1)").unwrap();
-    std::os::unix::fs::symlink(&outside, dir.join("next/assets/index-Linked.js")).unwrap();
-    let app = TestApp::with(
-        support::FakeKube::new(),
-        support::Options {
-            ui_dir: dir.clone(),
-            ..Default::default()
-        },
-    );
-    // Control: the real file beside it is served, so the preview itself is on.
-    assert_eq!(app.get("/ui/next/assets/index-Real.js").await.status, 200);
-    app.get("/ui/next/assets/index-Linked.js")
+    let dir = temp_ui("link-file");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), page).unwrap();
+    std::fs::write(dir.join("assets/index-Real.js"), b"console.log(1)").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("assets/index-Linked.js")).unwrap();
+    let app = app_for(&dir);
+    // Control: the real file beside it is served.
+    assert_eq!(app.get("/ui/assets/index-Real.js").await.status, 200);
+    app.get("/ui/assets/index-Linked.js")
         .await
         .assert_problem(404, "not_found");
 
-    // 2. `next` itself a link to a directory holding a page.
-    let linked = layout("dir");
-    let real = linked.join("real-next");
-    std::fs::create_dir_all(&real).unwrap();
-    std::fs::write(real.join("index.html"), b"<!doctype html>").unwrap();
-    std::os::unix::fs::symlink(&real, linked.join("next")).unwrap();
-    let app2 = TestApp::with(
-        support::FakeKube::new(),
-        support::Options {
-            ui_dir: linked.clone(),
-            ..Default::default()
-        },
-    );
+    // 2. `assets` itself a link to a directory of hashed files.
+    let linked = temp_ui("link-dir");
+    let elsewhere = linked.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(linked.join("index.html"), page).unwrap();
+    std::fs::write(elsewhere.join("index-Linked.js"), b"console.log(2)").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, linked.join("assets")).unwrap();
+    let app2 = app_for(&linked);
+    assert_eq!(app2.get("/ui/").await.status, 200);
     assert!(app2
         .state
         .assets()
         .paths()
         .iter()
-        .all(|p| !p.starts_with(logweir_api::assets::NEXT_DIR)));
-    for path in ["/ui/next/", "/ui/next"] {
-        app2.get(path).await.assert_problem(404, "not_found");
-    }
-    // 3. `next/assets` a link to a directory of hashed files.
-    let hashed = layout("assets");
-    std::fs::create_dir_all(hashed.join("next")).unwrap();
-    std::fs::write(hashed.join("next/index.html"), b"<!doctype html>").unwrap();
-    let elsewhere = hashed.join("elsewhere");
-    std::fs::create_dir_all(&elsewhere).unwrap();
-    std::fs::write(elsewhere.join("index-Linked.js"), b"console.log(2)").unwrap();
-    std::os::unix::fs::symlink(&elsewhere, hashed.join("next/assets")).unwrap();
-    let app4 = TestApp::with(
-        support::FakeKube::new(),
-        support::Options {
-            ui_dir: hashed.clone(),
-            ..Default::default()
-        },
-    );
-    assert_eq!(app4.get("/ui/next/").await.status, 200);
-    app4.get("/ui/next/assets/index-Linked.js")
+        .all(|p| !p.starts_with(logweir_api::assets::ASSETS_DIR)));
+    app2.get("/ui/assets/index-Linked.js")
         .await
         .assert_problem(404, "not_found");
 
-    // Control: the same tree with a real `next/` serves the page.
-    std::fs::remove_file(linked.join("next")).unwrap();
-    std::fs::rename(&real, linked.join("next")).unwrap();
-    let app3 = TestApp::with(
-        support::FakeKube::new(),
-        support::Options {
-            ui_dir: linked.clone(),
-            ..Default::default()
-        },
-    );
-    assert_eq!(app3.get("/ui/next/").await.status, 200);
+    // 3. The page itself a link: no page, so the directory is refused at startup.
+    let page_link = temp_ui("link-page");
+    std::fs::create_dir_all(&page_link).unwrap();
+    std::os::unix::fs::symlink(&outside, page_link.join("index.html")).unwrap();
+    assert!(logweir_api::assets::StaticAssets::load(&page_link).is_err());
 
-    std::fs::remove_dir_all(&dir).unwrap();
-    std::fs::remove_dir_all(&linked).unwrap();
-    std::fs::remove_dir_all(&hashed).unwrap();
+    // Control: the same tree with a real `assets/` serves the file.
+    std::fs::remove_file(linked.join("assets")).unwrap();
+    std::fs::rename(&elsewhere, linked.join("assets")).unwrap();
+    assert_eq!(
+        app_for(&linked)
+            .get("/ui/assets/index-Linked.js")
+            .await
+            .status,
+        200
+    );
+
+    for d in [&dir, &linked, &page_link] {
+        std::fs::remove_dir_all(d).unwrap();
+    }
     std::fs::remove_file(&outside).unwrap();
 }
 
@@ -859,7 +710,7 @@ fn references(html: &str) -> Vec<(String, String)> {
 /// every asset any shipped page names is a same-origin path this server
 /// answers 200 for.
 ///
-/// REGRESSION REASONS. Put `data:,` back in `ui/index.html`: the reference
+/// REGRESSION REASONS. Put `data:,` in the page's icon link: the reference
 /// walk fails naming it. Drop the compiled-in icon from `assets.rs`: the
 /// served-200 arm fails naming `/ui/favicon.svg`. Add `data:` to the policy:
 /// the policy arm fails.
@@ -894,54 +745,35 @@ async fn no_console_page_names_an_asset_the_served_policy_forbids() {
         );
     }
 
-    let pages: Vec<String> = shipped_ui_files()
-        .into_iter()
-        .filter(|f| f.ends_with(".html"))
-        .collect();
-    assert!(!pages.is_empty(), "no shipped page was found under ui/");
+    // The test page names what a build's page names: its script, its
+    // stylesheet and the icon, each a path relative to the page.
+    let html = std::fs::read_to_string(fixture_ui().join("index.html")).unwrap();
     let mut checked = 0usize;
-    for page in &pages {
-        let html = std::fs::read_to_string(support::repo_root().join(page)).unwrap();
-        let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        for (tag, value) in references(&html) {
-            // A fragment is navigation inside the page, never a fetch.
-            if tag == "a" || value.starts_with('#') {
-                continue;
-            }
-            let scheme = value
-                .split_once(':')
-                .map(|(s, _)| s)
-                .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('.'));
-            assert!(
-                scheme.is_none() && !value.starts_with("//") && !value.starts_with('/'),
-                "{page}: <{tag}> names `{value}`, which is not a path relative to the page. \
-                 The served policy holds every fetch to 'self' ({csp}); a `data:` or remote \
-                 reference is refused by the browser on every load"
-            );
-            let mut segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
-            for segment in value.split('/') {
-                match segment {
-                    "." | "" => {}
-                    ".." => {
-                        segments.pop();
-                    }
-                    other => segments.push(other),
-                }
-            }
-            let url = format!("/{}", segments.join("/"));
-            let response = app.get(&url).await;
-            assert_eq!(
-                response.status, 200,
-                "{page}: <{tag}> names `{value}`, and this server answers {} for {url}",
-                response.status
-            );
-            checked += 1;
+    for (tag, value) in references(&html) {
+        // A fragment is navigation inside the page, never a fetch.
+        if tag == "a" || value.starts_with('#') {
+            continue;
         }
+        let scheme = value
+            .split_once(':')
+            .map(|(s, _)| s)
+            .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('.'));
+        assert!(
+            scheme.is_none() && !value.starts_with("//") && !value.starts_with('/'),
+            "<{tag}> names `{value}`, which is not a path relative to the page. The served \
+             policy holds every fetch to 'self' ({csp}); a `data:` or remote reference is \
+             refused by the browser on every load"
+        );
+        let url = format!("/ui/{}", value.trim_start_matches("./"));
+        let response = app.get(&url).await;
+        assert_eq!(
+            response.status, 200,
+            "<{tag}> names `{value}`, and this server answers {} for {url}",
+            response.status
+        );
+        checked += 1;
     }
-    assert!(
-        checked >= 4,
-        "only {checked} page references were resolved; the walk has gone quiet"
-    );
+    assert_eq!(checked, 3, "the page's script, stylesheet and icon");
 
     let icon = app
         .get(&format!("/ui/{}", logweir_api::assets::ICON_PATH))
@@ -967,7 +799,7 @@ async fn no_console_page_names_an_asset_the_served_policy_forbids() {
             .body
             .windows(b"href=\"./favicon.svg\"".len())
             .any(|w| w == b"href=\"./favicon.svg\""),
-        "ui/index.html names the served icon"
+        "the page names the served icon"
     );
 }
 
@@ -977,26 +809,21 @@ async fn tests_fixtures_keys_readmes_listings_and_traversals_are_not_served() {
     for path in [
         "/ui/README.md",
         "/ui/tests/index.html",
-        "/ui/tests/api.spec.js",
-        "/ui/tests/fixtures/approver.pem",
-        "/ui/tests/fixtures/approver.pub.pem",
-        "/ui/tests/fixtures/plan.golden.yaml",
-        "/ui/tests/fixtures/backup-valid-exit0.json",
-        "/ui/tests/",
-        "/ui/pages/",
-        "/ui/pages",
+        "/ui/fixtures/approver.pem",
+        "/ui/assets/",
+        "/ui/assets",
         "/ui/../Cargo.toml",
         "/ui/%2e%2e/Cargo.toml",
-        "/ui/pages/../index.html",
-        "/ui/pages/%2e%2e/index.html",
+        "/ui/assets/../index.html",
+        "/ui/assets/%2e%2e/index.html",
         "/ui/./index.html",
         "/ui//index.html",
         "/ui/index.html/",
         "/ui/INDEX.HTML",
-        "/ui/app.js%00",
+        "/ui/assets/index-AbC_1-x.js%00",
         "/ui/.git/config",
         "/Cargo.toml",
-        "/ui/api.js.map",
+        "/ui/assets/index-AbC_1-x.js.map",
     ] {
         let response = app.get(path).await;
         response.assert_problem(404, "not_found");

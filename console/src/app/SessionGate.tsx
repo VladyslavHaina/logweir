@@ -1,5 +1,5 @@
-// The session gate: GET /api/v1/session once at boot, then one of four pages, as
-// ui/README.md "How the page decides its state" describes for the current console:
+// The session gate: GET /api/v1/session once at boot, then one of four pages
+// (console/README.md, "How the page decides its state"):
 //   a session document          -> the console, for the namespaces it grants;
 //   401 unauthenticated/expired -> "Sign in", handing over to /auth/login and back to this route;
 //   anything else               -> "Can't reach the Logweir service", with what it got and Retry;

@@ -1153,7 +1153,7 @@ impl Default for Options {
             authenticator: None,
             authorizer: None,
             deadline: Duration::from_secs(10),
-            ui_dir: repo_root().join("ui"),
+            ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui"),
             cursor_key: vec![0x5a; 32],
             public_origin: ORIGIN.to_string(),
             allowed_hosts: vec![

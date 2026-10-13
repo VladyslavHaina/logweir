@@ -279,6 +279,7 @@ impl Fixture {
             std::env::temp_dir().join(format!("logweir-api-{tag}-{}-{stamp}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fixture = Self(dir);
+        fixture.write_ui();
         std::fs::write(fixture.0.join("cursor.key"), [0x42; 32]).unwrap();
         std::fs::write(
             fixture.0.join("kubeconfig.yaml"),
@@ -288,6 +289,26 @@ impl Fixture {
         )
         .unwrap();
         fixture
+    }
+
+    /// The UI directory the binary serves: the test fixture laid out like
+    /// `console/dist`, plus [`LARGE_ASSET`], an asset big enough that a client
+    /// which stops reading fills its socket buffers.
+    fn write_ui(&self) {
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui");
+        let to = self.0.join("ui");
+        std::fs::create_dir_all(to.join("assets")).unwrap();
+        std::fs::copy(from.join("index.html"), to.join("index.html")).unwrap();
+        let line = "// filler: a hashed console script of a realistic size.\n";
+        std::fs::write(
+            to.join(LARGE_ASSET.trim_start_matches("/ui/")),
+            line.repeat(LARGE_ASSET_BYTES / line.len()),
+        )
+        .unwrap();
+    }
+
+    fn ui(&self) -> PathBuf {
+        self.0.join("ui")
     }
 
     fn config(&self, body: &str) -> PathBuf {
@@ -312,7 +333,7 @@ fn config_text(fixture: &Fixture, listen: &str, origin: &str, context: &str) -> 
         "mode: localAdmin\nlisten: \"{listen}\"\npublicOrigin: \"{origin}\"\nuiDirectory: {}\n\
          localAdmin:\n  subject: admin\nnamespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  \
          kubeconfig: {}\n  context: {context}\ncursorKeyFile: {}\n",
-        repo_root().join("ui").display(),
+        fixture.ui().display(),
         fixture.path("kubeconfig.yaml"),
         fixture.path("cursor.key"),
     )
@@ -621,7 +642,7 @@ fn shared_config_text(fixture: &Fixture, listen: &str, public_base_url: &str) ->
          cursorKey:\n  file: {cursor}\n  expectedVersion: 1\n\
          namespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: {kubeconfig}\n  \
          context: fixture\n",
-        ui = repo_root().join("ui").display(),
+        ui = fixture.ui().display(),
         secret = fixture.path("client.secret"),
         session = fixture.path("session.key.yaml"),
         cursor = fixture.path("cursor.key.yaml"),
@@ -743,7 +764,10 @@ fn the_binary_serves_loopback_and_stops_on_sigterm() {
         "{}",
         &ui[..ui.len().min(400)]
     );
-    assert!(ui.contains("<title>Logweir</title>"), "the index is served");
+    assert!(
+        ui.contains("<title>Logweir console (test fixture)</title>"),
+        "the index is served"
+    );
 
     // The proxy path the current UI uses is not served by this binary.
     let apis = http_get(
@@ -1657,15 +1681,14 @@ fn answered_then_closed(
     }
 }
 
-/// The size of the largest answer the binary can give without a cluster:
-/// `ui/render.js`, served whole.
-fn render_js_size() -> usize {
-    usize::try_from(
-        std::fs::metadata(repo_root().join("ui/render.js"))
-            .expect("ui/render.js exists")
-            .len(),
-    )
-    .unwrap()
+/// The largest answer the binary can give without a cluster: [`LARGE_ASSET`],
+/// served whole (156 KiB, the size the old console's largest script had).
+const LARGE_ASSET: &str = "/ui/assets/large-AbC_1-x.js";
+const LARGE_ASSET_BYTES: usize = 156 * 1024;
+
+fn large_asset_size() -> usize {
+    let line = "// filler: a hashed console script of a realistic size.\n".len();
+    LARGE_ASSET_BYTES / line * line
 }
 
 /// **Clients that stop reading cannot hold the ceiling past the stall
@@ -1701,7 +1724,7 @@ fn clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline() {
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let runtime = socket_runtime();
-    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let request = format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     let requests = request.repeat(PIPELINED);
     let open = |i: usize| {
         let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
@@ -1790,7 +1813,7 @@ fn clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline() {
     // the sixteen answers. A connection the server never ended would instead
     // be read to the end of all sixteen, or still be open.
     std::thread::sleep((STALL_DEADLINE + STALL_SLACK).saturating_sub(last.elapsed()));
-    let whole = PIPELINED * render_js_size();
+    let whole = PIPELINED * large_asset_size();
     for (i, stream) in held.iter_mut().enumerate() {
         match answered_then_closed(stream, Duration::from_secs(2)) {
             Ok((_, received)) if received.len() < whole => {}
@@ -1833,7 +1856,7 @@ fn a_client_that_stops_reading_is_ended_at_the_stall_deadline() {
     stopped
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let request = format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     stopped
         .write_all(request.repeat(PIPELINED).as_bytes())
         .unwrap();
@@ -1843,7 +1866,7 @@ fn a_client_that_stops_reading_is_ended_at_the_stall_deadline() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 
     std::thread::sleep((STALL_DEADLINE + STALL_SLACK).saturating_sub(sent.elapsed()));
-    let whole = PIPELINED * render_js_size();
+    let whole = PIPELINED * large_asset_size();
     match answered_then_closed(&mut stopped, Duration::from_secs(2)) {
         Ok((_, received)) if received.len() < whole => {}
         Ok((_, received)) => panic!(
@@ -1882,9 +1905,9 @@ fn a_slow_but_steady_reader_outlasts_the_stall_deadline() {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let keep = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let keep = format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     let close = format!(
-        "GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        "GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(format!("{}{close}", keep.repeat(ANSWERS - 1)).as_bytes())
@@ -1915,9 +1938,9 @@ fn a_slow_but_steady_reader_outlasts_the_stall_deadline() {
         "a steady reader's connection was cut after {elapsed:?} and {received} bytes: {ended:?}"
     );
     assert!(
-        received >= ANSWERS * render_js_size(),
+        received >= ANSWERS * large_asset_size(),
         "the connection ended after {received} bytes, before {ANSWERS} answers of {} bytes",
-        render_js_size()
+        large_asset_size()
     );
     assert!(
         elapsed > STALL_DEADLINE + DEADLINE_SLACK,
@@ -2409,7 +2432,7 @@ fn a_client_reading_one_byte_every_twenty_seconds_is_ended_at_the_stall_deadline
     let mut slow = connect_with_receive_buffer(&runtime, address, 4096).unwrap();
     slow.set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let request = format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     slow.write_all(request.repeat(PIPELINED).as_bytes())
         .unwrap();
     let sent = Instant::now();
@@ -2443,7 +2466,7 @@ fn a_client_reading_one_byte_every_twenty_seconds_is_ended_at_the_stall_deadline
     );
 
     std::thread::sleep(bound.saturating_sub(sent.elapsed()));
-    let whole = PIPELINED * render_js_size();
+    let whole = PIPELINED * large_asset_size();
     match answered_then_closed(&mut slow, Duration::from_secs(2)) {
         Ok((_, received)) if received.len() + read < whole => {}
         Ok((_, received)) => panic!(
@@ -2482,7 +2505,7 @@ fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
     let (_server, port) = start_server(&fixture);
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let runtime = socket_runtime();
-    let request = format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let request = format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
     let requests = request.repeat(PIPELINED);
     let open = |i: usize| {
         let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
@@ -2587,7 +2610,7 @@ fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
     );
 
     std::thread::sleep(limit.saturating_sub(last.elapsed()));
-    let whole = PIPELINED * render_js_size();
+    let whole = PIPELINED * large_asset_size();
     for (i, stream) in held.iter_mut().enumerate() {
         match answered_then_closed(stream, Duration::from_secs(2)) {
             Ok((_, received)) if received.len() < whole => {}
@@ -3132,7 +3155,7 @@ fn one_address_outside_the_trusted_set_cannot_hold_the_ceiling() {
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let runtime = socket_runtime();
     let requests =
-        format!("GET /ui/render.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").repeat(PIPELINED);
+        format!("GET {LARGE_ASSET} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").repeat(PIPELINED);
 
     // Opened in batches, so the listen queue never holds more than one.
     let first = Instant::now();

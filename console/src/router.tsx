@@ -1,5 +1,5 @@
 // Routes. Hash history: the address after `#` is the route, so logweir-api keeps
-// serving files only and the sign-in round trip (`next=/ui/next/#/...`) comes back
+// serving files only and the sign-in round trip (`next=/ui/#/...`) comes back
 // to the same route. The namespace is always in the address, so every link names
 // what it shows; a visit with none lands on the session's first namespace.
 import {
@@ -17,7 +17,7 @@ import { Overview } from "./pages/Overview";
 import { Restores } from "./pages/restores/RestoreList";
 import { RestoreWizard, restoreSearch } from "./pages/restores/RestoreWizard";
 import { RestoreDetail } from "./pages/restores/RestoreDetail";
-import { Planned } from "./pages/Planned";
+import { NotFound } from "./pages/NotFound";
 import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
 import { scheduleRoutes } from "./pages/schedules/routes";
@@ -48,7 +48,7 @@ const restoreNew = createRoute({
   validateSearch: restoreSearch,
 });
 const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
-const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: Planned });
+const notFound = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: NotFound });
 
 const routeTree = root.addChildren([
   home,
@@ -63,7 +63,7 @@ const routeTree = root.addChildren([
     ...destinationRoutes(nsRoute),
     ...scheduleRoutes(nsRoute),
     ...approvalRoutes(nsRoute),
-    planned,
+    notFound,
   ]),
 ]);
 

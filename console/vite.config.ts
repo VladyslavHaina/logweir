@@ -6,7 +6,7 @@ declare const process: { env: Record<string, string | undefined> };
 
 // Two builds from one source:
 //   `vite build`               -> dist/: index.html plus hashed files under assets/,
-//                                 what logweir-api serves at /ui/next/. It talks to the
+//                                 what logweir-api serves at /ui/. It talks to the
 //                                 product API on its own origin ("live").
 //   `vite build --mode single` -> dist-single/index.html: every script, style and
 //                                 font inlined, on the in-page mock, for showing the
@@ -20,7 +20,7 @@ export default defineConfig(({ command, mode }) => {
   return {
     base: "./",
     define: { "import.meta.env.VITE_LOGWEIR_API": JSON.stringify(api) },
-    plugins: single ? [react(), inlineIntoHtml()] : [react()],
+    plugins: single ? [react(), inlineIntoHtml()] : [react(), pageIcon()],
     server: {
       // The API checks Host and, on writes, Origin against its own public origin.
       proxy: Object.fromEntries(
@@ -52,6 +52,15 @@ export default defineConfig(({ command, mode }) => {
         },
   };
 });
+
+// The page icon logweir-api compiles in and serves beside the page (assets.rs ICON_PATH).
+// The single-file demo has no server, so it names none.
+function pageIcon(): Plugin {
+  return {
+    name: "logweir-page-icon",
+    transformIndexHtml: () => [{ tag: "link", attrs: { rel: "icon", type: "image/svg+xml", href: "./favicon.svg" }, injectTo: "head" }],
+  };
+}
 
 // The single-file build's one step: move the entry chunk and the stylesheet into
 // index.html and drop them from the output. Our own 30 lines instead of a plugin

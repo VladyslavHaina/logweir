@@ -770,7 +770,7 @@ console:
     cd console && npm audit --audit-level=high
     cd console && npm run check:licences
 
-# THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the twenty-two page files.
+# THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the console build it serves at /ui/.
 #
 # `Dockerfile.console` COMPILES, so this recipe behaves like
 # `image-weirkeeper`: the platform is
@@ -785,7 +785,7 @@ image-console:
     docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.console -t logweir-console:check .
 
 # Build the console image and assert it. Requires Docker. The check holds the
-# image's /ui/next to this tree's console build, so that is built first.
+# image's /ui to this tree's console build, so that is built first.
 smoke-console: image-console
     cd console && npm ci && npx vite build
     bash scripts/check-image-api.sh logweir-console:check

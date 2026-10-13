@@ -2,7 +2,7 @@
   "name": "logweir-console",
   "private": true,
   "version": "0.0.0-prototype",
-  "description": "PROD-18.1: the rebuilt Logweir console. Served by logweir-api at /ui/next/ until step R8 moves it to /ui/.",
+  "description": "The Logweir console (PROD-18.1), served by logweir-api at /ui/.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

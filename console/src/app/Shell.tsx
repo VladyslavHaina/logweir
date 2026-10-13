@@ -64,7 +64,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
 /** A navigation entry, shown when the session grants `flag` in the namespace (in any
- *  namespace, for `anyNamespace`), as the current console's tabs are. */
+ *  namespace, for `anyNamespace`). */
 type Entry = { path: string; label: string; icon: ComponentType; flag?: Flag; anyNamespace?: boolean };
 
 export const NAV: { group: string | null; items: Entry[] }[] = [

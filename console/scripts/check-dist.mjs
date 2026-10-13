@@ -1,4 +1,4 @@
-// What `vite build` wrote is what crates/logweir-api/src/assets.rs serves at /ui/next/,
+// What `vite build` wrote is what crates/logweir-api/src/assets.rs serves at /ui/,
 // and nothing else: index.html, plus hashed scripts, styles, fonts and images directly in
 // assets/, under the server's 8 MiB bound, referenced relatively, and with none of the
 // in-page mock (a live build talks to the product API only). Beside them, never served,
@@ -26,7 +26,7 @@ for (const file of files) {
   const stat = statSync(path);
   if (!stat.isFile()) problems.push(`${file} is not a file`);
   else if (stat.size > MAX_BYTES) problems.push(`${file} is ${stat.size} bytes; the server takes at most ${MAX_BYTES}`);
-  if (file !== "index.html" && !/\.(js|css|woff2|svg)$/.test(name)) problems.push(`${file}: not a type /ui/next/assets/ serves`);
+  if (file !== "index.html" && !/\.(js|css|woff2|svg)$/.test(name)) problems.push(`${file}: not a type /ui/assets/ serves`);
   if (!SAFE.test(name)) problems.push(`${file}: a name the server's safe_name refuses`);
   if (/\.(js|css|html)$/.test(name)) {
     const text = readFileSync(path, "utf8");
@@ -35,7 +35,8 @@ for (const file of files) {
 }
 const page = readFileSync(join(dist, "index.html"), "utf8");
 for (const [, ref] of page.matchAll(/(?:src|href)="([^"]*)"/g)) {
-  if (!ref.startsWith("./assets/")) problems.push(`index.html names ${ref}; every reference is ./assets/…`);
+  // The one exception is the icon logweir-api compiles in beside the page.
+  if (!ref.startsWith("./assets/") && ref !== "./favicon.svg") problems.push(`index.html names ${ref}; every reference is ./assets/… or ./favicon.svg`);
 }
 if (/<script(?![^>]*\bsrc=)/.test(page)) problems.push("index.html has an inline script, which the CSP refuses");
 
@@ -43,4 +44,4 @@ if (problems.length > 0) {
   console.error(`check-dist:\n  ${problems.join("\n  ")}`);
   process.exit(1);
 }
-console.log(`check-dist: ${files.length} files, the shape /ui/next/ serves, no mock`);
+console.log(`check-dist: ${files.length} files, the shape /ui/ serves, no mock`);

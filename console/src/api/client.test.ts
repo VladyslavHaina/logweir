@@ -134,8 +134,8 @@ describe("the session read", () => {
 
 describe("sign-in", () => {
   it("hands over to the existing route and comes back to the same page and route", () => {
-    expect(signInHref({ pathname: "/ui/next/", hash: "#/team-a/backups" })).toBe(
-      "/auth/login?next=%2Fui%2Fnext%2F%23%2Fteam-a%2Fbackups",
+    expect(signInHref({ pathname: "/ui/", hash: "#/team-a/backups" })).toBe(
+      "/auth/login?next=%2Fui%2F%23%2Fteam-a%2Fbackups",
     );
   });
 });
