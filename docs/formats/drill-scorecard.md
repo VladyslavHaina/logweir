@@ -65,6 +65,7 @@ chose.
 | 2.0.0 | PROD-11.1b | [a partition subset](#format-200-a-partition-subset-prod-111b-od-9-a): `source.selection` required, with `partitions` and `engine_runs`; arms PS-1 to PS-5 | a partition-subset restore, and only it | **MAJOR**, the owner's decision OD-9 (a), 2026-10-09: two existing fields then name the selection, not the topic |
 | 1.8.0 | PROD-15.1 | [`target.original_name`](#targetoriginal_name-format-180), arms ON-1 to ON-14 | a restore under the original topic names; format 1 only | MINOR, OD-7 (a) |
 | 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
+| 1.10.0, 2.2.0 | PROD-04.2 | [`integrity.verification.positions_mapping`](#integrityverificationpositions_mapping-format-1100-and-220), arms PM-1 to PM-5 | a passing complete restore of a point that captured consumer groups (2.2.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -81,6 +82,7 @@ chose.
 | 2.0.0 | **Every older reader refuses it**, never prints it `VALID`: `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1 as a newer major; a `logweir` between PROD-11.1 and PROD-11.1b as a newer major, or (a subset from the floor, with no start) at deserialisation. Upgrade the verifier before verifying subset restores. Older runners refuse a subset plan ([the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b)) | 2.0.0 documents stay verifiable with readers from PROD-11.1b on |
 | 1.8.0 | A verifier older than 1.28.0 and a `logweir` built before PROD-15.1 accept it, ignore the block and print no `original name:` line. An older runner refuses an original-name plan at phase 0 (its empty prefix maps every topic onto itself) | Documents stay valid; no older runner restores under the original names |
 | 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
+| 1.10.0, 2.2.0 | Accepts it, ignores the block and prints no `mapping:` line; `verify_scorecard.py` before 1.31.0 and an older `logweir drill verify` have no `--positions-mapping` | An older `logweir` writes no mapping (a `Switchover` over such a restore is refused `NoPositionsMapping`); documents stay valid |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -1062,6 +1064,54 @@ header order; a complete block's counts, or `INCOMPLETE` and why; and how many
 gaps and pruned ranges the verified partitions record — or the one line saying
 the coverage was not recorded; `logweir drill show` renders the same in its
 qualifiers footer (`integrity.verification`).
+
+### `integrity.verification.positions_mapping` (format 1.10.0 and 2.2.0)
+
+PROD-04.2. When a restore bound to a point whose receipt captured consumer
+groups passes a complete verification that covered every partition, phase 7
+maps every captured position onto the target, in the same in-order scan of
+each restored partition, and writes
+`logweir/drills/<run_id>.positions-mapping.json` (format 1.0.0, unsigned,
+at most 4 MiB, schema `schemas/logweir-positions-mapping-1.0.0.json`, `logweir
+schema positions-mapping`). This block binds it:
+
+```json
+"positions_mapping": {
+  "document": {"key": "logweir/drills/<run_id>.positions-mapping.json", "sha256": "sha256:…", "bytes": 1718},
+  "counts": {"exact": 4, "approximate": 0, "unavailable": 0},
+  "groups": 3
+}
+```
+
+`document` is absent and `omitted` is `tooLarge` (over 4 MiB) or `writeFailed`
+when no document was written. **The rule:** a captured position `P` maps to
+the first restored record whose last `x-original-offset` is at or above `P`
+(the target's end when none is); `exact` unless the restore's own selection
+excluded archived records in between (`approximate`, `skipped` counts them,
+offset holes are not records), or a capture gap or pruned range lies in
+between (`unavailable: ArchiveGap`). An emptied partition (`log_start =
+high_watermark = P`) maps `exact` to 0. Every other case is `unavailable` with
+its name: `TransactionalArchive`, `PartitionNotRestored`, `NoArchivedData`,
+`BeforeLogStart`, `BeforeArchive`, `BeyondArchive`, `PositionBeyondEnd`,
+`NotCaptured: <the capture's reason>`. A group the backup did not capture is
+listed with its reason and no entry.
+
+| Arm | Refuses |
+|---|---|
+| PM-1 | the block under a version before 1.10.0 (format 1) or 2.2.0 (format 2) |
+| PM-2 | the block beside an outcome that is not `pass`, a sampled verification, or `covered: false` |
+| PM-3 | both or neither of `document` and `omitted`, or an `omitted` outside the two words |
+| PM-4 | a document key that is not this run's, a digest that is not `sha256:<64 hex>`, or a length outside 1 to 4,194,304 |
+| PM-5 | `groups: 0` |
+
+With `--positions-mapping <file>` both readers also check the document
+(PMD-1 to PMD-7): the block names one; its bytes are the digest and length the
+block binds; it is format 1 of this run by the one rule; its counts are the
+block's; each entry's class, offset, `skipped` and reason fit; a mapped entry
+names a partition `complete.partitions[]` lists, in its restored topic, and
+one marked `PartitionNotRestored` names none; a group that was not captured has
+no entry. Both then print one `mapping:` line per entry. Applying the mapping
+is a `Switchover`'s ([kubernetes.md](../kubernetes.md#switching-consumer-groups-over)).
 
 ### `partial_reason` must SAY something
 
