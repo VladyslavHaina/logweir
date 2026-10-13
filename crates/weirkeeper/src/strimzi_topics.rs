@@ -73,7 +73,7 @@ pub fn process_namespaces() -> Vec<String> {
 /// must be one the installation listed.
 #[must_use]
 pub fn admit_namespace(strimzi: &StrimziRef, allowed: &[String]) -> Option<String> {
-    if allowed.iter().any(|n| *n == strimzi.namespace) {
+    if allowed.contains(&strimzi.namespace) {
         return None;
     }
     Some(format!(

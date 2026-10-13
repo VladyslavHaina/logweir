@@ -1077,9 +1077,12 @@ fn every_call_site_has_a_grant() {
 /// Strimzi's API group, read by PROD-05.1a.
 const STRIMZI_GROUP: &str = "kafka.strimzi.io";
 
+/// One RBAC rule as `(apiGroups, resources, verbs)`, each sorted.
+type Rule = (Vec<String>, Vec<String>, Vec<String>);
+
 /// The rules of every `weirkeeper-strimzi-kafkatopics` Role in a render, one
 /// list per Role.
-fn strimzi_roles(rel: &str) -> Vec<Vec<(Vec<String>, Vec<String>, Vec<String>)>> {
+fn strimzi_roles(rel: &str) -> Vec<Vec<Rule>> {
     manifests_in(&repo().join(rel))
         .iter()
         .filter(|m| m.kind == "Role" && m.name() == "weirkeeper-strimzi-kafkatopics")
