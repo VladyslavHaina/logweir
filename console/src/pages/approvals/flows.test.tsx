@@ -102,6 +102,8 @@ function serve(w: World) {
       if (w.approval === "error") return json(500, { code: "internal", detail: "the read failed", requestId: "q" });
       return w.approval ? ok(w.approval) : json(404, { code: "not_found", detail: "none" });
     }
+    if (path === "/namespaces/team-a/restores/restore-y") return ok(await restore({ name: "restore-y", uid: "uid-y", approvalRef: { name: "approval-y" } }));
+    if (path === "/namespaces/team-a/approvals/approval-y") return json(404, { code: "not_found", detail: "none" });
     if (path === "/namespaces/team-a/approvals/approval-x/packet") return w.packet ? ok(w.packet) : json(404, { code: "not_found", detail: "none" });
     if (path === "/namespaces/team-a/approvals/approval-x-confirmation/packet") return w.confirmation ? ok(w.confirmation) : json(404, { code: "not_found", detail: "none" });
     const req = path.match(/^\/namespaces\/team-a\/restores\/([^/]+)\/approval-request$/);
@@ -124,6 +126,7 @@ function renderAt(path: string) {
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  return router;
 }
 
 beforeEach(() => {
@@ -186,6 +189,20 @@ describe("two-person: the second person's page", () => {
     expect(screen.getByText(/needs a second person: the approver is the requester/)).toBeTruthy();
     expect(screen.queryByText(/Couldn't load|had a problem/)).toBeNull();
     expect(posts()).toHaveLength(1);
+  });
+
+  it("does not carry one Restore's outcome to the next Restore's page", async () => {
+    serve({
+      policy: TWO_PERSON,
+      requests: { "restore-y": { ...pending(), restore: "restore-y", restoreUid: "uid-y", approve: { offered: false, refusal: "requester", sentence: "You requested this restore." } } },
+      post: () => created(),
+    });
+    const router = renderAt("/team-a/approvals/restore-x");
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    await screen.findByText("Recorded as Approval approval-x");
+    await router.navigate({ to: "/$ns/approvals/$name", params: { ns: "team-a", name: "restore-y" }, search: {} });
+    await screen.findByText("You cannot approve your own request");
+    expect(screen.queryByText(/Recorded as Approval/)).toBeNull();
   });
 
   it("refuses a link that disagrees with the Restore, and offers no Approve", async () => {
