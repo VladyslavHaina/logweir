@@ -9,10 +9,6 @@ import { NAV } from "../app/Shell";
 import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
-const PLANNED: Record<string, string> = {
-  approvals: "Approvals: requests waiting for you, the two-person Approve page, and the history.",
-};
-
 /** The current console's address for the same page (ui/README.md "Routes"). */
 export function currentConsoleHref(ns: string, segments: string[]): string {
   const [section = "", name] = segments;
@@ -21,8 +17,6 @@ export function currentConsoleHref(ns: string, segments: string[]): string {
   switch (section) {
     case "restores":
       return name === "new" ? `/ui/#/restore?${q}` : one("history");
-    case "approvals":
-      return one(section);
     default:
       return `/ui/#/clusters?${q}`;
   }
@@ -42,7 +36,7 @@ export function Planned() {
         <Card>
           {MOCK ? (
             <Empty
-              title="Not in the prototype"
+              title="This page does not exist"
               icon={entry?.icon ?? CubesIcon}
               actions={
                 <Button component="a" href={`#/${ns}`} variant="secondary">
@@ -50,7 +44,7 @@ export function Planned() {
                 </Button>
               }
             >
-              {PLANNED[section] ?? "This page does not exist."} The prototype draws every other page in the navigation.
+              Nothing in the console has this address. The prototype draws every page in the navigation.
             </Empty>
           ) : (
             <Empty

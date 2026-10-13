@@ -1,6 +1,7 @@
 // What the Overview and the navigation's counts show, worked out once from the lists the
 // API publishes (protection policies, backups, restores, connections). Pure functions
 // of the documents and `now`, so the rows in attention.test.ts pin every number.
+import { useApprovalsNavCount } from "../api/approvals";
 import { useBackups, useConnections, useProtection } from "../api/queries";
 import { useCan } from "../api/session";
 import type { Backup, Connection, ProtectionPolicy } from "../api/types";
@@ -119,8 +120,8 @@ export function useAttentionReadable(ns: string): boolean {
 }
 
 /** The navigation's counts: needs attention (Overview) and failed backups in 24 hours (Backups),
- *  from the same queries the Overview reads. Approvals waiting for you join them with the
- *  approvals page (R6). */
+ *  from the same queries the Overview reads, and the requests waiting for this session's
+ *  approval (Approvals, from the Approvals page's own reads). */
 export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
   const backups = useBackups(ns);
   const protection = useProtection(ns);
@@ -129,6 +130,7 @@ export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
   const ready = readable && protection.data && connections.data && backups.data;
   const attention = ready ? attentionItems(ns, protection.data!, backups.data!, connections.data!) : [];
   const failed = backups.data ? failedLastDay(backups.data).length : 0;
+  const approvals = useApprovalsNavCount(ns);
   return {
     "": attention.length
       ? {
@@ -138,5 +140,6 @@ export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
         }
       : undefined,
     backups: failed ? { n: failed, tone: "danger", text: `${failed} failed in the last 24 hours` } : undefined,
+    approvals,
   };
 }

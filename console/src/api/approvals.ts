@@ -12,11 +12,13 @@
 //
 // EVERY RULE HERE DECIDES WHAT IS DRAWN, NEVER WHAT IS ALLOWED: the API and the
 // controller check each one again.
+import { useMemo } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError } from "./client";
-import { useSessionDoc } from "./session";
+import { ApiError, LocalRefusal as Refusal, api, call, listAll, LIST_PAGE_SIZE, outcomeUnknown } from "./client";
+import { keys, useRestores } from "./queries";
+import { useCan, useSessionDoc } from "./session";
 import type { components } from "./schema";
-import type { Problem, Restore, Session } from "./types";
+import type { Restore, Session } from "./types";
 import type { NavCount } from "../app/attention";
 import { sha256 } from "../components/hash";
 
@@ -496,25 +498,6 @@ export function afterwardsWords(mode: string, teardown: string): string {
 
 // ------------------------------------------------------- reads
 
-/** The page size lists ask for, and how many pages one list may follow. */
-export const LIST_PAGE_SIZE = 200;
-export const LIST_PAGE_BUDGET = 25;
-
-type PageOf<T> = { items: T[]; page: { nextCursor?: string | null } };
-
-/** Every item, following the cursor; never a prefix presented as the whole. */
-export async function listAll<T>(read: (cursor: string | undefined) => Promise<PageOf<T>>, what: string): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  for (let i = 0; i < LIST_PAGE_BUDGET; i += 1) {
-    const page = await read(cursor);
-    items.push(...page.items);
-    if (!page.page.nextCursor) return items;
-    cursor = page.page.nextCursor;
-  }
-  throw new Error(`This namespace holds more than ${items.length} ${what}; this page reads at most ${LIST_PAGE_SIZE * LIST_PAGE_BUDGET}. Use kubectl or the logweir CLI for the rest.`);
-}
-
 /** A read whose 404 is an answer (nothing there), not an error. */
 async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -525,20 +508,16 @@ async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   }
 }
 
-function unwrap<T>(result: { data?: T; error?: unknown; response: Response }): T {
-  if (result.data !== undefined && result.response.ok) return result.data;
-  throw new ApprovalProblem(result.response.status, result.error as Partial<Problem> | undefined);
-}
-
+/** R1's keys: [kind, ns] for the list and [kind, ns, name] for one; the reads that
+ *  are not an Approval or a Restore each have a kind of their own. */
 export const approvalKeys = {
-  all: (ns: string) => ["approvals", ns] as const,
-  policy: (ns: string) => ["approvals", ns, "policy"] as const,
-  list: (ns: string) => ["approvals", ns, "list"] as const,
-  restores: (ns: string) => ["approvals", ns, "restores"] as const,
-  restore: (ns: string, name: string) => ["approvals", ns, "restore", name] as const,
-  one: (ns: string, name: string) => ["approvals", ns, "approval", name] as const,
-  packet: (ns: string, name: string) => ["approvals", ns, "packet", name] as const,
-  request: (ns: string, restore: string) => ["approvals", ns, "request", restore] as const,
+  policy: (ns: string) => ["approval-policy", ns] as const,
+  list: (ns: string) => keys.list("approvals", ns),
+  one: (ns: string, name: string) => keys.item("approvals", ns, name),
+  packet: (ns: string, name: string) => ["approval-packets", ns, name] as const,
+  request: (ns: string, restore: string) => ["approval-requests", ns, restore] as const,
+  /** A Restore as the approval page reads it: with its plan bytes, and null when absent. */
+  subject: (ns: string, name: string) => ["approval-subjects", ns, name] as const,
 };
 
 export function useApprovalPolicy(ns: string, enabled = true) {
@@ -548,89 +527,74 @@ export function useApprovalPolicy(ns: string, enabled = true) {
     queryFn: async ({ signal }) =>
       // The OpenAPI document declares a `name` path parameter this route does not have;
       // it fills no placeholder, so the cast only satisfies the generated type.
-      unwrap(await api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns } as { ns: string; name: string } }, signal })).item,
+      (await call(() => api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns } as { ns: string; name: string } }, signal }))).item,
   });
 }
 
 export function useApprovals(ns: string, enabled = true) {
+  const readable = useCan(ns, "approvalsRead");
   return useQuery({
     queryKey: approvalKeys.list(ns),
-    enabled,
+    enabled: enabled && readable,
     queryFn: ({ signal }) =>
-      listAll(
-        async (cursor) =>
-          unwrap(
-            await api.GET("/api/v1/namespaces/{ns}/approvals", {
-              params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}) } },
-              signal,
-            }),
-          ),
-        "Approvals",
+      listAll("Approvals", (cursor) =>
+        call(() =>
+          api.GET("/api/v1/namespaces/{ns}/approvals", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
+        ),
       ),
     // A recorded approval the controller has not decided yet is re-read until it has.
     refetchInterval: (q) => (q.state.data?.some((a) => recordState(a).state === "awaiting-verification") ? 3000 : false),
   });
 }
 
-/** Every Restore in the namespace that still waits for an approval. */
+/** Every Restore in the namespace that still waits for an approval: the Restores list
+ *  (one cache with the Restores page), filtered. */
 export function useWaitingRestores(ns: string, enabled = true) {
-  return useQuery({
-    queryKey: approvalKeys.restores(ns),
-    enabled,
-    queryFn: async ({ signal }) =>
-      (
-        await listAll(
-          async (cursor) =>
-            unwrap(
-              await api.GET("/api/v1/namespaces/{ns}/restores", {
-                params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}) } },
-                signal,
-              }),
-            ),
-          "Restores",
-        )
-      ).filter(awaitingApproval),
-    refetchInterval: 10_000,
-  });
+  const all = useRestores(ns, enabled);
+  const waiting = useMemo(() => all.data?.filter(awaitingApproval), [all.data]);
+  return { ...all, data: waiting } as typeof all;
 }
 
 /** One Restore, with its plan bytes; null when it does not exist. */
 export function useSubjectRestore(ns: string, name: string, enabled = true) {
   return useQuery({
-    queryKey: approvalKeys.restore(ns, name),
+    queryKey: approvalKeys.subject(ns, name),
     enabled,
     queryFn: ({ signal }) =>
-      orNull(async () => unwrap(await api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal })).item),
+      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal }))).item),
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? 3000 : false),
   });
 }
 
 /** One Approval's metadata; null when none has that name. */
 export function useApproval(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "approvalsRead");
   return useQuery({
     queryKey: approvalKeys.one(ns, name),
-    enabled: enabled && name.length > 0,
+    enabled: enabled && readable && name.length > 0,
     queryFn: ({ signal }) =>
-      orNull(async () => unwrap(await api.GET("/api/v1/namespaces/{ns}/approvals/{name}", { params: { path: { ns, name } }, signal })).item),
+      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/approvals/{name}", { params: { path: { ns, name } }, signal }))).item),
     refetchInterval: (q) => (q.state.data && recordState(q.state.data).state === "awaiting-verification" ? 2000 : false),
   });
 }
 
 /** An Approval's two documents, verbatim; null when none has that name. */
 export function useApprovalPacket(ns: string, name: string, enabled = true) {
+  const readable = useCan(ns, "approvalPacketRead");
   return useQuery({
     queryKey: approvalKeys.packet(ns, name),
-    enabled: enabled && name.length > 0,
+    enabled: enabled && readable && name.length > 0,
     queryFn: ({ signal }) =>
       orNull(
-        async () => unwrap(await api.GET("/api/v1/namespaces/{ns}/approvals/{name}/packet", { params: { path: { ns, name } }, signal })).item,
+        async () =>
+          (await call(() => api.GET("/api/v1/namespaces/{ns}/approvals/{name}/packet", { params: { path: { ns, name } }, signal }))).item,
       ),
     staleTime: Infinity,
   });
 }
 
 async function readRequest(ns: string, name: string, signal?: AbortSignal): Promise<ApprovalRequest> {
-  return unwrap(await api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal })).item;
+  return (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item;
 }
 
 /** A two-person request as the second person is shown it. */
@@ -675,17 +639,8 @@ export function useApprovalsNavCount(ns: string): NavCount | undefined {
 
 // ------------------------------------------------------- writes
 
-/** A refusal that keeps its field errors (`ApiError` keeps the rest). */
-export class ApprovalProblem extends ApiError {
-  readonly fieldErrors: FieldError[];
-  constructor(status: number, problem: Partial<Problem> | undefined) {
-    super(status, problem);
-    this.fieldErrors = problem?.errors ?? [];
-  }
-}
-
-/** Nothing was sent: this page refused before any request. */
-export class LocalRefusal extends Error {
+/** Nothing was sent: this page refused before any request, naming the fields it is about. */
+export class LocalRefusal extends Refusal {
   readonly fields: ("approvalBytes" | "sidecarBytes")[];
   constructor(message: string, fields: ("approvalBytes" | "sidecarBytes")[] = []) {
     super(message);
@@ -705,10 +660,9 @@ export class LocalRefusal extends Error {
 export type Outcome = "unknown" | "invalid" | "local" | "refused";
 
 export function outcomeOf(error: unknown): Outcome {
-  if (error instanceof LocalRefusal) return "local";
-  if (!(error instanceof ApiError)) return "unknown";
-  if (error.status === 0 || error.status === 502 || error.status === 503 || error.status === 504 || error.code === "upstream_timeout") return "unknown";
-  if (error instanceof ApprovalProblem && error.fieldErrors.length > 0) return "invalid";
+  if (error instanceof Refusal) return "local";
+  if (outcomeUnknown(error) || (error instanceof ApiError && error.code === "upstream_timeout")) return "unknown";
+  if (error instanceof ApiError && error.fieldErrors.length > 0) return "invalid";
   return "refused";
 }
 
@@ -719,7 +673,7 @@ export const UNKNOWN_OUTCOME_SENTENCE =
 export function placeFieldErrors<F extends string>(error: unknown, fields: readonly F[]): { fields: Partial<Record<F, string>>; unmatched: string[] } {
   const placed: Partial<Record<F, string>> = {};
   const unmatched: string[] = [];
-  for (const e of error instanceof ApprovalProblem ? error.fieldErrors : []) {
+  for (const e of error instanceof ApiError ? error.fieldErrors : []) {
     const field = fields.find((f) => e.field === f || e.field === `spec.${f}`);
     if (field === undefined) unmatched.push(`${e.field}: ${e.message}`);
     else placed[field] = placed[field] ? `${placed[field]} ${e.message}` : e.message;
@@ -743,10 +697,11 @@ export async function sendConsoleApproval(ns: string, view: OfferView): Promise<
   if (!consoleApprovalOffered(view) || !view.request || !view.subject) {
     throw new LocalRefusal("This session is not offered an approval for this request; nothing was sent.");
   }
-  const answer = unwrap(
-    await api.POST("/api/v1/namespaces/{ns}/restores/{name}/console-approval", {
-      params: { path: { ns, name: view.subject.name }, header: originHeader() },
-      body: { confirmationSha256: view.request.confirmationSha256! },
+  const { subject, request } = view;
+  const answer = await call(() =>
+    api.POST("/api/v1/namespaces/{ns}/restores/{name}/console-approval", {
+      params: { path: { ns, name: subject.name }, header: originHeader() },
+      body: { confirmationSha256: request.confirmationSha256! },
     }),
   );
   return { approval: answer.item, replayed: answer.replayed === true };
@@ -763,7 +718,7 @@ export async function planHashOf(restore: Restore): Promise<string> {
  */
 export async function assertUnchanged(ns: string, expected: Subject): Promise<void> {
   const current = await orNull(
-    async () => unwrap(await api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name: expected.name } } })).item,
+    async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name: expected.name } } }))).item,
   );
   if (!current) throw new LocalRefusal(`Restore ${expected.name} no longer exists in this namespace; nothing was sent.`);
   const now = subjectOf(current, await planHashOf(current));
@@ -782,8 +737,8 @@ export async function sendCountersignature(ns: string, expected: Subject, sideca
   if (sidecar.text.trim().length === 0) throw new LocalRefusal("Paste the sidecar logweir drill countersign wrote, or choose its file.", ["sidecarBytes"]);
   await assertUnchanged(ns, expected);
   const restore = expected.name;
-  const answer = unwrap(
-    await api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
+  const answer = await call(() =>
+    api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
       params: { path: { ns, name: restore }, header: originHeader() },
       body: { sidecarBytes: sidecar.text },
     }),
@@ -819,8 +774,8 @@ export async function sendApprovalFiles(ns: string, expected: Subject, files: Ap
   if (missing.length > 0) throw new LocalRefusal("Choose both files, or paste their text.", missing);
   await assertUnchanged(ns, expected);
   const restore = expected.name;
-  const answer = unwrap(
-    await api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
+  const answer = await call(() =>
+    api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
       params: { path: { ns, name: restore }, header: originHeader() },
       body: { approvalBytes: files.approvalBytes, sidecarBytes: files.sidecarBytes },
     }),
@@ -833,8 +788,9 @@ function useApprovalWrite<V>(ns: string, send: (v: V) => Promise<Written>) {
   return useMutation({
     mutationFn: send,
     onSettled: () => {
-      void client.invalidateQueries({ queryKey: approvalKeys.all(ns) });
-      void client.invalidateQueries({ queryKey: ["restores", ns] });
+      for (const kind of ["approvals", "approval-requests", "approval-subjects", "restores"]) {
+        void client.invalidateQueries({ queryKey: keys.list(kind, ns) });
+      }
     },
   });
 }

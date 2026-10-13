@@ -697,7 +697,7 @@ export async function approvalsMock(request: Request, method: string, path: stri
     if (keyed.length > 0) {
       return problem(422, "validation_failed", "A field carries private-key text.", keyed.map((field) => ({ field, code: "private_key", message: "this carries private-key text; paste the signed files `logweir drill` wrote, never a key. Nothing was stored." })));
     }
-    let sidecar: { payloadType?: unknown; signatures?: unknown } | null = null;
+    let sidecar: { payloadType?: unknown; signatures?: unknown } | null;
     try {
       sidecar = JSON.parse(String(sent.sidecarBytes ?? ""));
     } catch {

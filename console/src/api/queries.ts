@@ -63,10 +63,11 @@ export function useBackup(ns: string, name: string) {
   });
 }
 
-export function useRestores(ns: string) {
+export function useRestores(ns: string, enabled = true) {
+  const readable = useCan(ns, "restoresRead");
   return useQuery({
     queryKey: keys.list("restores", ns),
-    enabled: useCan(ns, "restoresRead"),
+    enabled: enabled && readable,
     queryFn: ({ signal }) =>
       listAll("restores", (cursor) =>
         call(() => api.GET("/api/v1/namespaces/{ns}/restores", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),

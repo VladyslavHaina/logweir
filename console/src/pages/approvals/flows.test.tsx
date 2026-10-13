@@ -17,6 +17,7 @@ import packetFixture from "../../../../ui/tests/fixtures/console/approval-packet
 import { approvalRoutes } from "./routes";
 import { sha256 } from "../../components/hash";
 import { PRIVATE_KEY_REFUSAL, useApprovalsNavCount, type ApprovalPolicy } from "../../api/approvals";
+import { SessionGate } from "../../app/SessionGate";
 
 configure({ asyncUtilTimeout: 5000 });
 // A PatternFly page in jsdom is slow to render on a loaded host: allow a whole flow 30 s.
@@ -24,7 +25,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; key: string | null; body: unknown }[],
-  answer: (_r: Request, _path: string): Response | Promise<Response | null> | null => null,
+  answer: (() => null) as (r: Request, path: string) => Response | Promise<Response | null> | null,
 }));
 
 vi.mock("../../mock/fetch", () => ({
@@ -123,7 +124,7 @@ function renderAt(path: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
     </QueryClientProvider>,
   );
   return router;
@@ -354,7 +355,11 @@ describe("the Approvals list", () => {
 describe("the navigation's count", () => {
   function hook() {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>
+        <SessionGate>{() => children}</SessionGate>
+      </QueryClientProvider>
+    );
     return renderHook(() => useApprovalsNavCount("team-a"), { wrapper });
   }
 

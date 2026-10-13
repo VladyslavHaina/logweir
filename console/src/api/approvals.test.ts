@@ -4,6 +4,7 @@
 // console-approval.spec.js and approval-policy.spec.js (the approvals page's
 // rows); every row sits beside the input that must make it say no.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "./client";
 import approvalFixture from "../../../ui/tests/fixtures/console/approval.json";
 import revokedFixture from "../../../ui/tests/fixtures/console/approval-revoked-after-use.json";
 import twoPersonFixture from "../../../ui/tests/fixtures/console/approval-policy-two-person.json";
@@ -17,10 +18,8 @@ import {
   approvalMode,
   approvalsNavCount,
   approvalState,
-  ApprovalProblem,
   consoleApprovalOffered,
   instantText,
-  listAll,
   LocalRefusal,
   noApprovalSentence,
   outcomeOf,
@@ -52,7 +51,7 @@ import type { Restore } from "./types";
 
 const net = vi.hoisted(() => ({
   sent: [] as { method: string; path: string; headers: Headers; body: unknown }[],
-  answer: (_r: Request, _path: string): Response | Promise<Response | null> | null => null,
+  answer: (() => null) as (r: Request, path: string) => Response | Promise<Response | null> | null,
 }));
 
 vi.mock("../mock/fetch", () => ({
@@ -367,7 +366,7 @@ describe("the requests", () => {
   });
 
   it("a refusal keeps its field errors beside their fields; no answer is an unknown outcome, never a refusal", async () => {
-    const problem = new ApprovalProblem(422, {
+    const problem = new ApiError(422, {
       code: "validation_failed",
       detail: "d",
       errors: [
@@ -380,19 +379,12 @@ describe("the requests", () => {
       fields: { approvalBytes: "the approval document names plan hash x" },
       unmatched: ["ticket: elsewhere"],
     });
-    expect(outcomeOf(new ApprovalProblem(403, { code: "forbidden", detail: "You requested this restore." }))).toBe("refused");
-    expect(outcomeOf(new ApprovalProblem(503, { code: "kubernetes_unavailable", detail: "later" }))).toBe("unknown");
+    expect(outcomeOf(new ApiError(403, { code: "forbidden", detail: "You requested this restore." }))).toBe("refused");
+    expect(outcomeOf(new ApiError(503, { code: "kubernetes_unavailable", detail: "later" }))).toBe("unknown");
     expect(outcomeOf(new TypeError("Failed to fetch"))).toBe("unknown");
+    // The live client's no answer (client.call): status 0, never a refusal.
+    expect(outcomeOf(new ApiError(0, undefined))).toBe("unknown");
     expect(outcomeOf(new LocalRefusal("no"))).toBe("local");
   });
 
-  it("a list follows its cursor to the end, and refuses rather than present a prefix as the whole", async () => {
-    let reads = 0;
-    const all = await listAll(async (cursor) => {
-      reads += 1;
-      return { items: [cursor ?? "first"], page: { nextCursor: reads < 3 ? `c${reads}` : null } };
-    }, "Approvals");
-    expect(all).toEqual(["first", "c1", "c2"]);
-    await expect(listAll(async () => ({ items: [1], page: { nextCursor: "again" } }), "Approvals")).rejects.toThrow(/more than 25 Approvals/);
-  });
 });
