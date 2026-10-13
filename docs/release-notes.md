@@ -28,11 +28,11 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93 and 94. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94 and 95. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below. Items 91 to 94
+`v0.2.0` release that carries it has its own record below. Items 91 to 95
 landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
@@ -2164,6 +2164,49 @@ point the refusal names. Roll the controller with the runner.
 older controller shows `exitReason: PointInTimeSelectionIncomplete` without
 the runner's sentence.
 
+#### 95. Consumer positions follow a restore, under review, and a `Switchover` applies them (PROD-04.2)
+
+**Changed.** A complete restore of a recovery point that captured consumer
+groups now maps every captured position onto the restored topics (`exact`,
+`approximate` with the count of records the restore's own selection skipped,
+or `unavailable` with its reason) and binds the mapping into the signed
+scorecard (format 1.12.0, 2.4.0 for a subset,
+`integrity.verification.positions_mapping`; both readers check it,
+`--positions-mapping` verifies the document; `verify_scorecard.py` 1.33.0).
+Nothing is committed by a restore. A new `Switchover` kind applies a reviewed
+plan (`logweir switchover plan`) to stopped groups under its own approval
+(subject kind `Switchover`): each group is classified, held to the target's
+bounds and compare-and-set against the plan, and committed by Logweir's own
+non-member client, which the broker refuses while the group has a member. The
+target topics must be the ones the restore created: their IDs are compared
+with the scorecard's `target.creation` (item 91), so a recreated topic is
+`TargetGenerationChanged`. A signed switchover record
+(`logweir/switchovers/<run_id>.record.json`) records priors, commits and
+readbacks, and `logweir switchover rollback-plan` reverses it within stated
+limits. A `Preflight` with operation `Switchover` (check kind
+`switchoverReadiness`) reviews the same decisions before anything is
+committed.
+**Do:** apply the CRDs (the new `Switchover`, and the `Approval` and
+`Preflight` additions) and roll the controller and the runner image together.
+Upgrade every verifier that will read a 1.12.0 or 2.4.0 scorecard's mapping,
+and stop each group's consumers before its switchover.
+**Scope:** compose rows C1 to C17 on Kafka 4.3.1 (C14 and C2 also on 3.9.2):
+the paused consumer resumes at its record; a live group is refused
+`GroupActive` and a new run recovers; partial application and re-runs; the
+compare-and-set; approximate and not-restored mappings; a compaction hole; an
+emptied partition; a recreated target topic; only a passing complete restore
+maps; a streams group refused by type; a hidden group never created; a
+transactional archive; the rollback and its refusal; the subject kind. The
+review row reads every position before the switchover. 14 mutants on the
+mapping rule, the compare, the admission and the apply were killed; the API's
+approval gates are held to the restore's by a parity table.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K5 and K9.]
+**Rollback:** an older controller ignores `Switchover` objects, so nothing is
+applied, and a Helm rollback leaves the CRD and its objects inert. An older
+verifier ignores the mapping block and refuses the `switchover-record` payload
+type. Positions already committed stay committed: a switchover record's
+`rollback-plan` reverses them.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -2303,7 +2346,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93 and 94, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94 and 95, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2375,6 +2418,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 92 | the runner (scorecard 1.11.0), the `Restore` CRD (`status.topicConfiguration`), the controller, both verifiers, the API | the CRDs applied; the restore principal granted `AlterConfigs` |
 | 93 | the `KafkaCluster` CRD (`spec.strimzi`), the controller, the chart (`strimzi.*`) | nothing until `strimzi.readKafkaTopics` is set |
 | 94 | the runner's restore selection and one controller refusal code | the two rolled together |
+| 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

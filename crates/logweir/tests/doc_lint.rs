@@ -2214,6 +2214,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a record out of timestamp order is never lost",
             "`refusal-reason=PointInTimeSelectionIncomplete`",
         ),
+        // PROD-04.2 (item 95): positions follow a restore; the new kind's record.
+        (
+            "consumer positions follow a restore",
+            "`logweir/switchovers/<run_id>.record.json`",
+        ),
     ];
     assert_eq!(
         items.len(),
