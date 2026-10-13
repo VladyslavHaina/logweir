@@ -278,3 +278,39 @@ pub fn consumer_positions_document_schema() -> String {
     out.push('\n');
     out
 }
+
+/// **PROD-04.2.** The positions-mapping document's schema,
+/// `schemas/logweir-positions-mapping-1.0.0.json` (`logweir schema
+/// positions-mapping`).
+pub fn positions_mapping_document_schema() -> String {
+    document_schema::<crate::positions_mapping::MappingDocument>(
+        "positions-mapping",
+        crate::positions_mapping::DOCUMENT_FORMAT_VERSION,
+    )
+}
+
+/// **PROD-04.2.** The switchover record's schema,
+/// `schemas/logweir-switchover-record-1.0.0.json` (`logweir schema
+/// switchover-record`).
+pub fn switchover_record_schema() -> String {
+    document_schema::<crate::switchover::SwitchoverRecord>(
+        "switchover-record",
+        crate::switchover::RECORD_FORMAT_VERSION,
+    )
+}
+
+/// A document's schema under `https://logweir.dev/schemas/logweir-<name>-<version>.json`,
+/// with the scorecard's generator settings.
+fn document_schema<T: schemars::JsonSchema>(name: &str, version: &str) -> String {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut root = settings.into_generator().into_root_schema_for::<T>();
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-{name}-{version}.json"
+    ));
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}

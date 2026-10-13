@@ -190,6 +190,8 @@ schema:
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
     cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
     cargo run -p logweir-core --example emit_consumer_positions_schema > schemas/logweir-consumer-positions-1.0.0.json
+    cargo run -p logweir-core --example emit_positions_mapping_schema > schemas/logweir-positions-mapping-1.0.0.json
+    cargo run -p logweir-core --example emit_switchover_record_schema > schemas/logweir-switchover-record-1.0.0.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -204,12 +206,16 @@ schema-check:
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
     cargo run --locked -p logweir-core --example emit_consumer_positions_schema > "$tmp/consumer-positions.json"
+    cargo run --locked -p logweir-core --example emit_positions_mapping_schema > "$tmp/positions-mapping.json"
+    cargo run --locked -p logweir-core --example emit_switchover_record_schema > "$tmp/switchover-record.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_format_1_schema_version}}.json "$tmp/scorecard-format-1.json"
     diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
     diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
     diff -u schemas/logweir-consumer-positions-1.0.0.json "$tmp/consumer-positions.json"
+    diff -u schemas/logweir-positions-mapping-1.0.0.json "$tmp/positions-mapping.json"
+    diff -u schemas/logweir-switchover-record-1.0.0.json "$tmp/switchover-record.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

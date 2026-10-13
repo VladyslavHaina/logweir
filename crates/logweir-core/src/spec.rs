@@ -1273,6 +1273,10 @@ pub struct AllowedClusters {
 /// being authorised, backwards-compatible where a file is being read.
 pub const SUBJECT_KIND_RESTORE: &str = "Restore";
 
+/// **PROD-04.2.** The subject kind of an approval that authorises a
+/// `Switchover` (ADR 0008 Amendment A's reserved kind).
+pub const SUBJECT_KIND_SWITCHOVER: &str = "Switchover";
+
 fn default_subject_kind() -> String {
     SUBJECT_KIND_RESTORE.to_string()
 }

@@ -3,16 +3,13 @@ use crate::exit::ExitCode;
 /// The one sentence every non-shipping arm below ends with, so `logweir
 /// schema <anything>` tells an operator what tag 1 DOES ship rather than only
 /// what it does not. Capitalised because every use is sentence-initial.
-const ACCEPTED: &str = "Tag 1 ships two schemas: `scorecard` and `backup-receipt`.";
+const ACCEPTED: &str = "It ships four schemas: `scorecard`, `backup-receipt`, `positions-mapping` \
+                        and `switchover-record`.";
 
 /// Global Constraint 13, as REVISED: `logweir schema` accepts `scorecard` and
-/// `backup-receipt` in tag 1. `snapshot`, `diff` and `plan` are accepted and
-/// exit `1` naming the sub-project that introduces them; `switchover-record`
-/// exits `1` naming **tag 2**.
-///
-/// `switchover-record` has its own arm because it is the one deferred schema
-/// the ROADMAP names by document type, so an adopter types it, and the
-/// catch-all's "unknown schema" reads as "no such thing", not "not yet".
+/// `backup-receipt`, and since PROD-04.2 `positions-mapping` and
+/// `switchover-record`. `snapshot`, `diff` and `plan` are accepted and exit
+/// `1` naming the sub-project that introduces them.
 pub fn run(which: &str) -> ExitCode {
     match which {
         "scorecard" => {
@@ -45,12 +42,18 @@ pub fn run(which: &str) -> ExitCode {
             );
             ExitCode::Operational
         }
-        "switchover-record" => {
-            eprintln!(
-                "`logweir schema switchover-record` is introduced by tag 2 (Switchover). \
-                 {ACCEPTED}"
+        // PROD-04.2: the Switchover's two documents, byte-identical to
+        // `schemas/logweir-{positions-mapping,switchover-record}-1.0.0.json`.
+        "positions-mapping" => {
+            print!(
+                "{}",
+                logweir_core::schema::positions_mapping_document_schema()
             );
-            ExitCode::Operational
+            ExitCode::Ok
+        }
+        "switchover-record" => {
+            print!("{}", logweir_core::schema::switchover_record_schema());
+            ExitCode::Ok
         }
         other => {
             eprintln!("unknown schema `{other}`. {ACCEPTED}");

@@ -478,6 +478,7 @@ pub(super) struct CompleteOutcome {
 /// `listed` is phase 4's selection; every entry must be one of the
 /// partitions this lane verifies, or the ledger could not cover it, which is
 /// refused (`Operational`) rather than truncated.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     reader: &dyn ClusterReader,
     store: &Store,

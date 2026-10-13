@@ -203,6 +203,71 @@ fn main() -> std::process::ExitCode {
             logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
         }
+        // PROD-04.2: the Switchover's plan builders and its Job.
+        cli::Command::Switchover(cli::SwitchoverCmd::Plan {
+            scorecard,
+            positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) => match logweir::switchover::plan(&logweir::switchover::PlanArgs {
+            scorecard,
+            mapping: positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) {
+            Ok(summary) => {
+                print!("{summary}");
+                logweir::exit::ExitCode::Ok
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                logweir::exit::ExitCode::Operational
+            }
+        },
+        cli::Command::Switchover(cli::SwitchoverCmd::RollbackPlan { record, out }) => {
+            match logweir::switchover::rollback_plan(&logweir::switchover::RollbackPlanArgs {
+                record,
+                out,
+            }) {
+                Ok(summary) => {
+                    print!("{summary}");
+                    logweir::exit::ExitCode::Ok
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    logweir::exit::ExitCode::Operational
+                }
+            }
+        }
+        cli::Command::Switchover(cli::SwitchoverCmd::Run {
+            plan,
+            restore_plan,
+            approval,
+            approver_key,
+            evidence_keys,
+            signing_key,
+            scorecard_key,
+            namespace,
+            name,
+            uid,
+            store_contract_version,
+        }) => logweir::switchover::run(&logweir::switchover::RunArgs {
+            plan,
+            restore_plan,
+            approval,
+            approver_key,
+            evidence_keys,
+            signing_key,
+            scorecard_key,
+            namespace,
+            name,
+            uid,
+            store_contract_version,
+        }),
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error
         // (`non-exhaustive patterns`), not a runtime stub.
