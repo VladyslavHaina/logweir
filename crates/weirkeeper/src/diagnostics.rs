@@ -960,6 +960,28 @@ pub fn should_read_progress(
     (now - last).to_std().is_ok_and(|d| d >= OBSERVED_HEARTBEAT)
 }
 
+/// What a progress read's body says: only the lines the runner sealed with
+/// the Job's token ([`crate::runner_log::own_lines`], FX-43), parsed with the
+/// gate's memory, and the stored phase when this window carries none. Pure.
+#[must_use]
+pub fn progress_of(
+    token: &crate::job::JobToken,
+    raw: &str,
+    stored: Option<&RunProgress>,
+) -> Progress {
+    let lines = crate::runner_log::own_lines(token, raw);
+    let mut progress = parse_progress_after(
+        lines.text(),
+        stored.is_some_and(|p| p.runner_phase.is_some()),
+    );
+    if progress.phase.is_none() {
+        // No new phase line in the window is not "no phase": carry the
+        // stored one so `runnerPhase` does not blink out.
+        progress.phase = stored.and_then(|p| p.runner_phase.clone());
+    }
+    progress
+}
+
 /// The progress read itself, with D3 §2.4's bounded `LogParams`.
 ///
 /// It looks for new lines, and an absence is not a retraction: the
@@ -988,16 +1010,7 @@ pub async fn read_progress(
     let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
     match crate::runner_log::read_text(&pods, pod_name, &crate::runner_log::PROGRESS).await {
         Ok(raw) => {
-            let lines = crate::runner_log::own_lines(token, &raw);
-            let mut progress = parse_progress_after(
-                lines.text(),
-                stored.is_some_and(|p| p.runner_phase.is_some()),
-            );
-            if progress.phase.is_none() {
-                // No new phase line in the window is not "no phase": carry the
-                // stored one so `runnerPhase` does not blink out.
-                progress.phase = stored.and_then(|p| p.runner_phase.clone());
-            }
+            let progress = progress_of(token, &raw, stored);
             if progress.ignored > 0 {
                 // Ignored, never a failure (D3 §2.4), and a log line rather
                 // than a diagnostic: the closed diagnostic vocabulary has no

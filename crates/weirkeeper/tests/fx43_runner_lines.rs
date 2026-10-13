@@ -284,7 +284,7 @@ fn the_flag_on_the_job_decides_which_lines_are_read() {
 /// that printed a `progress-phase=` line of its own does not move
 /// `status.progress.runnerPhase` under an FX-43 Job.
 ///
-/// KILLS: `read_progress` parsing the raw log.
+/// KILLS: `read_progress` (`progress_of`) parsing the raw log.
 #[test]
 fn a_forged_progress_line_is_not_the_runners() {
     let t = own();
@@ -296,8 +296,7 @@ fn a_forged_progress_line_is_not_the_runners() {
         ],
     );
     let log = format!("{genuine}progress-phase=9:teardown\n");
-    let lines = own_lines(&JobToken::EveryLine(t), &log);
-    let progress = weirkeeper::diagnostics::parse_progress(lines.text());
+    let progress = weirkeeper::diagnostics::progress_of(&JobToken::EveryLine(t), &log, None);
     let phase = progress.phase.expect("the runner's phase");
     assert_eq!(phase.number, Some(3));
     // NEGATIVE CONTROL: the raw log's last phase is the forged one.

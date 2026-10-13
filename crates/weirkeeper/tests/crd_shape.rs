@@ -2371,6 +2371,48 @@ fn restore_target_mode_accepts_only_scratch_or_new_topic() {
     );
 }
 
+/// **FX-43: every `spec.bootstrapServers` entry is held to a pattern the API
+/// server enforces at admission**: no C0 or C1 control character and no line
+/// or paragraph separator, the set the runner's guard refuses
+/// (`logweir_core::runner_line::holds_line_breaking_or_control`). The pattern
+/// is RE2 (the API server's), so the separators are `\x{…}`. The live
+/// refusal is a PoC row (`kubectl apply` of such an object is refused).
+///
+/// KILLS: the pattern dropped from the items; a range narrowed (`\n` only).
+#[test]
+fn kafka_cluster_bootstrap_servers_refuse_control_characters_at_admission() {
+    let doc = crd("kafkaclusters.yaml");
+    let items = at(
+        spec_schema(&doc),
+        &["properties", "bootstrapServers", "items"],
+    );
+    let pattern = items
+        .get("pattern")
+        .and_then(Value::as_str)
+        .expect("the items carry a pattern");
+    assert_eq!(
+        pattern,
+        weirkeeper::crds::kafka_cluster::BOOTSTRAP_SERVER_PATTERN
+    );
+    assert_eq!(pattern, r"^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$");
+    // The same set the runner refuses: every C0 and C1 control, DEL, and the
+    // two separators, and nothing printable.
+    for c in [
+        '\u{0}', '\n', '\r', '\u{1f}', '\u{7f}', '\u{85}', '\u{9f}', '\u{2028}', '\u{2029}',
+    ] {
+        assert!(
+            logweir_core::runner_line::holds_line_breaking_or_control(&c.to_string()),
+            "{c:?}"
+        );
+    }
+    for c in [' ', '~', '\u{a0}', 'é', '\u{2027}', '\u{202a}'] {
+        assert!(
+            !logweir_core::runner_line::holds_line_breaking_or_control(&c.to_string()),
+            "{c:?}"
+        );
+    }
+}
+
 /// The auth mode enum, byte for byte; `the_crd_auth_mode_enum_and_auth_spec_agree`
 /// compares the Rust `AuthSpec` against exactly this. The three newer modes
 /// were APPENDED, so every value an earlier object could carry keeps its
