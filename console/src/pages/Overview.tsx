@@ -24,7 +24,6 @@ import {
   Progress,
   ProgressMeasureLocation,
   ProgressSize,
-  ProgressVariant,
   Stack,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
@@ -39,7 +38,8 @@ import { HealthStatus, RunStatus } from "../components/Status";
 import { ErrorState, LoadingRows } from "../components/States";
 import { When, duration, useNow } from "../components/When";
 import { CompactList, useNarrow } from "../components/CompactList";
-import { attentionItems, pointAgeSeconds, useAttentionReadable, type Attention } from "../app/attention";
+import { attentionItems, useAttentionReadable, type Attention } from "../app/attention";
+import { ageVsObjective } from "../app/policyAge";
 import { ApiError } from "../api/client";
 import { can, useSessionDoc } from "../api/session";
 import { activity, backupDay, freshestPoint, protectionCount, strip } from "./overviewData";
@@ -137,15 +137,6 @@ function Stat({ title, value, detail, tone }: { title: string; value: string; de
       </CardBody>
     </Card>
   );
-}
-
-function ageVsObjective(p: ProtectionPolicy, now: number) {
-  const age = pointAgeSeconds(p, now);
-  const objective = p.objectives.maxRecoveryPointAgeSeconds;
-  if (age === undefined) return { percent: 100, variant: ProgressVariant.danger, text: "No recovery point" };
-  const percent = Math.min(100, Math.round((age / objective) * 100));
-  const variant = percent >= 100 ? ProgressVariant.danger : percent >= 75 ? ProgressVariant.warning : ProgressVariant.success;
-  return { percent, variant, text: `${duration(age)} of ${duration(objective)}` };
 }
 
 function topicsOf(p: ProtectionPolicy): string {

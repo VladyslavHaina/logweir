@@ -69,11 +69,6 @@ export function protectedWords(p: ProtectionPolicy): { tone: "success" | "danger
   return { tone: "danger", text: "Objective not met", title };
 }
 
-/** Health, with `Unknown` (evaluated, could not decide) kept apart from absent (never evaluated). */
-function Health({ health }: { health: string | null | undefined }) {
-  return health === "Unknown" ? <StatusLabel tone="neutral" text="Unknown" title="health Unknown: the evaluation could not decide" /> : <HealthStatus health={health} />;
-}
-
 function failedWords(p: ProtectionPolicy): string {
   return `${p.consecutiveFailedRuns ?? 0} (${p.objectives.maxConsecutiveFailedRuns} allowed)`;
 }
@@ -135,7 +130,7 @@ export function ProtectionList() {
                 href: `#/${ns}/protection/${p.name}`,
                 title: p.name,
                 meta: `${ageVsObjective(p).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
-                status: <Health health={p.health} />,
+                status: <HealthStatus health={p.health} />,
               }))}
             />
           ) : (
@@ -162,7 +157,7 @@ export function ProtectionList() {
                       </div>
                     </Td>
                     <Td dataLabel="Status">
-                      <Health health={p.health} />
+                      <HealthStatus health={p.health} />
                     </Td>
                     <Td dataLabel="Recovery point age">
                       <AgeBar p={p} />
@@ -224,7 +219,7 @@ export function ProtectionDetail() {
         breadcrumb={breadcrumb}
         status={
           <>
-            <Health health={p.health} />
+            <HealthStatus health={p.health} />
             {met?.tone === "neutral" && <StatusLabel tone={met.tone} text={met.text} title={met.title} />}
           </>
         }

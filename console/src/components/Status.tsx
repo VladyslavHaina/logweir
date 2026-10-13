@@ -57,9 +57,12 @@ export function RunStatus({ op }: { op: OperationSummary }) {
   }
 }
 
-/** A protection policy's health (Healthy, AtRisk, Stale, Unprotected, Unknown). */
+/** A protection policy's health (Healthy, AtRisk, Stale, Unprotected, Unknown). An absent health
+ *  is "not evaluated yet"; `Unknown` is an evaluation that could not decide, never the same thing. */
 export function HealthStatus({ health }: { health: string | null | undefined }) {
   switch (health) {
+    case "Unknown":
+      return <StatusLabel tone="neutral" text="Unknown" title="health Unknown: the evaluation could not decide" icon={<UnknownIcon />} />;
     case "Healthy":
       return <StatusLabel tone="success" text="Protected" />;
     case "AtRisk":

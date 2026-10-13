@@ -9,7 +9,11 @@ import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRou
 import { ProgressVariant } from "@patternfly/react-core";
 import type { components } from "../../api/schema";
 import { ageVsObjective } from "../../app/policyAge";
+import { HealthStatus } from "../../components/Status";
+import { SessionProvider } from "../../api/session";
+import type { Session } from "../../api/types";
 import { scheduleRoutes } from "../schedules/routes";
+import sessionDoc from "../../../../ui/tests/fixtures/console/session.json";
 import { openProblems, protectedWords } from "./Protection";
 import listFixture from "../../../../ui/tests/fixtures/console/protection-policies-list.json";
 import healthy from "../../../../ui/tests/fixtures/console/protection-policy.json";
@@ -20,7 +24,7 @@ configure({ asyncUtilTimeout: 5000 });
 // A PatternFly form in jsdom is slow to render on a loaded host: allow a whole flow 30 s.
 vi.setConfig({ testTimeout: 30_000 });
 
-const net = vi.hoisted(() => ({ answer: (_path: string): unknown => undefined }));
+const net = vi.hoisted(() => ({ answer: (() => undefined) as (path: string) => unknown }));
 vi.mock("../../mock/fetch", () => ({
   mockFetch: async (request: Request) => {
     const path = new URL(request.url).pathname.replace(/^.*?\/api\/v1/, "");
@@ -38,7 +42,9 @@ function renderAt(path: string) {
   });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <RouterProvider router={router} />
+      <SessionProvider session={sessionDoc as unknown as Session}>
+        <RouterProvider router={router} />
+      </SessionProvider>
     </QueryClientProvider>,
   );
 }
@@ -47,6 +53,16 @@ afterEach(cleanup);
 const policy = (over: Partial<P>): P => ({ ...(healthy.item as unknown as P), ...over });
 
 describe("age against the objective", () => {
+  it("is measured when the page reads it, from the point's capture start (the Overview's rule)", () => {
+    const now = Date.parse("2026-10-13T12:00:00Z");
+    const objectives = { ...(healthy.item.objectives as P["objectives"]), maxRecoveryPointAgeSeconds: 3600 };
+    const captured = policy({ objectives, lastAvailablePoint: { recoveryPointAt: "2026-10-13T11:30:00Z", ageSeconds: 60, topicsTruncated: false } });
+    expect(ageVsObjective(captured, now)).toMatchObject({ percent: 50, text: "30 min of 60 min" });
+    // Control: the controller's own age stands in only when no capture start is recorded.
+    const aged = policy({ objectives, lastAvailablePoint: { ageSeconds: 60, topicsTruncated: false } });
+    expect(ageVsObjective(aged, now)).toMatchObject({ percent: 2 });
+  });
+
   it("is the Overview's derivation: under, near and past the objective, and no point at all", () => {
     const objectives = { ...(healthy.item.objectives as P["objectives"]), maxRecoveryPointAgeSeconds: 3600 };
     const at = (ageSeconds?: number) => ageVsObjective(policy({ objectives, lastAvailablePoint: ageSeconds === undefined ? undefined : { ageSeconds, topicsTruncated: false } }));
@@ -81,6 +97,16 @@ describe("the policy's statuses", () => {
     await within(region).findByText("Unknown");
     expect(within(region).queryByText("Not evaluated yet")).toBeNull();
     expect(within(region).getByText("Could not be evaluated")).toBeTruthy();
+  });
+
+  it("the shared health label keeps an evaluated Unknown apart from a policy never evaluated", () => {
+    render(<HealthStatus health="Unknown" />);
+    expect(screen.getByText("Unknown")).toBeTruthy();
+    expect(screen.queryByText("Not evaluated yet")).toBeNull();
+    cleanup();
+    // Negative control: an absent health is the one that reads "Not evaluated yet".
+    render(<HealthStatus health={undefined} />);
+    expect(screen.getByText("Not evaluated yet")).toBeTruthy();
   });
 
   it("the list draws each policy's age from the shared derivation", async () => {
