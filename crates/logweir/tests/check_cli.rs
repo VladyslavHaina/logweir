@@ -5197,6 +5197,17 @@ fn bound_point(pin: bool) -> BoundPoint {
 /// [`bound_point`], for backup set `set` and run `run`: every key the WRITER
 /// would derive from those two ids, and nothing spelled by hand.
 fn bound_point_of(set: &str, run: &str, pin: bool) -> BoundPoint {
+    bound_point_with(set, run, pin, |_| {})
+}
+
+/// [`bound_point_of`], with the receipt changed by `mutate` before it is
+/// signed.
+fn bound_point_with(
+    set: &str,
+    run: &str,
+    pin: bool,
+    mutate: impl FnOnce(&mut logweir_core::backup_receipt::BackupReceipt),
+) -> BoundPoint {
     use logweir_evidence::keys::SigningKey;
     let (store, bucket) = logweir_engine_oso::storage::Store::in_memory_versioned(BOUND_PREFIX);
     let manifest = bound_manifest_of(set);
@@ -5228,6 +5239,7 @@ fn bound_point_of(set: &str, run: &str, pin: bool) -> BoundPoint {
             logweir_core::backup_receipt::FORMAT_VERSION_WITH_MANIFEST_VERSION.to_string();
         receipt.archive.manifest_version_id = Some(version);
     }
+    mutate(&mut receipt);
     let receipt_bytes =
         logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
     let keys = logweir::backup::phase_run::receipt_keys(set, run);
@@ -13811,3 +13823,147 @@ fn the_walks_peak_memory_is_one_points() {
 /// to hash it, one at a time, under the 256 MiB manifest cap; a real manifest
 /// is about 540 bytes a segment, and this row's is 13 bytes.
 const FX33_WALK_BOUND: u64 = 64 << 20;
+
+/// **PROD-05.2's preview.** A restore plan carrying
+/// `target.topic_configuration`, bound to a point whose receipt records the
+/// model: one details line per topic with the diff phase 0 would create
+/// (the factor bounded by the target's ONE broker, the source's compaction
+/// deferred, the inherited retention against the target's own default), the
+/// target's `validate_only` verdicts, and what the transition's retention
+/// deletes. CONTROL: the same block over an unbound plan names the refusal
+/// phase 0 would make (`TopicConfigurationNotRecorded`).
+#[test]
+fn a_restore_preflight_previews_the_topic_configuration_diff() {
+    use logweir_core::backup_receipt::{ConfigEntry, TopicConfiguration};
+    let point = bound_point_with(BOUND_SET, "run-1", false, |r| {
+        r.owner_detection = Some(Vec::new());
+        r.topic_configuration = Some(BTreeMap::from([(
+            "orders".to_string(),
+            TopicConfiguration {
+                partitions: Some(1),
+                replication_factor: Some(3),
+                entries: Some(BTreeMap::from([
+                    (
+                        "cleanup.policy".to_string(),
+                        ConfigEntry {
+                            value: Some("compact".into()),
+                            source: "dynamicTopicConfig".into(),
+                            portability: "portable".into(),
+                        },
+                    ),
+                    (
+                        "retention.ms".to_string(),
+                        ConfigEntry {
+                            value: Some("604800000".into()),
+                            source: "defaultConfig".into(),
+                            portability: "inherited".into(),
+                        },
+                    ),
+                ])),
+                owner: None,
+            },
+        )]));
+    });
+    let block = "  topic_configuration:\n    transition: afterVerification\n    owners: []\n";
+    let with_block = |yaml: String| -> String {
+        let out = yaml.replace(
+            "  default_replication_factor: 1\n",
+            &format!("  default_replication_factor: 1\n{block}"),
+        );
+        assert_ne!(out, yaml, "the fixture carries the replication factor line");
+        out
+    };
+    let yaml = with_block(bound_yaml(Some(&point.binding)));
+    let mut plan = restore_plan(&yaml, None);
+    if let CheckRequest::RestorePreflight(req) = &mut plan.request {
+        req.backup_id = BOUND_SET.to_string();
+        req.manifest_key = format!("{BOUND_SET}/manifest.json");
+    }
+    let probe = FakeProbe::new()
+        .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+        .default_presence(TopicPresence::NotFound)
+        .with_broker_config("log.message.timestamp.after.max.ms", "3600000")
+        .with_broker_config("log.retention.ms", "86400000");
+    probe.state.lock().unwrap().listing.broker_count = 1;
+    let wiring = FakeWiring {
+        shared_store: Some(Arc::new(point.store)),
+        ..FakeWiring::default()
+    }
+    .with_file(PLAN_FILE, yaml.as_bytes())
+    .with_probe(probe.clone());
+    let run = drive(&mount(&plan), &wiring);
+    let details = String::from_utf8_lossy(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Details)
+            .expect("a details stream"),
+    )
+    .into_owned();
+    let line: serde_json::Value = details
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["check"] == "target.topicConfiguration")
+        .unwrap_or_else(|| panic!("no preview line:\n{details}"));
+    assert_eq!(line["topic"], "restore-orders", "{line}");
+    assert_eq!(line["targetLine"], "4.x");
+    let diff = &line["diff"];
+    assert_eq!(
+        diff["replication_factor"],
+        serde_json::json!({"source": 3, "target": 1, "reason": "targetBrokers"})
+    );
+    assert_eq!(diff["deferred"]["cleanup.policy"], "compact");
+    assert_eq!(diff["during_restore"]["cleanup.policy"], "delete");
+    let retention = diff["not_applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["key"] == "retention.ms")
+        .expect("the inherited retention is listed");
+    assert_eq!(retention["value"], "604800000");
+    assert_eq!(retention["target_default"], "86400000");
+    assert_eq!(line["retentionAfterTransition"]["retentionMs"], 86_400_000);
+    assert_eq!(
+        line["retentionAfterTransition"]["deletesEveryRestoredRecord"], true,
+        "records from 2026-09-15 are older than a day: {line}"
+    );
+    assert!(line["atCreation"].is_string() && line["afterVerification"].is_string());
+    // The validations it asked for: the creation set at the bounded factor.
+    let calls = probe.create_calls();
+    assert!(
+        calls
+            .iter()
+            .flatten()
+            .any(|spec| spec.name == "restore-orders"
+                && spec.replication_factor == 1
+                && spec
+                    .configs
+                    .iter()
+                    .any(|(k, v)| k == "cleanup.policy" && v == "delete")),
+        "{calls:?}"
+    );
+
+    // THE CONTROL: unbound, the refusal phase 0 would make.
+    let unbound = with_block(restore_yaml(
+        &ms_to_rfc3339(INSIDE_MS),
+        &["orders"],
+        "scratch",
+    ));
+    let m = mount(&restore_plan(&unbound, None));
+    let probe = FakeProbe::new()
+        .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+        .default_presence(TopicPresence::NotFound);
+    let run = drive(&m, &restore_wiring(&unbound, &manifest_json(), probe));
+    let details = String::from_utf8_lossy(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Details)
+            .expect("a details stream"),
+    )
+    .into_owned();
+    assert!(
+        details.contains("\"refusal\":\"TopicConfigurationNotRecorded: "),
+        "{details}"
+    );
+}
