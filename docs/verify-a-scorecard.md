@@ -343,11 +343,12 @@ cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
   copy's position with the last copy's value; undetected. A record that already
   carried `x-original-offset` keeps only the backup's, and a drill sampling it
   fails.
-- **Out-of-order timestamps.** Point selection reads each segment's first and
-  last timestamps, so a point-in-time restore can omit a record without the
-  drill noticing; a record older than every segment's first is dropped from every
-  restore (a full restore's count check fails, a point-in-time drill can pass),
-  and a correct point-in-time restore can fail the count check.
+- **Out-of-order timestamps.** The engine selects segments by their first and
+  last timestamps. Since PROD-01.1b the runner reads each record's own
+  timestamp first: the window starts at the oldest record, and a window whose
+  record the engine would skip is refused before anything is written
+  ([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)). A scorecard signed by
+  an earlier runner may be a point-in-time pass that omitted such a record.
 
 Order within a partition, keys, values, null versus empty, header values,
 tombstones and a compacted source's records at backup time are preserved. A
@@ -415,10 +416,10 @@ At 1.6.0 or later a sampled `pass` also means:
 
 It still does not establish that every record of a partition is the archive's,
 that header order was kept, or more than one record of a straddling segment:
-ask for `sample.coverage: complete`. The bounds assume a segment's timestamps
-do not run backwards; a record older than every segment's first is dropped and
-the bound then fails a faithful restore
-([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+ask for `sample.coverage: complete`. Since PROD-01.1b the bounds use each
+segment's oldest and newest record; an earlier runner's assumed its timestamps
+do not run backwards
+([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)).
 A sampled 1.4.0 or 1.5.0 document, from before FX-23, was judged by one count
 bound over all topics, and its `max_partitions` kept the first partitions in
 manifest order: an engine stopped early could leave later topics empty under a

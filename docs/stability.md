@@ -496,22 +496,41 @@ then skipped and `sample.coverage_note` says so. A segment in the window the
 check cannot decode refuses the run; one after the window that cannot be read
 does not, and the note counts it. The shape is the only signal: a record of
 your own with that shape is counted too, and a transaction whose marker the
-archive lacks, or that sits in an unread segment, is not detected (PROD-01.1b,
-PROD-00.3a).
+archive lacks, or that sits in an unread segment, is not detected
+(PROD-00.3a).
 
-### Recovery-point selection uses segment first and last timestamps
+### Out-of-order timestamps inside a segment
 
 The archive describes each segment by its first and last record timestamps,
-not its minimum and maximum, and the engine's segment selection and Logweir's
-window floor and count bound read those. With timestamps out of order within a
-segment, a record older than every segment's first record is dropped from every
-restore of that archive; a point-in-time restore can omit a record at or before
-the point and still pass; and a correct point-in-time restore can fail the
-count check (three rows of `e2e/tests/record_semantics.rs`;
-[decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment)).
-**Complete coverage** (PROD-08.1) selects the expected output by each record's
-own timestamp, so the omitted and dropped records fail it and the correct
-restore passes. The restores themselves are unchanged until PROD-01.1b.
+not its minimum and maximum, and the engine selects the segments a restore
+reads by those two values. Since PROD-01.1b a restore reads every segment of
+the partitions it restores once before it creates anything (the pass the
+transaction-marker check makes, which now runs under
+`restore.allow_transaction_markers: true` too), and:
+
+- the window starts at the **oldest archived record**, so no record older than
+  every segment's first is dropped, and the count bounds use each segment's
+  oldest and newest record;
+- a window that selects a record held, out of timestamp order, in a segment
+  the engine skips (its first record is after the window's end, or its last
+  is before a stated start) is **refused**, exit 3,
+  `refusal-reason=PointInTimeSelectionIncomplete`, naming the segment and the
+  point or start that reads it. There is no override: choose that point or
+  start;
+- a segment the restore reads and the runner cannot decode refuses the run, as
+  before, and now under the marker override too; one it does not read and
+  cannot read is counted in `sample.coverage_note`, never refused.
+
+The three rows of `e2e/tests/record_semantics.rs`
+([decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment))
+measure it: the record below the old floor is restored and the drill passes, a
+correct point-in-time restore passes, and the skipped record is refused before
+any write. **Upgrade:** a `Restore` or a `RehearsalSchedule` slot over such an
+archive that used to run, and could sign a pass with a record left out, is now
+refused; an archive in timestamp order restores exactly as before. The restore
+preview reads the manifest only and does not show this refusal. Rolling the
+runner back restores the old selection. The engine itself still selects by
+first and last; reading minimum and maximum from the manifest is PROD-00.3b.
 
 ### `LogAppendTime` sources are restored with the producers' timestamps
 
@@ -645,7 +664,7 @@ newest`), and so is a `point_in_time` equal to `covered.from_ms`
 (`PointInTimeBeforeCoverage`); the console offers `[from_ms + 1 ms, to_ms - 1
 ms]` and defaults to its end. Both floors are the minimum segment start over
 the topics a document names, and a stated start (`"<start>/<end>"`, PROD-11.1)
-must be at or after it ([segment first and last timestamps](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+must be at or after it ([out-of-order timestamps](#out-of-order-timestamps-inside-a-segment)).
 
 ### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
 

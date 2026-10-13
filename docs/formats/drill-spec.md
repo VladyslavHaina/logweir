@@ -248,8 +248,7 @@ Optional. **How much of the restore phase 7 verifies.**
   at the archive, unless the plan states a window start,
   `restore.point_in_time: "<start>/<end>"`, which is then the lower bound); every restored record is read back and compared with it by
   its `x-original-offset` — content with headers in order, exact counts,
-  duplicates and order. The manifest's first/last-timestamp count bound is not
-  consulted. The contract is
+  duplicates and order. The segment count bound is not consulted. The contract is
   [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md);
   the signed result is `integrity.verification`
   ([the scorecard format](drill-scorecard.md#integrityverification-format-140)).

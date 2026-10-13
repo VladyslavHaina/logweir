@@ -2942,7 +2942,9 @@ pub fn build_plan(
     // Guard G-WIN, the binding half, here where the plan is built (the
     // renderer only prints it). `time_window.0` is the archive's earliest
     // covered timestamp from the manifest, never the spec's: widening the
-    // start to the archive floor cannot lose records. `time_window.1` is
+    // start to the archive floor cannot lose records. A run hands it facts
+    // widened by the restored segments' records (PROD-01.1b), so there the
+    // floor is the oldest archived record. `time_window.1` is
     // `spec.restore.point_in_time` when present, else `spec.sample.window_end`.
     // The floor is the minimum over the topics this restore names, the
     // instant the backup receipt's `covered.from_ms` reports for the same

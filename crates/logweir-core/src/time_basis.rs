@@ -146,8 +146,9 @@ pub fn recorded_timestamp_type(
 ///   then outside the window. At or after it, the restore takes the archive
 ///   as the manifest records it (a full restore) — as far as the segment
 ///   bounds show: with out-of-order timestamps inside a segment a record later
-///   than both ends can still fall outside the window, which this does not
-///   detect.
+///   than both ends can still fall outside the window. The runner hands it
+///   bounds widened by the restored segments' records
+///   (`crate::record_times::widen`), so there the newest record decides.
 ///
 /// `None` for the topic's facts (the manifest does not describe it) counts as
 /// "no recorded timestamp", so only a stated point selects it by time.

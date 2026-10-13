@@ -926,6 +926,20 @@ pub enum Drill {
     /// marker: neither the engine nor the marker check reads it, so the run
     /// is not refused.
     HoldsAMarkerBeforeAStatedStart,
+    /// PROD-01.1b (the record's ts-pit): a point in time at the window's
+    /// end, and a second segment whose first and last records are AFTER it
+    /// holding one record AT the window's end, out of timestamp order. The
+    /// engine selects segments by first and last, so it would skip that
+    /// record: refused `PointInTimeSelectionIncomplete` before phase 2.
+    HoldsAWindowRecordAfterThePoint,
+    /// `HoldsAWindowRecordAfterThePoint` with the out-of-order record moved
+    /// after the point too: the segment is skipped and holds nothing the
+    /// window selects, so the run passes (the control).
+    HoldsOnlyLaterRecordsAfterThePoint,
+    /// `HoldsAnUnreadableSegment` under `restore.allow_transaction_markers:
+    /// true`: the restore reads the segment, and its record times cannot be
+    /// read either, so the override does not get past the refusal.
+    HoldsAnUnreadableSegmentAndAllowsMarkers,
 }
 
 /// The fixture segment's records: one data record and, for
@@ -1489,8 +1503,12 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::StatesAWindowStart | Drill::HoldsAMarkerBeforeAStatedStart => {
             format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_START}/{FIXTURE_WINDOW_END}\"\n")
         }
-        Drill::HoldsTransactionMarkersAndAllowsThem => {
+        Drill::HoldsTransactionMarkersAndAllowsThem
+        | Drill::HoldsAnUnreadableSegmentAndAllowsMarkers => {
             "restore:\n  allow_transaction_markers: true\n".to_string()
+        }
+        Drill::HoldsAWindowRecordAfterThePoint | Drill::HoldsOnlyLaterRecordsAfterThePoint => {
+            format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n")
         }
         _ => String::new(),
     };
@@ -1616,7 +1634,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // A real KBAK segment, because the runner reads every
     // restored segment for transaction markers before phase 2. The sampled
     // shapes' fingerprints still come from the engine double.
-    let segment_bytes = if shape == Drill::HoldsAnUnreadableSegment {
+    let segment_bytes = if matches!(
+        shape,
+        Drill::HoldsAnUnreadableSegment | Drill::HoldsAnUnreadableSegmentAndAllowsMarkers
+    ) {
         b"logweir-fixture-segment-0".to_vec()
     } else {
         kbak_segment(&archived_records(shape, window_end_ms))
@@ -1664,6 +1685,32 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         archive.put_create_only(key, &bytes).unwrap();
         let mut seg = after_window(0, key, &bytes);
         (seg.start_timestamp, seg.end_timestamp, seg.uploaded_at) = (ts, ts, ts);
+        facts.topics[0].partitions[0].segments.push(seg);
+    }
+    if matches!(
+        shape,
+        Drill::HoldsAWindowRecordAfterThePoint | Drill::HoldsOnlyLaterRecordsAfterThePoint
+    ) {
+        // First and last an hour after the point; the middle record at the
+        // point itself (selected) or a millisecond after it (not).
+        let late = window_end_ms + 3_600_000;
+        let middle = if shape == Drill::HoldsAWindowRecordAfterThePoint {
+            window_end_ms
+        } else {
+            window_end_ms + 1
+        };
+        let mut records = Vec::new();
+        for (i, ts) in [late, middle, late + 1].into_iter().enumerate() {
+            let mut r = archived_records(Drill::Passes, ts)[0].clone();
+            r.offset = FIXTURE_WINDOW_RECORDS + i as i64;
+            records.push(r);
+        }
+        let bytes = kbak_segment(&records);
+        let key = "logweir/fixture-archive/orders/0/after-out-of-order.kbak";
+        archive.put_create_only(key, &bytes).unwrap();
+        let mut seg = after_window(0, key, &bytes);
+        (seg.end_offset, seg.end_timestamp, seg.record_count) =
+            (FIXTURE_WINDOW_RECORDS + 2, late + 1, 3);
         facts.topics[0].partitions[0].segments.push(seg);
     }
     if shape == Drill::HoldsUnreadableSegmentsAfterTheWindow {
@@ -1865,6 +1912,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::HoldsAMarkerAfterTheWindow
         | Drill::HoldsUnreadableSegmentsAfterTheWindow
         | Drill::HoldsAMarkerBeforeAStatedStart
+        | Drill::HoldsAWindowRecordAfterThePoint
+        | Drill::HoldsOnlyLaterRecordsAfterThePoint
+        | Drill::HoldsAnUnreadableSegmentAndAllowsMarkers
         | Drill::FailsAtVerify
         | Drill::LeavesATopicBehind
         | Drill::ArchivesNoSegment => {}

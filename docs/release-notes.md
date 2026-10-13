@@ -414,7 +414,7 @@ accept `1.6.0`. A sampled `pass` from an earlier build over a plan with
 ([verify-a-scorecard.md](verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
 An archive whose timestamps run backwards within a segment can now fail the
 per-partition bound
-([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)).
 **Scope:** a live compose restore whose engine got SIGTERM mid-topic (`e2e/tests/stopped_restore.rs`: `pass` before, `fail-integrity` now, both readers accepting), and unit rows with 25 mutants (`crates/logweir/tests/stopped_restore.rs`); the sampled restore rows are the PoC upgrade's.
 **Rollback:** an older runner samples the first N partitions again and ignores
 the engine report; the 1.6.0 scorecards already written stay valid under both

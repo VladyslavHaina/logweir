@@ -530,8 +530,9 @@ the sample. It does not establish that unsampled records would match
 ([the sample window is not a claim about the whole archive](verify-a-scorecard.md#the-sample-window-is-not-a-claim-about-the-whole-archive)),
 and `sample.coverage_note` is the test's own statement of how representative
 the sample is. Only the in-window segments of the sampled partitions are
-hashed. The record count check is a bound computed from the archive manifest's
-segment first and last timestamps, not an exact count per partition. Since
+hashed. The record count check is a bound computed from each segment's time
+bounds (its oldest and newest record since PROD-01.1b), not an exact count per
+partition. Since
 format 1.4.0 a restored head that repeats or reorders source offsets fails the
 check, but duplicates and order beyond the head are not checked.
 
@@ -803,11 +804,12 @@ does not detect. In each measured case below, the test was signed `pass`
   (`config_coverage.<topic>.timestamp_type.value` and `.source`), so such a
   source is visible in the evidence. Tracker row FX-8 (proposed) refuses that
   selection unless the approved plan asks for it, and labels the result.
-- Out-of-order timestamps within a segment can make a point-in-time restore
-  omit a record at or before the requested point
-  ([recovery-point selection](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
-  A sampled check passes such a restore; a complete check reports the record
-  missing and fails it.
+- Out-of-order timestamps within a segment could make a point-in-time restore
+  omit a record at or before the requested point, which a sampled check
+  passed. Since PROD-01.1b the runner refuses that restore before it writes
+  ([out-of-order timestamps](stability.md#out-of-order-timestamps-inside-a-segment)); a
+  scorecard from an earlier runner may carry such a pass, which a complete
+  check fails.
 - A repeated header key keeps one copy
   ([repeated header keys](stability.md#a-repeated-header-key-keeps-one-copy)).
 

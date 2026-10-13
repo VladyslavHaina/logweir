@@ -2724,3 +2724,59 @@ fn a_marker_before_a_stated_start_is_not_read() {
         sc.sample.coverage_note
     );
 }
+
+/// **PROD-01.1b, the record's ts-pit.** A segment whose first and last records
+/// are after the point holds a record AT the point, out of timestamp order. The
+/// engine selects segments by first and last and would skip it, so the run is
+/// refused `PointInTimeSelectionIncomplete`, exit 3, naming the segment and
+/// the point that reads it, with no target topic created. The control is the
+/// same segment with that record a millisecond after the point: skipped,
+/// holding nothing the window selects, and the run passes.
+///
+/// KILLS: the skip test read off the widened bounds (nothing is skipped);
+/// `selected` ignored (the control is refused); the refusal dropped (the run
+/// passes).
+#[test]
+fn a_point_whose_segment_hides_a_record_of_the_window_is_refused() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsAWindowRecordAfterThePoint);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=PointInTimeSelectionIncomplete");
+    assert!(
+        message.contains("`logweir/fixture-archive/orders/0/after-out-of-order.kbak`")
+            && message.contains("holds 1 (a recovery point at or after epoch-ms"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+
+    let control = fixtures::orchestrator_fixture(Drill::HoldsOnlyLaterRecordsAfterThePoint);
+    execute_with(&control.args, &control.run_id, &control.ctx).expect("the control passes");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert_eq!(sc.outcome, Outcome::Pass);
+}
+
+/// **The override is the marker check's alone.** A segment the restore reads
+/// and the runner cannot decode is refused under
+/// `restore.allow_transaction_markers: true` too: its record times cannot be
+/// read, so the window cannot be bounded by them. Exit 3, nothing created.
+/// The marker-check twin is `a_segment_the_marker_check_cannot_read_refuses_the_run`.
+///
+/// KILLS: the record-time pass skipped under the override (the run reaches the
+/// engine).
+#[test]
+fn a_segment_the_restore_reads_and_the_runner_cannot_is_refused_under_the_override() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsAnUnreadableSegmentAndAllowsMarkers);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(line, "refusal-reason=GuardRefused");
+    assert!(
+        message.contains("could not read archive segment")
+            && message.contains(fixtures::FIXTURE_SEGMENT_KEY)
+            && message.contains("own timestamps"),
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+}
