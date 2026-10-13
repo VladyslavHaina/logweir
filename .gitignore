@@ -44,7 +44,13 @@
 # reproduced by running the suite; none of it is evidence.
 /.e2e/
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+node_modules/
+.DS_Store
 
 /.playwright-mcp/
 /image-digests/

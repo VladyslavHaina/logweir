@@ -1,5 +1,5 @@
 // The steps a person takes on the console pages that console-ux-1 redesigned, shared by the live
-// browser harnesses (scripts/*-ui-*.mjs and the journeys). Nothing here reads a cluster;
+// browser harness (scripts/prod16-1-ui-e2e.mjs). Nothing here reads a cluster;
 // every helper drives the page the way a person does and THROWS when the page does not answer
 // the way the helper requires, so a journey never goes on from a step it did not reach.
 //
@@ -12,10 +12,9 @@
 // position line names it, with its own title, and its page is the only one not hidden.
 //
 // Which control is on which step is ui/pages/restore-wizard.js's own `FIELD_STEP` and render
-// functions; the offline guard (scripts/live/wizard_steps.py, run by
-// e2e/journeys/test_catalogue.py) holds every wizard
-// control in the harnesses behind a walk to its step, and reads the titles below against the
-// page's `STEPS`.
+// functions; the offline guard (scripts/console_steps.py, run by `just lint` through
+// scripts/test_console_steps.py) holds every wizard control in the harnesses behind a walk to
+// its step, and reads the titles below against the page's `STEPS`.
 
 /** The six steps' titles, in order, exactly as `ui/pages/restore-wizard.js` `STEPS` names them. */
 export const WIZARD_STEPS = Object.freeze(["Archive", "Recovery point", "Point in time",

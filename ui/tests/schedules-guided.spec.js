@@ -5,8 +5,8 @@
 // requires no YAML, raw endpoint reconstruction or manual signing step;
 // invalid fields retain the draft". Each row carries its own NEGATIVE CONTROL,
 // the assertion that fails if the behaviour is removed. The browser half (a
-// real keyboard, a real redirect, a real Preflight) is
-// `scripts/plat10-ui-e2e.mjs`; these rows are the ones a string can prove.
+// real keyboard, a real redirect, a real Preflight) needs a live console; these
+// rows are the ones a string can prove.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

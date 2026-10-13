@@ -40,7 +40,7 @@ from __future__ import annotations
 import pathlib
 import re
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 WIZARD_JS = ROOT / "ui" / "pages" / "restore-wizard.js"
 SELECT_JS = ROOT / "ui" / "select.js"
 DESTINATIONS_JS = ROOT / "ui" / "pages" / "destinations.js"

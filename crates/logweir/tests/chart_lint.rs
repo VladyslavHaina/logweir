@@ -680,7 +680,6 @@ fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
         "charts/logweir/rendered/demo.yaml",
         "deploy/poc/minio-grants.yaml",
         "scripts/test-k8s-scram.py",
-        "e2e/k8s/d2/d2_live.py",
     ] {
         assert!(
             mirror_mentions.contains(must),

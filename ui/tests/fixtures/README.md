@@ -214,10 +214,7 @@ unit test, with no cluster and no browser. That Rust row also checks the `rule` 
 route's own constants (`NAME_PREFIX`, `ROUTE_CREATE`, `NAME_HASH_CHARS`) and reads the alphabet out
 of `base32_lower` rather than out of this document.
 
-On top of that, `scripts/live/d1/run.py`'s `L-06-2-cli` runs the REAL `logweir-api` in localAdmin
-mode against docker-desktop, re-derives every recorded row with the page's own function on that
-machine, and then fails if the object the API server stored for a live scope is not named what the
-page's function says it should be. A fixture only one side checked would pin a function to itself.
+A fixture only one side checked would pin a function to itself.
 
 The rows are chosen for what they can catch: the localAdmin actor and an OIDC one; the LEGACY
 scope, whose issuer and subject are empty because a browser behind `kubectl proxy` holds neither;

@@ -1400,8 +1400,8 @@ function mergeOperation(object, operation) {
 //
 // `ui/tests/fixtures/manual-backup-names.json` pins both sides:
 // `ui/tests/d1.spec.js` drives this function over every row, and
-// `scripts/live/d1/run.py`'s `L-06-2-cli` drives `logweir-api` over the
-// same rows.
+// `crates/logweir-api/tests/manual_backups.rs` drives `logweir-api`'s rule
+// over the same rows.
 
 /** The route identifier inside a manual run's idempotency scope: the PRODUCT
  *  API's route. */
