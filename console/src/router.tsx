@@ -23,6 +23,7 @@ import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
 import { scheduleRoutes } from "./pages/schedules/routes";
 import { backupRoutes } from "./pages/backups/routes";
+import { approvalRoutes } from "./pages/approvals/routes";
 
 export type RouterContext = { session: Session };
 
@@ -68,6 +69,7 @@ const routeTree = root.addChildren([
     ...connectionRoutes(nsRoute),
     ...destinationRoutes(nsRoute),
     ...scheduleRoutes(nsRoute),
+    ...approvalRoutes(nsRoute),
     planned,
   ]),
 ]);

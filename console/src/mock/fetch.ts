@@ -21,6 +21,7 @@ import { connectionsMock } from "./connections";
 import { destinationsMock } from "./destinations";
 import { schedulesMock } from "./schedules";
 import { backupsMock } from "./backups";
+import { approvalsMock } from "./approvals";
 
 const LATENCY_MS = 350;
 
@@ -175,6 +176,7 @@ async function route(request: Request): Promise<Response> {
   let p: RegExpMatchArray | null;
 
   if (method === "GET" && path === "/session") return json(200, session);
+  { const approvals = await approvalsMock(request, method, path); if (approvals) return approvals; }
   { const settings = (await connectionsMock(request, method, path)) ?? (await destinationsMock(request, method, path)); if (settings) return settings; }
 
   if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
