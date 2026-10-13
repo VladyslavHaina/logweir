@@ -938,8 +938,8 @@ mod tests {
         assert_eq!(
             line["positions"],
             serde_json::json!([
-                {"partition": 0, "class": "exact", "committed": null, "offset": 40},
-                {"partition": 1, "class": "approximate", "committed": null, "offset": 12, "reason": logweir_core::positions_mapping::SELECTION_EXCLUDED},
+                {"partition": 0, "class": "exact", "committed": null, "offset": 40}, // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
+                {"partition": 1, "class": "approximate", "committed": null, "offset": 12, "reason": logweir_core::positions_mapping::SELECTION_EXCLUDED}, // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
                 {"partition": 2, "class": "unavailable", "committed": null, "reason": "ArchiveGap"}
             ])
         );
