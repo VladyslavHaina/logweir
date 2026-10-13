@@ -17,6 +17,7 @@ import {
   withPoint,
 } from "./data";
 import { declareRestore } from "./themeA";
+import { restoresFallback, restoresMock } from "./restores";
 
 const LATENCY_MS = 350;
 
@@ -162,6 +163,7 @@ function newestVerified(ns: string, source: string): Backup | undefined {
 let restoreSerial = 0;
 
 async function route(request: Request): Promise<Response> {
+  { const r5 = await restoresMock(request); if (r5) return r5; }
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;
@@ -263,7 +265,7 @@ async function route(request: Request): Promise<Response> {
     return json(200, { ...page(points), truncated: false, viewExpired: false });
   }
 
-  return problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
+  return (await restoresFallback(request)) ?? problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
 }
 
 /** The `fetch` the typed client is given in the prototype. */

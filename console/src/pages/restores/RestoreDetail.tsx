@@ -1,0 +1,662 @@
+// One restore, live: where it is, why, what the controller could see, what the run
+// recorded, whether its evidence verified, how much was compared and what it produced.
+// The old console's #/operations (restore) and #/history restore detail in one page.
+// It computes no state (the API's word is shown) and never merges the result with the
+// evidence: "the run passed" and "its signed scorecard verifies" are two facts.
+import { useState } from "react";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import {
+  Alert,
+  Breadcrumb,
+  BreadcrumbItem,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  CodeBlock,
+  CodeBlockCode,
+  Content,
+  ExpandableSection,
+  Flex,
+  FlexItem,
+  Grid,
+  GridItem,
+  PageSection,
+  Progress,
+  ProgressMeasureLocation,
+  ProgressStep,
+  ProgressStepper,
+} from "@patternfly/react-core";
+import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
+import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
+import RedoIcon from "@patternfly/react-icons/dist/esm/icons/redo-icon";
+import {
+  useApprovalPolicy,
+  useApprovalRequest,
+  useCapabilities,
+  useRestoreItem,
+  useRestoreOperation,
+  type OperationView,
+  type Restore,
+} from "../../api/restores";
+import type { OperationStage } from "../../api/types";
+import { PageHeader } from "../../components/PageHeader";
+import { StatusLabel } from "../../components/Status";
+import { ErrorState, LoadingRows } from "../../components/States";
+import { count, exactUtc } from "../../components/When";
+import { Ident } from "../../components/Ident";
+import { themeAOf } from "../../mock/themeA";
+import { CloneCard, MOCK_THEME_A, PositionsCard, TopicConfigCard } from "./themeA";
+import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
+import { approvalRoute } from "./model";
+import {
+  COMPLETION_NOT_VERIFIED,
+  QUEUED_RUN_SENTENCE,
+  RECORDS_IN_WINDOW_LABEL,
+  RETRY_FRESH_TARGET_SENTENCE,
+  SCORECARD_CLAIM_SENTENCE,
+  completionGuidance,
+  coverageWords,
+  modeMeaning,
+  evidenceCase,
+  evidenceVerified,
+  independentCheck,
+  notCovered,
+  operationVerified,
+  planEvidenceBucket,
+  planEvidenceRoute,
+  planTimeBasis,
+  selectionWords,
+  signedTimeBasisText,
+  verificationScopeSentence,
+} from "./words";
+import "./restores.css";
+
+const STAGES: { stage: OperationStage; title: string; desc: string }[] = [
+  { stage: "admission", title: "Admitted", desc: "Plan checked and approved" },
+  { stage: "preparing", title: "Preparing", desc: "Topics created on the target" },
+  { stage: "running", title: "Restoring", desc: "Records replayed from the archive" },
+  { stage: "verifying", title: "Verifying", desc: "Restored records compared with the archive" },
+  { stage: "finished", title: "Done", desc: "Scorecard signed and verified" },
+];
+
+/** The stepper: the API's stage, never inferred. A stage this build does not know shows no step as current. */
+function Stages({ op, verified }: { op: OperationView; verified: boolean }) {
+  const at = STAGES.findIndex((s) => s.stage === (op.stage ?? (op.state === "queued" ? "admission" : undefined)));
+  return (
+    <ProgressStepper isCenterAligned aria-label="Restore progress" className="lw-stepper">
+      {STAGES.map((s, i) => {
+        const done = op.terminal ? (verified ? true : i < at) : i < at;
+        const current = !op.terminal && i === at;
+        const failedHere = op.terminal && !verified && i === Math.max(at, 0);
+        return (
+          <ProgressStep
+            key={s.stage}
+            id={`rs-${s.stage}`}
+            titleId={`rs-${s.stage}-t`}
+            variant={failedHere ? "danger" : done ? "success" : current ? "info" : "pending"}
+            isCurrent={current}
+            description={s.desc}
+          >
+            {s.title}
+          </ProgressStep>
+        );
+      })}
+    </ProgressStepper>
+  );
+}
+
+/** A scorecard fact, shown as a claim until the evidence verified. */
+function Claim({ value, verified }: { value: React.ReactNode; verified: boolean }) {
+  if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
+  return verified ? (
+    <>{value}</>
+  ) : (
+    <>
+      {value} <StatusLabel tone="neutral" text="Unverified claim" title="Copied from a scorecard whose signature has not verified" />
+    </>
+  );
+}
+
+function CreationStopped({ r }: { r: Restore }) {
+  const s = r.targetTopicsAppeared;
+  if (!s) return null;
+  const more = (list: string[], total: number) => (total > list.length ? ` and ${total - list.length} more` : "");
+  return (
+    <Alert variant="warning" isInline title="This restore stopped while creating its target topics, before anything was restored" id="creation-stopped">
+      {s.appeared.length > 0 && (
+        <p>
+          {s.appeared.join(", ")}
+          {more(s.appeared, s.appearedCount)}: created by someone else after this restore was admitted. The restore wrote nothing into
+          {s.appeared.length === 1 ? " it." : " them."}
+        </p>
+      )}
+      {s.left.length === 0 && s.unconfirmed.length === 0 ? (
+        <p>This restore created no topic.</p>
+      ) : (
+        <ul className="lw-plain-list">
+          {s.left.map((t) => (
+            <li key={t}>
+              <strong>{t}</strong>: {s.leftInstruction}.
+            </li>
+          ))}
+          {s.unconfirmed.map((t) => (
+            <li key={t}>
+              <strong>{t}</strong>: {s.unconfirmedInstruction ?? "this restore asked the cluster to create it and got no definite answer; check what it holds and who writes to it before you remove it"}.
+            </li>
+          ))}
+        </ul>
+      )}
+      {(s.left.length > 0 || s.unconfirmed.length > 0) && <p>Logweir never deletes a topic under a name it may not own.</p>}
+    </Alert>
+  );
+}
+
+/** What a restore waits for, under the namespace's approval policy. */
+function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) {
+  const policy = useApprovalPolicy(ns);
+  const route = approvalRoute(policy.data ?? null);
+  const request = useApprovalRequest(ns, r.name, op.awaitingApproval && route === "two-person");
+  if (!op.awaitingApproval) return null;
+  const approvals = (
+    <Link to="/$ns/$section" params={{ ns, section: "approvals" }}>
+      Open Approvals
+    </Link>
+  );
+  if (route === "two-person") {
+    const req = request.data;
+    return (
+      <Alert variant="info" isInline title="Waiting for a second person to approve" id="awaiting-approval">
+        <p>
+          {req?.stateSentence ?? "The console recorded your request; a second person, signed in as an approver and not you, approves it."}{" "}
+          {req?.expiresAt ? (
+            <>
+              It expires <Instant value={req.expiresAt} />.
+            </>
+          ) : null}{" "}
+          No Job runs until the controller verifies the approval.
+        </p>
+        <p>{approvals}</p>
+      </Alert>
+    );
+  }
+  return (
+    <Alert variant="info" isInline title="Waiting for an approval" id="awaiting-approval">
+      <p>
+        No Job runs until the controller verifies an approval of this plan ({r.approvalRef.name}). An approver who is not you
+        {route === "strict" ? " countersigns the console's confirmation with their own key and submits it." : " signs this plan with their own key, out of band."}
+      </p>
+      <p>{approvals}</p>
+    </Alert>
+  );
+}
+
+function CompleteCoverage({ op, verified }: { op: OperationView; verified: boolean }) {
+  const c = op.verificationScope.complete;
+  if (!c) return null;
+  const rows = c.partitions ?? null;
+  return (
+    <div id="complete-coverage" data-covered={c.covered ? "true" : "false"}>
+      <Facts
+        items={[
+          { term: "Covered", value: <Claim value={c.covered ? "yes" : "no: not a pass"} verified={verified} /> },
+          { term: "Record bound", value: <Claim value={typeof c.maxRecords === "number" ? count(c.maxRecords) : null} verified={verified} /> },
+          { term: "Archive segments verified", value: <Claim value={`${count(c.segmentsVerified)} of ${count(c.segments)} (failed ${count(c.segmentsFailed)}, not examined ${count(c.segmentsUnverified)})`} verified={verified} /> },
+          { term: "Archived records decoded", value: <Claim value={count(c.recordsDecoded)} verified={verified} /> },
+          { term: "Compaction holes", value: <Claim value={`${count(c.offsetHoles)} (disclosed, not a fault)`} verified={verified} /> },
+        ]}
+      />
+      {rows === null ? (
+        <Content component="p" className="lw-subtle lw-small">
+          The signed scorecard lists {count(c.partitionCount)} partitions, more than this page is served; each one's counts are in the scorecard.
+        </Content>
+      ) : (
+        <Table aria-label="Complete coverage by partition" variant="compact" gridBreakPoint="grid-lg" className="lw-gap-top">
+          <Thead>
+            <Tr>
+              <Th>Topic</Th>
+              <Th className="lw-num">Partition</Th>
+              <Th>Compared</Th>
+              <Th className="lw-num">Expected</Th>
+              <Th className="lw-num">Matching</Th>
+              <Th className="lw-num">Missing</Th>
+              <Th className="lw-num">Unexpected</Th>
+              <Th className="lw-num">Duplicates</Th>
+              <Th className="lw-num">Out of order</Th>
+              <Th className="lw-num">Different</Th>
+            </Tr>
+          </Thead>
+          <Tbody>
+            {rows.map((p) => (
+              <Tr key={`${p.topic}/${p.partition}`}>
+                <Td dataLabel="Topic">{p.topic}</Td>
+                <Td dataLabel="Partition" className="lw-num">{p.partition}</Td>
+                <Td dataLabel="Compared">{p.compared ? "yes" : <strong>no</strong>}</Td>
+                <Td dataLabel="Expected" className="lw-num">{count(p.replay.expected)}</Td>
+                <Td dataLabel="Matching" className="lw-num">{count(p.replay.matching)}</Td>
+                <Td dataLabel="Missing" className="lw-num">{count(p.replay.missing)}</Td>
+                <Td dataLabel="Unexpected" className="lw-num">{count(p.replay.unexpected)}</Td>
+                <Td dataLabel="Duplicates" className="lw-num">{count(p.replay.duplicates)}</Td>
+                <Td dataLabel="Out of order" className="lw-num">{count(p.replay.outOfOrder)}</Td>
+                <Td dataLabel="Different" className="lw-num">{count(p.replay.mismatched)}</Td>
+              </Tr>
+            ))}
+          </Tbody>
+        </Table>
+      )}
+    </div>
+  );
+}
+
+/** One page per restore: moving to another restore starts its page afresh. */
+export function RestoreDetail() {
+  const { ns, name } = useParams({ from: "/$ns/restores/$name" });
+  return <Detail key={`${ns}/${name}`} ns={ns} name={name} />;
+}
+
+function Detail({ ns, name }: { ns: string; name: string }) {
+  const navigate = useNavigate();
+  const caps = useCapabilities(ns);
+  const restore = useRestoreItem(ns, name);
+  const operation = useRestoreOperation(ns, name, caps?.operationsRead !== false);
+  const [showPlan, setShowPlan] = useState(false);
+
+  const breadcrumb = (
+    <Breadcrumb className="lw-breadcrumb">
+      <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
+      <BreadcrumbItem isActive>{name}</BreadcrumbItem>
+    </Breadcrumb>
+  );
+  if (restore.isPending || (operation.isPending && operation.fetchStatus !== "idle")) {
+    return (
+      <>
+        <PageHeader title={name} breadcrumb={breadcrumb} />
+        <PageSection>
+          <LoadingRows rows={6} label="Loading the restore" />
+        </PageSection>
+      </>
+    );
+  }
+  if (restore.isError) {
+    return (
+      <>
+        <PageHeader title={name} breadcrumb={breadcrumb} />
+        <PageSection>
+          <ErrorState error={restore.error} onRetry={() => void restore.refetch()} />
+        </PageSection>
+      </>
+    );
+  }
+
+  const r = restore.data;
+  const op = operation.data ?? null;
+  const verified = op ? operationVerified(op) : r.operation.verifiedSuccess && r.coverage?.covered !== false;
+  // A scorecard fact is a claim until the scorecard's signature verified, pass or not.
+  const signed = op ? evidenceVerified(op) : verified;
+  const failed = r.operation.terminal && (r.operation.state === "failed" || r.operation.state === "refused");
+  const t = MOCK_THEME_A ? themeAOf(r) : null;
+  const complete = r.coverage?.requested === "complete";
+  const scope = op?.verificationScope;
+  const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
+  const planBucket = planEvidenceBucket(r.planBytes);
+  const evidenceKeys = op?.evidence.payloadKey && op.evidence.sidecarKey;
+  const selection = scope?.selection ?? r.selection ?? null;
+
+  return (
+    <>
+      <PageHeader
+        title={r.name}
+        breadcrumb={breadcrumb}
+        status={<RestoreStatus r={r} />}
+        description={`From the point at ${exactUtc(r.pointInTime)} into ${r.target.clusterRef.name}.`}
+        actions={
+          failed && caps?.restoreCreate !== false ? (
+            <Button variant="secondary" icon={<RedoIcon />} onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { retryOf: r.name } })} id="retry-fresh-target">
+              Retry to a fresh target
+            </Button>
+          ) : verified && t?.mapping === "written" ? (
+            <Button variant="primary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name } })}>
+              Switch consumers over
+            </Button>
+          ) : undefined
+        }
+      />
+      <PageSection>
+        <div className="lw-stack">
+          {op && <Awaiting ns={ns} r={r} op={op} />}
+          {r.operation.state === "queued" && <Alert variant="info" isInline title="Queued">{QUEUED_RUN_SENTENCE}</Alert>}
+          <CreationStopped r={r} />
+          {failed && (
+            <Alert variant="danger" isInline title={`This restore ${r.operation.state === "refused" ? "was refused" : "failed"}${r.operation.stateReason ? `: ${r.operation.stateReason}` : ""}`}>
+              {RETRY_FRESH_TARGET_SENTENCE}
+            </Alert>
+          )}
+          {notCovered(scope?.complete) && (
+            <Alert variant="danger" isInline title="Complete coverage did not cover this restore">
+              {verificationScopeSentence(scope)}
+            </Alert>
+          )}
+          {op && (!op.terminal || verified) && (
+            <Card>
+              <CardBody>
+                <Stages op={op} verified={signed} />
+                {!op.terminal && op.stage === "running" && replayedMatch && (
+                  <Progress
+                    className="lw-records-progress"
+                    value={(Number(replayedMatch[1]!.replace(/,/g, "")) / Number(replayedMatch[2]!.replace(/,/g, ""))) * 100}
+                    title="Records restored"
+                    label={`${replayedMatch[1]} of ${replayedMatch[2]}`}
+                    measureLocation={ProgressMeasureLocation.outside}
+                    aria-label="Records restored"
+                  />
+                )}
+              </CardBody>
+            </Card>
+          )}
+          {op && op.terminal && verified && (
+            <Alert variant="success" isInline title="Restored and verified">
+              <p>
+                {complete && scope?.complete
+                  ? `${count(scope.complete.replay.matching)} of ${count(scope.complete.replay.expected)} records match the archive byte for byte (complete verification).`
+                  : `${count(op.completion?.recordsSampledMatching)} of ${count(op.completion?.recordsSampled)} sampled records match the archive byte for byte.`}{" "}
+                The controller verified the signed scorecard.
+              </p>
+              {t?.mapping === "written" && (
+                <p>
+                  <strong>Next:</strong> your consumer groups still point at their old positions. Review how each position translates to
+                  the restored topics, then switch them over.
+                </p>
+              )}
+            </Alert>
+          )}
+          {!op && caps?.operationsRead === false && (
+            <Alert variant="info" isInline isPlain title="Your role here does not read operations, so progress and evidence are not shown." />
+          )}
+          {operation.isError && <ErrorState error={operation.error} onRetry={() => void operation.refetch()} />}
+        </div>
+      </PageSection>
+      <PageSection>
+        <Grid hasGutter>
+          <GridItem lg={7}>
+            <Card isFullHeight>
+              <CardHeader>
+                <CardTitle component="h2">Activity</CardTitle>
+              </CardHeader>
+              <CardBody>
+                {op ? (
+                  <>
+                    <Facts
+                      items={[
+                        { term: "State", value: `${op.state}${op.stateReason ? ` (${op.stateReason})` : ""}` },
+                        { term: "Stage", value: shown(op.stage) },
+                        op.message ? { term: "Message", value: op.message } : null,
+                        op.stale ? { term: "Status", value: <StatusLabel tone="warning" text="Too old to believe" /> } : null,
+                        { term: "Last update", value: <Instant value={op.lastUpdatedAt} /> },
+                      ]}
+                    />
+                    <ol className={op.terminal ? "lw-timeline lw-gap-top" : "lw-timeline lw-timeline--live lw-gap-top"} aria-live="polite">
+                      {[...op.conditions].reverse().map((c) => (
+                        <li key={`${c.type}-${c.lastTransitionTime}`}>
+                          <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} gap={{ default: "gapSm" }}>
+                            <FlexItem>
+                              <strong>{c.type}</strong>
+                              {c.status !== "True" && <span className="lw-subtle"> ({c.status})</span>}
+                              {c.reason && <span className="lw-subtle lw-small"> · {c.reason}</span>}
+                            </FlexItem>
+                            <FlexItem className="lw-subtle lw-small">
+                              <Instant value={c.lastTransitionTime} />
+                            </FlexItem>
+                          </Flex>
+                          {c.message && <div>{c.message}</div>}
+                        </li>
+                      ))}
+                    </ol>
+                    {(op.diagnostics ?? []).length > 0 && (
+                      <>
+                        <Content component="h3" className="lw-gap-top">What the controller could see</Content>
+                        <ul className="lw-plain-list" aria-label="Diagnoses">
+                          {op.diagnostics!.map((d) => (
+                            <li key={`${d.code}-${d.lastSeen}`} className="lw-gap-bottom">
+                              <StatusLabel tone={d.severity === "Error" ? "danger" : "warning"} text={d.code} /> {d.message}
+                              <div className="lw-subtle lw-small">
+                                {d.object ? `${d.object.kind} ${d.object.name}` : ""}
+                                {d.count && d.count > 1 ? ` · ${d.count} times` : ""} · last <Instant value={d.lastSeen} />
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    <Content component="p" className="lw-subtle lw-small lw-gap-top">
+                      {op.terminal
+                        ? "This run is final."
+                        : "Following this restore by re-reading it every second; you can leave this page and come back. Leaving cancels nothing."}
+                    </Content>
+                  </>
+                ) : (
+                  <Content component="p" className="lw-subtle">Not available.</Content>
+                )}
+              </CardBody>
+            </Card>
+          </GridItem>
+          <GridItem lg={5}>
+            <Card isFullHeight>
+              <CardHeader>
+                <CardTitle component="h2">Plan</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <Facts
+                  narrow
+                  items={[
+                    { term: "Plan hash", value: <Ident value={r.planHash} label="plan sha256" /> },
+                    { term: "Approval", value: <>{r.approvalRef.name} <span className="lw-subtle lw-small">({r.approvalSubject === "originalName" ? "subject originalName" : "subject ordinary"})</span></> },
+                    { term: "Target", value: `${r.target.clusterRef.name}, ${r.target.originalName ? "original names" : `prefix ${r.target.topicPrefix}`}` },
+                    { term: "Mode", value: modeMeaning(r.target.mode, r.target.originalName) },
+                    { term: "Point in time", value: exactUtc(r.pointInTime) },
+                    { term: "Time basis (plan)", value: planTimeBasis(r.planBytes) ? "producer time" : r.planBytes ? "not stated" : "Not recorded" },
+                    { term: "Backup set", value: <Ident value={r.backupSetRef} label="backup set id" /> },
+                    { term: "Archive", value: r.sourceDestinationRef ? `saved destination ${r.sourceDestinationRef.name}` : r.sourceArchive.url },
+                    { term: "Deadline", value: `${Math.round(r.deadlineSeconds / 60)} min` },
+                  ]}
+                />
+                {r.planBytes ? (
+                  <ExpandableSection toggleText={showPlan ? "Hide the plan" : "Show the plan"} onToggle={(_e, o) => setShowPlan(o)} isExpanded={showPlan} className="lw-gap-top">
+                    <CodeBlock>
+                      <CodeBlockCode>{r.planBytes}</CodeBlockCode>
+                    </CodeBlock>
+                  </ExpandableSection>
+                ) : null}
+              </CardBody>
+            </Card>
+          </GridItem>
+          {op && (
+            <GridItem lg={6}>
+              <Card isFullHeight>
+                <CardHeader>
+                  <CardTitle component="h2">Result and evidence</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  {!op.terminal ? (
+                    <Content component="p" className="lw-subtle">
+                      The run has not finished. What it recorded and whether its signed scorecard verified appear here when it does.
+                    </Content>
+                  ) : (
+                  <>
+                  <Content component="p">
+                    {verified ? (
+                      <StatusLabel tone="success" text="Verified" title={`verified at ${op.verification.verifiedAt ?? ""} against key ${op.verification.matchedKeyId ?? ""}`} />
+                    ) : (
+                      <StatusLabel tone={op.terminal ? "warning" : "neutral"} text="Not verified" />
+                    )}{" "}
+                    <span className="lw-subtle">{verified ? `${op.trust.state === "verifiedHistorical" ? "by a retired key that was valid when it signed" : "by the controller"}` : evidenceCase(op)}</span>
+                  </Content>
+                  <Facts
+                    narrow
+                    items={[
+                      { term: "Result", value: `${op.result.status}${typeof op.result.exitCode === "number" ? `, exit ${op.result.exitCode}` : ""}${op.result.exitReason ? ` (${op.result.exitReason})` : ""}` },
+                      { term: "Outcome", value: <Claim value={op.result.outcome} verified={signed} /> },
+                      { term: "Last phase completed", value: shown(op.result.lastPhaseCompleted) },
+                      { term: "Signature", value: `${op.verification.state}${op.verification.detail ? `: ${op.verification.detail}` : ""}` },
+                      { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
+                      op.verification.matchedKeyId ? { term: "Signed by key", value: <Ident value={op.verification.matchedKeyId} label="signer key id" /> } : null,
+                      { term: "Trust", value: `${op.trust.state}, basis ${op.trust.basis}${op.trust.keyState ? `, key ${op.trust.keyState}` : ""}${op.trust.policy?.name ? `, policy ${op.trust.policy.name}` : ""}` },
+                      op.evidence.payloadKey ? { term: "Scorecard", value: <Ident value={op.evidence.payloadKey} label="scorecard key" /> } : { term: "Scorecard", value: shown(null) },
+                      op.evidence.payloadSha256 ? { term: "Scorecard sha256", value: <Ident value={op.evidence.payloadSha256} label="scorecard sha256" /> } : null,
+                      op.evidence.offsetReportKey ? { term: "Offset report", value: <Ident value={op.evidence.offsetReportKey} label="offset report key" /> } : null,
+                    ]}
+                  />
+                  {!signed && op.terminal && <Content component="p" className="lw-subtle lw-small lw-gap-top">{SCORECARD_CLAIM_SENTENCE}</Content>}
+                  <ExpandableSection toggleText="Check it yourself" className="lw-gap-top">
+                    {evidenceKeys && planBucket ? (
+                      <>
+                        <Content component="p" className="lw-subtle lw-small">
+                          Fetch the signed scorecard from the evidence bucket this restore's approved plan wrote to, then verify it with the Rust
+                          reader and the Python one.
+                        </Content>
+                        <Commands lines={independentCheck(planBucket, op.evidence.payloadKey!, op.evidence.sidecarKey!, planEvidenceRoute(r.planBytes))} label="the commands" />
+                      </>
+                    ) : (
+                      <Content component="p" className="lw-subtle lw-small">
+                        This run recorded no scorecard and signature keys, or its plan names no evidence bucket this page can read, so there is
+                        nothing to fetch.
+                      </Content>
+                    )}
+                  </ExpandableSection>
+                  </>
+                  )}
+                </CardBody>
+              </Card>
+            </GridItem>
+          )}
+          <GridItem lg={op ? 6 : 12}>
+            <Card isFullHeight>
+              <CardHeader>
+                <CardTitle component="h2">Verification</CardTitle>
+              </CardHeader>
+              <CardBody>
+                <Facts
+                  narrow
+                  items={[
+                    {
+                      term: "Asked for",
+                      value: complete ? `complete, ${typeof r.coverage.completeMaxRecords === "number" ? `at most ${count(r.coverage.completeMaxRecords)} archived records` : "no record bound"}` : "sampled",
+                    },
+                    {
+                      term: "Signed",
+                      value:
+                        r.coverage?.recorded ?? scope?.coverage ? (
+                          <Claim value={coverageWords(r.coverage?.recorded ?? scope?.coverage, r.coverage?.requested, scope?.complete ?? { covered: r.coverage?.covered ?? undefined })} verified={signed} />
+                        ) : (
+                          coverageWords(null, r.coverage?.requested, null)
+                        ),
+                    },
+                    selectionWords(selection) ? { term: "Restored (signed)", value: <Claim value={selectionWords(selection)} verified={signed} /> } : null,
+                    { term: "Time basis (signed)", value: r.timeBasis ? <Claim value={signedTimeBasisText(r.timeBasis)} verified={signed} /> : signedTimeBasisText(null) },
+                  ]}
+                />
+                {scope && op?.terminal && <Content component="p" className="lw-gap-top">{verificationScopeSentence(scope)}</Content>}
+                {r.timeBasis?.notRecorded.length ? (
+                  <Alert variant="warning" isInline isPlain className="lw-gap-top" title={`The timestamp type of ${r.timeBasis.notRecorded.join(", ")} was not recorded, so the clock this restore's point in time was read on is unknown.`} />
+                ) : null}
+              </CardBody>
+            </Card>
+          </GridItem>
+          {op?.verificationScope.complete && (
+            <GridItem>
+              <Card>
+                <CardHeader>
+                  <CardTitle component="h2">Complete coverage</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <CompleteCoverage op={op} verified={signed} />
+                </CardBody>
+              </Card>
+            </GridItem>
+          )}
+          <GridItem>
+            <Card>
+              <CardHeader>
+                <CardTitle component="h2">What this restore produced</CardTitle>
+              </CardHeader>
+              <CardBody>
+                {op?.completion ? (
+                  <>
+                    <Table aria-label="Topics this restore created" variant="compact">
+                      <Thead>
+                        <Tr>
+                          <Th>Topic</Th>
+                          <Th className="lw-num">Partitions</Th>
+                        </Tr>
+                      </Thead>
+                      <Tbody>
+                        {(op.completion.newTopics ?? []).map((nt) => (
+                          <Tr key={nt.name}>
+                            <Td dataLabel="Topic">{nt.name}</Td>
+                            <Td dataLabel="Partitions" className="lw-num">{count(nt.partitions)}</Td>
+                          </Tr>
+                        ))}
+                      </Tbody>
+                    </Table>
+                    <Facts
+                      items={[
+                        { term: "Records expected", value: <Claim value={count(op.completion.recordsExpected)} verified={signed} /> },
+                        { term: RECORDS_IN_WINDOW_LABEL, value: <Claim value={count(op.completion.recordsRestored)} verified={signed} /> },
+                        { term: "Records sampled", value: <Claim value={count(op.completion.recordsSampled)} verified={signed} /> },
+                        { term: "Sampled and matching", value: <Claim value={count(op.completion.recordsSampledMatching)} verified={signed} /> },
+                        { term: "Integrity level", value: <Claim value={op.completion.integrityLevel} verified={signed} /> },
+                      ]}
+                    />
+                  </>
+                ) : op?.terminal && op.state === "succeeded" ? (
+                  <Content component="p" className="lw-subtle">{COMPLETION_NOT_VERIFIED}</Content>
+                ) : (
+                  <Facts
+                    items={[
+                      { term: "New topics", value: r.newTopics.length ? r.newTopics.join(", ") : shown(null) },
+                      { term: "Source topics (written to by nothing)", value: r.oldTopics?.length ? r.oldTopics.join(", ") : shown(null) },
+                    ]}
+                  />
+                )}
+                {op?.terminal && op.state === "succeeded" && (
+                  <Content component="p" className="lw-gap-top">{completionGuidance(r.target.mode, r.target.originalName)}</Content>
+                )}
+                {r.topicPreflight && (
+                  <Facts
+                    items={[
+                      { term: "Target timestamp type", value: shown(r.topicPreflight.timestampType) },
+                      { term: "Target retention.ms", value: shown(r.topicPreflight.retentionMs) },
+                      { term: "Oldest timestamp accepted", value: typeof r.topicPreflight.timestampBound === "number" ? exactUtc(r.topicPreflight.timestampBound) : shown(null) },
+                    ]}
+                  />
+                )}
+                {op?.teardown && (
+                  <>
+                    <Content component="h3" className="lw-gap-top">Teardown</Content>
+                    <Facts
+                      items={[
+                        { term: "Deleted", value: op.teardown.deleted?.length ? `${op.teardown.deleted.join(", ")}${op.teardown.deletedTruncated ? " and more" : ""}` : shown(null) },
+                        { term: "Not deleted", value: op.teardown.failed?.length ? op.teardown.failed.map((f) => `${f.topic}: ${f.error}`).join("; ") : "none" },
+                        op.teardown.attestationKey ? { term: "Attestation", value: <Ident value={op.teardown.attestationKey} label="teardown attestation key" /> } : null,
+                      ]}
+                    />
+                  </>
+                )}
+              </CardBody>
+            </Card>
+          </GridItem>
+          {t && (
+            <>
+              <GridItem>{t.clone ? <CloneCard t={t} /> : <PositionsCard r={r} t={t} />}</GridItem>
+              {t.topicConfiguration && (
+                <GridItem>
+                  <TopicConfigCard r={r} t={t} />
+                </GridItem>
+              )}
+            </>
+          )}
+        </Grid>
+      </PageSection>
+    </>
+  );
+}

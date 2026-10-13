@@ -13,9 +13,9 @@ import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
 import { Backups } from "./pages/Backups";
 import { BackupDetail } from "./pages/BackupDetail";
-import { Restores } from "./pages/Restores";
-import { RestoreWizard } from "./pages/RestoreWizard";
-import { RestoreDetail } from "./pages/RestoreDetail";
+import { Restores } from "./pages/restores/RestoreList";
+import { RestoreWizard, restoreSearch } from "./pages/restores/RestoreWizard";
+import { RestoreDetail } from "./pages/restores/RestoreDetail";
 import { Cutover } from "./pages/Cutover";
 import { NotInPrototype } from "./pages/NotInPrototype";
 
@@ -39,8 +39,7 @@ const restoreNew = createRoute({
   getParentRoute: () => nsRoute,
   path: "restores/new",
   component: RestoreWizard,
-  validateSearch: (search: Record<string, unknown>): { backup?: string } =>
-    typeof search.backup === "string" ? { backup: search.backup } : {},
+  validateSearch: restoreSearch,
 });
 const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
 const cutover = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name/cutover", component: Cutover });
