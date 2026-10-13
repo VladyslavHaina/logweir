@@ -19,6 +19,7 @@ import {
 import { declareRestore } from "./themeA";
 import { connectionsMock } from "./connections";
 import { destinationsMock } from "./destinations";
+import { schedulesMock } from "./schedules";
 
 const LATENCY_MS = 350;
 
@@ -164,6 +165,7 @@ function newestVerified(ns: string, source: string): Backup | undefined {
 let restoreSerial = 0;
 
 async function route(request: Request): Promise<Response> {
+  const owned = await schedulesMock(request); if (owned) return owned;
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;

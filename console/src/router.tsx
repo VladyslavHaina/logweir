@@ -23,6 +23,7 @@ import { Cutover } from "./pages/Cutover";
 import { Planned } from "./pages/Planned";
 import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
+import { scheduleRoutes } from "./pages/schedules/routes";
 
 export type RouterContext = { session: Session };
 
@@ -60,7 +61,19 @@ const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", c
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, ...connectionRoutes(nsRoute), ...destinationRoutes(nsRoute), planned]),
+  nsRoute.addChildren([
+    overview,
+    backups,
+    backup,
+    restores,
+    restoreNew,
+    restore,
+    cutover,
+    ...connectionRoutes(nsRoute),
+    ...destinationRoutes(nsRoute),
+    ...scheduleRoutes(nsRoute),
+    planned,
+  ]),
 ]);
 
 /** The page's router, made once by main.tsx (and afresh by each test that renders the console). */
