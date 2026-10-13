@@ -541,6 +541,28 @@ Amendment A's list is unchanged. The contract
 is [PROD-15.1-original-name.md](to-do/decisions/PROD-15.1-original-name.md),
 and the operator's account is [kubernetes.md](kubernetes.md) §12.
 
+## Amendment K — cutover (PROD-04.2, 05.2, 05.1a, 11.1a; OD-15)
+
+Accepted 2026-10-13 (the owner's yes to the cutover design's §3.9). (1)
+`Switchover`, Amendment A's reserved kind, is built: a namespaced kind that
+applies reviewed consumer positions, taken from a verified `Restore`'s signed
+mapping, to stopped consumer groups on that restore's target. It is the only
+path that commits a consumer-group offset. The commit is Logweir's own client
+from a non-member (ADR 0004; PROD-04.0), never the engine (Amendment D). It
+writes and deletes no topic, and no `Restore` creates one. (2) A `Restore` may
+create its topics with the source's configuration and, after a passing
+verdict, apply the settings that would have dropped or re-stamped restored
+records. It alters only topics it created, and only while their overrides are
+the ones it set. (3) A scratch `Restore` may keep its topics for a declared
+time: the same deletion phase 9 performs, of the same names, deferred, and
+only while each topic's ID is the one recorded at creation. (4) `weirkeeper`
+may read (get, list) Strimzi `KafkaTopic` resources where a `KafkaCluster`
+names its Strimzi cluster and the chart grants it. It never creates or changes
+one. No other kind is added. The contract is
+[PROD-04.2-cutover.md](to-do/decisions/PROD-04.2-cutover.md), and the
+operator's account of (1) is [kubernetes.md](kubernetes.md) §Switching
+consumer groups over.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
