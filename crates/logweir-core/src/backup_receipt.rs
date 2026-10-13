@@ -757,6 +757,11 @@ pub struct SourceConfigCoverage {
     /// receipt records one for; empty for no receipt and for a receipt before
     /// 1.3.0.
     factors: BTreeMap<String, u32>,
+    /// The receipt's whole configuration model (PROD-05.2 creates each target
+    /// topic from it); `None` for no receipt and for a receipt before 1.3.0.
+    model: Option<BTreeMap<String, TopicConfiguration>>,
+    /// The receipt's `owner_detection`; empty when absent.
+    owner_detection: Vec<String>,
 }
 
 impl SourceConfigCoverage {
@@ -783,7 +788,23 @@ impl SourceConfigCoverage {
                         .map(|f| (topic.clone(), f))
                 })
                 .collect(),
+            model: receipt.topic_configuration.clone(),
+            owner_detection: receipt.owner_detection.clone().unwrap_or_default(),
         }
+    }
+
+    /// The receipt's configuration model, or `None` when it records none
+    /// (no receipt, or one before 1.3.0) — NOT RECORDED, never "no settings".
+    #[must_use]
+    pub fn model(&self) -> Option<&BTreeMap<String, TopicConfiguration>> {
+        self.model.as_ref()
+    }
+
+    /// Where the receipt's backup looked for declarative owners; empty when
+    /// it looked nowhere or records nothing.
+    #[must_use]
+    pub fn owner_detection(&self) -> &[String] {
+        &self.owner_detection
     }
 
     /// The source `topic`'s replication factor as the receipt

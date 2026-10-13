@@ -67,6 +67,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             topic_mapping_prefix: SCRATCH_PREFIX.into(),
             default_replication_factor: 1,
             teardown: "delete".into(),
+            topic_configuration: None,
         },
         sample: SampleSpec {
             window_start: ts("2026-09-07T12:00:00Z"),
