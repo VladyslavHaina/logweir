@@ -1,0 +1,24 @@
+format_version: "1.0.0"
+restore:
+  name: "orders-recovery"
+  uid: "6f1c2a3b-0000-4000-8000-000000000001"
+  plan_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  scorecard_sha256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  mapping_sha256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+groups:
+  - source: "orders-app"
+    target: "orders-app"
+    topics:
+      "orders":
+        offsets: {0: 1200, 1: 50}
+        approximate: [1]
+        expected: none
+      "payments":
+        offsets: {2: 7}
+        expected: none
+  - source: "1e3"
+    target: "1e3"
+    topics:
+      "true":
+        offsets: {0: 0}
+        expected: none
