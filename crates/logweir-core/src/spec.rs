@@ -598,9 +598,11 @@ pub struct TargetSpec {
     pub default_replication_factor: i16,
     /// "delete" (default) or "keep". **`Scratch` mode only**: phase 9 tears
     /// nothing down in `newTopic` mode at any value of this field (Global
-    /// Constraint 19).
-    #[serde(default = "delete")]
-    pub teardown: String,
+    /// Constraint 19). PROD-11.1a adds the clone form `{ttl_seconds: N}`
+    /// ([`crate::target_creation::Teardown`]), which a runner from before it
+    /// refuses at parse.
+    #[serde(default)]
+    pub teardown: crate::target_creation::Teardown,
 }
 impl TargetSpec {
     /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the
@@ -620,9 +622,6 @@ fn marker() -> String {
 }
 fn rf1() -> i16 {
     1
-}
-fn delete() -> String {
-    "delete".into()
 }
 
 /// **Interface I33, the Rust half.** The two restores tag 1 performs.

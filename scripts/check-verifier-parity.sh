@@ -2755,3 +2755,152 @@ for name in ca1-under-1.8.0 ca1-under-2.0.0 ca2-mode ca3-same ca3-case ca3-issue
     echo "check-verifier-parity: scorecard/console-$name  rust=$rust_rc python=$py_rc  ok  (console approval refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_CONSOLE_APPROVAL_VERSION and $SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION console-approved scorecards, say the same about who approved and how, and refuse each of CA-1 to CA-8 and ON-5's two new statements with the same words"
+
+# ---------------------------------------------------------------------------
+# PROD-11.1a: `target.creation` (scorecard 1.10.0, and 2.2.0), arms TCR-1 to
+# TCR-5
+# ---------------------------------------------------------------------------
+# The topics a run created, with each topic's ID at creation. Three documents
+# both readers ACCEPT, with the `target creation:` line they print compared
+# byte for byte (a restore under a prefix, a partition subset at 2.2.0, and a
+# TTL clone), and one per arm both readers REFUSE with the same full text.
+# The scorecard formats that define the block --
+# `FORMAT_VERSION_WITH_TARGET_CREATION` and
+# `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`; a renumber moves them here.
+SCORECARD_TARGET_CREATION_VERSION="1.10.0"
+SCORECARD_SUBSET_TARGET_CREATION_VERSION="2.2.0"
+mkdir -p "$tmp/scorecard-tcr"
+"$PY" - "$ROOT" "$tmp/scorecard-tcr" "$SC_PT" "$SCORECARD_TARGET_CREATION_VERSION" \
+    "$SCORECARD_SUBSET_TARGET_CREATION_VERSION" <<'PYEOF'
+import base64, copy, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current, subset_current = sys.argv[4], sys.argv[5]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+corpus = root / "e2e" / "fixtures" / "invariants"
+plain = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+subset = json.loads((corpus / "subsets_2_0_sampled.json").read_text())
+ID = "Cf6zT_mcTNCoxuPmv1Ztxw"
+
+
+def created(base, version=current, ttl=None, **topic):
+    d = copy.deepcopy(base)
+    d["format_version"] = version
+    t = {"name": "drill-orders", "partitions": 3, "topic_id": ID}
+    t.update(topic)
+    d["target"]["creation"] = {"topics": [t], "lineage_headers": "kept"}
+    if ttl is not None:
+        d["target"]["creation"]["teardown_after_seconds"] = ttl
+    return d
+
+
+def new_topic(d):
+    d["target"]["mode"] = "newTopic"
+    d["target"].pop("marker_topic", None)
+    return d
+
+
+stripped = created(plain)
+stripped["target"]["creation"]["lineage_headers"] = "stripped"
+twice = created(plain)
+twice["target"]["creation"]["topics"] *= 2
+cases = {
+    "plain": created(plain),
+    "subset": created(subset, version=subset_current),
+    "clone": created(plain, ttl=300, topic_id=None, topic_id_reason="noTopicId"),
+    "tcr1-under-1.9.0": created(plain, version="1.9.0"),
+    "tcr1-under-2.1.0": created(subset, version="2.1.0"),
+    "tcr2-stripped": stripped,
+    "tcr3-twice": twice,
+    "tcr4-reserved": created(plain, topic_id="AAAAAAAAAAAAAAAAAAAAAQ"),
+    "tcr5-new-topic": new_topic(created(plain, ttl=300)),
+    "tcr5-thirty-days-and-one": created(plain, ttl=2592001),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+tcr_tail="restored records keep their lineage headers (kept)"
+for name in plain subset clone; do
+    doc="$tmp/scorecard-tcr/$name.json"
+    sig="$tmp/scorecard-tcr/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/creation-$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/creation-$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE 'target creation: .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE 'target creation: .*' "$tmp/py.all" || true)"
+    case "$name" in
+        plain|subset) want="target creation: this run created 1 topic: drill-orders (3 partitions, topic ID Cf6zT_mcTNCoxuPmv1Ztxw); $tcr_tail" ;;
+        clone) want="target creation: this run created 1 topic: drill-orders (3 partitions, no topic ID (noTopicId)); $tcr_tail; a clone, deleted 300 seconds after the run, each topic only while its ID is the one recorded here" ;;
+    esac
+    if [ "$rust_lines" != "$py_lines" ] || [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/creation-$name: the target-creation line differs between the readers or from its sentence.
+  rust:   $rust_lines
+  python: $py_lines
+  want:   $want"
+    fi
+    echo "check-verifier-parity: scorecard/creation-$name  rust=$rust_rc python=$py_rc  ok  (target creation)"
+done
+if grep -q 'target creation:' "$tmp/rust.plain" "$tmp/py.plain"; then
+    fail "scorecard/creation-control: a document without target.creation printed a target-creation line"
+fi
+
+for name in tcr1-under-1.9.0 tcr1-under-2.1.0 tcr2-stripped tcr3-twice tcr4-reserved tcr5-new-topic tcr5-thirty-days-and-one; do
+    doc="$tmp/scorecard-tcr/$name.json"
+    sig="$tmp/scorecard-tcr/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/creation-$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/creation-$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        tcr1-under-1.9.0) want_msg="target.creation is present but format_version \"1.9.0\" does not define it: the block is defined from $SCORECARD_TARGET_CREATION_VERSION of format 1 and from $SCORECARD_SUBSET_TARGET_CREATION_VERSION of format 2" ;;
+        tcr1-under-2.1.0) want_msg="target.creation is present but format_version \"2.1.0\" does not define it: the block is defined from $SCORECARD_TARGET_CREATION_VERSION of format 1 and from $SCORECARD_SUBSET_TARGET_CREATION_VERSION of format 2" ;;
+        tcr2-stripped) want_msg="target.creation.lineage_headers is not \"kept\"; every restored record keeps x-original-offset and x-original-timestamp" ;;
+        tcr3-twice) want_msg="target.creation.topics is empty, names a topic twice, or names a blank topic or one with no partitions; the block is present exactly when the run created topics, and names each once" ;;
+        tcr4-reserved) want_msg="target.creation.topics carries a topic_id that is not a topic ID this format defines, or a topic_id_reason outside the closed set, or both or neither; a created topic's identity is its ID or the reason there is none" ;;
+        tcr5-new-topic|tcr5-thirty-days-and-one) want_msg="target.creation.teardown_after_seconds is present but target.mode is not scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, kept from five minutes to thirty days" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/creation-$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/creation-$name  rust=$rust_rc python=$py_rc  ok  (target creation refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_TARGET_CREATION_VERSION and $SCORECARD_SUBSET_TARGET_CREATION_VERSION scorecards that record what a run created, print the same line, and refuse each of TCR-1 to TCR-5 with the same words"

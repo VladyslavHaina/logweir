@@ -4098,6 +4098,14 @@ pub struct ScopeTargetView {
     /// (`delete`: the topics the run created are deleted; a `newTopic`
     /// restore deletes nothing whatever it says).
     pub teardown: String,
+    /// PROD-11.1a: a clone's lifetime in seconds (`target.teardown:
+    /// {ttl_seconds}`); its topics are deleted that long after the run.
+    /// Absent for every other plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teardown_after_seconds: Option<u64>,
+    /// PROD-11.1a: always `kept`: every restored record keeps its lineage
+    /// headers (`x-original-offset`, `x-original-timestamp`).
+    pub lineage_headers: String,
     /// `scratch` or `newTopic`.
     pub mode: String,
     /// The prefix every source topic is mapped through; empty for a restore

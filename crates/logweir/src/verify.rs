@@ -174,6 +174,23 @@ pub struct VerifyReport {
     /// `approval.console` (scorecard 1.9.0 and 2.1.0, PROD-16.2), carried as
     /// read: `None` is a run no second person approved in the console.
     pub console_approval: Option<Box<logweir_core::scorecard::ConsoleApprovalInfo>>,
+    /// `target.creation` (scorecard 1.10.0 and 2.2.0, PROD-11.1a), carried as
+    /// read: `None` is a run that created no topic, or a document before it.
+    pub target_creation: Option<Box<logweir_core::target_creation::TargetCreation>>,
+}
+
+/// The `target creation:` line both readers print for a run that created
+/// topics (PROD-11.1a): the writer's sentence (`TargetCreation::lines`).
+/// Nothing for a document without the block.
+/// `docs/verify_scorecard.py::_target_creation_lines` prints the same line,
+/// and `scripts/check-verifier-parity.sh` compares it between the readers.
+#[must_use]
+pub fn target_creation_lines(
+    block: Option<&logweir_core::target_creation::TargetCreation>,
+) -> Vec<String> {
+    block
+        .map(logweir_core::target_creation::TargetCreation::lines)
+        .unwrap_or_default()
 }
 
 /// The `console approval:` line both readers print for a restore a SECOND
@@ -1321,6 +1338,7 @@ pub fn verify_scorecard_with(
         format_version: sc.format_version.clone(),
         original_name: sc.target.original_name.clone().map(Box::new),
         console_approval: sc.approval.console.clone().map(Box::new),
+        target_creation: sc.target.creation.clone().map(Box::new),
     }))
 }
 
@@ -1403,6 +1421,10 @@ fn print_report(r: &VerifyReport) {
     // PROD-15.1: nor an ordinary restore when it wrote under the original
     // topic names — and what admitted that.
     for line in original_name_lines(r.original_name.as_deref()) {
+        println!("target:    {line}");
+    }
+    // PROD-11.1a: what the run created, by name and ID at creation.
+    for line in target_creation_lines(r.target_creation.as_deref()) {
         println!("target:    {line}");
     }
 }

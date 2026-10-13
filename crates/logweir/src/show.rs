@@ -362,6 +362,13 @@ fn qualifiers(sc: &Scorecard) -> String {
             o.push_str(&format!("    approval.console          {line}\n"));
         }
     }
+    // PROD-11.1a: the topics the run created, with their IDs at creation
+    // (scorecard 1.10.0, or 2.2.0). Printed only for a document carrying it.
+    if let Some(creation) = sc.target.creation.as_ref() {
+        for line in creation.lines() {
+            o.push_str(&format!("    target.creation           {line}\n"));
+        }
+    }
     // The restore wrote under the source's ORIGINAL topic names
     // (scorecard 1.8.0). A qualifier in this footer's sense — the `target`
     // row reads `mode=newTopic` either way — printed only for a document

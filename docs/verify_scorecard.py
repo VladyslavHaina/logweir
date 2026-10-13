@@ -609,7 +609,15 @@ FORMAT_VERSION = "1.4.0"
 # and every partition empty. Arm 4 admits the empty window only beside the
 # block. `source_watermarks` lines say "coverage recorded" or, for every
 # receipt without the block, "coverage not recorded".
-SCRIPT_VERSION = "1.30.0"
+#
+# 1.31.0 (PROD-11.1a) knows scorecard 1.10.0 and 2.2.0 and their optional
+# `target.creation` block: the topics a run created, with each topic's ID at
+# creation, `lineage_headers: kept`, and a TTL clone's lifetime. Arms TCR-1 to
+# TCR-5, mirrored byte for byte and in position (after CA-8): the block only
+# from 1.10.0 / 2.2.0, lineage headers kept, each topic named once with a
+# partition, an ID or its closed-set reason, and a lifetime only on a bounded
+# scratch clone. One `target creation:` line, in the Rust reader's words.
+SCRIPT_VERSION = "1.31.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -669,6 +677,19 @@ ORIGINAL_NAME_OWNER_KINDS = ("strimzi", "external")
 # (`docs/test_verify_scorecard.py::test_the_console_approval_minors_are_the_rust_readers`).
 SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR = 9
 SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2 = 1
+
+# PROD-11.1a: `target.creation`, the topics a run created. The first minor of
+# format 1, and of format 2, that defines the block (arm TCR-1) --
+# `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`; its one `lineage_headers` value and
+# a clone's bounds are `LINEAGE_HEADERS_KEPT`, `CLONE_TTL_MIN_SECONDS` and
+# `CLONE_TTL_MAX_SECONDS` in `crates/logweir-core/src/target_creation.rs`
+# (`docs/test_verify_scorecard.py::test_the_target_creation_constants_are_the_rust_readers`).
+SCORECARD_TARGET_CREATION_SINCE_MINOR = 10
+SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2 = 2
+LINEAGE_HEADERS_KEPT = "kept"
+CLONE_TTL_MIN_SECONDS = 300
+CLONE_TTL_MAX_SECONDS = 2592000
 
 # The block's one mode, and the new member of `ORIGINAL_NAME_APPROVAL_MODES`
 # above -- `APPROVAL_MODE_CONSOLE` in `scorecard.rs`. THE VOCABULARY IS HELD TO
@@ -1314,6 +1335,20 @@ def _defines_console_approval(version) -> bool:
     return False
 
 
+def _defines_target_creation(version) -> bool:
+    """Whether a document of `version` defines `target.creation` (arm TCR-1):
+    1.x from 1.10.0, 2.x from 2.2.0 -- the twin of
+    `logweir_core::scorecard::defines_target_creation`."""
+    major, minor = _major(version), _minor(version)
+    if minor is None:
+        return False
+    if major == 1:
+        return minor >= SCORECARD_TARGET_CREATION_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
 def _days_from_civil(year: int, month: int, day: int) -> int:
     """Days since 1970-01-01 of a proleptic Gregorian date (any year)."""
     year -= month <= 2
@@ -1621,6 +1656,40 @@ def _console_approval_shape_ok(block) -> bool:
         _instant(block.get(name)) is not None
         for name in ("requested_at", "approved_at", "request_expires_at")
     )
+
+
+def _target_creation_shape_ok(block) -> bool:
+    """`target.creation` has the shape `TargetCreation` deserialises
+    (PROD-11.1a, format 1.10.0 and 2.2.0): `topics`, an array of objects with a
+    string `name`, a `u32` `partitions`, a string or null `topic_id` and an
+    optional string `topic_id_reason`; a string `lineage_headers`; and an
+    optional `u64` `teardown_after_seconds`. Unknown keys are ignored, as serde
+    ignores them."""
+    if not isinstance(block, dict) or not isinstance(block.get("lineage_headers"), str):
+        return False
+    ttl = block.get("teardown_after_seconds")
+    if ttl is not None and not (
+        isinstance(ttl, int) and not isinstance(ttl, bool) and 0 <= ttl < 2 ** 64
+    ):
+        return False
+    topics = block.get("topics")
+    if not isinstance(topics, list):
+        return False
+    for t in topics:
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+            return False
+        partitions = t.get("partitions")
+        if not (
+            isinstance(partitions, int)
+            and not isinstance(partitions, bool)
+            and 0 <= partitions < 2 ** 32
+        ):
+            return False
+        for name in ("topic_id", "topic_id_reason"):
+            value = t.get(name)
+            if value is not None and not isinstance(value, str):
+                return False
+    return True
 
 
 def _is_sha256_prefixed(value) -> bool:
@@ -2161,6 +2230,19 @@ def check_invariants(doc) -> str:
             "target.original_name is not an object of the shape the writer gives it: three "
             "strings, an optional source cluster id, the places looked in, the owners found and "
             "a bool owner_path"
+        )
+
+    # Also shape (PROD-11.1a, scorecard 1.10.0 and 2.2.0): `target.creation`
+    # is an `Option<TargetCreation>` over there, so `null` is ABSENT and
+    # anything that is not the writer's shape is refused at DESERIALISATION.
+    # Arms TCR-1 to TCR-5 below compare its fields, so the shape is asserted
+    # first.
+    creation = target.get("creation")
+    if creation is not None and not _target_creation_shape_ok(creation):
+        return (
+            "target.creation is not an object of the shape the writer gives it: an array of "
+            "topics of a string name, an integer partition count, a topic id or null and an "
+            "optional reason, a string lineage_headers and an optional integer lifetime"
         )
 
     # Also shape (PROD-16.2, scorecard 1.9.0 and 2.1.0): `approval.console` is
@@ -3175,6 +3257,73 @@ def check_invariants(doc) -> str:
             "approval.console is present; a console approval names who approved, and a "
             "governed, ordinary or v1 approval carries no console approver"
         )
+
+    # `target.creation` (format 1.10.0, and 2.2.0; PROD-11.1a): arms TCR-1 to
+    # TCR-5, mirrored ARM FOR ARM, IN THIS POSITION (after CA-8, before
+    # `redactions`) and with the same words from
+    # `Scorecard::validate_invariants`. They fire ONLY on a document carrying
+    # the block. Not interpolated except TCR-1's version.
+    if creation is not None:
+        # TCR-1. The block is defined from 1.10.0 of format 1 and from 2.2.0 of
+        # format 2.
+        if not _defines_target_creation(version):
+            return (
+                f"target.creation is present but format_version "
+                f"{_rust_debug_str(version)} does not define it: the block is defined from "
+                f"1.{SCORECARD_TARGET_CREATION_SINCE_MINOR}.0 of format 1 and from "
+                f"2.{SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+            )
+        # TCR-2. Restored records keep their lineage headers, always.
+        if creation["lineage_headers"] != LINEAGE_HEADERS_KEPT:
+            return (
+                "target.creation.lineage_headers is not \"kept\"; every restored record "
+                "keeps x-original-offset and x-original-timestamp"
+            )
+        # TCR-3. The block names what was created: at least one topic, each
+        # once, by a name, with at least one partition.
+        created = creation["topics"]
+        created_names = [t["name"] for t in created]
+        if (
+            not created
+            or len(set(created_names)) != len(created_names)
+            or any(
+                not t["name"].strip(RUST_WHITESPACE) or t["partitions"] == 0 for t in created
+            )
+        ):
+            return (
+                "target.creation.topics is empty, names a topic twice, or names a blank topic "
+                "or one with no partitions; the block is present exactly when the run created "
+                "topics, and names each once"
+            )
+
+        # TCR-4. Each topic carries a real topic ID or the closed-set reason
+        # there is none, never both and never neither.
+        def _identity_bad(t):
+            topic_id, reason = t.get("topic_id"), t.get("topic_id_reason")
+            if topic_id is not None and reason is None:
+                return not _is_canonical_topic_id(topic_id)
+            if topic_id is None and reason is not None:
+                return reason not in RECEIPT_TOPIC_ID_REASONS
+            return True
+
+        if any(_identity_bad(t) for t in created):
+            return (
+                "target.creation.topics carries a topic_id that is not a topic ID this format "
+                "defines, or a topic_id_reason outside the closed set, or both or neither; a "
+                "created topic's identity is its ID or the reason there is none"
+            )
+        # TCR-5. Only a scratch restore is a clone, and its lifetime is the
+        # plan's bounded TTL.
+        ttl = creation.get("teardown_after_seconds")
+        if ttl is not None and (
+            target.get("mode") not in (None, "scratch")
+            or not CLONE_TTL_MIN_SECONDS <= ttl <= CLONE_TTL_MAX_SECONDS
+        ):
+            return (
+                "target.creation.teardown_after_seconds is present but target.mode is not "
+                "scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, "
+                "kept from five minutes to thirty days"
+            )
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -5131,6 +5280,37 @@ def _console_approval_lines(block):
     ]
 
 
+def _target_creation_lines(block):
+    """`target.creation` as a line -- the twin of `crates/logweir/src/
+    verify.rs::target_creation_lines` (PROD-11.1a): the writer's sentence
+    (`TargetCreation::lines`). Absent prints nothing: the run created no
+    topic."""
+    if block is None:
+        return []
+    topics = []
+    for t in block["topics"]:
+        if t.get("topic_id") is not None:
+            ident = f"topic ID {t['topic_id']}"
+        elif t.get("topic_id_reason") is not None:
+            ident = f"no topic ID ({t['topic_id_reason']})"
+        else:
+            ident = "no topic ID"
+        unit = "partition" if t["partitions"] == 1 else "partitions"
+        topics.append(f"{t['name']} ({t['partitions']} {unit}, {ident})")
+    count = "1 topic" if len(block["topics"]) == 1 else f"{len(block['topics'])} topics"
+    line = (
+        f"target creation: this run created {count}: {', '.join(topics)}; restored records "
+        f"keep their lineage headers ({block['lineage_headers']})"
+    )
+    ttl = block.get("teardown_after_seconds")
+    if ttl is not None:
+        line += (
+            f"; a clone, deleted {ttl} seconds after the run, each topic only while its ID is "
+            "the one recorded here"
+        )
+    return [line]
+
+
 def _unsampled_lines(topics):
     """`sample.unsampled_topics` as lines -- the twin of `crates/logweir/src/
     verify.rs::unsampled_lines` (FX-23), in the same words. Absent or empty
@@ -5500,6 +5680,11 @@ def main(
         # (`original_name_lines`).
         for line in _original_name_lines(doc["target"].get("original_name")):
             print(f"       target:   {line}")
+        # PROD-11.1a: what the run created, by name and ID at creation. The
+        # same line `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::target_creation_lines`).
+        for line in _target_creation_lines(doc["target"].get("creation")):
+            print(f"       target:   {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -5561,6 +5746,9 @@ def main(
             "approval inside the request's window, approval.approver the approver's principal, "
             "approval.key_id the console's key, approval.approved_at the instant of the "
             "approval, and target.original_name.approval_mode consoleApproval exactly beside it; "
+            "target.creation only from 1.10.0 of format 1 or 2.2.0 of format 2, lineage headers "
+            "kept, each created topic once with a partition and its ID or the reason there is "
+            "none, and a lifetime only on a scratch clone, from 300 to 2592000 seconds; "
             "approval.self_attested derived, not echoed)"
         )
         return 0

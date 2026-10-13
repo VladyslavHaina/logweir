@@ -1041,10 +1041,11 @@ fn each_phases_result_reaches_the_signed_document() {
     // A SCRATCH drill's deviations are intended (above), and phase 7
     // makes the 1.2.0 claim that nothing was left unreconstructed.
     assert_eq!(sc.topic_parity.not_reconstructed, Some(vec![]));
-    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0 or later, and every run that created
+    // topics records them as 1.10.0 (PROD-11.1a's `target.creation`).
     assert_eq!(
         sc.format_version,
-        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
     );
     // The fixture's plan states no point in time and its sample window
     // ends on the archive's newest timestamp, so nothing was selected by time:
@@ -1085,10 +1086,11 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.target.mode, logweir_core::spec::TargetMode::NewTopic);
-    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0 or later, and every run that created
+    // topics records them as 1.10.0 (PROD-11.1a's `target.creation`).
     assert_eq!(
         sc.format_version,
-        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
     );
     assert!(
         sc.topic_parity.intentionally_deviated.is_empty(),
@@ -1786,10 +1788,11 @@ fn the_producer_time_opt_in_runs_and_the_signed_scorecard_says_so() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
-    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0 or later, and every run that created
+    // topics records them as 1.10.0 (PROD-11.1a's `target.creation`).
     assert_eq!(
         sc.format_version,
-        logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
     );
     assert_eq!(
         sc.source.time_basis,
@@ -2215,9 +2218,12 @@ fn a_complete_coverage_plan_signs_a_covered_exact_complete_block() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
-    // A complete verification keeps its version; only a sampled one is
-    // 1.6.0.
-    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    // A complete verification keeps its version (only a sampled one is
+    // 1.6.0), raised to 1.10.0 by the topics it created (PROD-11.1a).
+    assert_eq!(
+        sc.format_version,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
+    );
     let v = sc
         .integrity
         .verification
@@ -2314,9 +2320,10 @@ fn a_partition_subset_is_restored_and_signed_as_format_2_0_0() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
+    // Major 2 for the subset; 2.2.0 for the topics it created (PROD-11.1a).
     assert_eq!(
         sc.format_version,
-        logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION
     );
     let end = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_END)
         .unwrap()
@@ -2377,9 +2384,11 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
+    // 1.7.0 defines the selection; 1.10.0 for the topics it created
+    // (PROD-11.1a).
     assert_eq!(
         sc.format_version,
-        logweir_core::scorecard::FORMAT_VERSION_WITH_SELECTION
+        logweir_core::scorecard::FORMAT_VERSION_WITH_TARGET_CREATION
     );
     let start = chrono::DateTime::parse_from_rfc3339(fixtures::FIXTURE_WINDOW_START)
         .unwrap()
@@ -2723,4 +2732,50 @@ fn a_marker_before_a_stated_start_is_not_read() {
         "{}",
         sc.sample.coverage_note
     );
+}
+
+/// **PROD-11.1a, C43's unit half: every run that created topics signs what
+/// it created.** `target.creation` names each created topic with the
+/// partition count it was created with, its ID at creation or the reason
+/// there is none (the fixture's reader reads no IDs: `notRead`), and
+/// `lineage_headers: kept`; a plain scratch drill declares no lifetime.
+///
+/// KILLS: a writer that leaves the block out, records a name the run did not
+/// create, or drops the lineage statement. NEGATIVE CONTROL: a run blocked at
+/// phase 5 created nothing and signs no block.
+#[test]
+fn every_creating_run_signs_the_topics_it_created() {
+    let f = fixtures::orchestrator_fixture(Drill::Passes);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("the drill passes");
+    let created = fixtures::created_topics(&f);
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    let block = sc.target.creation.as_ref().expect("the block is signed");
+    assert_eq!(block.lineage_headers, "kept");
+    assert_eq!(block.teardown_after_seconds, None);
+    assert_eq!(
+        block
+            .topics
+            .iter()
+            .map(|t| (t.name.clone(), i64::from(t.partitions)))
+            .collect::<Vec<_>>(),
+        created
+            .iter()
+            .map(|s| (s.name.clone(), i64::from(s.num_partitions)))
+            .collect::<Vec<_>>()
+    );
+    for t in &block.topics {
+        assert_eq!(t.topic_id, None);
+        assert_eq!(t.topic_id_reason.as_deref(), Some("notRead"));
+    }
+
+    let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
+    let _ = execute_with(&f.args, &f.run_id, &f.ctx);
+    assert!(fixtures::created_topics(&f).is_empty());
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert!(sc.target.creation.is_none());
+    assert!(!logweir_core::scorecard::defines_target_creation(
+        &sc.format_version
+    ));
 }

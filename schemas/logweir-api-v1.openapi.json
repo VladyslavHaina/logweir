@@ -13422,6 +13422,7 @@
         "required": [
           "authMode",
           "bootstrapServers",
+          "lineageHeaders",
           "mode",
           "replicationFactor",
           "teardown",
@@ -13448,6 +13449,10 @@
               "type": "string"
             }
           },
+          "lineageHeaders": {
+            "description": "PROD-11.1a: always `kept`: every restored record keeps its lineage headers (`x-original-offset`, `x-original-timestamp`).",
+            "type": "string"
+          },
           "mode": {
             "description": "`scratch` or `newTopic`.",
             "type": "string"
@@ -13465,6 +13470,13 @@
           "teardown": {
             "description": "`target.teardown`: what happens to a SCRATCH run's targets afterwards (`delete`: the topics the run created are deleted; a `newTopic` restore deletes nothing whatever it says).",
             "type": "string"
+          },
+          "teardownAfterSeconds": {
+            "description": "PROD-11.1a: a clone's lifetime in seconds (`target.teardown: {ttl_seconds}`); its topics are deleted that long after the run. Absent for every other plan.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0,
+            "nullable": true
           },
           "topicPrefix": {
             "description": "The prefix every source topic is mapped through; empty for a restore under the original topic names.",

@@ -82,6 +82,7 @@ fn main() {
             // Absent, as on every document that is not an
             // original-name restore.
             original_name: None,
+            creation: None,
         },
         approval: ApprovalInfo {
             approver: "sre-oncall@example.com".into(),
