@@ -428,6 +428,8 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
             auth_username: scope.target.auth_username.clone(),
             replication_factor: scope.target.replication_factor,
             teardown: scope.target.teardown.clone(),
+            teardown_after_seconds: scope.target.teardown_after_seconds,
+            lineage_headers: scope.target.lineage_headers.to_string(),
             owner_statement: scope.target.owner_statement.as_ref().map(|statement| {
                 ScopeOwnerStatementView {
                     owners: statement.owners.as_ref().map(|owners| {

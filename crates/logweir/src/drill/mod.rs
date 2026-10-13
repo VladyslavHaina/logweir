@@ -1895,6 +1895,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
         return Err(GuardRefusal(refusal).into());
     }
+    // PROD-11.1a: a clone (`target.teardown: {ttl_seconds}`) is a scratch
+    // restore with a bounded lifetime; refused by name, exit 3, before
+    // anything is read or dialled. Phase 0 repeats the check.
+    if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(&authenticated_spec)
+    {
+        return Err(GuardRefusal(refusal).into());
+    }
     // The approval subject, over the authenticated plan and before anything is
     // read or dialled: an original-name plan needs its own approval subject,
     // which an ordinary approval cannot satisfy, and an `originalName`
@@ -2488,7 +2495,8 @@ fn execute_with_validated_approval(
             deleter,
             &admitted.topic_mapping,
             created,
-            &c.spec.target.teardown,
+            // A TTL clone that failed is torn down at once (PROD-11.1a).
+            c.spec.target.teardown.phase9_policy(false),
             c.spec.target.mode,
             run_id,
             &mut std::io::stdout().lock(),
@@ -2505,6 +2513,21 @@ fn execute_with_validated_approval(
         &mut topic_preflight,
     )?;
     let created = topic_preflight.topics_created.clone();
+    // PROD-11.1a: what this run created, with each topic's ID at creation,
+    // signed as `target.creation` (and a TTL clone's lifetime). The clone's
+    // cleanup and the switchover read it.
+    sc.target.creation = phase0_admit::created_topics_identity(
+        reader,
+        &admitted.topic_mapping,
+        &facts,
+        &created,
+        c.spec.target.teardown.ttl_seconds(),
+    );
+    sc.format_version = logweir_core::scorecard::format_version_with_target_creation(
+        &sc.format_version,
+        sc.target.creation.as_ref(),
+    )
+    .to_string();
     let torn_down = |e: DrillError| -> DrillError {
         remove_created(&created);
         e
@@ -2736,11 +2759,15 @@ fn teardown(
     mapping: &BTreeMap<String, String>,
     scorecard_sha256: &str,
 ) {
+    // PROD-11.1a: a TTL clone keeps a passing run's topics for its cleanup and
+    // tears any other run down at once; the attestation names the declared
+    // policy (`ttl`).
+    let passed = sc.outcome == Outcome::Pass;
     let attested = record(sc, 9, "teardown", || {
-        let a = phase9_teardown::run(
+        let mut a = phase9_teardown::run(
             deleter,
             mapping,
-            &c.spec.target.teardown,
+            c.spec.target.teardown.phase9_policy(passed),
             // Global Constraint 19, passed rather than re-derived: phase 9
             // deletes only in `scratch` mode, and the mode travels onto the
             // teardown attestation so a reader can tell "nothing, and nothing
@@ -2749,6 +2776,7 @@ fn teardown(
             run_id,
             scorecard_sha256,
         );
+        a.teardown_policy = c.spec.target.teardown.policy().to_string();
         // A teardown that left topics is a warning event: the names travel in
         // the `topics` field and in the message (JSON and plain-text
         // consumers), and `run_id` is on the event, not only on the span,
@@ -3350,6 +3378,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // Written once phase 1 has verified the approval
             // subject (`original_name_info`), never on a draft.
             original_name: None,
+            creation: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -3681,6 +3710,7 @@ fn target_info(
         // point at which the approval subject is VERIFIED; a block written
         // here would sign a subject nobody had checked yet.
         original_name: None,
+        creation: None,
     })
 }
 

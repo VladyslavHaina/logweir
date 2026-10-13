@@ -1148,6 +1148,60 @@ kubectl --context docker-desktop get restore r1 \
 `Valid` alone says the document is authentic; `pass` alone says the drill passed
 by a document nobody verified. The `SIGNED` and `OUTCOME` columns show both.
 
+### Safe clones: a scratch restore kept for a declared time
+
+A clone (PROD-11.1a) is a `scratch` restore whose plan says how long to keep
+what it restored:
+
+```yaml
+target:
+  mode: scratch
+  topic_mapping_prefix: "clone-"
+  teardown: {ttl_seconds: 86400}   # 300 (five minutes) to 2592000 (thirty days)
+```
+
+Scratch mode's checks hold unchanged: the target cluster is in the
+`TrustPolicy`'s `allowedTargetClusterIds`, it is not the source, and the marker
+topic exists. The map form outside scratch mode is refused
+`CloneTtlNeedsScratch`, out of bounds `CloneTtlOutOfRange`, both before any Job.
+A runner from before this feature cannot parse the map form and restores
+nothing. Restored records always keep `x-original-offset` and
+`x-original-timestamp`; the approval scope shows `teardownAfterSeconds` and
+`lineageHeaders: kept`.
+
+The `Restore` carries the finalizer `logweir.dev/clone-cleanup` from admission,
+before its run Job exists. `status.clone` says where the clone is:
+
+| `phase` | Meaning |
+|---|---|
+| `Active` | The run passed; its topics are kept until `expiresAt` (the success the controller recorded plus `ttlSeconds`). The cleanup Job exists, suspended. |
+| `Removing` | At `expiresAt`, or at once when the `Restore` is deleted: the cleanup Job (`logweir-clone-cleanup-<uid>-<attempt>`) runs `logweir restore cleanup`. |
+| `Removed` | It deleted what the run's signed scorecard records (`target.creation`), on the cluster the scorecard records, each topic only while its ID is the recorded one. `status.teardown` lists `deleted`, the topics it left (`failed`, with why) and the signed attestation (`logweir/drills/<run_id>.cleanup.json`). The finalizer is released. |
+| `NotKept` | The run did not pass and the runner exited with one of its own codes (1 to 4): its phase 9, or the teardown of a run that failed after creating, removed what it created at once and named anything it left in `status.teardown.failed`; a stopped creation step deletes nothing and names what it left in `status.targetTopicsAppeared`. A run refused before any Job created nothing. The finalizer is released. |
+| `RemovalFailed` | The cleanup refused (exit 3, for example `CloneTargetClusterChanged`: the target answers with another cluster ID), failed three times five minutes apart, or the controller cannot settle the clone (a plan it cannot read, a recorded run Job gone before its outcome, a run that ended with no exit code or was killed by a signal, 137 or 143, so its teardown never ran). `status.clone.reason` says which. The finalizer stays. |
+
+A topic recreated by someone else since the run is never deleted: it is left
+`CloneTargetReplaced` in `status.teardown.failed`, and the clone still reaches
+`Removed`. One window remains: the cleanup reads each topic's ID and then
+deletes by name, because librdkafka has no delete by topic ID, so a topic
+deleted and created again under a recorded name between that read and the
+delete request would be deleted. The cleanup verifies the run's scorecard with
+the installation's current signing key (and, for a plan bound to a recovery
+point, the evidence keyring); a signing key rotated during a clone's lifetime
+makes it refuse, `RemovalFailed`, and nothing is deleted. **On `RemovalFailed`**, check the target for topics with the clone's
+prefix, delete any the run created (`status.teardown.failed` and the scorecard's
+`target.creation` name them), then remove the finalizer:
+
+```bash
+kubectl --context docker-desktop -n <ns> patch restore <name> --type=json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+The controller needs `patch` on `restores` for the finalizer (the chart grants
+it). **Rollback:** a controller from before this feature ignores the finalizer,
+so deleting a clone's `Restore` waits until the finalizer is removed by hand as
+above; delete the clone's topics first.
+
 ### The recovery catalog
 
 A `RecoveryCatalog` indexes one destination's durable catalog,

@@ -80,6 +80,9 @@ pub mod schema;
 pub mod schema_dependency;
 pub mod scorecard;
 pub mod spec;
+/// The scorecard's `target.creation` block, a clone's declared lifetime
+/// (`target.teardown: {ttl_seconds}`) and the rule its cleanup deletes by.
+pub mod target_creation;
 /// Which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;

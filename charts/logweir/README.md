@@ -69,7 +69,10 @@ Standard refuses them; install a demo only into a namespace that admits them.
 
 Nothing optional is on by default. `manifest_lint.rs` holds the controller's
 role to its calls: no verb on `secrets`, no `update`, and `delete` only on
-`topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
+`topicdiscoveries` and `preflights`. `patch` on `restores` (PROD-11.1a) adds
+and removes a TTL clone's finalizer `logweir.dev/clone-cleanup`; a rollback to
+a controller without it leaves the finalizer on clone `Restore`s, which an
+operator then removes by hand ([docs/kubernetes.md](../../docs/kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)). Every status write is a merge `PATCH`
 carrying a `metadata.resourceVersion` precondition.
 
 ## Values

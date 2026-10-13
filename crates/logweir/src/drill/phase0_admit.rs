@@ -295,6 +295,11 @@ pub fn run_with_original_name(
     if let Some(refusal) = original_name::refuse_shape(spec) {
         return Err(GuardRefusal(refusal).into());
     }
+    // PROD-11.1a, purely local: the clone form of `target.teardown` only in
+    // scratch mode, with a lifetime within its bounds.
+    if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(spec) {
+        return Err(GuardRefusal(refusal).into());
+    }
     let is_original_name = original_name::is_original_name_restore(spec);
 
     // The two PURELY LOCAL checks run first, before any network round trip. A
@@ -1138,6 +1143,60 @@ pub fn create_target_topics(
             })?;
     }
     Ok(())
+}
+
+/// **PROD-11.1a: the scorecard's `target.creation` block** for the topics this
+/// run created (`created`, `TopicPreflight.topics_created`), read right after
+/// [`create_target_topics`]: each one's partition count and the topic ID
+/// Logweir's own DescribeTopics read returns now, or why there is none. A
+/// failed read is recorded as its reason, never as a failure of the run.
+/// `None` when the run created nothing.
+pub fn created_topics_identity(
+    reader: &dyn ClusterReader,
+    topic_mapping: &BTreeMap<String, String>,
+    facts: &logweir_core::engine::BackupSetFacts,
+    created: &[String],
+    teardown_after_seconds: Option<u64>,
+) -> Option<logweir_core::target_creation::TargetCreation> {
+    if created.is_empty() {
+        return None;
+    }
+    let partitions: BTreeMap<&str, u32> = facts
+        .topics
+        .iter()
+        .filter_map(|t| {
+            let dst = topic_mapping.get(&t.name)?;
+            let count = super::phase3_diff::restore_partition_count(t);
+            Some((dst.as_str(), u32::try_from(count).unwrap_or(0)))
+        })
+        .collect();
+    let reads: BTreeMap<String, logweir_core::topic_identity::IdRead> =
+        match reader.topic_ids(created) {
+            Ok(reads) => reads
+                .into_iter()
+                .map(|(name, read)| (name, read.to_id_read()))
+                .collect(),
+            Err(_) => BTreeMap::new(),
+        };
+    let rows: Vec<(String, u32, logweir_core::topic_identity::IdRead)> = created
+        .iter()
+        .map(|name| {
+            (
+                name.clone(),
+                partitions.get(name.as_str()).copied().unwrap_or(0),
+                reads
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(logweir_core::topic_identity::IdRead::Unread(
+                        logweir_core::topic_identity::READ_FAILED,
+                    )),
+            )
+        })
+        .collect();
+    Some(logweir_core::target_creation::TargetCreation::of(
+        &rows,
+        teardown_after_seconds,
+    ))
 }
 
 /// The creation step stopped, and nothing is deleted.

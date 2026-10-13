@@ -144,6 +144,14 @@ pub struct ScopeTarget {
     /// (`delete` removes the topics the run created, never an original name;
     /// a `newTopic` restore deletes nothing whatever it says).
     pub teardown: String,
+    /// PROD-11.1a: a TTL clone's lifetime in seconds (`target.teardown:
+    /// {ttl_seconds}`), after which its topics are deleted; absent for every
+    /// other plan.
+    pub teardown_after_seconds: Option<u64>,
+    /// PROD-11.1a: what restored records carry of their source, always
+    /// [`crate::target_creation::LINEAGE_HEADERS_KEPT`]: every record keeps
+    /// `x-original-offset` and `x-original-timestamp`.
+    pub lineage_headers: &'static str,
     /// `scratch` or `newTopic`.
     pub mode: &'static str,
     /// The prefix every source topic is mapped through
@@ -685,7 +693,9 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
             auth_mode: plan.target.auth.mode_str(),
             auth_username: shown_opt(plan.target.auth.username(), "the target's SASL principal")?,
             replication_factor: plan.target.default_replication_factor,
-            teardown: shown(&plan.target.teardown, "the target's teardown")?,
+            teardown: shown(plan.target.teardown.policy(), "the target's teardown")?,
+            teardown_after_seconds: plan.target.teardown.ttl_seconds(),
+            lineage_headers: crate::target_creation::LINEAGE_HEADERS_KEPT,
             owner_statement: plan
                 .target
                 .original_name()

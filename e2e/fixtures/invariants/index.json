@@ -1258,5 +1258,97 @@
   "rust_exit": 0,
   "python_exit": 0,
   "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_accepted",
+  "file": "target_creation_1_10_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_2_2_partition_subset",
+  "file": "target_creation_2_2_partition_subset.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_ttl_clone",
+  "file": "target_creation_1_10_ttl_clone.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_without_an_id",
+  "file": "target_creation_1_10_without_an_id.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_under_format_1_9_0",
+  "file": "target_creation_under_format_1_9_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation is present but format_version \"1.9.0\" does not define it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2",
+  "arm": "target.creation is present but format_version "
+ },
+ {
+  "id": "target_creation_under_format_2_1_0",
+  "file": "target_creation_under_format_2_1_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation is present but format_version \"2.1.0\" does not define it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2",
+  "arm": "target.creation is present but format_version "
+ },
+ {
+  "id": "target_creation_headers_stripped",
+  "file": "target_creation_headers_stripped.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.lineage_headers is not \"kept\"; every restored record keeps x-original-offset and x-original-timestamp",
+  "arm": "target.creation.lineage_headers is not"
+ },
+ {
+  "id": "target_creation_topic_twice",
+  "file": "target_creation_topic_twice.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics is empty, names a topic twice, or names a blank topic or one with no partitions; the block is present exactly when the run created topics, and names each once",
+  "arm": "target.creation.topics is empty, names a topic twice"
+ },
+ {
+  "id": "target_creation_reserved_topic_id",
+  "file": "target_creation_reserved_topic_id.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics carries a topic_id that is not a topic ID this format defines, or a topic_id_reason outside the closed set, or both or neither; a created topic's identity is its ID or the reason there is none",
+  "arm": "target.creation.topics carries a topic_id that is not"
+ },
+ {
+  "id": "target_creation_id_and_reason",
+  "file": "target_creation_id_and_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics carries a topic_id that is not a topic ID this format defines, or a topic_id_reason outside the closed set, or both or neither; a created topic's identity is its ID or the reason there is none",
+  "arm": "target.creation.topics carries a topic_id that is not"
+ },
+ {
+  "id": "target_creation_ttl_on_a_new_topic_restore",
+  "file": "target_creation_ttl_on_a_new_topic_restore.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.teardown_after_seconds is present but target.mode is not scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, kept from five minutes to thirty days",
+  "arm": "target.creation.teardown_after_seconds is present but"
+ },
+ {
+  "id": "target_creation_ttl_below_five_minutes",
+  "file": "target_creation_ttl_below_five_minutes.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.teardown_after_seconds is present but target.mode is not scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, kept from five minutes to thirty days",
+  "arm": "target.creation.teardown_after_seconds is present but"
  }
 ]

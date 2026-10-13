@@ -1,4 +1,4 @@
-# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name` and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name`, `target.teardown` and `notifications`
 
 **This is not a complete drill-spec reference.** It documents the keys Task 14,
 decision D3, FX-8, PROD-08.1, PROD-11.1 and PROD-15.1 created or changed.
@@ -557,6 +557,34 @@ the original names without the conditions above. The full account, with the
 [kubernetes.md](../kubernetes.md#restoring-under-the-original-topic-names-prod-151).
 
 ---
+
+## `target.teardown: {ttl_seconds}`: a clone (PROD-11.1a)
+
+`target.teardown` is a policy, `delete` (the default) or `keep`, or the clone
+form `{ttl_seconds: N}`: a scratch restore whose topics are kept N seconds after
+a passing run, then deleted by `logweir restore cleanup`
+([Kubernetes](../kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
+N is 300 to 2,592,000 (`CloneTtlOutOfRange`), and the form is scratch mode's
+only (`CloneTtlNeedsScratch`); both are exit 3 before anything is read. A run
+that does not pass is torn down at once. A runner from before PROD-11.1a types
+the field as a string, so it refuses the map form (`drill spec does not parse`,
+exit 1) and creates nothing. The signed scorecard records what the run created
+and the lifetime in [`target.creation`](drill-scorecard.md#targetcreation-format-1100-and-220).
+
+`logweir restore cleanup --spec <plan> --run-id <id> --signing-key <key>
+[--evidence-keys <keyring>] [--attempt N]` deletes exactly the topics that
+document records, only on the cluster it records (`CloneTargetClusterChanged`
+otherwise) and only while each one's ID is the recorded one
+(`CloneTargetReplaced`, `CloneTargetIdentityUnknown` otherwise; a missing topic
+is `alreadyAbsent`). It verifies the scorecard's signature, invariants, run id
+and plan hash first, and signs a teardown attestation (`teardown_policy: ttl`)
+at `logweir/drills/<run_id>.cleanup.json` (`.cleanup-N.json` for attempt N).
+Exit 0: every recorded topic deleted, already gone, or left for good by the ID
+rule; 1: a delete failed or an ID could not be read; 3: refused, nothing
+deleted; 4: the attestation was not persisted. Its line (exit 0, 1 and 3,
+not when the store or the cluster did not answer) is
+`clone-cleanup=<JSON>` (`runId`, `deleted`, `alreadyAbsent`, `left[{topic,
+reason}]`, `attestationKey` or `refused`).
 
 ## `notifications`
 

@@ -672,6 +672,63 @@ pub fn format_version_with_console_approval<'a>(
     }
 }
 
+/// The first minor of scorecard format 1 that defines `target.creation`
+/// (arm TCR-1). A renumber changes this and
+/// [`FORMAT_VERSION_WITH_TARGET_CREATION`] together, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_TARGET_CREATION_SINCE_MINOR`
+/// follows it.
+pub const TARGET_CREATION_SINCE_MINOR: u64 = 10;
+
+/// The first minor of scorecard format 2 that defines `target.creation`: a
+/// partition-subset restore creates topics like any other.
+pub const TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2: u64 = 2;
+
+/// The `format_version` of a format 1 scorecard that carries
+/// `target.creation` (PROD-11.1a): every run that created topics. A MINOR
+/// bump for a new optional block, under OD-7 (a): arms TCR-1 to TCR-5 read
+/// only the block (TCR-5 judges `target.mode` against it) and can only
+/// refuse. `schemas/logweir-drill-scorecard-1.10.0.json`.
+pub const FORMAT_VERSION_WITH_TARGET_CREATION: &str = "1.10.0";
+
+/// The same, for a partition-subset restore: format 2's second minor.
+/// `schemas/logweir-drill-scorecard-2.2.0.json`.
+pub const FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION: &str = "2.2.0";
+
+/// Whether a document of `format_version` defines `target.creation` (arm
+/// TCR-1): a 1.x document from 1.10.0 on, or a 2.x document from 2.2.0 on.
+#[must_use]
+pub fn defines_target_creation(format_version: &str) -> bool {
+    let Some(minor) = minor_version(format_version) else {
+        return false;
+    };
+    match major_version(format_version) {
+        Some(1) => minor >= TARGET_CREATION_SINCE_MINOR,
+        Some(PARTITION_SUBSETS_MAJOR) => minor >= TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2,
+        _ => false,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its created topics
+/// are known: when it carries `target.creation`, at least
+/// [`FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`] for a major-2 document and
+/// at least [`FORMAT_VERSION_WITH_TARGET_CREATION`] for any other; else
+/// `current` unchanged. Monotonic within the major, so it runs after every
+/// step that can choose the major.
+#[must_use]
+pub fn format_version_with_target_creation<'a>(
+    current: &'a str,
+    creation: Option<&crate::target_creation::TargetCreation>,
+) -> &'a str {
+    if creation.is_none() {
+        return current;
+    }
+    if major_version(current) == Some(PARTITION_SUBSETS_MAJOR) {
+        newer_format_version(current, FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION)
+    } else {
+        newer_format_version(current, FORMAT_VERSION_WITH_TARGET_CREATION)
+    }
+}
+
 /// One of the two people of a console approval, as the console attested
 /// them: an identity provider's issuer and its subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1113,6 +1170,14 @@ pub struct TargetInfo {
     /// absent, so every other document keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name: Option<OriginalNameInfo>,
+    /// **PROD-11.1a (format 1.10.0 and 2.2.0).** Present exactly when the run
+    /// created topics: each one's name, partitions and topic ID at creation,
+    /// `lineage_headers: kept`, and a TTL clone's lifetime
+    /// ([`crate::target_creation::TargetCreation`]). Arms TCR-1 to TCR-5.
+    /// Nested optional and skipped when absent, so every other document keeps
+    /// its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<crate::target_creation::TargetCreation>,
 }
 
 /// A nested optional block. GC12 as amended permits nested optional fields in
@@ -3148,6 +3213,87 @@ impl Scorecard {
                 ));
             }
         }
+        // `target.creation` (format 1.10.0, and 2.2.0; PROD-11.1a): arms TCR-1
+        // to TCR-5. They fire ONLY on a document that carries the block, so
+        // every other document is decided exactly as before: MINOR under OD-7
+        // (a). NOT INTERPOLATED, except TCR-1's version. Mirrored arm for arm,
+        // in this order and this position (after CA-8, before `redactions`),
+        // in `docs/verify_scorecard.py::check_invariants`.
+        if let Some(creation) = &self.target.creation {
+            // TCR-1. The block is defined from 1.10.0 of format 1 and from
+            // 2.2.0 of format 2.
+            if !defines_target_creation(&self.format_version) {
+                return Err(InvariantError(format!(
+                    "target.creation is present but format_version {:?} does not define it: \
+                     the block is defined from 1.{TARGET_CREATION_SINCE_MINOR}.0 of format 1 and \
+                     from 2.{TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2}.0 of format 2",
+                    self.format_version
+                )));
+            }
+            // TCR-2. Restored records keep their lineage headers, always.
+            if creation.lineage_headers != crate::target_creation::LINEAGE_HEADERS_KEPT {
+                return Err(InvariantError(
+                    "target.creation.lineage_headers is not \"kept\"; every restored record \
+                     keeps x-original-offset and x-original-timestamp"
+                        .into(),
+                ));
+            }
+            // TCR-3. The block names what was created: at least one topic,
+            // each once, by a name, with at least one partition.
+            let mut names: Vec<&str> = creation.topics.iter().map(|t| t.name.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            if creation.topics.is_empty()
+                || names.len() != creation.topics.len()
+                || creation
+                    .topics
+                    .iter()
+                    .any(|t| t.name.trim().is_empty() || t.partitions == 0)
+            {
+                return Err(InvariantError(
+                    "target.creation.topics is empty, names a topic twice, or names a blank \
+                     topic or one with no partitions; the block is present exactly when the run \
+                     created topics, and names each once"
+                        .into(),
+                ));
+            }
+            // TCR-4. Each topic carries a real topic ID or the closed-set
+            // reason there is none, never both and never neither.
+            if creation
+                .topics
+                .iter()
+                .any(|t| match (&t.topic_id, &t.topic_id_reason) {
+                    (Some(id), None) => !crate::topic_identity::is_canonical(id),
+                    (None, Some(reason)) => {
+                        !crate::topic_identity::TOPIC_ID_REASONS.contains(&reason.as_str())
+                    }
+                    _ => true,
+                })
+            {
+                return Err(InvariantError(
+                    "target.creation.topics carries a topic_id that is not a topic ID this format \
+                     defines, or a topic_id_reason outside the closed set, or both or neither; a \
+                     created topic's identity is its ID or the reason there is none"
+                        .into(),
+                ));
+            }
+            // TCR-5. Only a scratch restore is a clone, and its lifetime is
+            // the plan's bounded TTL.
+            if let Some(ttl) = creation.teardown_after_seconds {
+                if !self.target.mode.is_scratch()
+                    || !(crate::target_creation::CLONE_TTL_MIN_SECONDS
+                        ..=crate::target_creation::CLONE_TTL_MAX_SECONDS)
+                        .contains(&ttl)
+                {
+                    return Err(InvariantError(
+                        "target.creation.teardown_after_seconds is present but target.mode is not \
+                         scratch, or it is outside 300 to 2592000; only a scratch restore is a \
+                         clone, kept from five minutes to thirty days"
+                            .into(),
+                    ));
+                }
+            }
+        }
         // `docs/formats/drill-scorecard.md` states that `redactions` is "Always
         // `[]` in v0.1" as a PROPERTY OF THE FORMAT: a non-empty list would
         // tell an auditor that a field they read first had been removed, and
@@ -3236,6 +3382,7 @@ mod tests {
                 // this same base document.
                 auth: None,
                 original_name: None,
+                creation: None,
             },
             approval: ApprovalInfo {
                 approver: "sre-oncall@example.com".into(),
@@ -6841,5 +6988,164 @@ mod tests {
             "{:?}",
             precise.lines()
         );
+    }
+
+    // ---- PROD-11.1a: `target.creation`, arms TCR-1 to TCR-5 ----
+
+    const TOPIC_ID: &str = "Cf6zT_mcTNCoxuPmv1Ztxw";
+
+    fn with_creation() -> Scorecard {
+        let mut sc = valid_scorecard();
+        sc.format_version = FORMAT_VERSION_WITH_TARGET_CREATION.into();
+        sc.target.creation = Some(crate::target_creation::TargetCreation::of(
+            &[
+                (
+                    "drill-orders".into(),
+                    3,
+                    crate::topic_identity::IdRead::Id(TOPIC_ID.into()),
+                ),
+                (
+                    "drill-payments".into(),
+                    1,
+                    crate::topic_identity::IdRead::Unread(crate::topic_identity::NO_TOPIC_ID),
+                ),
+            ],
+            Some(300),
+        ));
+        sc
+    }
+
+    fn tcr_err(mutate: impl FnOnce(&mut Scorecard)) -> String {
+        let mut sc = with_creation();
+        mutate(&mut sc);
+        sc.validate_invariants().unwrap_err().0
+    }
+
+    /// The version step: 1.10.0, or 2.2.0 for a partition subset, never
+    /// lower, and nothing without the block. KILLS: a step that ignores the
+    /// major, or that raises a document without the block.
+    #[test]
+    fn a_creating_run_is_written_as_1_10_0_or_as_2_2_0_for_a_partition_subset() {
+        let block = with_creation().target.creation;
+        assert_eq!(
+            format_version_with_target_creation("1.4.0", block.as_ref()),
+            "1.10.0"
+        );
+        assert_eq!(
+            format_version_with_target_creation("2.1.0", block.as_ref()),
+            "2.2.0"
+        );
+        assert_eq!(format_version_with_target_creation("1.9.0", None), "1.9.0");
+        assert!(defines_target_creation("1.10.0") && defines_target_creation("2.2.0"));
+        assert!(!defines_target_creation("1.9.0") && !defines_target_creation("2.1.0"));
+        assert!(with_creation().validate_invariants().is_ok());
+    }
+
+    /// TCR-1. KILLS: deleting it; a reader that accepts the block under 1.9.0
+    /// or 2.1.0.
+    #[test]
+    fn tcr1_refuses_the_block_under_a_version_that_predates_it() {
+        for version in ["1.9.0", "1.4.0"] {
+            assert_eq!(
+                tcr_err(|sc| sc.format_version = version.into()),
+                format!(
+                    "target.creation is present but format_version \"{version}\" does not define \
+                     it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2"
+                )
+            );
+        }
+    }
+
+    /// TCR-2. KILLS: an arm that accepts a stripped-header claim.
+    #[test]
+    fn tcr2_holds_lineage_headers_to_kept() {
+        assert_eq!(
+            tcr_err(|sc| sc.target.creation.as_mut().unwrap().lineage_headers = "stripped".into()),
+            "target.creation.lineage_headers is not \"kept\"; every restored record keeps \
+             x-original-offset and x-original-timestamp"
+        );
+    }
+
+    /// TCR-3. KILLS: each of its four conditions dropped.
+    #[test]
+    fn tcr3_names_each_created_topic_once() {
+        let message = "target.creation.topics is empty, names a topic twice, or names a blank \
+                       topic or one with no partitions; the block is present exactly when the run \
+                       created topics, and names each once";
+        let empty = |sc: &mut Scorecard| sc.target.creation.as_mut().unwrap().topics.clear();
+        let twice = |sc: &mut Scorecard| {
+            let c = sc.target.creation.as_mut().unwrap();
+            c.topics[1].name = c.topics[0].name.clone();
+        };
+        let blank =
+            |sc: &mut Scorecard| sc.target.creation.as_mut().unwrap().topics[0].name = " ".into();
+        let none =
+            |sc: &mut Scorecard| sc.target.creation.as_mut().unwrap().topics[0].partitions = 0;
+        assert_eq!(tcr_err(empty), message);
+        assert_eq!(tcr_err(twice), message);
+        assert_eq!(tcr_err(blank), message);
+        assert_eq!(tcr_err(none), message);
+    }
+
+    /// TCR-4. KILLS: accepting a reserved or malformed ID, a reason outside
+    /// the closed set, an ID beside a reason, or neither.
+    #[test]
+    fn tcr4_holds_each_identity_to_an_id_or_its_reason() {
+        let message = "target.creation.topics carries a topic_id that is not a topic ID this \
+                       format defines, or a topic_id_reason outside the closed set, or both or \
+                       neither; a created topic's identity is its ID or the reason there is none";
+        fn topic(sc: &mut Scorecard, i: usize) -> &mut crate::target_creation::CreatedTopic {
+            &mut sc.target.creation.as_mut().unwrap().topics[i]
+        }
+        assert_eq!(
+            tcr_err(|sc| topic(sc, 0).topic_id = Some("AAAAAAAAAAAAAAAAAAAAAQ".into())),
+            message
+        );
+        assert_eq!(
+            tcr_err(|sc| topic(sc, 0).topic_id = Some("Cf6zT/mcTNCoxuPmv1Ztxw".into())),
+            message
+        );
+        assert_eq!(
+            tcr_err(|sc| topic(sc, 1).topic_id_reason = Some("deleted".into())),
+            message
+        );
+        assert_eq!(
+            tcr_err(|sc| topic(sc, 0).topic_id_reason = Some("noTopicId".into())),
+            message
+        );
+        assert_eq!(tcr_err(|sc| topic(sc, 1).topic_id_reason = None), message);
+    }
+
+    /// TCR-5. KILLS: a lifetime on a `newTopic` restore, or outside the
+    /// plan's bounds at either end (the bounds are inclusive).
+    #[test]
+    fn tcr5_holds_a_lifetime_to_a_bounded_scratch_clone() {
+        let message = "target.creation.teardown_after_seconds is present but target.mode is not \
+                       scratch, or it is outside 300 to 2592000; only a scratch restore is a \
+                       clone, kept from five minutes to thirty days";
+        assert_eq!(
+            tcr_err(|sc| sc.target.mode = crate::spec::TargetMode::NewTopic),
+            message
+        );
+        for bad in [299, 2_592_001] {
+            assert_eq!(
+                tcr_err(
+                    |sc| sc.target.creation.as_mut().unwrap().teardown_after_seconds = Some(bad)
+                ),
+                message
+            );
+        }
+        for ok in [300, 2_592_000] {
+            let mut sc = with_creation();
+            sc.target.creation.as_mut().unwrap().teardown_after_seconds = Some(ok);
+            assert!(sc.validate_invariants().is_ok(), "{ok}");
+        }
+        // NEGATIVE CONTROL: a `newTopic` restore records its creation without
+        // a lifetime.
+        let mut sc = with_creation();
+        sc.target.mode = crate::spec::TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        sc.target.creation.as_mut().unwrap().teardown_after_seconds = None;
+        assert!(sc.validate_invariants().is_ok());
     }
 }

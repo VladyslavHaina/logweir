@@ -201,6 +201,10 @@ fn main() -> std::process::ExitCode {
             logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
         }
+        // PROD-11.1a: a TTL clone's cleanup Job.
+        cli::Command::Restore(cli::RestoreCmd::Cleanup(a)) => {
+            logweir::restore_cleanup::run(a.into())
+        }
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error
         // (`non-exhaustive patterns`), not a runtime stub.

@@ -1140,6 +1140,12 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["backups"]),
             v(&["create", "patch"]),
         ),
+        // PROD-11.1a: `patch` adds and removes the `logweir.dev/clone-cleanup`
+        // finalizer on a TTL clone's `Restore`, one metadata merge patch
+        // preconditioned on the object's version
+        // (`controllers/restore_clone.rs::set_finalizer`). No `update`, no
+        // `delete`.
+        (v(&["logweir.dev"]), v(&["restores"]), v(&["patch"])),
         (
             v(&["logweir.dev"]),
             v(&[

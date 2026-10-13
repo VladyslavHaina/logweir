@@ -85,7 +85,7 @@ writes.
 
 | Document | Versions | Defined in |
 |---|---|---|
-| Drill scorecard | 1.0.0–1.9.0, 2.0.0, 2.1.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
+| Drill scorecard | 1.0.0–1.10.0, 2.0.0–2.2.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
 | Backup receipt | 1.0.0–1.8.0 | [formats/backup-receipt.md](formats/backup-receipt.md#versions) |
 | Consumer positions document | 1.0.0 | [formats/backup-receipt.md](formats/backup-receipt.md#two-documents-the-receipts-summary-and-the-positions-document) |
 | Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
@@ -312,6 +312,19 @@ observed*, never a default that flatters the object:**
 | `status.evidence.verification.trust` | `basis: None`, and the badge uses the pre-existing rule |
 | a catalog point's `partitions` | the size bound is not enforced, recorded as `sizeBasis: unknown` |
 | a record's `execution` | provenance unknown |
+
+### Safe clones (PROD-11.1a): an older runner refuses, an older controller ignores
+
+`Restore.status.clone` and the finalizer `logweir.dev/clone-cleanup` are new;
+every other object reads as before. A runner from before PROD-11.1a refuses a
+clone plan at parse (`target.teardown` was a string) and creates nothing; keep
+the runner image at least as new as the controller. A controller from before it
+ignores `status.clone` and the finalizer: after a rollback, a clone is never
+cleaned up and deleting its `Restore` waits until the finalizer is removed by
+hand ([the steps](kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
+Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
+subset), carrying `target.creation`; older readers accept it and ignore the
+block.
 
 ### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
 

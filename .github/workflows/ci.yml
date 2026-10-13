@@ -85,7 +85,7 @@ jobs:
           # 23; 14. On 4.x group_admin's fixture is seven groups of four types.
           - shard: 2
             tests: [position_evidence, group_admin, original_name, fixture_retention,
-                    replication_factor_parity, resume_semantics]
+                    replication_factor_parity, resume_semantics, clone_ttl]
           # 22; 13
           - shard: 3
             tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
