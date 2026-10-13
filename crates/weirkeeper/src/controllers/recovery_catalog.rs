@@ -680,7 +680,11 @@ impl Pass<'_> {
         };
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
         let job = match jobs
-            .create(&PostParams::default(), &view::build_sync_job(&spec))
+            // FX-43: the sync Job's relay is read only through its token.
+            .create(
+                &PostParams::default(),
+                &crate::job::tokened(view::build_sync_job(&spec)),
+            )
             .await
         {
             Ok(job) => job,

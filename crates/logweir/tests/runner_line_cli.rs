@@ -212,3 +212,39 @@ fn a_probe_seals_its_two_lines_and_its_end() {
         assert!(!line.starts_with("failure-reason="), "{line}");
     }
 }
+
+/// **`check run` given FX-43's flag seals its refusal and its end.** No plan
+/// to read: refused before any client (exit 3), the sealed
+/// `refusal-reason=` before the plain one, then the sealed `runner-exit=3`.
+///
+/// KILLS: the check runner left without the flag (an older runner's clap
+/// error); the refusal printed unsealed.
+#[test]
+fn a_check_seals_its_refusal_and_its_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    command.current_dir(dir.path()).args([
+        "check",
+        "run",
+        "--plan",
+        "absent-check-plan.json",
+        "--check-contract-version",
+        "1",
+        RUNNER_LINE_TOKEN_ARG,
+        token().expose_token(),
+    ]);
+    let out = run(command);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(3), "{stdout}");
+    assert_eq!(
+        sealed_lines(&stdout),
+        vec![
+            "refusal-reason=CheckContractMismatch".to_string(),
+            format!("{RUNNER_EXIT_PREFIX}3")
+        ],
+        "{stdout}"
+    );
+    assert!(stdout
+        .lines()
+        .any(|l| l == "refusal-reason=CheckContractMismatch"));
+}

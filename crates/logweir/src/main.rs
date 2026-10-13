@@ -85,10 +85,15 @@ fn main() -> std::process::ExitCode {
         cli::Command::Check(cli::CheckCmd::Run {
             plan,
             check_contract_version,
-        }) => logweir::check::run(&logweir::check::CheckRunArgs {
-            plan,
-            check_contract_version,
-        }),
+            runner_line_token,
+        }) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::check::run(&logweir::check::CheckRunArgs {
+                plan,
+                check_contract_version,
+            })
+        }
         cli::Command::Backup(cli::BackupCmd::Run {
             store_contract_version,
             spec,

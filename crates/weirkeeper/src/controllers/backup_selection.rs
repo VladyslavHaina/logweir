@@ -1181,7 +1181,13 @@ async fn start(
         image_pull_policy: runner.image_pull_policy.clone(),
         attempt: None,
     };
-    let desired = build_discovery_job(&spec, job_name, job_deadline, source_sha256);
+    // FX-43: the discovery Job's relay is read only through its token.
+    let desired = crate::job::tokened(build_discovery_job(
+        &spec,
+        job_name,
+        job_deadline,
+        source_sha256,
+    ));
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
     match jobs.create(&PostParams::default(), &desired).await {
         Ok(_) => {}

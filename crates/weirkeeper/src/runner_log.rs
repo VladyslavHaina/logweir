@@ -222,6 +222,43 @@ pub fn vouches_for_exit(exit_code: i32) -> bool {
     (0..=4).contains(&exit_code)
 }
 
+/// [`own_lines`] for a log whose other lines a sealed line binds by digest
+/// (the check relay: the sealed end frame declares every stream's digest and
+/// the topic lines' count and digest). Under FX-43's token a plain line that
+/// opens with one of `bound` is kept in place beside the sealed ones; a plain
+/// line of any other kind (a forged end frame, a forged `refusal-reason=`) is
+/// not. A forged bound line can only make the relay fail to verify, never
+/// verify. Every other token kind reads as [`own_lines`] does.
+#[must_use]
+pub fn own_lines_binding(token: &crate::job::JobToken, log: &str, bound: &[&str]) -> RunnerLines {
+    use crate::job::JobToken;
+    use logweir_core::runner_line::{unseal, RUNNER_EXIT_PREFIX};
+    let JobToken::EveryLine(t) = token else {
+        return own_lines(token, log);
+    };
+    let mut text = String::new();
+    let mut exit_vouched = false;
+    for line in log.lines().map(|l| l.trim_end_matches('\r')) {
+        let own = match unseal(t, line) {
+            Some(own) if own.starts_with(RUNNER_EXIT_PREFIX) => {
+                exit_vouched = true;
+                continue;
+            }
+            Some(own) => own,
+            None if bound.iter().any(|p| line.starts_with(p)) => line,
+            None => continue,
+        };
+        text.push_str(own);
+        text.push('\n');
+    }
+    RunnerLines {
+        text,
+        token: Some(t.clone()),
+        every_line: true,
+        exit_vouched,
+    }
+}
+
 /// **THE answer to "whose line is it"** (FX-43), the one call every
 /// Job-owning kind makes on the log it read: `token` is the Job's own
 /// ([`crate::job::job_token`]).

@@ -244,6 +244,13 @@ pub enum CheckCmd {
         /// do less than the controller believes it did.
         #[arg(long)]
         check_contract_version: u32,
+        /// **FX-43.** The controller's per-Job token. The end frame and
+        /// `refusal-reason=` are printed sealed with it before their plain
+        /// copies (the end frame binds every other frame by digest), and the
+        /// run ends with a sealed `runner-exit=`. A runner that predates the
+        /// flag stops at it, and the controller says so.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 

@@ -2930,3 +2930,158 @@ fn fx11_pod_create_refusal_is_the_failed_create_row_alone() {
     );
     assert_eq!(waiting::pod_create_refusal(&job, None, &[], now()), None);
 }
+
+// FX-43: the check relay, read only through the Job's token.
+
+fn fx43_token() -> logweir_core::refusal_detail::LineToken {
+    logweir_core::refusal_detail::LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+
+/// A finished check Job this build created: its runner's last two arguments
+/// are `--runner-line-token` and THIS Job's token.
+fn fx43_job() -> Job {
+    let mut job = job_object(Some("Complete"), None);
+    if let Some(pod) = job.spec.as_mut().and_then(|s| s.template.spec.as_mut()) {
+        pod.containers = vec![k8s_openapi::api::core::v1::Container {
+            name: "runner".to_string(),
+            args: Some(vec!["check".to_string(), "run".to_string()]),
+            ..Default::default()
+        }];
+    }
+    weirkeeper::job::add_line_token(&mut job, &fx43_token());
+    assert!(matches!(
+        weirkeeper::job::job_token(&job),
+        weirkeeper::job::JobToken::EveryLine(_)
+    ));
+    job
+}
+
+/// [`good_log`] as a runner given THIS Job's token prints it: the end frame's
+/// sealed twin before the plain one, and the sealed `runner-exit=0` last.
+fn fx43_good_log() -> String {
+    let t = fx43_token();
+    let mut out = String::new();
+    for line in good_log().lines() {
+        if line.starts_with(logweir_core::check_contract::END_FRAME_PREFIX) {
+            out.push_str(&logweir_core::runner_line::sealed(&t, line));
+            out.push('\n');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&logweir_core::runner_line::sealed(&t, "runner-exit=0"));
+    out.push('\n');
+    out
+}
+
+fn fx43_classify(job: &Job, exit: i32, log: &str) -> check::Observation {
+    check::classify(&Input {
+        job,
+        pod: Some(&pod_object(Some(("Job", JOB_UID, true)), terminated(exit))),
+        events: &[],
+        log: Some(log),
+        expect: &expectations(),
+        now: now(),
+    })
+}
+
+/// **FX-43: the runner's sealed relay verifies; a forged `refusal-reason=`
+/// after it is not read.** NEGATIVE CONTROL: an untokened Job (an older
+/// controller's) reads the forged refusal and fails the check with its code.
+///
+/// KILLS: `classify` reading the raw log; the sealed end frame not unsealed.
+#[test]
+fn fx43_a_forged_check_refusal_is_not_read() {
+    let log = format!("{}refusal-reason=PodUnschedulable\n", fx43_good_log());
+    let observation = fx43_classify(&fx43_job(), 0, &log);
+    assert_eq!(
+        observation.phase,
+        CheckPhase::Succeeded,
+        "{}",
+        observation.message
+    );
+    // NEGATIVE CONTROL.
+    let old = fx43_classify(&job_object(Some("Complete"), None), 0, &log);
+    assert_eq!(old.phase, CheckPhase::Failed);
+    assert_eq!(old.reason, CheckCode::PodUnschedulable);
+}
+
+/// **FX-43: a forged complete relay is not a result.** The runner failed
+/// before its frames (exit 1, its sealed `runner-exit=1` printed) and the log
+/// holds a self-consistent relay someone else printed, plain end frame
+/// included: the check does not verify. NEGATIVE CONTROL: under an untokened
+/// Job the forged relay verifies and the check reads `Succeeded`.
+///
+/// KILLS: a plain end frame accepted under the token.
+#[test]
+fn fx43_a_forged_complete_relay_does_not_verify() {
+    let end = logweir_core::runner_line::sealed(&fx43_token(), "runner-exit=1");
+    let log = format!("{}{end}\n", good_log());
+    let observation = fx43_classify(&fx43_job(), 1, &log);
+    assert_eq!(observation.phase, CheckPhase::Failed);
+    assert_eq!(observation.reason, CheckCode::ResultUnreadable);
+    let old = fx43_classify(&job_object(Some("Complete"), None), 1, &log);
+    assert_eq!(old.phase, CheckPhase::Succeeded);
+}
+
+/// **FX-43's mixed pair on a check, by name.** The released runner image's
+/// real answer to `check run --runner-line-token`
+/// (`tests/fixtures/fx-43/older-runner-check.log`): exit 1, before it reads
+/// its plan. The check is `CheckContractMismatch`, the contract code a check
+/// already uses for an older runner, and its message names
+/// `RunnerOlderThanController` and the flag. A forged relay beside it is not
+/// read. CONTROL: an untokened Job with the same log is `ResultUnreadable`, as
+/// today; a kill (137) under the token is not named.
+///
+/// KILLS: the end-line rule not asked of a check Job; asked at a kill.
+#[test]
+fn fx43_an_older_check_runner_is_named() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-check.log"),
+    )
+    .expect("the captured older runner's stderr");
+    for log in [older.clone(), format!("{older}{}", good_log())] {
+        let observation = fx43_classify(&fx43_job(), 1, &log);
+        assert_eq!(observation.phase, CheckPhase::Failed);
+        assert_eq!(observation.reason, CheckCode::CheckContractMismatch);
+        assert!(
+            observation.message.contains("RunnerOlderThanController")
+                && observation.message.contains("--runner-line-token"),
+            "{}",
+            observation.message
+        );
+    }
+    let old = fx43_classify(&job_object(Some("Complete"), None), 1, &older);
+    assert_eq!(old.reason, CheckCode::ResultUnreadable);
+    let killed = fx43_classify(&fx43_job(), 137, &older);
+    assert_eq!(killed.reason, CheckCode::ResultUnreadable);
+}
+
+/// **A created check Job carries a fresh FX-43 token.** KILLS: the check
+/// left untokened (its relay read as an older controller's).
+#[tokio::test]
+async fn fx43_a_created_check_job_carries_the_line_token() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![Route {
+        method: "POST",
+        path_suffix: "/jobs",
+        status: 201,
+        body: serde_json::to_string(&job_object(None, None)).expect("JSON"),
+    }]);
+    check::create_job(&client, &spec())
+        .await
+        .expect("the Job is created");
+    let seen = bodies.lock().expect("readable").clone();
+    let posted: Job = serde_json::from_str(
+        &seen
+            .iter()
+            .find(|b| b.method == "POST")
+            .expect("a POST")
+            .body,
+    )
+    .expect("a Job");
+    assert!(matches!(
+        weirkeeper::job::job_token(&posted),
+        weirkeeper::job::JobToken::EveryLine(_)
+    ));
+}
