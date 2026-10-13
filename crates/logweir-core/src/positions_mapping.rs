@@ -904,6 +904,15 @@ mod tests {
         assert_eq!((e.class.as_str(), e.target_offset), (EXACT, Some(1)));
     }
 
+    /// One excluded record is already approximate (C6's live fixture):
+    /// `skipped` is a count, never a threshold.
+    #[test]
+    fn a_single_excluded_record_is_approximate() {
+        let s = scan(&[3, 4], &[2], &[2], &[]);
+        let e = classify(2, "withinArchive", &s, &facts(0, 5, Some((0, 4))));
+        assert_eq!((e.class.as_str(), e.skipped), (APPROXIMATE, Some(1)));
+    }
+
     /// A window END that excluded everything from P on maps to the end,
     /// approximate, counting every excluded record from P.
     #[test]

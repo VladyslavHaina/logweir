@@ -1536,8 +1536,51 @@ fn a_filtered_restore_maps_approximate_or_not_restored() {
         .unwrap();
     assert_eq!(e.class, "approximate", "C6: {e:?}");
     let skipped = e.skipped.unwrap_or_default();
-    // Control: the ignoring rule would say exact.
-    assert!(skipped >= 1, "C6: the exact skipped count");
+    // The exact count, from the SOURCE's own records: the first record at or
+    // after P = 2 the window selects, and every record before it from P that
+    // it excluded. Control: a rule that ignores the selection says exact.
+    let source: Vec<(i64, i64)> = {
+        let c: BaseConsumer = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", harness::bootstrap())
+            .set("group.id", format!("probe-s-{n}"))
+            .create()
+            .unwrap();
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        tpl.add_partition_offset(&topic, 0, rdkafka::Offset::Offset(0))
+            .unwrap();
+        c.assign(&tpl).unwrap();
+        let mut out = Vec::new();
+        let until = Instant::now() + Duration::from_secs(20);
+        while out.len() < 10 && Instant::now() < until {
+            if let Some(Ok(m)) = c.poll(Duration::from_millis(500)) {
+                out.push((m.offset(), m.timestamp().to_millis().unwrap_or_default()));
+            }
+        }
+        out
+    };
+    let start_ms = base + 6 * 1000;
+    let found = source
+        .iter()
+        .find(|(o, ts)| *o >= 2 && *ts >= start_ms)
+        .map_or(i64::MAX, |(o, _)| *o);
+    let want = source
+        .iter()
+        .filter(|(o, ts)| *o >= 2 && *o < found && *ts < start_ms)
+        .count() as u64;
+    let selected_before = source
+        .iter()
+        .filter(|(o, ts)| *o < found && *ts >= start_ms)
+        .count() as i64;
+    assert_eq!(
+        skipped, want,
+        "C6: the exact skipped count, from the source: {source:?}"
+    );
+    assert!(want >= 1, "the fixture excludes an unread record");
+    assert_eq!(
+        e.target_offset,
+        Some(selected_before),
+        "C6: the first selected record"
+    );
     // A partition subset: the other partition is not restored.
     let subset = restore(
         &restore_spec(
