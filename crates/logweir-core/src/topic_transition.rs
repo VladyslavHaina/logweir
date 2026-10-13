@@ -679,27 +679,36 @@ pub fn desired_state_key(run_id: &str) -> String {
     format!("logweir/drills/{run_id}.desired-state.yaml")
 }
 
-/// The arms' answer for a block, or `None`: TC-2 to TC-5 (TC-1, the
-/// version, is the scorecard's). Each message is a fixed sentence: nothing a
-/// document's author chose reaches it.
+/// Which of arms TC-2 to TC-5 a block fails (TC-1, the version, is the
+/// scorecard's). The readers map each to a fixed sentence
+/// (`crate::scorecard::Scorecard::validate_invariants`), so nothing a
+/// document's author chose reaches a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockFault {
+    /// TC-2: `transition` outside [`TRANSITIONS`].
+    Transition,
+    /// TC-3: a route outside [`ROUTES`], a reason outside [`RF_REASONS`], or
+    /// a target replication factor of 0.
+    Topic,
+    /// TC-4: `desired_state` present without an exported topic or absent
+    /// beside one, or its digest not `sha256:<64 lowercase hex>`.
+    DesiredState,
+    /// TC-5: a `secret` listed with a value, or another entry without one.
+    Secret,
+}
+
+/// The first of arms TC-2 to TC-5 `block` fails, in that order, or `None`.
 #[must_use]
-pub fn block_fault(block: &TopicConfigurationBlock) -> Option<&'static str> {
+pub fn block_fault(block: &TopicConfigurationBlock) -> Option<BlockFault> {
     if !TRANSITIONS.contains(&block.transition.as_str()) {
-        return Some(
-            "target.topic_configuration.transition is not \"afterVerification\" or \"none\"",
-        );
+        return Some(BlockFault::Transition);
     }
-    for topic in block.topics.values() {
-        if !ROUTES.contains(&topic.route.as_str())
+    if block.topics.values().any(|topic| {
+        !ROUTES.contains(&topic.route.as_str())
             || !RF_REASONS.contains(&topic.replication_factor.reason.as_str())
             || topic.replication_factor.target == 0
-        {
-            return Some(
-                "target.topic_configuration names a route outside adminApi and \
-                 desiredStateExport, a replication factor reason outside its closed set, or a \
-                 replication factor of 0",
-            );
-        }
+    }) {
+        return Some(BlockFault::Topic);
     }
     let exported = block
         .topics
@@ -713,22 +722,15 @@ pub fn block_fault(block: &TopicConfigurationBlock) -> Option<&'static str> {
         })
     });
     if exported != block.desired_state.is_some() || !shaped {
-        return Some(
-            "target.topic_configuration.desired_state is present exactly when a topic's route \
-             is desiredStateExport, and names its document by sha256",
-        );
+        return Some(BlockFault::DesiredState);
     }
-    for topic in block.topics.values() {
-        if topic
+    if block.topics.values().any(|topic| {
+        topic
             .not_applied
             .iter()
             .any(|n| (n.portability == SECRET) == n.value.is_some())
-        {
-            return Some(
-                "target.topic_configuration lists a secret with a value, or another entry \
-                 without one",
-            );
-        }
+    }) {
+        return Some(BlockFault::Secret);
     }
     None
 }
@@ -1552,33 +1554,33 @@ mod tests {
         assert_eq!(block_fault(&good), None);
         let mut b = good.clone();
         b.transition = "later".into();
-        assert!(block_fault(&b).unwrap().contains("transition"));
+        assert_eq!(block_fault(&b), Some(BlockFault::Transition));
         let mut b = good.clone();
         b.topics.get_mut("r-orders").unwrap().route = "unknown".into();
-        assert!(block_fault(&b).unwrap().contains("route"));
+        assert_eq!(block_fault(&b), Some(BlockFault::Topic));
         let mut b = good.clone();
         b.topics
             .get_mut("r-orders")
             .unwrap()
             .replication_factor
             .target = 0;
-        assert!(block_fault(&b).unwrap().contains("replication factor of 0"));
+        assert_eq!(block_fault(&b), Some(BlockFault::Topic));
         let mut b = good.clone();
         b.desired_state = Some(DesiredStateRef {
             key: "k".into(),
             sha256: format!("sha256:{}", "a".repeat(64)),
             bytes: 1,
         });
-        assert!(block_fault(&b).unwrap().contains("desired_state"));
+        assert_eq!(block_fault(&b), Some(BlockFault::DesiredState));
         let mut b = good.clone();
         b.topics.get_mut("r-orders").unwrap().route = ROUTE_DESIRED_STATE_EXPORT.into();
-        assert!(block_fault(&b).unwrap().contains("desired_state"));
+        assert_eq!(block_fault(&b), Some(BlockFault::DesiredState));
         b.desired_state = Some(DesiredStateRef {
             key: "k".into(),
             sha256: format!("sha256:{}", "A".repeat(64)),
             bytes: 1,
         });
-        assert!(block_fault(&b).unwrap().contains("desired_state"));
+        assert_eq!(block_fault(&b), Some(BlockFault::DesiredState));
         b.desired_state.as_mut().unwrap().sha256 = format!("sha256:{}", "a".repeat(64));
         assert_eq!(block_fault(&b), None);
         let mut b = good.clone();
@@ -1590,7 +1592,7 @@ mod tests {
             .find(|n| n.portability == SECRET)
             .unwrap()
             .value = Some("hunter2".into());
-        assert!(block_fault(&b).unwrap().contains("secret"));
+        assert_eq!(block_fault(&b), Some(BlockFault::Secret));
     }
 
     #[test]

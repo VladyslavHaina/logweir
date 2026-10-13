@@ -210,7 +210,7 @@ and take no token.
 
 | Run | Codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`, `TopicConfigurationNotRecorded`, `TopicConfigRefusedByTarget`, `TopicClassDisagrees`, `TopicOwnerNotChecked` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 When the controller shows no reason, the message ends with nothing after

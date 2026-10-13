@@ -681,6 +681,15 @@ pub trait ClusterReader: Send + Sync {
         let _ = topics;
         Ok(BTreeMap::new())
     }
+    /// How many brokers the cluster's metadata lists: the bound a restore's
+    /// replication factor is held to (PROD-05.2). `None` when the reader
+    /// cannot say.
+    ///
+    /// The DEFAULT knows none, so a reader that does not implement it — every
+    /// test double — leaves the factor unbounded by the target, never guessed.
+    fn broker_count(&self) -> Result<Option<u32>, KafkaError> {
+        Ok(None)
+    }
     /// Per named topic, its topic ID (KIP-516) through
     /// DescribeTopics — one verdict per name, in the order given
     /// ([`crate::topic_ids`]): the ID in Kafka's text, `NoId` from a broker
@@ -827,6 +836,45 @@ pub trait TopicCreator: Send + Sync {
         &self,
         topics: &[NewTopicSpec],
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError>;
+
+    /// **PROD-05.2.** `CreateTopics` with `validate_only`: the broker's
+    /// verdict on each spec, creating nothing. One result per name.
+    ///
+    /// The DEFAULT cannot validate and says so, so a creator that does not
+    /// implement it refuses a restore that needs the verdict rather than
+    /// creating anything unchecked.
+    #[allow(clippy::type_complexity)]
+    fn validate_create_topics(
+        &self,
+        topics: &[NewTopicSpec],
+    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+        let _ = topics;
+        Err(KafkaError::Client(
+            "this client cannot validate a topic creation (CreateTopics validate_only)".to_string(),
+        ))
+    }
+
+    /// **PROD-05.2, phase 9.** ONE legacy `AlterConfigs` on one topic,
+    /// carrying its WHOLE desired override set: the broker replaces every
+    /// dynamic override of the topic with exactly `configs` (measured on 3.9.2
+    /// and 4.3.1). Called only for a topic the restore created, and only while
+    /// its overrides are the ones it set (Amendment K (2)).
+    ///
+    /// rust-rdkafka 0.36.2's `AlterConfigsFuture` answers `Ok` for every
+    /// resource and never reads its per-resource error, so `Ok` here is not
+    /// proof: the caller reads the overrides back.
+    ///
+    /// The DEFAULT cannot alter and says so.
+    fn alter_topic_configs(
+        &self,
+        topic: &str,
+        configs: &BTreeMap<String, String>,
+    ) -> Result<(), KafkaError> {
+        let _ = (topic, configs);
+        Err(KafkaError::Client(
+            "this client cannot alter a topic's configuration".to_string(),
+        ))
+    }
 }
 
 /// One topic to create, fully specified. Nothing here is defaulted by the

@@ -672,6 +672,60 @@ pub fn format_version_with_console_approval<'a>(
     }
 }
 
+/// The first minor of scorecard format 1 that defines
+/// `target.topic_configuration` (arm TC-1, PROD-05.2). A renumber at
+/// integration changes this, [`TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2`]
+/// and the two version constants together, and `docs/verify_scorecard.py`
+/// follows them.
+pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = 10;
+
+/// The first minor of scorecard format 2 that defines
+/// `target.topic_configuration`: a partition-subset restore may carry the
+/// plan block like any other.
+pub const TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2: u64 = 2;
+
+/// The `format_version` of a format 1 scorecard that carries
+/// `target.topic_configuration`. A MINOR bump for a new optional block under
+/// OD-7 (a): arms TC-1 to TC-5 read only the block and can only refuse.
+pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.10.0";
+
+/// The same, for a partition-subset (format 2) document.
+pub const FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION: &str = "2.2.0";
+
+/// Whether a document of `format_version` defines
+/// `target.topic_configuration` (arm TC-1).
+#[must_use]
+pub fn defines_topic_configuration(format_version: &str) -> bool {
+    let Some(minor) = minor_version(format_version) else {
+        return false;
+    };
+    match major_version(format_version) {
+        Some(1) => minor >= TOPIC_CONFIGURATION_SINCE_MINOR,
+        Some(PARTITION_SUBSETS_MAJOR) => minor >= TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2,
+        _ => false,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its
+/// `target.topic_configuration` is known: at least
+/// [`FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`] for a major-2 document
+/// and at least [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] for any other;
+/// else `current` unchanged. Monotonic within the major.
+#[must_use]
+pub fn format_version_with_topic_configuration<'a>(
+    current: &'a str,
+    block: Option<&crate::topic_transition::TopicConfigurationBlock>,
+) -> &'a str {
+    if block.is_none() {
+        return current;
+    }
+    if major_version(current) == Some(PARTITION_SUBSETS_MAJOR) {
+        newer_format_version(current, FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION)
+    } else {
+        newer_format_version(current, FORMAT_VERSION_WITH_TOPIC_CONFIGURATION)
+    }
+}
+
 /// One of the two people of a console approval, as the console attested
 /// them: an identity provider's issuer and its subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1113,6 +1167,14 @@ pub struct TargetInfo {
     /// absent, so every other document keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name: Option<OriginalNameInfo>,
+    /// **PROD-05.2 (format 1.10.0, and 2.2.0).** Present exactly when the plan
+    /// carried `target.topic_configuration`: each target topic's creation from
+    /// the bound point's model, the settings phase 9 applies after a passing
+    /// verdict, and those it never applies
+    /// ([`crate::topic_transition::TopicConfigurationBlock`]). ABSENT on every
+    /// other document; arms TC-1 to TC-5 judge it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<crate::topic_transition::TopicConfigurationBlock>,
 }
 
 /// A nested optional block. GC12 as amended permits nested optional fields in
@@ -3148,6 +3210,56 @@ impl Scorecard {
                 ));
             }
         }
+        // `target.topic_configuration` (format 1.10.0, and 2.2.0; PROD-05.2):
+        // arms TC-1 to TC-5. They fire ONLY on a document that CARRIES the
+        // block, so every document without it is decided exactly as before:
+        // MINOR under OD-7 (a). NOT INTERPOLATED except TC-1's version: no
+        // topic name, key or value reaches a refusal. Mirrored arm for arm,
+        // in this position, in `docs/verify_scorecard.py::check_invariants`.
+        if let Some(block) = &self.target.topic_configuration {
+            // TC-1. The block is defined from 1.10.0 of format 1 and from
+            // 2.2.0 of format 2.
+            if !defines_topic_configuration(&self.format_version) {
+                return Err(InvariantError(format!(
+                    "target.topic_configuration is present but format_version {:?} does not \
+                     define it: the block is defined from 1.{TOPIC_CONFIGURATION_SINCE_MINOR}.0 \
+                     of format 1 and from 2.{TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2}.0 of \
+                     format 2",
+                    self.format_version
+                )));
+            }
+            match crate::topic_transition::block_fault(block) {
+                None => {}
+                // TC-2.
+                Some(crate::topic_transition::BlockFault::Transition) => {
+                    return Err(InvariantError(
+                        "target.topic_configuration.transition is not \"afterVerification\" or \"none\""
+                            .into(),
+                    ));
+                }
+                // TC-3.
+                Some(crate::topic_transition::BlockFault::Topic) => {
+                    return Err(InvariantError(
+                        "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0"
+                            .into(),
+                    ));
+                }
+                // TC-4.
+                Some(crate::topic_transition::BlockFault::DesiredState) => {
+                    return Err(InvariantError(
+                        "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256"
+                            .into(),
+                    ));
+                }
+                // TC-5. A secret is never copied into a signed document.
+                Some(crate::topic_transition::BlockFault::Secret) => {
+                    return Err(InvariantError(
+                        "target.topic_configuration lists a secret with a value, or another entry without one"
+                            .into(),
+                    ));
+                }
+            }
+        }
         // `docs/formats/drill-scorecard.md` states that `redactions` is "Always
         // `[]` in v0.1" as a PROPERTY OF THE FORMAT: a non-empty list would
         // tell an auditor that a field they read first had been removed, and
@@ -3236,6 +3348,7 @@ mod tests {
                 // this same base document.
                 auth: None,
                 original_name: None,
+                topic_configuration: None,
             },
             approval: ApprovalInfo {
                 approver: "sre-oncall@example.com".into(),
