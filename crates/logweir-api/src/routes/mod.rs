@@ -17,6 +17,7 @@ pub mod restores;
 pub mod retention;
 pub mod schedules;
 pub mod session;
+pub mod subject;
 pub mod switchovers;
 pub mod topic_discoveries;
 pub mod trust;

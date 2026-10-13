@@ -4415,3 +4415,125 @@ pub struct SwitchoverResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization: Option<RestoreRoutingView>,
 }
+
+/// The restore a switchover scope applies, as its plan binds it.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopeRestoreView {
+    pub name: String,
+    pub uid: String,
+    /// The restore plan's hash: its target cluster and credentials.
+    pub plan_hash: String,
+    pub scorecard_sha256: String,
+    pub mapping_sha256: String,
+}
+
+/// The switchover record a rollback plan reverses.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopeRecordView {
+    pub key: String,
+    pub sha256: String,
+}
+
+/// One position a switchover commits.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopePositionView {
+    pub partition: u32,
+    /// The target offset committed.
+    pub offset: i64,
+    /// The mapping class is `approximate` (else `exact`).
+    pub approximate: bool,
+    /// The committed position the group must hold first; absent: none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<i64>,
+}
+
+/// One restored topic of a scope group, every planned partition.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopeTopicView {
+    pub topic: String,
+    pub positions: Vec<SwitchoverScopePositionView>,
+}
+
+/// One consumer group a switchover commits for.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopeGroupView {
+    /// The captured (source) group.
+    pub source: String,
+    /// The target group committed for.
+    pub target: String,
+    pub topics: Vec<SwitchoverScopeTopicView>,
+}
+
+/// **Everything a second person approves for a switchover**: the restore it
+/// applies and every group, topic and position, never a slice.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverScopeView {
+    pub restore: SwitchoverScopeRestoreView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_of: Option<SwitchoverScopeRecordView>,
+    pub groups: Vec<SwitchoverScopeGroupView>,
+    pub groups_count: usize,
+    pub positions_count: usize,
+}
+
+/// A two-person switchover request as the second person is shown it
+/// (`ApprovalRequestView`'s rules; PROD-04.2).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverApprovalRequestView {
+    pub namespace: String,
+    /// The Switchover the request is for.
+    pub switchover: String,
+    /// Its UID, now.
+    pub switchover_uid: String,
+    /// The Approval the Switchover references, which a click creates.
+    pub approval_name: String,
+    /// The stored request, `<approvalName>-confirmation`.
+    pub confirmation_name: String,
+    pub policy: String,
+    pub policy_digest: String,
+    pub state: ApprovalRequestState,
+    pub state_sentence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    /// Whether `scope` is everything a second person approves, in full.
+    pub scope_complete: bool,
+    /// Why not: `tooManyGroups`, `tooManyPositions`, `planUnreadable`, …
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_incomplete: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_sentence: Option<String>,
+    /// Present exactly when `scopeComplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SwitchoverScopeView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// What a click must name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
+    pub approve: ApproveOfferView,
+}
+
+/// `GET .../switchovers/{name}/approval-request`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverApprovalRequestResponse {
+    pub request_id: String,
+    pub item: SwitchoverApprovalRequestView,
+}

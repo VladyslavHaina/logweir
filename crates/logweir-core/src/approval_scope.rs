@@ -324,6 +324,27 @@ pub enum ScopeIncomplete {
         /// Which value, in fixed words.
         what: &'static str,
     },
+    /// PROD-04.2: the switchover plan names more consumer groups than a
+    /// scope shows ([`crate::switchover::MAX_GROUPS`]).
+    TooManyGroups {
+        /// How many it names.
+        count: usize,
+    },
+    /// PROD-04.2: the switchover plan commits more positions than a scope
+    /// shows ([`crate::switchover::MAX_POSITIONS`]).
+    TooManyPositions {
+        /// How many it commits.
+        count: usize,
+    },
+}
+
+/// What a scope is the scope of: the sentences name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeOf {
+    /// A `Restore` ([`approval_scope`]).
+    Restore,
+    /// A `Switchover` ([`switchover_scope`]).
+    Switchover,
 }
 
 impl ScopeIncomplete {
@@ -344,6 +365,67 @@ impl ScopeIncomplete {
             Self::OwnersNotShowable => "ownersNotShowable",
             Self::NotificationsNotShown => "notificationsNotShown",
             Self::ValueNotShowable { .. } => "valueNotShowable",
+            Self::TooManyGroups { .. } => "tooManyGroups",
+            Self::TooManyPositions { .. } => "tooManyPositions",
+        }
+    }
+
+    /// [`Self::sentence`], naming the kind the scope is of. A `Restore`'s is
+    /// [`Self::sentence`] itself, word for word.
+    #[must_use]
+    pub fn sentence_for(self, of: ScopeOf) -> String {
+        const WAY_OUT: &str = "A second person approves only what they are shown in full";
+        if of == ScopeOf::Restore {
+            return self.sentence();
+        }
+        match self {
+            Self::PlanNotTheRequests => format!(
+                "{WAY_OUT}, and the plan stored on this Switchover is not the plan the request \
+                 names by hash. Submit the Switchover again"
+            ),
+            Self::PlanUnreadable => format!(
+                "{WAY_OUT}, and this Switchover's plan is not a switchover plan this console can \
+                 read (format 1, 1 to {} groups, 1 to {} positions), so its groups and positions \
+                 cannot be shown. Write it again with `logweir switchover plan`",
+                crate::switchover::MAX_GROUPS,
+                crate::switchover::MAX_POSITIONS
+            ),
+            Self::SubjectNotThePlans => format!(
+                "{WAY_OUT}, and the request names an approval subject or a typed confirmation, \
+                 which a switchover never carries. Submit the Switchover again"
+            ),
+            Self::TooManyGroups { count } => format!(
+                "{WAY_OUT}, and this switchover names {count} consumer groups, more than the {} a \
+                 request shows. Split it into switchovers of at most {} groups each, requested \
+                 and approved one by one, or approve it under a strict (personal-key) policy",
+                crate::switchover::MAX_GROUPS,
+                crate::switchover::MAX_GROUPS
+            ),
+            Self::TooManyPositions { count } => format!(
+                "{WAY_OUT}, and this switchover commits {count} positions, more than the {} a \
+                 request shows. Split it into switchovers over fewer groups, or approve it under \
+                 a strict (personal-key) policy",
+                crate::switchover::MAX_POSITIONS
+            ),
+            Self::TopicNotAName => format!(
+                "{WAY_OUT}, and a topic in this Switchover's plan is not a name a Kafka broker \
+                 accepts (letters, digits, `.`, `_` and `-`, at most {} characters), so it cannot \
+                 be shown as it would be committed. Write the plan again with `logweir switchover \
+                 plan`",
+                crate::guard::MAX_TOPIC_NAME_CHARS
+            ),
+            Self::ValueNotShowable { what } => format!(
+                "{WAY_OUT}, and {what} in this {} is longer than {MAX_SCOPE_TEXT_CHARS} \
+                 characters or is not printable ASCII, so what a reviewer would see is not what \
+                 was signed. Correct it, or approve the switchover under a strict (personal-key) \
+                 policy",
+                if REQUEST_VALUES.contains(&what) {
+                    "request"
+                } else {
+                    "Switchover's plan"
+                }
+            ),
+            other => other.sentence(),
         }
     }
 
@@ -423,6 +505,11 @@ impl ScopeIncomplete {
                     "Restore's plan"
                 }
             ),
+            // A restore plan never yields these; their words are the
+            // switchover's.
+            Self::TooManyGroups { .. } | Self::TooManyPositions { .. } => {
+                self.sentence_for(ScopeOf::Switchover)
+            }
         }
     }
 }
@@ -434,12 +521,14 @@ impl std::fmt::Display for ScopeIncomplete {
 }
 
 /// The values of a scope that come from the REQUEST, not from its plan.
-const REQUEST_VALUES: [&str; 8] = [
+const REQUEST_VALUES: [&str; 10] = [
     "the requester's issuer",
     "the requester's subject",
     "the namespace",
     "the Restore's name",
     "the Restore's UID",
+    "the Switchover's name",
+    "the Switchover's UID",
     "the policy's name",
     "the policy's digest",
     "the change ticket",
@@ -763,6 +852,218 @@ pub fn approval_scope(
         topics: plan.topics,
         verification: plan.verification,
         evidence: plan.evidence,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// PROD-04.2: the scope of a SWITCHOVER request.
+// ---------------------------------------------------------------------------
+
+/// The verified restore a switchover plan applies, as its plan binds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeSwitchoverRestore {
+    /// The `Restore`'s name.
+    pub name: String,
+    /// Its UID.
+    pub uid: String,
+    /// The restore plan's hash: the target cluster and its credentials.
+    pub plan_hash: String,
+    /// The signed scorecard's digest.
+    pub scorecard_sha256: String,
+    /// The positions-mapping document's digest.
+    pub mapping_sha256: String,
+}
+
+/// One position a switchover commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopePosition {
+    /// The restored partition.
+    pub partition: u32,
+    /// The target offset committed.
+    pub offset: i64,
+    /// Whether the mapping class is `approximate` (else `exact`).
+    pub approximate: bool,
+    /// The committed position the group must hold first; `None`: none.
+    pub expected: Option<i64>,
+}
+
+/// One restored topic of a scope group, every partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeGroupTopic {
+    /// The restored topic.
+    pub topic: String,
+    /// Every planned partition, in order.
+    pub positions: Vec<ScopePosition>,
+}
+
+/// One consumer group a switchover commits for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeGroup {
+    /// The captured (source) group.
+    pub source: String,
+    /// The target group committed for.
+    pub target: String,
+    /// Every topic, in order.
+    pub topics: Vec<ScopeGroupTopic>,
+}
+
+/// The part of a switchover's scope its PLAN decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchoverPlanScope {
+    /// The restore it applies.
+    pub restore: ScopeSwitchoverRestore,
+    /// A rollback plan's record `(key, sha256)`.
+    pub rollback_of: Option<(String, String)>,
+    /// Every group, in the plan's order. Never a slice.
+    pub groups: Vec<ScopeGroup>,
+    /// How many positions `groups` lists.
+    pub positions: usize,
+}
+
+/// **Everything a second person approves for a switchover**, from the
+/// request and the plan it hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchoverScope {
+    /// Who asked.
+    pub requester: ScopePrincipal,
+    /// The namespace of the Switchover.
+    pub namespace: String,
+    /// The Switchover.
+    pub switchover: String,
+    /// Its UID.
+    pub switchover_uid: String,
+    /// The plan's hash, which the request names.
+    pub plan_hash: String,
+    /// The policy the request was made under.
+    pub policy_name: String,
+    /// That policy's snapshot digest.
+    pub policy_digest: String,
+    /// The change ticket.
+    pub ticket: Option<String>,
+    /// When the console signed the request.
+    pub requested_at: DateTime<Utc>,
+    /// When it stops authorising anything.
+    pub expires_at: DateTime<Utc>,
+    /// The plan's part.
+    pub plan: SwitchoverPlanScope,
+}
+
+/// **The part of a switchover's scope its plan decides**, from the plan
+/// bytes alone — or why it cannot be shown in full. The counts come BEFORE
+/// the plan's own shape check, so a plan too large to show is refused for
+/// that, by name (`tooManyGroups`, `tooManyPositions`), and not as unreadable.
+///
+/// # Errors
+///
+/// [`ScopeIncomplete`]: every reason but the two that need the request.
+pub fn switchover_plan_scope(plan_bytes: &[u8]) -> Result<SwitchoverPlanScope, ScopeIncomplete> {
+    use crate::switchover::{validate, Expected, SwitchoverPlan, MAX_GROUPS, MAX_PLAN_BYTES};
+    if plan_bytes.len() > MAX_PLAN_BYTES {
+        return Err(ScopeIncomplete::PlanUnreadable);
+    }
+    let plan: SwitchoverPlan =
+        serde_yaml::from_slice(plan_bytes).map_err(|_| ScopeIncomplete::PlanUnreadable)?;
+    if plan.groups.len() > MAX_GROUPS {
+        return Err(ScopeIncomplete::TooManyGroups {
+            count: plan.groups.len(),
+        });
+    }
+    let count = plan.positions();
+    if count > crate::switchover::MAX_POSITIONS {
+        return Err(ScopeIncomplete::TooManyPositions { count });
+    }
+    validate(&plan).map_err(|_| ScopeIncomplete::PlanUnreadable)?;
+    let restore = ScopeSwitchoverRestore {
+        name: shown(&plan.restore.name, "the restore's name")?,
+        uid: shown(&plan.restore.uid, "the restore's UID")?,
+        plan_hash: shown(&plan.restore.plan_hash, "a digest")?,
+        scorecard_sha256: shown(&plan.restore.scorecard_sha256, "a digest")?,
+        mapping_sha256: shown(&plan.restore.mapping_sha256, "a digest")?,
+    };
+    let rollback_of = match &plan.rollback_of {
+        None => None,
+        Some(record) => Some((
+            shown(&record.key, "the rollback record's key")?,
+            shown(&record.sha256, "a digest")?,
+        )),
+    };
+    let mut groups = Vec::with_capacity(plan.groups.len());
+    let mut listed = 0usize;
+    for group in &plan.groups {
+        let mut topics = Vec::with_capacity(group.topics.len());
+        for (topic, planned) in &group.topics {
+            if !crate::guard::topic_name_is_kafka_legal(topic) {
+                return Err(ScopeIncomplete::TopicNotAName);
+            }
+            let positions: Vec<ScopePosition> = planned
+                .offsets
+                .iter()
+                .map(|(partition, offset)| ScopePosition {
+                    partition: *partition,
+                    offset: *offset,
+                    approximate: planned.approximate.contains(partition),
+                    expected: match &planned.expected {
+                        Expected::Word(_) => None,
+                        Expected::Positions(_) => planned.expected.at(*partition),
+                    },
+                })
+                .collect();
+            listed += positions.len();
+            topics.push(ScopeGroupTopic {
+                topic: topic.clone(),
+                positions,
+            });
+        }
+        groups.push(ScopeGroup {
+            source: shown(&group.source, "a consumer group id")?,
+            target: shown(&group.target, "a consumer group id")?,
+            topics,
+        });
+    }
+    Ok(SwitchoverPlanScope {
+        restore,
+        rollback_of,
+        groups,
+        positions: listed,
+    })
+}
+
+/// **The approval scope of one switchover request** ([`approval_scope`]'s
+/// rule for subject kind `Switchover`): the request the console signed and
+/// the plan it names by hash, held to that hash FIRST. Pure.
+///
+/// # Errors
+///
+/// Why it cannot be shown in full.
+pub fn switchover_scope(
+    request: &RestoreAuthorization,
+    plan_bytes: &[u8],
+) -> Result<SwitchoverScope, ScopeIncomplete> {
+    if crate::ids::sha256_prefixed(plan_bytes) != request.plan_hash {
+        return Err(ScopeIncomplete::PlanNotTheRequests);
+    }
+    if request.subject.kind != crate::spec::SUBJECT_KIND_SWITCHOVER
+        || request.approval_subject.is_some()
+        || request.original_name_confirmation.is_some()
+    {
+        return Err(ScopeIncomplete::SubjectNotThePlans);
+    }
+    let plan = switchover_plan_scope(plan_bytes)?;
+    Ok(SwitchoverScope {
+        requester: ScopePrincipal {
+            issuer: shown(&request.requester.issuer, "the requester's issuer")?,
+            subject: shown(&request.requester.subject, "the requester's subject")?,
+        },
+        namespace: shown(&request.subject.namespace, "the namespace")?,
+        switchover: shown(&request.subject.name, "the Switchover's name")?,
+        switchover_uid: shown(&request.subject.uid, "the Switchover's UID")?,
+        plan_hash: request.plan_hash.clone(),
+        policy_name: shown(&request.policy.name, "the policy's name")?,
+        policy_digest: shown(&request.policy.digest, "the policy's digest")?,
+        ticket: shown_opt(request.ticket.as_deref(), "the change ticket")?,
+        requested_at: request.issued_at,
+        expires_at: request.expires_at,
+        plan,
     })
 }
 
@@ -1362,6 +1663,8 @@ mod tests {
             ScopeIncomplete::ValueNotShowable {
                 what: "the backup set",
             },
+            ScopeIncomplete::TooManyGroups { count: 101 },
+            ScopeIncomplete::TooManyPositions { count: 8193 },
         ];
         let words: BTreeSet<&str> = reasons.iter().map(|r| r.code()).collect();
         let sentences: BTreeSet<String> = reasons.iter().map(|r| r.sentence()).collect();
@@ -1377,6 +1680,190 @@ mod tests {
                 sentence.chars().all(|c| matches!(c, ' '..='~')),
                 "{sentence}"
             );
+        }
+    }
+
+    // ---- PROD-04.2: the switchover scope -----------------------------------
+
+    use crate::switchover::{Expected, PlanGroup, PlanTopic, RestoreRef, SwitchoverPlan};
+
+    fn sha(c: char) -> String {
+        format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    /// A plan of `groups` groups, each over one topic of `per` partitions.
+    fn switchover_plan(groups: usize, per: u32) -> SwitchoverPlan {
+        SwitchoverPlan {
+            format_version: "1.0.0".into(),
+            restore: RestoreRef {
+                name: "incident".into(),
+                uid: "r-uid".into(),
+                plan_hash: sha('a'),
+                scorecard_sha256: sha('b'),
+                mapping_sha256: sha('c'),
+            },
+            rollback_of: None,
+            groups: (0..groups)
+                .map(|g| PlanGroup {
+                    source: format!("app-{g}"),
+                    target: format!("app-{g}"),
+                    topics: [(
+                        "r-orders".to_string(),
+                        PlanTopic {
+                            offsets: (0..per).map(|p| (p, 40 + i64::from(p))).collect(),
+                            approximate: vec![],
+                            expected: Expected::none(),
+                        },
+                    )]
+                    .into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn bytes(plan: &SwitchoverPlan) -> Vec<u8> {
+        serde_yaml::to_string(plan).expect("yaml").into_bytes()
+    }
+
+    fn switchover_request(plan: &[u8]) -> RestoreAuthorization {
+        let mut r = request("", None);
+        r.subject.kind = crate::spec::SUBJECT_KIND_SWITCHOVER.into();
+        r.subject.name = "swo-1".into();
+        r.subject.uid = "s-uid".into();
+        r.plan_hash = crate::ids::sha256_prefixed(plan);
+        r
+    }
+
+    /// **A switchover's scope is every group, topic, partition and position,
+    /// with each one's class and the position it must hold first.**
+    /// KILLS: a scope that drops a group or a position, shows a position as
+    /// exact that the plan marks approximate, or loses a stated `expected`.
+    #[test]
+    fn a_switchover_scope_is_every_position_of_the_request_and_its_plan() {
+        let mut plan = switchover_plan(2, 3);
+        let topic = plan.groups[1].topics.get_mut("r-orders").expect("topic");
+        topic.approximate = vec![2];
+        topic.expected = Expected::Positions([(0, 7), (1, 8), (2, 9)].into());
+        let text = bytes(&plan);
+        let scope = switchover_scope(&switchover_request(&text), &text).expect("complete");
+        assert_eq!(
+            (scope.switchover.as_str(), scope.switchover_uid.as_str()),
+            ("swo-1", "s-uid")
+        );
+        assert_eq!(scope.requester.subject, "alice");
+        assert_eq!(scope.ticket.as_deref(), Some("CHG-4711"));
+        assert_eq!(scope.plan.restore.name, "incident");
+        assert_eq!(scope.plan.restore.mapping_sha256, sha('c'));
+        assert_eq!(scope.plan.groups.len(), 2);
+        assert_eq!(scope.plan.positions, 6);
+        let first = &scope.plan.groups[0].topics[0];
+        assert_eq!(first.topic, "r-orders");
+        assert_eq!(
+            first.positions[1],
+            ScopePosition {
+                partition: 1,
+                offset: 41,
+                approximate: false,
+                expected: None
+            }
+        );
+        let second = &scope.plan.groups[1].topics[0].positions;
+        assert_eq!(
+            second[2],
+            ScopePosition {
+                partition: 2,
+                offset: 42,
+                approximate: true,
+                expected: Some(9)
+            }
+        );
+        assert_eq!(second[0].expected, Some(7));
+    }
+
+    /// **Complete, or nothing**, for a switchover: the plan hash first, then
+    /// the counts BEFORE the plan's own shape (so a plan too large to show is
+    /// refused for that, by name), then each value by the showable rule, and
+    /// a request that is not a switchover's.
+    /// KILLS: a scope over bytes the request does not hash; a count checked
+    /// after the grammar (`planUnreadable` for an 8193-position plan); a
+    /// group id that is not printable ASCII shown anyway; a restore's
+    /// request read as a switchover's.
+    #[test]
+    fn a_switchover_scope_is_complete_or_names_why_not() {
+        let ok = bytes(&switchover_plan(1, 1));
+        let other = bytes(&switchover_plan(1, 2));
+        assert_eq!(
+            switchover_scope(&switchover_request(&ok), &other),
+            Err(ScopeIncomplete::PlanNotTheRequests)
+        );
+        // 8192 positions: shown whole. 8193: refused by count, not grammar.
+        let full = bytes(&switchover_plan(2, 4096));
+        assert_eq!(
+            switchover_scope(&switchover_request(&full), &full)
+                .expect("8192 positions are shown")
+                .plan
+                .positions,
+            8192
+        );
+        let mut over = switchover_plan(2, 4096);
+        over.groups[1]
+            .topics
+            .get_mut("r-orders")
+            .expect("topic")
+            .offsets
+            .insert(5000, 1);
+        let over = bytes(&over);
+        assert_eq!(
+            switchover_scope(&switchover_request(&over), &over),
+            Err(ScopeIncomplete::TooManyPositions { count: 8193 })
+        );
+        let many = bytes(&switchover_plan(101, 1));
+        assert_eq!(
+            switchover_scope(&switchover_request(&many), &many),
+            Err(ScopeIncomplete::TooManyGroups { count: 101 })
+        );
+        let mut accented = switchover_plan(1, 1);
+        accented.groups[0].target = "caf\u{e9}".into();
+        let accented = bytes(&accented);
+        assert_eq!(
+            switchover_scope(&switchover_request(&accented), &accented),
+            Err(ScopeIncomplete::ValueNotShowable {
+                what: "a consumer group id"
+            })
+        );
+        let unreadable = b"format_version: 1.0.0\n".to_vec();
+        assert_eq!(
+            switchover_scope(&switchover_request(&unreadable), &unreadable),
+            Err(ScopeIncomplete::PlanUnreadable)
+        );
+        let mut restore_kind = switchover_request(&ok);
+        restore_kind.subject.kind = "Restore".into();
+        assert_eq!(
+            switchover_scope(&restore_kind, &ok),
+            Err(ScopeIncomplete::SubjectNotThePlans)
+        );
+        let mut with_subject = switchover_request(&ok);
+        with_subject.approval_subject = Some("originalName".into());
+        assert_eq!(
+            switchover_scope(&with_subject, &ok),
+            Err(ScopeIncomplete::SubjectNotThePlans)
+        );
+        // A switchover's sentences name the switchover; a restore's are
+        // word for word what they were.
+        for reason in [
+            ScopeIncomplete::PlanNotTheRequests,
+            ScopeIncomplete::PlanUnreadable,
+            ScopeIncomplete::TooManyPositions { count: 8193 },
+            ScopeIncomplete::ValueNotShowable {
+                what: "a consumer group id",
+            },
+        ] {
+            let words = reason.sentence_for(ScopeOf::Switchover);
+            assert!(
+                words.contains("witchover") && !words.contains("Restore"),
+                "{words}"
+            );
+            assert_eq!(reason.sentence_for(ScopeOf::Restore), reason.sentence());
         }
     }
 }

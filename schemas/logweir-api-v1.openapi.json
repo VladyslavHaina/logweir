@@ -2112,7 +2112,7 @@
     "/api/v1/namespaces/{ns}/switchovers/{name}/approval": {
       "post": {
         "operationId": "submitSwitchoverApproval",
-        "summary": "PROD-04.2: in an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote; under a two-person or strict policy, an approver's countersignature over the console's stored request (never the requester's own). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+        "summary": "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
         "parameters": [
           {
             "name": "ns",
@@ -2165,6 +2165,168 @@
           },
           "200": {
             "description": "An identical Approval already exists (a replay).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request": {
+      "get": {
+        "operationId": "getSwitchoverApprovalRequest",
+        "summary": "PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverApprovalRequestResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval": {
+      "post": {
+        "operationId": "approveSwitchoverInConsole",
+        "summary": "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsoleApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Approval was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "This approver already approved this request (a replay).",
             "content": {
               "application/json": {
                 "schema": {
@@ -14336,6 +14498,129 @@
         },
         "additionalProperties": false
       },
+      "SwitchoverApprovalRequestResponse": {
+        "description": "`GET .../switchovers/{name}/approval-request`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/SwitchoverApprovalRequestView"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverApprovalRequestView": {
+        "description": "A two-person switchover request as the second person is shown it (`ApprovalRequestView`'s rules; PROD-04.2).",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "approve",
+          "confirmationName",
+          "namespace",
+          "policy",
+          "policyDigest",
+          "scopeComplete",
+          "state",
+          "stateSentence",
+          "switchover",
+          "switchoverUid"
+        ],
+        "properties": {
+          "approvalName": {
+            "description": "The Approval the Switchover references, which a click creates.",
+            "type": "string"
+          },
+          "approve": {
+            "$ref": "#/components/schemas/ApproveOfferView"
+          },
+          "approvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "approver": {
+            "type": "string",
+            "nullable": true
+          },
+          "confirmationName": {
+            "description": "The stored request, `<approvalName>-confirmation`.",
+            "type": "string"
+          },
+          "confirmationSha256": {
+            "description": "What a click must name.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "planHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "policy": {
+            "type": "string"
+          },
+          "policyDigest": {
+            "type": "string"
+          },
+          "requester": {
+            "type": "string",
+            "nullable": true
+          },
+          "scope": {
+            "description": "Present exactly when `scopeComplete`.",
+            "$ref": "#/components/schemas/SwitchoverScopeView",
+            "nullable": true
+          },
+          "scopeComplete": {
+            "description": "Whether `scope` is everything a second person approves, in full.",
+            "type": "boolean"
+          },
+          "scopeIncomplete": {
+            "description": "Why not: `tooManyGroups`, `tooManyPositions`, `planUnreadable`, …",
+            "type": "string",
+            "nullable": true
+          },
+          "scopeSentence": {
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "$ref": "#/components/schemas/ApprovalRequestState"
+          },
+          "stateSentence": {
+            "type": "string"
+          },
+          "switchover": {
+            "description": "The Switchover the request is for.",
+            "type": "string"
+          },
+          "switchoverUid": {
+            "description": "Its UID, now.",
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "SwitchoverGroupView": {
         "description": "One group's outcome, as the status carries it.",
         "type": "object",
@@ -14436,6 +14721,161 @@
           }
         },
         "additionalProperties": false
+      },
+      "SwitchoverScopeGroupView": {
+        "description": "One consumer group a switchover commits for.",
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "topics"
+        ],
+        "properties": {
+          "source": {
+            "description": "The captured (source) group.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The target group committed for.",
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopeTopicView"
+            }
+          }
+        }
+      },
+      "SwitchoverScopePositionView": {
+        "description": "One position a switchover commits.",
+        "type": "object",
+        "required": [
+          "approximate",
+          "offset",
+          "partition"
+        ],
+        "properties": {
+          "approximate": {
+            "description": "The mapping class is `approximate` (else `exact`).",
+            "type": "boolean"
+          },
+          "expected": {
+            "description": "The committed position the group must hold first; absent: none.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "offset": {
+            "description": "The target offset committed.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "partition": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
+      "SwitchoverScopeRecordView": {
+        "description": "The switchover record a rollback plan reverses.",
+        "type": "object",
+        "required": [
+          "key",
+          "sha256"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeRestoreView": {
+        "description": "The restore a switchover scope applies, as its plan binds it.",
+        "type": "object",
+        "required": [
+          "mappingSha256",
+          "name",
+          "planHash",
+          "scorecardSha256",
+          "uid"
+        ],
+        "properties": {
+          "mappingSha256": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "planHash": {
+            "description": "The restore plan's hash: its target cluster and credentials.",
+            "type": "string"
+          },
+          "scorecardSha256": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeTopicView": {
+        "description": "One restored topic of a scope group, every planned partition.",
+        "type": "object",
+        "required": [
+          "positions",
+          "topic"
+        ],
+        "properties": {
+          "positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopePositionView"
+            }
+          },
+          "topic": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeView": {
+        "description": "**Everything a second person approves for a switchover**: the restore it applies and every group, topic and position, never a slice.",
+        "type": "object",
+        "required": [
+          "groups",
+          "groupsCount",
+          "positionsCount",
+          "restore"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopeGroupView"
+            }
+          },
+          "groupsCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "positionsCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "restore": {
+            "$ref": "#/components/schemas/SwitchoverScopeRestoreView"
+          },
+          "rollbackOf": {
+            "$ref": "#/components/schemas/SwitchoverScopeRecordView",
+            "nullable": true
+          }
+        }
       },
       "SwitchoverView": {
         "description": "A `Switchover`, projected.",

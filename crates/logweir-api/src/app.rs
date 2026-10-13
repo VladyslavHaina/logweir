@@ -379,6 +379,15 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
             axum::routing::post(switchovers::submit_approval),
         )
+        // A two-person switchover request, read and clicked as a restore's.
+        .route(
+            "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
+            get(console_approval::switchover_request),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
+            axum::routing::post(console_approval::switchover_approve),
+        )
         .route(
             "/api/v1/namespaces/{ns}/approval-policy",
             get(approvals::policy),

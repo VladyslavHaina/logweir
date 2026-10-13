@@ -120,6 +120,11 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | `POST …/restores/{name}/approval` | `approval.submit` | a governed countersignature, or the two `drill approve` files |
 | `GET …/restores/{name}/approval-request` | `approval.read` | a two-person request, as the approver is shown it |
 | `POST …/restores/{name}/console-approval` | `approval.submit` | the second person's click |
+| `GET …/switchovers[/{name}]` | `restore.read` | `Switchover` projections; `planBytes` on one switchover only (PROD-04.2) |
+| `POST …/switchovers` | `restore.create` | creates a `Switchover` from a reviewed plan, under the restore create's gates |
+| `POST …/switchovers/{name}/approval` | `approval.submit` | the restore route's submission, for subject kind `Switchover` |
+| `GET …/switchovers/{name}/approval-request` | `approval.read` | a two-person switchover request: every group, topic and position |
+| `POST …/switchovers/{name}/console-approval` | `approval.submit` | the second person's click on a switchover |
 | `GET …/approval-policy` | `approval.read` | the namespace's effective approval policy |
 | `GET …/approvals[/{name}]` | `approval.read` | Approval metadata, no documents |
 | `GET …/approvals/{name}/packet` | `approval.readPacket` | the approval and sidecar documents, verbatim |
@@ -426,6 +431,23 @@ are `requester`, `approverPrincipal`, `requesterIssuer`, `requesterSubject`,
 `scopeTopicsShown`, `scopeTopicsInPlan`, `separation` (`distinct` or
 `refused`), `approvedAt`, `expiresAt`, `approval`, and on a refusal the
 `failureCode` above.
+
+#### Switchovers (PROD-04.2)
+
+The switchover routes are held to every gate above, by the same functions
+(`routes::subject`): `POST …/switchovers` runs the restore create's refusals
+before the plan's own grammar, `POST …/switchovers/{name}/approval` is the
+restore submission (bounds, the private-key refusal, `subject_kind_mismatch`
+for a v1 document of another kind, `not_an_approval` for one that does not
+parse), and `…/approval-request` and `…/console-approval` are the restore
+read and click. A switchover's scope is the restore its plan applies and
+every group, topic and position with its class (`approximate`) and the
+position the group must hold first (`expected`, absent for none):
+`tooManyGroups` over 100 groups, `tooManyPositions` over 8192 positions,
+counted before the grammar. Its click's audit notes say `scopeGroupsShown`,
+`scopePositionsShown` and `scopePositionsInPlan` in place of the topic counts.
+The stored `Approval` has `subjectRef.kind: Switchover` and the document's
+`subject.kind` is `Switchover`, which every verifier compares.
 
 ### Topic mapping and original names
 
