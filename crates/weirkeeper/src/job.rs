@@ -741,6 +741,22 @@ pub fn add_fresh_line_token(job: &mut Job) -> bool {
     }
 }
 
+/// `job` with a fresh FX-43 line token ([`add_fresh_line_token`]), for the
+/// reconcilers that build a Job and create it in one expression. When the
+/// random source fails the Job is returned without one, and a `warn` names
+/// the Job: its log is then read as a Job an older controller built.
+#[must_use]
+pub fn tokened(mut job: Job) -> Job {
+    if !add_fresh_line_token(&mut job) {
+        tracing::warn!(
+            job = job.metadata.name.as_deref().unwrap_or_default(),
+            "the random source gave no line token; the Job is created without one and its log \
+             is read as a Job an older controller built"
+        );
+    }
+    job
+}
+
 /// The line token `job`'s runner was given, read back off the Job's own pod
 /// template, whichever flag carried it ([`job_token`]).
 #[must_use]

@@ -1163,6 +1163,11 @@ fn fx20_an_unbound_or_foreign_credential_is_refused_before_anything_is_read() {
 /// Run the shipped binary once over `full_env` plus `extra`, with a deadline:
 /// its exit code, stdout and stderr.
 fn run_shipped(extra: &[(&str, &str)]) -> (Option<i32>, String, String) {
+    run_shipped_with(extra, &[])
+}
+
+/// [`run_shipped`] with arguments appended to the argv.
+fn run_shipped_with(extra: &[(&str, &str)], args: &[&str]) -> (Option<i32>, String, String) {
     // No `tempfile` dev-dependency in this crate: a unique scratch directory
     // under the system temp dir, removed at the end.
     let dir = std::env::temp_dir().join(format!(
@@ -1185,6 +1190,7 @@ fn run_shipped(extra: &[(&str, &str)]) -> (Option<i32>, String, String) {
         "--retention-contract-version",
         "1",
     ])
+    .args(args)
     .env_clear()
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
@@ -1407,4 +1413,90 @@ fn fx15_the_shipped_worker_names_an_unreadable_ceiling_and_its_variable() {
         "stderr: {stderr}"
     );
     assert!(stderr.contains("nothing is deleted"), "{stderr}");
+}
+
+/// A token for the FX-43 rows, assembled so that no source line holds a
+/// secret-shaped literal.
+fn fx43_token() -> logweir_core::refusal_detail::LineToken {
+    logweir_core::refusal_detail::LineToken::parse(&"7f".repeat(20)).expect("forty hex digits")
+}
+
+/// **FX-43: the shipped worker given `--runner-line-token` seals its lines and
+/// its end, and the plain line stays last.** A binding refusal (exit 3): the
+/// controller reads only the sealed `retention-refusal=`, an older controller
+/// the plain one, and the human line on stderr is one line.
+///
+/// KILLS: the block printed without its seal or its end line; the token flag
+/// refused as an unknown argument; the stderr text printed raw.
+#[test]
+fn fx43_the_shipped_worker_seals_its_lines_and_its_end() {
+    let t = fx43_token();
+    let (status, stdout, stderr) = run_shipped_with(
+        &[
+            (
+                "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
+                "v1:mine:sha256:00",
+            ),
+            ("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", "v1:theirs:sha256:11"),
+        ],
+        &[
+            logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+            t.expose_token(),
+        ],
+    );
+    assert_eq!(status, Some(EXIT_REFUSED), "stderr: {stderr}");
+    let sealed: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| logweir_core::runner_line::unseal(&t, l))
+        .collect();
+    assert_eq!(
+        sealed,
+        vec![
+            "retention-refusal=CredentialBindingMismatch",
+            "runner-exit=3"
+        ],
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.lines().last(),
+        Some("retention-refusal=CredentialBindingMismatch"),
+        "the plain line last, for an older controller: {stdout}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    // NEGATIVE CONTROL: without the flag, the bytes it always printed.
+    let (_, plain, _) = run_shipped(&[
+        (
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
+            "v1:mine:sha256:00",
+        ),
+        ("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", "v1:theirs:sha256:11"),
+    ]);
+    assert_eq!(plain, "retention-refusal=CredentialBindingMismatch\n");
+}
+
+/// The token pair is taken off the argv wherever it stands; a malformed
+/// value or a second pair is left for the argv grammar, which refuses it.
+#[test]
+fn fx43_the_line_token_is_taken_off_the_argv() {
+    let t = fx43_token();
+    let flag = logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG;
+    let argv = ["run", flag, t.expose_token(), "--dry-run"];
+    let (rest, token) = logweir_retention::take_line_token(&argv);
+    assert_eq!(rest, vec!["run", "--dry-run"]);
+    assert_eq!(token, Some(t.clone()));
+    let (rest, token) = logweir_retention::take_line_token(&["run", flag, "not-hex"]);
+    assert_eq!(rest, vec!["run", flag, "not-hex"]);
+    assert!(token.is_none());
+    assert!(matches!(
+        logweir_retention::parse_args(&rest),
+        Err(logweir_retention::Refusal::UnknownArgument(_))
+    ));
+    let (rest, _) = logweir_retention::take_line_token(&[
+        "run",
+        flag,
+        t.expose_token(),
+        flag,
+        t.expose_token(),
+    ]);
+    assert_eq!(rest, vec!["run", flag, t.expose_token()]);
 }

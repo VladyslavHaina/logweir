@@ -36,6 +36,7 @@
 //!
 //! ```text
 //! logweir-retention run --plan <path> --retention-contract-version 1 [--dry-run]
+//!     [--runner-line-token <hex>]
 //! ```
 //!
 //! Everything else arrives in the environment, because a Job spec is readable
@@ -368,6 +369,44 @@ pub struct Args {
     pub plan_path: String,
     /// `--dry-run`.
     pub dry_run: bool,
+}
+
+/// FX-43: the controller's per-Job line token, `--runner-line-token <hex>`,
+/// taken off `argv`, and the rest. **Pure.** A well-formed pair is removed
+/// wherever it stands; anything else is left for [`parse_args`], which
+/// refuses it (`UnknownArgument`).
+///
+/// With a token, every stdout line is printed sealed with it before the plain
+/// line, and the run ends with a sealed `runner-exit=`
+/// (`logweir_core::runner_line::final_block`): the controller reads only
+/// those, so no line a provider's error or a plan got into the log is read. An
+/// older worker refuses the flag at exit 3, and the controller names that
+/// `RunnerOlderThanController`.
+#[must_use]
+pub fn take_line_token<'a>(
+    argv: &[&'a str],
+) -> (
+    Vec<&'a str>,
+    Option<logweir_core::refusal_detail::LineToken>,
+) {
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut token = None;
+    let mut i = 0usize;
+    while i < argv.len() {
+        if argv[i] == logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG && token.is_none() {
+            if let Some(t) = argv
+                .get(i + 1)
+                .and_then(|v| logweir_core::refusal_detail::LineToken::parse(v))
+            {
+                token = Some(t);
+                i += 2;
+                continue;
+            }
+        }
+        rest.push(argv[i]);
+        i += 1;
+    }
+    (rest, token)
 }
 
 /// The argv, parsed. **Pure.**

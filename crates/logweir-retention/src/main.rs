@@ -43,7 +43,24 @@ fn main() -> ExitCode {
             println!("{HELP}");
             ExitCode::SUCCESS
         }
-        _ => code(run(&flags)),
+        _ => {
+            // FX-43: the controller's per-Job token, taken off the argv before
+            // anything parses it. Every stdout line is printed once, at the
+            // end, sealed with it, then the sealed `runner-exit=`, then plain.
+            let (flags, token) = logweir_retention::take_line_token(&flags);
+            let (exit, lines) = run(&flags);
+            print!(
+                "{}",
+                logweir_core::runner_line::final_block(
+                    token
+                        .as_ref()
+                        .map(|t| (t, logweir_core::runner_line::LineScope::EveryLine)),
+                    u8::try_from(exit).unwrap_or(1),
+                    &lines,
+                )
+            );
+            code(exit)
+        }
     }
 }
 
@@ -51,15 +68,20 @@ fn code(exit: i32) -> ExitCode {
     ExitCode::from(u8::try_from(exit).unwrap_or(1))
 }
 
-/// Every exit-3 path: the reason on stderr, and the closed code
-/// on stdout for the controller to put on the policy's status.
-fn refuse(refusal: &Refusal) -> i32 {
-    eprintln!("logweir-retention: {refusal}");
-    println!("{}", refusal.refusal_line());
-    refusal.exit_code()
+/// Every exit-3 path: the reason on stderr, on ONE line (it can repeat a
+/// provider's multi-line error body), and the closed code for stdout, where
+/// the controller reads it.
+fn refuse(refusal: &Refusal) -> (i32, Vec<String>) {
+    eprintln!(
+        "{}",
+        logweir_core::runner_line::one_line(&format!("logweir-retention: {refusal}"))
+    );
+    (refusal.exit_code(), vec![refusal.refusal_line()])
 }
 
-fn run(flags: &[&str]) -> i32 {
+/// The run, and the stdout lines it owes the controller, in order. Nothing is
+/// printed on stdout here: `main` prints the lines once, at the end (FX-43).
+fn run(flags: &[&str]) -> (i32, Vec<String>) {
     let started_at = Utc::now();
     let admitted = match admit(flags, &ProcessEnv, |path| std::fs::read(path)) {
         Ok(a) => a,
@@ -91,11 +113,9 @@ fn run(flags: &[&str]) -> i32 {
             &logweir_reaper::NoTombstones,
             &reaper,
         );
-        for line in &report.lines {
-            println!("{line}");
-        }
-        println!("{}", result_line(&report, true));
-        return report.exit_code;
+        let mut lines = report.lines.clone();
+        lines.push(result_line(&report, true));
+        return (report.exit_code, lines);
     }
 
     // THE RECORD SINK, BEFORE THE FIRST DELETE. `admit` already refused a run
@@ -113,9 +133,7 @@ fn run(flags: &[&str]) -> i32 {
     };
 
     let report = execute(&admitted, &reaper, &ThreadSleeper, &sink, &reaper);
-    for line in &report.lines {
-        println!("{line}");
-    }
+    let mut lines = report.lines.clone();
 
     let doc = record(
         &admitted.plan,
@@ -137,18 +155,29 @@ fn run(flags: &[&str]) -> i32 {
                 &admitted.attribution.run_id,
             );
             match sink.put_create_only(&key, &bytes) {
-                Ok(_) => println!("{}", record_line(&key, &digest)),
+                Ok(_) => lines.push(record_line(&key, &digest)),
+                // On one line: the store's error text can be a provider's
+                // multi-line XML body.
                 Err(e) => eprintln!(
-                    "logweir-retention: the enforcement record at `{key}` was not written: {e}. \
-                     The per-point tombstones under the same prefix are the surviving trail."
+                    "{}",
+                    logweir_core::runner_line::one_line(&format!(
+                        "logweir-retention: the enforcement record at `{key}` was not written: \
+                         {e}. The per-point tombstones under the same prefix are the surviving \
+                         trail."
+                    ))
                 ),
             }
         }
-        Err(e) => eprintln!("logweir-retention: the enforcement record did not serialise: {e}"),
+        Err(e) => eprintln!(
+            "{}",
+            logweir_core::runner_line::one_line(&format!(
+                "logweir-retention: the enforcement record did not serialise: {e}"
+            ))
+        ),
     }
 
-    println!("{}", result_line(&report, false));
-    report.exit_code
+    lines.push(result_line(&report, false));
+    (report.exit_code, lines)
 }
 
 fn as_credentials(keys: &Keys) -> Credentials {
