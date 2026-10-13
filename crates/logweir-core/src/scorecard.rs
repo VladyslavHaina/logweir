@@ -118,9 +118,7 @@ pub struct SourceInfo {
     /// `sample.window_end` is at or after every segment's first and last
     /// timestamp is not counted as a selection, yet with out-of-order
     /// timestamps inside a segment the engine's end filter can still drop a
-    /// record later than both ends. A runner since PROD-01.1b decides over
-    /// bounds widened by the restored segments' records, so it counts that
-    /// case as a selection; the document does not say which runner signed it.
+    /// record later than both ends; that case is PROD-01.1b's.
     ///
     /// Global Constraint 12 as amended permits this as a NESTED optional
     /// field: `SourceInfo`'s properties are not the scorecard's 21.

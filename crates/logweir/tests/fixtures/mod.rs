@@ -940,6 +940,16 @@ pub enum Drill {
     /// true`: the restore reads the segment, and its record times cannot be
     /// read either, so the override does not get past the refusal.
     HoldsAnUnreadableSegmentAndAllowsMarkers,
+    /// PROD-01.1b and FX-8: `orders` recorded `LogAppendTime`, no point in
+    /// time, and a second segment whose first and last records are inside
+    /// the window holding one record a millisecond AFTER the window's end, out
+    /// of timestamp order. By the manifest's first and last the window takes
+    /// the whole archive; by the records it cuts it, which is a selection by
+    /// producer time: refused `PointInTimeByProducerTime`.
+    HoldsALogAppendTimeRecordAfterTheWindow,
+    /// The same segment with that record inside the window, in order: the
+    /// window takes the whole archive and the run passes (the control).
+    HoldsALogAppendTimeRecordInsideTheWindow,
 }
 
 /// The fixture segment's records: one data record and, for
@@ -1713,6 +1723,31 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             (FIXTURE_WINDOW_RECORDS + 2, late + 1, 3);
         facts.topics[0].partitions[0].segments.push(seg);
     }
+    if matches!(
+        shape,
+        Drill::HoldsALogAppendTimeRecordAfterTheWindow
+            | Drill::HoldsALogAppendTimeRecordInsideTheWindow
+    ) {
+        let t0 = ts(FIXTURE_WINDOW_START).timestamp_millis();
+        let middle = if shape == Drill::HoldsALogAppendTimeRecordAfterTheWindow {
+            window_end_ms + 1
+        } else {
+            t0 + 1_500
+        };
+        let mut records = Vec::new();
+        for (i, ts) in [t0 + 1_000, middle, t0 + 2_000].into_iter().enumerate() {
+            let mut r = archived_records(Drill::Passes, ts)[0].clone();
+            r.offset = FIXTURE_WINDOW_RECORDS + i as i64;
+            records.push(r);
+        }
+        let bytes = kbak_segment(&records);
+        let key = "logweir/fixture-archive/orders/0/inside-out-of-order.kbak";
+        archive.put_create_only(key, &bytes).unwrap();
+        let mut seg = after_window(0, key, &bytes);
+        (seg.start_timestamp, seg.end_timestamp, seg.uploaded_at) = (t0 + 1_000, t0 + 2_000, t0);
+        (seg.end_offset, seg.record_count) = (FIXTURE_WINDOW_RECORDS + 2, 3);
+        facts.topics[0].partitions[0].segments.push(seg);
+    }
     if shape == Drill::HoldsUnreadableSegmentsAfterTheWindow {
         let absent = "logweir/fixture-archive/orders/0/after-absent.kbak";
         let garbage = "logweir/fixture-archive/orders/0/after-garbage.kbak";
@@ -1733,7 +1768,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     // a source topic that set one.
     if matches!(
         shape,
-        Drill::SelectsALogAppendTimeTopicAtAPoint | Drill::SelectsALogAppendTimeTopicByProducerTime
+        Drill::SelectsALogAppendTimeTopicAtAPoint
+            | Drill::SelectsALogAppendTimeTopicByProducerTime
+            | Drill::HoldsALogAppendTimeRecordAfterTheWindow
+            | Drill::HoldsALogAppendTimeRecordInsideTheWindow
     ) {
         facts.topics[0]
             .configurations
@@ -1915,6 +1953,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::HoldsAWindowRecordAfterThePoint
         | Drill::HoldsOnlyLaterRecordsAfterThePoint
         | Drill::HoldsAnUnreadableSegmentAndAllowsMarkers
+        | Drill::HoldsALogAppendTimeRecordAfterTheWindow
+        | Drill::HoldsALogAppendTimeRecordInsideTheWindow
         | Drill::FailsAtVerify
         | Drill::LeavesATopicBehind
         | Drill::ArchivesNoSegment => {}

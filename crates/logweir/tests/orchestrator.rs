@@ -2757,6 +2757,42 @@ fn a_point_whose_segment_hides_a_record_of_the_window_is_refused() {
     assert_eq!(sc.outcome, Outcome::Pass);
 }
 
+/// **PROD-01.1b feeds the time basis (FX-8) the records' own bounds.** A
+/// `LogAppendTime` topic, no point in time: a segment whose first and last
+/// records are inside the window holds one record a millisecond after its end.
+/// By the manifest the window takes the whole archive; by the records it cuts
+/// it, a selection by producer time, refused `PointInTimeByProducerTime`
+/// before anything is created. The control: the same segment in order; the
+/// run is not refused and signs a time basis with nothing selected by producer
+/// time (its verdict is the fixture target's: it holds the main segment's 500
+/// records only, so the count bound fails it).
+///
+/// KILLS: the run reading the manifest's bounds after the record pass (the
+/// row is not refused).
+#[test]
+fn the_time_basis_reads_the_records_own_bounds() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsALogAppendTimeRecordAfterTheWindow);
+    let err = execute_with(&f.args, &f.run_id, &f.ctx).expect_err("refused");
+    let (message, code, line) = refusal(err);
+    assert_eq!(code, ExitCode::GuardRefused);
+    assert_eq!(
+        line, "refusal-reason=PointInTimeByProducerTime",
+        "{message}"
+    );
+    assert!(fixtures::created_topics(&f).is_empty());
+
+    let control = fixtures::orchestrator_fixture(Drill::HoldsALogAppendTimeRecordInsideTheWindow);
+    if let Err(DrillError::Guard(e)) = execute_with(&control.args, &control.run_id, &control.ctx) {
+        panic!("the control is not refused: {e:?}");
+    }
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
+    assert_eq!(
+        sc.source.time_basis,
+        Some(logweir_core::scorecard::TimeBasisLabel::default())
+    );
+}
+
 /// **The override is the marker check's alone.** A segment the restore reads
 /// and the runner cannot decode is refused under
 /// `restore.allow_transaction_markers: true` too: its record times cannot be
