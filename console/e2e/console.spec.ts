@@ -90,6 +90,9 @@ test("the session lands on its namespace's Overview, with the navigation its rol
   const nav = page.getByRole("navigation").first();
   await expect(nav.getByRole("link", { name: /Overview/ })).toBeVisible();
   await expect(page.getByRole("button", { name: new RegExp(ns) }).first()).toBeVisible();
+  // A settled screen: while its reads are in flight, a control is disabled, and a
+  // disabled control's contrast is not held (WCAG 1.4.3) though axe may report it.
+  await page.waitForLoadState("networkidle");
   await clean(page, w, "overview");
 });
 
