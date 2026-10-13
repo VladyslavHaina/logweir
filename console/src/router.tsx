@@ -21,6 +21,8 @@ import { RestoreWizard } from "./pages/RestoreWizard";
 import { RestoreDetail } from "./pages/RestoreDetail";
 import { Cutover } from "./pages/Cutover";
 import { Planned } from "./pages/Planned";
+import { connectionRoutes } from "./pages/connections/routes";
+import { destinationRoutes } from "./pages/destinations/routes";
 
 export type RouterContext = { session: Session };
 
@@ -39,7 +41,7 @@ const home = createRoute({
   },
 });
 
-const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
+export const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
 
 const overview = createRoute({ getParentRoute: () => nsRoute, path: "/", component: Overview });
 const backups = createRoute({ getParentRoute: () => nsRoute, path: "backups", component: PROTOTYPE ? Backups : Planned });
@@ -58,7 +60,7 @@ const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", c
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, planned]),
+  nsRoute.addChildren([overview, backups, backup, restores, restoreNew, restore, cutover, ...connectionRoutes(nsRoute), ...destinationRoutes(nsRoute), planned]),
 ]);
 
 /** The page's router, made once by main.tsx (and afresh by each test that renders the console). */

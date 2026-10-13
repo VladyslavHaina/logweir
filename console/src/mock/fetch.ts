@@ -17,6 +17,8 @@ import {
   withPoint,
 } from "./data";
 import { declareRestore } from "./themeA";
+import { connectionsMock } from "./connections";
+import { destinationsMock } from "./destinations";
 
 const LATENCY_MS = 350;
 
@@ -169,6 +171,7 @@ async function route(request: Request): Promise<Response> {
   let p: RegExpMatchArray | null;
 
   if (method === "GET" && path === "/session") return json(200, session);
+  { const settings = (await connectionsMock(request, method, path)) ?? (await destinationsMock(request, method, path)); if (settings) return settings; }
 
   if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
     return json(200, page(forNamespace(p[1]!, backups).map(backupNow)));
