@@ -861,9 +861,9 @@ async fn a_second_person_approves_a_switchover_in_the_console() {
             "source": "app-1",
             "target": "app-1",
             "topics": [{"topic": "r-orders", "positions": [
-                {"partition": 0, "offset": 40, "approximate": false},
-                {"partition": 1, "offset": 41, "approximate": true},
-                {"partition": 2, "offset": 42, "approximate": false}
+                {"partition": 0, "offset": 40, "approximate": false}, // engine-token-ok: a JSON field of the switchover scope view, not an engine subcommand
+                {"partition": 1, "offset": 41, "approximate": true}, // engine-token-ok: a JSON field of the switchover scope view, not an engine subcommand
+                {"partition": 2, "offset": 42, "approximate": false} // engine-token-ok: a JSON field of the switchover scope view, not an engine subcommand
             ]}]
         })
     );
