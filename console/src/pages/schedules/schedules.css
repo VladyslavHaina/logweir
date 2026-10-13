@@ -38,3 +38,8 @@
 .lw-nowrap {
   white-space: nowrap;
 }
+/* The topic offer wraps to two rows once a discovery lists more than a row:
+   room between them for each label's 24 px target (WCAG 2.2, 2.5.8). */
+.pf-v6-c-label-group.lw-topic-offer {
+  --pf-v6-c-label-group__list--RowGap: var(--pf-t--global--spacer--sm);
+}

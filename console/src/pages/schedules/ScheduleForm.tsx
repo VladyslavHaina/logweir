@@ -279,7 +279,7 @@ function TopicPicker({ ns, control, source, onAdd }: { ns: string; control: Cont
         {d.stale ? " This inventory is out of date." : ""}
         {found.data.failed ? " A newer discovery failed." : ""}
       </Content>
-      <LabelGroup numLabels={12} categoryName="Add a topic" isCompact>
+      <LabelGroup numLabels={12} categoryName="Add a topic" isCompact className="lw-topic-offer">
         {found.data.topics.map((t) => {
           const added = typed.includes(t);
           return (
