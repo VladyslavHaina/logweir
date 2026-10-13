@@ -602,8 +602,11 @@ fn desired_for(
     })
 }
 
-/// `min.insync.replicas` no larger than the replication factor: a topic whose
-/// value exceeds it refuses every `acks=all` write (05.1 §2, measured).
+/// `min.insync.replicas` no larger than the replication factor. Measured on
+/// 3.9.2 and 4.3.1 (C21): both brokers take an `acks=all` write into a topic
+/// whose value exceeds its factor, holding the effective minimum to the
+/// factor; the cap makes the stated configuration the one the topic honours,
+/// on every line, and `capped` says so.
 fn cap_min_insync(value: &str, replication_factor: u32) -> String {
     match value.trim().parse::<u32>() {
         Ok(n) if n > replication_factor => replication_factor.to_string(),

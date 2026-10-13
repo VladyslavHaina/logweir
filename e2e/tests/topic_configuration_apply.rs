@@ -12,7 +12,7 @@
 //! |---|---|---|---|
 //! | `c20_c24_a_3_9_point_applies_its_model_and_a_removed_key_on_3_9` | C20, C24 (3.9) | on `--kafka 3.9`: the topics are created from the model (partitions, factor and reason), `message.format.version` (removedInKafka4) is applied to the 3.x target, and after the passing verdict each topic holds exactly its desired set (compaction, the source's retention); writes the hand-off the 4.3 row restores | — (the 4.3 row is the line's control) |
 //! | `c20_c24_c25_a_3_9_point_restored_to_4_3_before_its_transition` | C20, C24 (4.3), C25 row 7 | on `--kafka 4.3`, from the 3.9 point (a filesystem archive that outlives the slot): with `transition: none` the topic reads Logweir's during-restore set plus the source's at-creation set (`cleanup.policy=delete`, `retention.ms=-1`); the removed key is NOT applied and is named `removedInKafka4`; the inherited `message.timestamp.after.max.ms` (Long.MAX on 3.9) is named against the 4.x target's own default before anything is created | no block: created exactly as today (`message.timestamp.type`, `retention.ms` and nothing else) |
-//! | `c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync` | C21 | `cluster3` (factor 3, `min.insync.replicas=2`) to the one-broker target: factor 1 with reason `targetBrokers`, `min.insync.replicas` capped to 1 and stated; the topic accepts `acks=all` | a topic created with `min.insync.replicas=2` at factor 1 refuses `acks=all` (`NOT_ENOUGH_REPLICAS`) |
+//! | `c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync` | C21 | `cluster3` (factor 3, `min.insync.replicas=2`) to the one-broker target: factor 1 with reason `targetBrokers`, `min.insync.replicas` capped to 1 and stated; the topic accepts `acks=all`; runs on either line | a topic created with `min.insync.replicas=2` at factor 1 takes `acks=all` too, on 3.9.2 and 4.3.1 alike (measured): the cap states what the topic honours and changes no write |
 //! | `c22_compaction_is_applied_after_a_complete_verification` | C22 | a compacted source: the complete verification passes with `offset_holes` disclosed, then `cleanup.policy=compact`; the topic is readable before (records restored) and after (every record consumed) | the unit mutant that applies a deferred key at creation (M1) |
 //! | `c23_old_timestamps_restore_under_a_bounded_broker` | C23 | with the target broker's default `log.message.timestamp.before.max.ms` at one hour, 30-day-old records restore and pass; the signed deferred `retention.ms` (10 days) is what the transition applies, and it deletes every restored record (the preview's arithmetic, over the signed block) | the same point without the block: phase 0's `TargetTopicConfigRefused` (today's), exit 3 |
 //! | `c25_settings_never_applied_are_listed_and_a_denied_read_is_not_recorded` | C25 rows 2 and 6 | `clusterBound` and `inherited` entries are never applied and are listed with the source's value; a `captureDenied` topic is created with the safe settings only and marked NOT RECORDED | a topic with no override lists only inherited entries |
@@ -22,11 +22,11 @@
 //! # Running it
 //!
 //! ```text
-//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 3.9)"
+//! eval "$(e2e/compose/stack-env.sh --slot N --kafka 3.9 --profiles cluster3)"
 //! just e2e-up
 //! LOGWEIR_PYTHON=<python3 with cryptography> AWS_EC2_METADATA_DISABLED=true \
 //!   cargo test -p e2e --features e2e --test topic_configuration_apply -- --ignored \
-//!   --test-threads=1 --nocapture c20_c24_a_3_9
+//!   --test-threads=1 --nocapture c20_c24_a_3_9 c21_
 //! just e2e-down
 //! eval "$(e2e/compose/stack-env.sh --slot N --kafka 4.3 --profiles cluster3,acl)"
 //! just e2e-up
@@ -1051,9 +1051,8 @@ fn c20_c24_c25_a_3_9_point_restored_to_4_3_before_its_transition() {
 
 /// **C21**: three brokers to one.
 #[test]
-#[ignore = "needs the compose stack on --kafka 4.3 with the cluster3 profile"]
+#[ignore = "needs the compose stack (--kafka 3.9 or 4.3) with the cluster3 profile"]
 fn c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync() {
-    require_line("4.x");
     let s = stack();
     let n = nonce();
     let topic = format!("tc{n}-rf3");
@@ -1093,25 +1092,21 @@ fn c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync() {
     // The restored topic takes `acks=all` writes.
     assert_eq!(produce_one_acks_all(&s.broker, &target), Ok(()));
 
-    // THE CONTROL, measured per line: on 3.x, `min.insync.replicas=2` at
-    // factor 1 refuses `acks=all` (`NOT_ENOUGH_REPLICAS`), which the cap
-    // prevents; on 4.x (KIP-966) the broker bounds the effective minimum by
-    // the factor itself, so the uncapped topic takes the write too (measured
-    // on 4.3.1, 2026-10-13) and the cap only states the truth.
+    // THE CONTROL, measured on both lines (3.9.2 and 4.3.1, 2026-10-13): a
+    // topic created with `min.insync.replicas=2` at factor 1 takes the
+    // `acks=all` write too, because the broker holds the effective minimum to
+    // the replicas the partition has. The cap changes no write on these lines;
+    // it makes the stated configuration the one the topic can honour.
     let control = format!("tc{n}-mis2");
     create_topic(&s.broker, &control, 1, 1, &[("min.insync.replicas", "2")]);
+    assert_eq!(overrides(&s.broker, &control)["min.insync.replicas"], "2");
     let control_answer = produce_one_acks_all(&s.broker, &control);
-    let refused_text = control_answer.clone().err().unwrap_or_default();
-    if line() == "3.9" {
-        assert!(
-            refused_text.contains("NotEnoughReplicas")
-                || refused_text.contains("NOT_ENOUGH_REPLICAS"),
-            "acks=all into min.insync.replicas=2 at factor 1 must be refused on 3.x: \
-             {refused_text:?}"
-        );
-    } else {
-        assert_eq!(control_answer, Ok(()), "4.x bounds min ISR by the factor");
-    }
+    assert_eq!(
+        control_answer,
+        Ok(()),
+        "measured on {}: the broker bounds min ISR by the factor",
+        line()
+    );
     write_evidence(
         "c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync",
         &json!({
