@@ -174,6 +174,12 @@ describe("the restore wizard", () => {
     await waitFor(() => expect(router.state.location.pathname).toMatch(/\/restores\/rst-/), { timeout: 15_000 });
     expect((posts()[0]!.body as S["CreateRestoreRequest"]).ticket).toBe("CHG-4711");
     await screen.findByText("Waiting for a second person to approve");
+    // The restore's own approval page (R6), held to this restore by its plan hash and approval name.
+    const sent = posts()[0]!.body as S["CreateRestoreRequest"];
+    const link = screen.getByRole("link", { name: "Open its approval" }).getAttribute("href") ?? "";
+    expect(link).toMatch(/\/team-a\/approvals\/rst-[a-z0-9-]+\?/);
+    expect(new URLSearchParams(link.split("?")[1]).get("hash")).toBe(sent.planHash);
+    expect(new URLSearchParams(link.split("?")[1]).get("approval")).toMatch(/^approval-/);
   });
 
   it("an API field error lands beside its field, and a lost answer resends the same key", async () => {
