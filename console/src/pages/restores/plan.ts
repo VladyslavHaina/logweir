@@ -361,8 +361,9 @@ function pushList(out: string[], indent: string, key: string, values: unknown[])
 }
 
 /** THE ONE SCALAR WRITER: every string double-quoted, so a topic name with a colon, a
- *  `#` or a quote cannot change the document's shape. */
-function quote(value: unknown): string {
+ *  `#` or a quote cannot change the document's shape. Also the console's one writer of a
+ *  value into any YAML it shows (the catalog's TrustPolicy snippet). */
+export function quote(value: unknown): string {
   let out = '"';
   for (const ch of String(value)) {
     const code = ch.codePointAt(0)!;

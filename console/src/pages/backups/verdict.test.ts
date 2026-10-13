@@ -215,7 +215,7 @@ describe("check it yourself", () => {
     const route = evidenceRoute(b, destination, null);
     expect(route).toEqual({ bucket: "kafka-backups", endpoint: "https://minio.local:9000", region: "us-east-1", pathStyle: true });
     const lines = checkCommands(route, "logweir/backups/x/r1.receipt.json", "logweir/backups/x/r1.receipt.sig");
-    expect(lines[0]).toBe("aws s3 cp s3://kafka-backups/logweir/backups/x/r1.receipt.json ./receipt.json --endpoint-url https://minio.local:9000 --region us-east-1");
+    expect(lines[0]).toBe("aws s3 cp 's3://kafka-backups/logweir/backups/x/r1.receipt.json' ./receipt.json --endpoint-url 'https://minio.local:9000' --region 'us-east-1'");
     expect(lines).toHaveLength(4);
     // NEGATIVE CONTROL: a destination that moved since the run froze is not where it wrote.
     const moved = evidenceRoute(b, { ...destination, locationDigest: "sha256:" + "b".repeat(64) }, null);

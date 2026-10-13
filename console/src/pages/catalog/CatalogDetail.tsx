@@ -2,6 +2,7 @@
 // usable, every point it lists with its two verdicts kept apart, and who signed
 // them. A refused sub-read is shown in its own card, never as an empty table:
 // an empty table is what an empty catalog looks like.
+import { quote } from "../restores/plan";
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -378,7 +379,8 @@ export function trustSnippet(keyIds: string[]): string[] {
   ];
   for (const id of keyIds) {
     lines.push(
-      `    - keyId: ${id}`,
+      // The server's key id enters the YAML only through the plan builder's scalar writer.
+      `    - keyId: ${quote(id)}`,
       "      spkiPem: |",
       "        <the PUBLIC half, after you compared its fingerprint out of band>",
       "      algorithm: p256",
@@ -454,7 +456,9 @@ function SignersCard({ signers }: { signers: SignerPage }) {
           <Content component="p" className="lw-subtle lw-small">
             Run this against the public half the key's holder gives you, and compare the digest with the key above.
           </Content>
-          <Commands lines={[signers.fingerprintCommand || FINGERPRINT_COMMAND]} label="the fingerprint command" />
+          {/* The console's own command, never the server's text: a command an operator copies
+              carries no string the page has not shaped (the server's names the same digest). */}
+          <Commands lines={[FINGERPRINT_COMMAND]} label="the fingerprint command" />
           <Content component="h3" className="lw-small">
             Trusting this key is a cluster-admin step
           </Content>

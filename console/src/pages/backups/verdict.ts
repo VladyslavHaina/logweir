@@ -14,6 +14,7 @@
 //   combined trust word, its basis, the key and the instant, and the exit code.
 // When not green, the words name which case it is: Invalid is about the
 // document, NotAttempted the controller, Untrusted the signer (D3 section 7.4).
+import { hasShape, s3Arg, shellArg } from "../../lib/shell";
 import type { Backup, OperationSummary, OperationView } from "../../api/backups";
 
 /** The two combined trust words a green badge may carry (the API's own vocabulary). */
@@ -262,10 +263,6 @@ export function identityWords(auth: Backup["observedAuth"]): string {
 
 // ------------------------------------------------------ check it yourself
 
-/** A word as one shell argument. */
-export function shellWord(value: string): string {
-  return /^[A-Za-z0-9._/:=@+%,-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-}
 
 /** The bucket an object-store URL names, or null. */
 export function bucketOf(url: string | null | undefined): string | null {
@@ -298,7 +295,8 @@ export function evidenceRoute(
 ): EvidenceRoute {
   const ref = b.destinationRef?.name;
   if (!ref) return { bucket: bucketOf(b.archive?.url) ?? "<your evidence bucket>" };
-  const placeholder = `<bucket of destination ${ref}>`;
+  // The placeholder goes into a command: the name only when it is a Kubernetes name.
+  const placeholder = hasShape(ref, "name") ? `<bucket of destination ${ref}>` : "<bucket of the destination>";
   if (!destination) {
     const why = destinationError instanceof Error ? `: ${destinationError.message}` : "";
     return { bucket: placeholder, missing: `Destination ${ref} could not be read${why}, so this page does not know its bucket.` };
@@ -332,11 +330,14 @@ export const PATH_STYLE_SENTENCE =
 
 /** The four lines: fetch the receipt and its signature, then verify them with the Rust reader and the Python one. */
 export function checkCommands(route: EvidenceRoute, receiptKey: string, sidecarKey: string): string[] {
-  const flags = (route.endpoint ? ` --endpoint-url ${shellWord(route.endpoint)}` : "") + (route.region ? ` --region ${shellWord(route.region)}` : "");
+  // Server strings enter only through shellArg/s3Arg: shaped and quoted, or a placeholder.
+  const flags =
+    (route.endpoint ? ` --endpoint-url ${shellArg(route.endpoint, "url", "<endpoint>")}` : "") +
+    (route.region ? ` --region ${shellArg(route.region, "region", "<region>")}` : "");
   const type = "backup-receipt";
   return [
-    `aws s3 cp ${shellWord(`s3://${route.bucket}/${receiptKey}`)} ./receipt.json${flags}`,
-    `aws s3 cp ${shellWord(`s3://${route.bucket}/${sidecarKey}`)} ./receipt.sig${flags}`,
+    `aws s3 cp ${s3Arg(route.bucket, receiptKey)} ./receipt.json${flags}`,
+    `aws s3 cp ${s3Arg(route.bucket, sidecarKey)} ./receipt.sig${flags}`,
     `logweir drill verify --payload-type ${type} --scorecard ./receipt.json --signature ./receipt.sig --public-key <your key>`,
     `python3 verify_scorecard.py --payload-type ${type} ./receipt.json ./receipt.sig <your key>`,
   ];

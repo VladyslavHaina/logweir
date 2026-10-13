@@ -1,6 +1,7 @@
 // What a restore's facts say, in the console's words: the green rule, coverage and
 // selection, the scope sentence, the guidance per target mode, and the fixed sentences
 // the wizard shows. Ported from ui/render.js, ui/pages/history.js and operation.js.
+import { s3Arg, shellArg } from "../../lib/shell";
 import type { components } from "../../api/schema";
 
 type S = components["schemas"];
@@ -334,17 +335,14 @@ export function planEvidenceRoute(planBytes: string | null | undefined) {
   return { endpoint: v("endpoint"), region: v("region"), pathStyle: v("path_style") === "true" };
 }
 
-/** One POSIX shell word: unchanged when plain, else single-quoted. */
-export function shellWord(value: string): string {
-  return /^[A-Za-z0-9._/:=@+%,-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
-}
 
 /** The commands an operator runs to fetch and verify the signed scorecard on their own machine. */
 export function independentCheck(bucket: string, scorecardKey: string, sidecarKey: string, route: ReturnType<typeof planEvidenceRoute>): string[] {
-  const flags = `${route.endpoint ? ` --endpoint-url ${shellWord(route.endpoint)}` : ""}${route.region ? ` --region ${shellWord(route.region)}` : ""}`;
+  // Plan and server strings enter only through shellArg/s3Arg: shaped and quoted, or a placeholder.
+  const flags = `${route.endpoint ? ` --endpoint-url ${shellArg(route.endpoint, "url", "<endpoint>")}` : ""}${route.region ? ` --region ${shellArg(route.region, "region", "<region>")}` : ""}`;
   return [
-    `aws s3 cp ${shellWord(`s3://${bucket}/${scorecardKey}`)} ./scorecard.json${flags}`,
-    `aws s3 cp ${shellWord(`s3://${bucket}/${sidecarKey}`)} ./scorecard.sig${flags}`,
+    `aws s3 cp ${s3Arg(bucket, scorecardKey)} ./scorecard.json${flags}`,
+    `aws s3 cp ${s3Arg(bucket, sidecarKey)} ./scorecard.sig${flags}`,
     "logweir drill verify --payload-type scorecard --scorecard ./scorecard.json --signature ./scorecard.sig --public-key <your key>",
     "python3 verify_scorecard.py --payload-type scorecard ./scorecard.json ./scorecard.sig <your key>",
   ];
