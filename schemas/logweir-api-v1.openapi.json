@@ -13463,7 +13463,7 @@
             "nullable": true
           },
           "replicationFactor": {
-            "description": "The replication factor of every topic the run creates.",
+            "description": "`target.default_replication_factor`: the factor of every topic the run creates, except with `topic_configuration`, where a topic the point records a factor for is created at that factor, bounded by the target's brokers, and only one without gets this.",
             "type": "integer",
             "format": "int16"
           },

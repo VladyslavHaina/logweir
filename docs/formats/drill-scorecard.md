@@ -616,6 +616,11 @@ phase 8 signed it before phase 9's transition ran.
 | `route` | `adminApi`, or `desiredStateExport` for a topic a declarative owner manages: created with Logweir's settings only and never altered; its configuration is the `desired_state` document (`KafkaTopic` YAML for Strimzi) |
 | `not_recorded` | `true` when the point did not record the topic's configuration: created with Logweir's settings only, and phase 9 leaves it on them |
 
+A Strimzi `KafkaTopic` in the `desired_state` document keeps the source
+owner's namespace and has no `strimzi.io/cluster` label. Set the target
+cluster's namespace and label before applying it: as exported, no operator
+reconciles it.
+
 Both readers refuse (arms TC-1 to TC-5, the same words): the block under a
 version before 1.10.0 of format 1 or 2.2.0 of format 2; a `transition` outside
 the two; a route, factor reason or factor of 0 outside the sets; a

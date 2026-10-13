@@ -357,6 +357,10 @@ for it instead of changing it.
 - A frozen run never lists again. A controller older than this field refuses a
   plan that carries the list (`PlanConfigMapConflict`); roll back only after
   such runs finish.
+- The exported `KafkaTopic` keeps the SOURCE owner's namespace and carries no
+  `strimzi.io/cluster` label: Logweir does not know which `Kafka` resource
+  manages the target. Set the target's namespace and label before applying
+  it; as exported, no operator reconciles it.
 
 ### Dynamic selection
 

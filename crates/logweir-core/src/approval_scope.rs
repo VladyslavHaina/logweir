@@ -138,7 +138,10 @@ pub struct ScopeTarget {
     pub auth_mode: &'static str,
     /// The SASL principal the plan authenticates as, when it names one.
     pub auth_username: Option<String>,
-    /// The replication factor of every topic the run creates.
+    /// `target.default_replication_factor`: the factor of every topic the run
+    /// creates, except with `topic_configuration`, where a topic the point
+    /// records a factor for is created at that factor, bounded by the
+    /// target's brokers, and only one without gets this.
     pub replication_factor: i16,
     /// `target.teardown`: what phase 9 does with a SCRATCH run's targets
     /// (`delete` removes the topics the run created, never an original name;

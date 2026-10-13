@@ -4157,7 +4157,10 @@ pub struct ScopeTargetView {
     /// The SASL principal the plan authenticates as, when it names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_username: Option<String>,
-    /// The replication factor of every topic the run creates.
+    /// `target.default_replication_factor`: the factor of every topic the run
+    /// creates, except with `topic_configuration`, where a topic the point
+    /// records a factor for is created at that factor, bounded by the
+    /// target's brokers, and only one without gets this.
     pub replication_factor: i16,
     /// `target.teardown`: what happens to a SCRATCH run's targets afterwards
     /// (`delete`: the topics the run created are deleted; a `newTopic`
