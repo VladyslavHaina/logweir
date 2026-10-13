@@ -159,7 +159,7 @@ fn a_restore_approved_in_the_console_signs_who_approved_as_1_9_0() {
         &outcome.scorecard.format_version
     ));
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, "1.10.0");
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     let console = sc.approval.console.as_ref().expect("the block is signed");
     assert_eq!(console.mode, "consoleApproval");
     assert_eq!(
@@ -224,7 +224,7 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     assert!(logweir_core::scorecard::defines_console_approval(
         &sc.format_version
     ));
-    assert_eq!(sc.format_version, "2.2.0");
+    assert_eq!(sc.format_version, FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION);
     assert!(sc
         .source
         .selection
@@ -270,7 +270,7 @@ fn an_original_name_restore_approved_in_the_console_says_so_in_both_places() {
     )
     .expect("the original-name restore runs");
     let (_, _, sc) = signed(&f);
-    assert_eq!(sc.format_version, "1.10.0");
+    assert_eq!(sc.format_version, FORMAT_VERSION_WITH_TARGET_CREATION);
     let on = sc.target.original_name.as_ref().expect("the block");
     assert_eq!(on.approval_subject, "originalName");
     assert_eq!(on.approval_mode, "consoleApproval");
