@@ -1,5 +1,5 @@
 # deploy/poc/rehearsals/r1-v0.1.5.values.yaml — the STARTING state of upgrade
-# rehearsal R1 (docs/release-handoff.md): Logweir v0.1.5, installed with
+# rehearsal R1 (docs/release-notes.md, the v0.2.0-rc.1 entry): Logweir v0.1.5, installed with
 # v0.1.5's OWN chart (this repository at tag v0.1.5, commit 9cc78a3), before
 # `helm upgrade` to the release versions.env names. README.md, *Upgrade
 # rehearsals*, has the full sequence.

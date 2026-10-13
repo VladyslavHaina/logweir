@@ -1,5 +1,5 @@
 # deploy/poc/rehearsals/r2-f49849d.values.yaml — the STARTING state of upgrade
-# rehearsal R2 (docs/release-handoff.md): the last publication before
+# rehearsal R2 (docs/release-notes.md, the v0.2.0-rc.1 entry): the last publication before
 # PLAT-15.2/17.2/19.2 (`sha-f49849d…`, the lab-refresh-8 build), installed with
 # THAT commit's chart, before `helm upgrade` to the release versions.env names.
 # README.md, *Upgrade rehearsals*, has the full sequence.

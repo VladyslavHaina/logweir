@@ -39,7 +39,7 @@ workflow summaries and downloaded artifacts provide execution evidence.
 - Required migration or recovery actions, and any checks intentionally deferred
   with a reason. Do not describe a deferred check as successful.
 - The shipped task IDs, commit and image identities, tested environments,
-  results, limitations and rollback in [release-handoff.md](release-handoff.md).
+  results, limitations and rollback in the release's candidate record ([release-notes.md](release-notes.md)).
 
 Every bullet but the last fills the candidate record at the top of the
 release's entry in [release-notes.md](release-notes.md).
