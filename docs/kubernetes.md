@@ -1148,6 +1148,54 @@ kubectl --context docker-desktop get restore r1 \
 `Valid` alone says the document is authentic; `pass` alone says the drill passed
 by a document nobody verified. The `SIGNED` and `OUTCOME` columns show both.
 
+### Safe clones: a scratch restore kept for a declared time
+
+A clone (PROD-11.1a) is a `scratch` restore whose plan says how long to keep
+what it restored:
+
+```yaml
+target:
+  mode: scratch
+  topic_mapping_prefix: "clone-"
+  teardown: {ttl_seconds: 86400}   # 300 (five minutes) to 2592000 (thirty days)
+```
+
+Scratch mode's checks hold unchanged: the target cluster is in the
+`TrustPolicy`'s `allowedTargetClusterIds`, it is not the source, and the marker
+topic exists. The map form outside scratch mode is refused
+`CloneTtlNeedsScratch`, out of bounds `CloneTtlOutOfRange`, both before any Job.
+A runner from before this feature cannot parse the map form and restores
+nothing. Restored records always keep `x-original-offset` and
+`x-original-timestamp`; the approval scope shows `teardownAfterSeconds` and
+`lineageHeaders: kept`.
+
+The `Restore` carries the finalizer `logweir.dev/clone-cleanup` from admission,
+before its run Job exists. `status.clone` says where the clone is:
+
+| `phase` | Meaning |
+|---|---|
+| `Active` | The run passed; its topics are kept until `expiresAt` (the success the controller recorded plus `ttlSeconds`). The cleanup Job exists, suspended. |
+| `Removing` | At `expiresAt`, or at once when the `Restore` is deleted: the cleanup Job (`logweir-clone-cleanup-<uid>-<attempt>`) runs `logweir restore cleanup`. |
+| `Removed` | It deleted what the run's signed scorecard records (`target.creation`), on the cluster the scorecard records, each topic only while its ID is the recorded one. `status.teardown` lists `deleted`, the topics it left (`failed`, with why) and the signed attestation (`logweir/drills/<run_id>.cleanup.json`). The finalizer is released. |
+| `NotKept` | The run did not pass and exited: its own phase 9 tore down what it created at once (a run refused before any Job created nothing). The finalizer is released. |
+| `RemovalFailed` | The cleanup refused (exit 3, for example `CloneTargetClusterChanged`: the target answers with another cluster ID), failed three times five minutes apart, or the controller cannot settle the clone (a plan it cannot read, a recorded run Job gone before its outcome, a run that ended with no exit code). `status.clone.reason` says which. The finalizer stays. |
+
+A topic recreated by someone else since the run is never deleted: it is left
+`CloneTargetReplaced` in `status.teardown.failed`, and the clone still reaches
+`Removed`. **On `RemovalFailed`**, check the target for topics with the clone's
+prefix, delete any the run created (`status.teardown.failed` and the scorecard's
+`target.creation` name them), then remove the finalizer:
+
+```bash
+kubectl --context docker-desktop -n <ns> patch restore <name> --type=json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+
+The controller needs `patch` on `restores` for the finalizer (the chart grants
+it). **Rollback:** a controller from before this feature ignores the finalizer,
+so deleting a clone's `Restore` waits until the finalizer is removed by hand as
+above; delete the clone's topics first.
+
 ### The recovery catalog
 
 A `RecoveryCatalog` indexes one destination's durable catalog,

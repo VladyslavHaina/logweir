@@ -3,13 +3,13 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.1.0.json`](../../schemas/logweir-drill-scorecard-2.1.0.json)
+[`schemas/logweir-drill-scorecard-2.2.0.json`](../../schemas/logweir-drill-scorecard-2.2.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json)
+[`schemas/logweir-drill-scorecard-1.10.0.json`](../../schemas/logweir-drill-scorecard-1.10.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.8.0.json` and `-2.0.0.json`, is frozen beside
-them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
+schema file, `-1.0.0.json` to `-1.9.0.json`, `-2.0.0.json` and `-2.1.0.json`,
+is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
@@ -65,6 +65,7 @@ chose.
 | 2.0.0 | PROD-11.1b | [a partition subset](#format-200-a-partition-subset-prod-111b-od-9-a): `source.selection` required, with `partitions` and `engine_runs`; arms PS-1 to PS-5 | a partition-subset restore, and only it | **MAJOR**, the owner's decision OD-9 (a), 2026-10-09: two existing fields then name the selection, not the topic |
 | 1.8.0 | PROD-15.1 | [`target.original_name`](#targetoriginal_name-format-180), arms ON-1 to ON-14 | a restore under the original topic names; format 1 only | MINOR, OD-7 (a) |
 | 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
+| 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -81,6 +82,7 @@ chose.
 | 2.0.0 | **Every older reader refuses it**, never prints it `VALID`: `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1 as a newer major; a `logweir` between PROD-11.1 and PROD-11.1b as a newer major, or (a subset from the floor, with no start) at deserialisation. Upgrade the verifier before verifying subset restores. Older runners refuse a subset plan ([the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b)) | 2.0.0 documents stay verifiable with readers from PROD-11.1b on |
 | 1.8.0 | A verifier older than 1.28.0 and a `logweir` built before PROD-15.1 accept it, ignore the block and print no `original name:` line. An older runner refuses an original-name plan at phase 0 (its empty prefix maps every topic onto itself) | Documents stay valid; no older runner restores under the original names |
 | 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
+| 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -94,6 +96,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 1.7.0 | `scorecard::FORMAT_VERSION_WITH_SELECTION` and `SELECTION_SINCE_MINOR`; the frozen schema's name; `SCORECARD_SELECTION_SINCE_MINOR`; `SCORECARD_SELECTION_VERSION`; `selection_*.json` |
 | 2.0.0 | `scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR`; the justfile's `scorecard_schema_version` and the current schema's name; `SCORECARD_PARTITION_SUBSETS_VERSION` and `SCORECARD_PARTITION_SUBSETS_MAJOR`; `SCORECARD_SUBSET_VERSION`; `subsets_*.json` |
 | 1.8.0 | `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; the justfile's `scorecard_format_1_schema_version` and the schema's name; `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`; `SCORECARD_ORIGINAL_NAME_VERSION`; `original_name_*.json` |
+| 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
 
 ---
 
@@ -101,7 +104,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format: `1.0.0` to `1.9.0` (major 1) or `2.0.0` and `2.1.0` (major 2, a partition subset only). See [Versions](#versions). |
+| `format_version` | string | Semver of this format: `1.0.0` to `1.10.0` (major 1) or `2.0.0` to `2.2.0` (major 2, a partition subset only). See [Versions](#versions). |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -505,6 +508,42 @@ meant for subset restores too says so, and moves 2.x with it. The schema file
 block, itself frozen since PROD-16.2; format 1's newest, generated file is
 `-1.9.0.json` (`logweir_core::schema::scorecard_format_1_schema`).
 
+### `target.creation` (format 1.10.0 and 2.2.0)
+
+PROD-11.1a: present exactly when the run created topics, written right after
+its creation step from Logweir's own DescribeTopics read. A clone's cleanup
+deletes only these names, and only while each one's ID is the one recorded
+here; a switchover refuses a target whose ID changed since.
+
+```json
+"creation": {
+  "topics": [
+    {"name": "clone-orders", "partitions": 3, "topic_id": "Cf6zT_mcTNCoxuPmv1Ztxw"},
+    {"name": "clone-payments", "partitions": 1, "topic_id": null, "topic_id_reason": "notAuthorized"}
+  ],
+  "lineage_headers": "kept",
+  "teardown_after_seconds": 300
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `topics[].name`, `.partitions` | each topic the run created, with the partition count it was created with |
+| `topics[].topic_id` | its topic ID in Kafka's text, or `null` with `topic_id_reason` from the receipt's closed set (`noTopicId`, `notAuthorized`, `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`) |
+| `lineage_headers` | always `kept`: every restored record carries `x-original-offset` and `x-original-timestamp` |
+| `teardown_after_seconds` | a TTL clone's lifetime (`target.teardown: {ttl_seconds}`); absent on every other run |
+
+Both readers refuse (arms TCR-1 to TCR-5, the same words): the block under a
+version before 1.10.0 of format 1 or 2.2.0 of format 2; `lineage_headers` other
+than `kept`; an empty list, a name twice, a blank name or zero partitions; an ID
+that is not a topic ID (a reserved one included) or a reason outside the closed
+set, both, or neither; a lifetime outside scratch mode or outside 300 to
+2,592,000 seconds. Both print one line:
+
+```text
+target creation: this run created 2 topics: clone-orders (3 partitions, topic ID Cf6zT_mcTNCoxuPmv1Ztxw), clone-payments (1 partition, no topic ID (notAuthorized)); restored records keep their lineage headers (kept); a clone, deleted 300 seconds after the run, each topic only while its ID is the one recorded here
+```
+
 ## `approval`
 
 | Field | Type | Meaning |
@@ -715,15 +754,17 @@ Both readers print one `sample coverage:` line naming the topics; nothing is
 printed when the field is absent.
 
 **The version marks the build (review M2).** Only a build with FX-23's checks
-writes 1.6.0, and it writes 1.6.0 for EVERY sampled-lane scorecard it signs,
-whether or not it names an unsampled topic (the orchestrator's decision,
+writes 1.6.0, and it writes at least 1.6.0 for EVERY sampled-lane scorecard it
+signs (1.10.0 once the run created topics, PROD-11.1a), whether or not it names
+an unsampled topic (the orchestrator's decision,
 2026-10-08; `scorecard::format_version_with_sample`). A sampled 1.4.0 or 1.5.0
 document is byte-for-byte the shape an earlier build signed, and the scorecard
 names no `logweir` build. So a 1.6.0-or-later sampled `pass` proves those
 checks ran; an earlier one proves what it always proved. Both readers print a
 second `sample coverage:` line for every sampled `pass` saying which
 ([the guide](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
-A complete verification's scorecard is the 1.4.0 or 1.5.0 document it was.
+A complete verification's scorecard is the 1.4.0 or 1.5.0 document it was,
+raised to 1.10.0 when the run created topics.
 
 ## `target_diff`, `integrity`, `topic_parity`
 

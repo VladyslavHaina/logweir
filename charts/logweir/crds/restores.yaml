@@ -305,7 +305,7 @@ spec:
             nullable: true
             properties:
               clone:
-                description: 'PROD-11.1a: a TTL clone (`target.teardown: {ttlSeconds}` in a scratch plan) — when it expires and how its cleanup went. Absent on every other `Restore`, and on anything an older controller reconciled.'
+                description: 'A TTL clone (`target.teardown: {ttl_seconds}` in a scratch plan): when it expires and how its cleanup went. Absent on every other `Restore`, and on anything an older controller reconciled.'
                 nullable: true
                 properties:
                   attempts:

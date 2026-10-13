@@ -1042,8 +1042,8 @@ pub struct RestoreStatus {
     /// What phase 9 removed, and what it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardown: Option<Teardown>,
-    /// PROD-11.1a: a TTL clone (`target.teardown: {ttlSeconds}` in a scratch
-    /// plan) — when it expires and how its cleanup went. Absent on every
+    /// A TTL clone (`target.teardown: {ttl_seconds}` in a scratch plan): when
+    /// it expires and how its cleanup went. Absent on every
     /// other `Restore`, and on anything an older controller reconciled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone: Option<CloneStatus>,
@@ -1111,7 +1111,7 @@ pub struct RestoreCompletion {
     pub sample_window: Option<SampleWindow>,
 }
 
-/// **PROD-11.1a: a TTL clone's lifetime and cleanup.**
+/// **A TTL clone's lifetime and cleanup.**
 ///
 /// A passing clone keeps its topics until `expiresAt` (`Active`); then, or at
 /// once when the `Restore` is deleted (finalizer `logweir.dev/clone-cleanup`),
@@ -1168,7 +1168,7 @@ pub struct TeardownFailure {
 /// exact names it created, through a deleter that refuses any name outside the
 /// run's prefix. The controller writes `failed` from the runner's
 /// `teardown-failed=` line (FX-44), on a run that passed and on one that
-/// failed after its creation step. For a TTL clone (PROD-11.1a) it also
+/// failed after its creation step. For a TTL clone it also
 /// copies `deleted`, `failed` and `attestationKey` from its cleanup Job's
 /// `clone-cleanup=` line.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

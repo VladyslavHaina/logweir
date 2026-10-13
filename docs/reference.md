@@ -122,6 +122,13 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 | `target-topics-appeared={…}` then `failure-reason=TargetTopicAppeared` / `CreatedTopicsLeft` | Exit 1 from a stopped creation step, the last two lines; at most 76 KB | `status.targetTopicsAppeared`, `status.exitReason` |
 | `refusal-detail={…}` then `refusal-reason=<State>` | Exit 3, the last two lines | The `Failed` message; `status.exitReason` |
 
+### `logweir restore cleanup` (PROD-11.1a)
+
+| Line | When | Read into |
+|---|---|---|
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Every exit but 4; on a refusal it carries `"refused":"<reason>"` instead, followed by the refusal's two lines | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
+| `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
+
 The evidence keys (interface I8) are the final lines of a run that signed a
 scorecard, in that order, with nothing after them; `teardown-key=` comes before
 them, as `catalog-key=` comes before interface I7's two. A run that signed
