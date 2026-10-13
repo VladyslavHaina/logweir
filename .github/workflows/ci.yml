@@ -60,7 +60,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
-  # FX-41: the e2e suite in four shards BY TEST BINARY, each on its own
+  # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's fifth), each on its own
   # runner with its own stack, engine build and logweir build (the Rust cache
   # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
   # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
@@ -97,6 +97,11 @@ jobs:
             crates: true
             tests: [guards, consumer_group_snapshot, backup_argv, mvp_demo, empty_capture,
                     topic_ids, scram, consumer_positions, offset_side, point_set_binding]
+          # about 15; 9 (PROD-04.2's switchover rows, from the worker's
+          # single-row runs). Its own shard: in any of the four above it would
+          # bring that shard's setup and tests close to the 40-minute timeout.
+          - shard: 5
+            tests: [switchover]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`

@@ -894,7 +894,6 @@ fn restored_topic(r: &Restore, source: &str) -> String {
 
 /// **C1 (headline), C3, C8, C9, C17.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn the_headline_a_paused_consumer_resumes_at_its_record() {
     let n = nonce();
     let topic = format!("sw-orders-{n}");
@@ -1072,7 +1071,6 @@ fn the_headline_a_paused_consumer_resumes_at_its_record() {
 
 /// **C2 (4.3), C4, C5.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn live_groups_are_refused_and_a_new_run_recovers() {
     let n = nonce();
     let topic = format!("sw-live-{n}");
@@ -1245,7 +1243,6 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
 
 /// **C15.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
     let n = nonce();
     let topic = format!("sw-rb-{n}");
@@ -1357,7 +1354,6 @@ fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
 
 /// **C10.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn a_recreated_target_topic_is_refused() {
     let n = nonce();
     let topic = format!("sw-gen-{n}");
@@ -1415,7 +1411,6 @@ fn a_recreated_target_topic_is_refused() {
 
 /// **C11.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn only_a_passing_complete_restore_maps_positions() {
     let n = nonce();
     let topic = format!("sw-cov-{n}");
@@ -1514,7 +1509,6 @@ fn only_a_passing_complete_restore_maps_positions() {
 
 /// **C6.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn a_filtered_restore_maps_approximate_or_not_restored() {
     let n = nonce();
     let topic = format!("sw-win-{n}");
@@ -1637,7 +1631,6 @@ fn a_filtered_restore_maps_approximate_or_not_restored() {
 
 /// **C7.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn a_compaction_hole_maps_to_the_next_record() {
     let n = nonce();
     let topic = format!("sw-cmp-{n}");
@@ -1852,7 +1845,6 @@ fn a_hidden_target_group_is_not_visible_and_never_created() {
 
 /// **C16.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn a_transactional_archive_maps_nothing() {
     let n = nonce();
     let topic = format!("sw-txn-{n}");
@@ -2048,7 +2040,6 @@ fn review_row(
 /// **§3.8 (K1's preview): the review reads every position before the
 /// switchover, and changes nothing.**
 #[test]
-#[ignore = "needs the compose stack (4.3)"]
 fn the_review_reads_every_position_before_the_switchover() {
     use logweir_core::check_contract::{CheckCode, CheckId, CheckState, Stream};
     let n = nonce();

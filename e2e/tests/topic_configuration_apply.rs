@@ -106,12 +106,14 @@ fn stack() -> Stack {
     }
 }
 
-/// `3.9` or `4.x`, from the slot's broker line.
+/// `3.9` or `4.x`, from the slot's broker line. Unset (CI's e2e job, `just
+/// e2e-up` without `stack-env.sh --kafka`) is the compose file's default
+/// line, Kafka 4.3.1.
 fn line() -> &'static str {
     let v = std::env::var("KAFKA_VERSION").unwrap_or_default();
     if v.starts_with("3.9") {
         "3.9"
-    } else if v.starts_with("4.") {
+    } else if v.is_empty() || v.starts_with("4.") {
         "4.x"
     } else {
         panic!("KAFKA_VERSION is {v:?}: start the slot with `--kafka 3.9` or `--kafka 4.3`")
@@ -1121,7 +1123,6 @@ fn c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync() {
 
 /// **C22**: compaction after a complete verification.
 #[test]
-#[ignore = "needs the compose stack on --kafka 4.3"]
 fn c22_compaction_is_applied_after_a_complete_verification() {
     require_line("4.x");
     let s = stack();
@@ -1452,7 +1453,6 @@ fn c25_settings_never_applied_are_listed_and_a_denied_read_is_not_recorded() {
 
 /// **C26**: owners.
 #[test]
-#[ignore = "needs the compose stack on --kafka 4.3"]
 fn c26_an_owned_topic_is_exported_and_its_neighbour_transitioned() {
     require_line("4.x");
     let s = stack();
