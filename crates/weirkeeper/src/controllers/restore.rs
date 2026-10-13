@@ -6959,7 +6959,7 @@ async fn reconcile_restore_inner(
     }
     // PROD-05.2: what the configuration transition did, by the same rule.
     if let Some(configured) = topic_configuration(
-        &log,
+        log,
         topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
     ) {
         if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
