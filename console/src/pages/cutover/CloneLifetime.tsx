@@ -8,7 +8,6 @@
 // * `CloneStatus`: `status.clone` from the operation view (`OperationView.clone`) with
 //   the teardown it ends in, and `cloneListWords` for a Restores row.
 import { Alert, Content, DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm, FormGroup, FormHelperText, FormSelect, FormSelectOption, HelperText, HelperTextItem, Radio } from "@patternfly/react-core";
-import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-icon";
 import InfoIcon from "@patternfly/react-icons/dist/esm/icons/info-circle-icon";
 import type { components } from "../../api/schema";
 import { shellArg, type Clone } from "../../api/switchovers";
@@ -100,7 +99,7 @@ export function CloneLifetime({
           </FormHelperText>
           <ul className="lw-facts">
             <li>
-              <CheckIcon className="lw-tone-success" aria-hidden="true" />
+              <InfoIcon className="lw-tone-info" aria-hidden="true" />
               <span>{target} must be in the trust policy's allowed clusters for scratch restores, and not the source; the restore is refused before anything is created otherwise.</span>
             </li>
             <li>

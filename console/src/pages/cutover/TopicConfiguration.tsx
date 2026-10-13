@@ -77,7 +77,7 @@ export function TopicConfigurationChoice({
         onChange={() => onChange({ ...value, transition: "afterVerification" })}
       />
       {value.transition !== null && (
-        <div className="lw-gap-below">
+        <div className="lw-gap-below lw-nested">
           <Checkbox
             id="topic-configuration-transition"
             isChecked={value.transition === "afterVerification"}
@@ -281,7 +281,7 @@ function TopicBlock({ t }: { t: TopicPreview }) {
         {d.not_recorded && <StatusLabel tone="warning" text="Not recorded" title="the backup could not read this topic's configuration" />}
       </div>
       {d.not_recorded && (
-        <Alert isInline isPlain variant="warning" title="The backup did not record this topic's configuration">
+        <Alert isInline isPlain className="lw-gap-below" variant="warning" title="The backup did not record this topic's configuration">
           It is created with Logweir's settings only, and its configuration is NOT RECORDED.
         </Alert>
       )}
@@ -339,12 +339,12 @@ function TopicBlock({ t }: { t: TopicPreview }) {
         )}
       </DescriptionList>
       {t.atCreation && t.atCreation !== VALIDATED && (
-        <Alert isInline isPlain variant="danger" title={`The target refuses the creation set (${t.atCreation})`}>
+        <Alert isInline isPlain className="lw-gap-top" variant="danger" title={`The target refuses the creation set (${t.atCreation})`}>
           The restore is refused before any topic is created (TopicConfigRefusedByTarget).
         </Alert>
       )}
       {transition && !owned && t.afterVerification && t.afterVerification !== VALIDATED && (
-        <Alert isInline isPlain variant="warning" title={`The target refuses the set applied after verification (${t.afterVerification})`}>
+        <Alert isInline isPlain className="lw-gap-top" variant="warning" title={`The target refuses the set applied after verification (${t.afterVerification})`}>
           The transition would fail for this topic; its whole desired set is then left for you to apply.
         </Alert>
       )}
@@ -352,6 +352,7 @@ function TopicBlock({ t }: { t: TopicPreview }) {
         <Alert
           isInline
           isPlain
+          className="lw-gap-top"
           variant={t.retention.deletesEveryRestoredRecord ? "danger" : "info"}
           title={
             t.retention.deletesEveryRestoredRecord
@@ -413,11 +414,11 @@ export function TopicConfigurationResult({ tc }: { tc: TopicConfiguration }) {
       <Table aria-label="Topic configuration before and after verification" variant="compact" gridBreakPoint="grid-md" className="lw-kv-table">
         <Thead>
           <Tr>
-            <Th width={20}>Topic</Th>
+            <Th width={15}>Topic</Th>
             <Th width={15}>Outcome</Th>
-            <Th width={15}>Replication</Th>
-            <Th width={25}>While restoring</Th>
-            <Th width={25}>Now</Th>
+            <Th width={10}>Replication</Th>
+            <Th width={30}>While restoring</Th>
+            <Th width={30}>Now</Th>
           </Tr>
         </Thead>
         <Tbody>

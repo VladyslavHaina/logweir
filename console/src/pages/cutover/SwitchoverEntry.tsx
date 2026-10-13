@@ -36,7 +36,7 @@ export function SwitchoverEntry({ restore: r, canCreate = true }: { restore: Res
         <Content component="p" className={refusal ? "lw-subtle" : undefined}>
           {refusal
             ? `${refusal.body}`
-            : "The complete verification mapped each captured consumer group's position onto the restored topics. Review them and move the stopped groups here."}
+            : "Verified completely, so the consumer groups its recovery point captured, if any, have positions mapped onto the restored topics. Review them, then move the stopped groups here."}
           {refusal && <span className="lw-reason"> {refusal.word}</span>}
         </Content>
         {mine.length > 0 && (

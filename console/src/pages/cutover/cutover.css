@@ -9,3 +9,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Options that belong to the radio above them. */
+.lw-nested {
+  margin-inline-start: var(--pf-t--global--spacer--lg);
+}
