@@ -194,6 +194,7 @@ fn approval_object(approval_bytes: &str, sidecar_bytes: &str, kind: SubjectKind)
                     SubjectKind::Restore => "r1".to_string(),
                     SubjectKind::Backup => "b1".to_string(),
                     SubjectKind::RehearsalSchedule => "rs1".to_string(),
+                    SubjectKind::Switchover => "sw1".to_string(),
                 },
             },
             plan_hash: PLAN_HASH.to_string(),

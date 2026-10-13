@@ -1014,6 +1014,8 @@ const TEARDOWN: &str = "application/vnd.logweir.drill-teardown+json";
 const APPROVAL: &str = "application/vnd.logweir.drill-approval+json";
 /// See [`BACKUP_RECEIPT`].
 const CATALOG_POINT: &str = "application/vnd.logweir.catalog-point+json";
+/// See [`BACKUP_RECEIPT`] (PROD-04.2).
+const SWITCHOVER_RECORD: &str = "application/vnd.logweir.switchover-record+json";
 
 /// The document's own latest pre-signature timestamp.
 ///
@@ -1024,6 +1026,7 @@ const CATALOG_POINT: &str = "application/vnd.logweir.catalog-point+json";
 /// | drill teardown | `deleted_at` |
 /// | drill approval | `approved_at` |
 /// | catalog point record | `recorded_at` |
+/// | switchover record | `finished_at` |
 ///
 /// `None` for an unknown media type, a missing field or a value that is not an
 /// RFC 3339 instant — and under [`decide`]'s fail-closed rule a `None` refuses
@@ -1077,6 +1080,7 @@ pub fn read_claimed_signing_time(
         TEARDOWN => json.get("deleted_at"),
         APPROVAL => json.get("approved_at"),
         CATALOG_POINT => json.get("recorded_at"),
+        SWITCHOVER_RECORD => json.get("finished_at"),
         _ => return Err(ClaimAbsence::UnknownPayloadType),
     };
     let text = value

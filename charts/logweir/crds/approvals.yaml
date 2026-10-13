@@ -64,11 +64,12 @@ spec:
                 description: The object this approval is about. Comes from the route the wizard navigated to; it is part of the bytes the approval binds, so an `Approval` whose `planHash` matches a `Restore` is never accepted for anything else.
                 properties:
                   kind:
-                    description: '`Restore` or `Backup`. Comes from the route the wizard navigated to.'
+                    description: '`Restore`, `Backup` or `Switchover`. Comes from the route the wizard navigated to.'
                     enum:
                     - Restore
                     - Backup
                     - RehearsalSchedule
+                    - Switchover
                     type: string
                   name:
                     description: The subject's `metadata.name`, in this namespace.
@@ -210,6 +211,7 @@ spec:
                     - Restore
                     - Backup
                     - RehearsalSchedule
+                    - Switchover
                     type: string
                   name:
                     description: The referent's name at verification time.

@@ -41,7 +41,10 @@ use crate::check::{catalogue, Deadline, Emission};
 #[must_use]
 pub fn connection_ids(operation: CheckOperation) -> (CheckId, Option<CheckId>) {
     match operation {
-        CheckOperation::Restore => (CheckId::TargetAuthenticated, None),
+        // A switchover's review dials the restore's TARGET.
+        CheckOperation::Restore | CheckOperation::Switchover => {
+            (CheckId::TargetAuthenticated, None)
+        }
         // A SOURCE-CONNECTION CHECK NAMES NO TOPIC, so it has no topic row —
         // the same rule `kinds::source_connection` states at length, kept here
         // too because this table is what any caller reads to find out which

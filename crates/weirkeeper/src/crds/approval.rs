@@ -13,11 +13,10 @@ use super::{Condition, Time};
 
 /// What an `Approval` can be about.
 ///
-/// `Switchover` is tag 2 and is **not** in this enum, so an `Approval` cannot
-/// name one: the subject kind is part of the bytes the approval binds, and
-/// without that an approved restore in a namespace would double as "a valid
-/// signature by a rostered key exists here", which any approved restore
-/// already produced.
+/// The subject kind is part of the bytes the approval binds (check 8), so an
+/// approval for a `Restore` never authorises a `Switchover` and back
+/// (`SubjectKindMismatch`): without that an approved restore in a namespace
+/// would double as "a valid signature by a rostered key exists here".
 ///
 /// THE THIRD VALUE IS KEPT ONLY SO OLD OBJECTS DECODE. `RehearsalSchedule`
 /// (ADR 0008 Amendment G) carried a STANDING rehearsal authorization.
@@ -34,6 +33,8 @@ pub enum SubjectKind {
     /// A `RehearsalSchedule`: a standing rehearsal authorization, withdrawn
     /// in v1 and refused by name.
     RehearsalSchedule,
+    /// A `Switchover` (PROD-04.2): applying reviewed consumer positions.
+    Switchover,
 }
 
 impl SubjectKind {
@@ -60,6 +61,7 @@ impl SubjectKind {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
             Self::RehearsalSchedule => "RehearsalSchedule",
+            Self::Switchover => "Switchover",
         }
     }
 }
@@ -74,7 +76,8 @@ impl std::fmt::Display for SubjectKind {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubjectRef {
-    /// `Restore` or `Backup`. Comes from the route the wizard navigated to.
+    /// `Restore`, `Backup` or `Switchover`. Comes from the route the wizard
+    /// navigated to.
     pub kind: SubjectKind,
     /// The subject's `metadata.name`, in this namespace.
     pub name: String,

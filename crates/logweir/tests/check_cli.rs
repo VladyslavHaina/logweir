@@ -2771,6 +2771,95 @@ fn the_marker_handle_is_built_only_through_the_principal_selection() {
 
 // 4a. `sourceConnection`: the source-connectivity kind.
 
+/// A `switchoverReadiness` plan (PROD-04.2 §3.8).
+fn switchover_review_plan() -> CheckPlan {
+    use logweir_core::execution_contract::{EvidenceKey, EvidenceKeyring};
+    use logweir_core::trust::{KeyState, KeyUsage, TrustedKey};
+    plan_of(CheckRequest::SwitchoverReadiness(Box::new(
+        logweir_core::check_contract::SwitchoverReadinessRequest {
+            restore_name: "incident".to_string(),
+            restore_uid: "r-uid".to_string(),
+            restore_plan_sha256: logweir_core::ids::sha256_prefixed(b"restore plan"),
+            scorecard_key: "logweir/drills/run-1.json".to_string(),
+            target: connection(),
+            evidence: destination(),
+            keyring: EvidenceKeyring {
+                format_version: "1.0.0".to_string(),
+                keys: vec![EvidenceKey {
+                    public_key_pem: "-----BEGIN PUBLIC KEY-----\nAA==\n-----END PUBLIC KEY-----\n"
+                        .to_string(),
+                    trust: TrustedKey {
+                        key_id: "a".repeat(64),
+                        principal_id: "install:x".to_string(),
+                        usages: vec![KeyUsage::EvidenceSigning],
+                        not_before: now(),
+                        not_after: now() + chrono::Duration::days(30),
+                        state: KeyState::Active,
+                        retired_at: None,
+                        revoked_at: None,
+                        revocation_reason: None,
+                        revocation_effective_from: None,
+                    },
+                }],
+            },
+            groups: Vec::new(),
+        },
+    )))
+}
+
+/// **PROD-04.2 §3.8: a switchover review emits its four rows on every
+/// path**, through the whole frame path and the controller's own decoder: a
+/// restore whose scorecard is not in the evidence store is `notReady
+/// RestoreEvidenceRefused`, and the target and groups rows are `unknown`,
+/// blocked, never absent (an absent blocking row would read "the check Job
+/// did not report this row"). The controller's `job_rows` mirror is held to
+/// this literal (`the_expected_rows_are_the_rows_the_runner_emits`).
+#[test]
+fn a_switchover_review_reports_every_row_it_owns() {
+    let m = mount(&switchover_review_plan());
+    let run = drive(&m, &FakeWiring::default());
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = [
+        "runner.contract",
+        "switchover.evidence",
+        "switchover.target",
+        "switchover.groups",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want, "a switchover review emits its four rows");
+    let evidence = run.row(CheckId::SwitchoverEvidence);
+    assert_eq!(evidence.state, CheckState::NotReady);
+    assert_eq!(evidence.code, CheckCode::RestoreEvidenceRefused);
+    for id in [CheckId::SwitchoverTarget, CheckId::SwitchoverGroups] {
+        assert_eq!(run.row(id).code, CheckCode::BlockedByPrerequisite, "{id}");
+    }
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+    // THE EVIDENCE IS READ WITH THE `evidenceRead` GRANT AND NO OTHER: that
+    // role refused, the row carries the store's own code, and nothing else is
+    // asked.
+    let denied = drive(
+        &m,
+        &FakeWiring::default().role_fails(
+            DestinationRole::EvidenceRead,
+            CheckCode::AccessDenied,
+            "denied",
+        ),
+    );
+    let evidence = denied.row(CheckId::SwitchoverEvidence);
+    assert_eq!(
+        (evidence.state, evidence.code),
+        (CheckState::NotReady, CheckCode::AccessDenied)
+    );
+    assert_eq!(
+        denied.row(CheckId::SwitchoverTarget).code,
+        CheckCode::BlockedByPrerequisite
+    );
+}
+
 fn source_connection_plan() -> CheckPlan {
     plan_of(CheckRequest::SourceConnection(
         logweir_core::check_contract::SourceConnectionRequest {
@@ -7054,6 +7143,10 @@ fn every_failing_code_the_runner_emits_has_a_remedy() {
         CheckCode::EngineProtocolSupported,
         CheckCode::TopicConfigsReadable,
         CheckCode::GroupTypesListed,
+        // `switchoverReadiness`'s ready codes (PROD-04.2 §3.8).
+        CheckCode::RestoreEvidenceVerified,
+        CheckCode::TargetIsTheRestores,
+        CheckCode::GroupsAdmissible,
         CheckCode::CheckContractMismatch,
         CheckCode::ResultUnreadable,
         CheckCode::StoreErrorUnclassified,

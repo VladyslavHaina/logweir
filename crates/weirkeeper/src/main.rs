@@ -447,6 +447,14 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::retention_policy::controller(client.clone(), runner.clone()),
         ));
+        // The `Switchover` reconciler (PROD-04.2) creates one runner Job per
+        // admitted object, with the restore's target and evidence access; it
+        // reads no archive and never dials Kafka.
+        controllers.push(Box::pin(weirkeeper::controllers::switchover::controller(
+            client.clone(),
+            runner.clone(),
+            approval_policies.clone(),
+        )));
 
         let registered = controllers.len();
         info!(

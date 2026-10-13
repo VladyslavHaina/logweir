@@ -1,4 +1,4 @@
-//! The seven plan kinds, and the seam they are driven through.
+//! The eight plan kinds, and the seam they are driven through.
 //!
 //! # `Wiring` is why none of this needs a socket to be tested
 //!
@@ -27,6 +27,7 @@ pub mod inventory;
 pub mod readiness;
 pub mod restore;
 pub mod source_connection;
+pub mod switchover;
 
 use std::time::Duration;
 
@@ -117,6 +118,27 @@ pub trait Wiring {
     /// process's environment. A non-UTF-8 value reads as absent.
     fn env(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
+    }
+
+    /// PROD-04.2 §3.8: the restore's target as a switchover reads it —
+    /// classification, committed positions, cluster and topic IDs — through
+    /// Logweir's own client. A PROVIDED method dialling the real client, so
+    /// every existing fake keeps compiling and a `switchoverReadiness` unit
+    /// row overrides it with an in-memory target. The readiness kind never
+    /// calls the handle's commit.
+    ///
+    /// # Errors
+    /// [`CheckFailure`] in the closed Kafka vocabulary.
+    fn switchover_target(
+        &self,
+        plan: &ConnectionPlan,
+        _budget: Duration,
+    ) -> Result<Box<dyn crate::switchover::target::SwitchoverTarget>, CheckFailure> {
+        let servers = crate::check::kafka::bootstrap(plan)?;
+        let auth = crate::check::kafka::auth_config(plan)?;
+        let reader = logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&servers, auth)
+            .map_err(|e| CheckFailure::new(CheckCode::BrokerUnreachable, e.to_string()))?;
+        Ok(Box::new(reader))
     }
 }
 
@@ -500,6 +522,10 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              own tooling. A group this endpoint cannot type is recorded as excluded, never as \
              captured and never as offset 0."
         }
+        // -- switchoverReadiness (PROD-04.2 §3.8) --------------------------
+        CheckCode::RestoreEvidenceRefused => switchover::EVIDENCE_REMEDY,
+        CheckCode::TargetNotTheRestores => switchover::TARGET_REMEDY,
+        CheckCode::GroupNotAdmissible => switchover::GROUPS_REMEDY,
         CheckCode::MarkerTopicMissing => {
             "The scratch target's marker topic does not exist. Create it, or point the restore \
              at a cluster that carries one."
@@ -623,5 +649,6 @@ pub fn run_kind_with(loaded: &Loaded, deadline: Deadline, wiring: &dyn Wiring) -
         CheckRequest::EvidenceFetch(r) => evidence::run(r, wiring, deadline),
         CheckRequest::CatalogSync(r) => catalog_sync::run(r, wiring, deadline),
         CheckRequest::SourceConnection(r) => source_connection::run(r, wiring, deadline),
+        CheckRequest::SwitchoverReadiness(r) => switchover::run(r, wiring, deadline),
     }
 }

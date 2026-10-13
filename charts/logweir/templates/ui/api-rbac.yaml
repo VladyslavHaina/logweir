@@ -90,6 +90,11 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
+  # PROD-04.2: a switchover is read and created through the API; never
+  # patched or deleted.
+  - apiGroups: ["logweir.dev"]
+    resources: ["switchovers"]
+    verbs: ["get", "list", "create"]
   # Read only.
   - apiGroups: ["logweir.dev"]
     resources:

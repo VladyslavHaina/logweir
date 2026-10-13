@@ -179,12 +179,14 @@ fn main() -> std::process::ExitCode {
             public_key,
             payload_type,
             consumer_positions,
-        }) => verify::run_with(
+            positions_mapping,
+        }) => verify::run_with_mapping(
             &scorecard,
             &signature,
             &public_key,
             &payload_type,
             consumer_positions.as_deref(),
+            positions_mapping.as_deref(),
         ),
         // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
         // same `RunArgs` through the same `From` impl and call
@@ -205,6 +207,75 @@ fn main() -> std::process::ExitCode {
         cli::Command::Restore(cli::RestoreCmd::Cleanup(a)) => {
             logweir::restore_cleanup::run(a.into())
         }
+        // PROD-04.2: the Switchover's plan builders and its Job.
+        cli::Command::Switchover(cli::SwitchoverCmd::Plan {
+            scorecard,
+            positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) => match logweir::switchover::plan(&logweir::switchover::PlanArgs {
+            scorecard,
+            mapping: positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) {
+            Ok(summary) => {
+                print!("{summary}");
+                logweir::exit::ExitCode::Ok
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                logweir::exit::ExitCode::Operational
+            }
+        },
+        cli::Command::Switchover(cli::SwitchoverCmd::RollbackPlan { record, out }) => {
+            match logweir::switchover::rollback_plan(&logweir::switchover::RollbackPlanArgs {
+                record,
+                out,
+            }) {
+                Ok(summary) => {
+                    print!("{summary}");
+                    logweir::exit::ExitCode::Ok
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    logweir::exit::ExitCode::Operational
+                }
+            }
+        }
+        cli::Command::Switchover(cli::SwitchoverCmd::Run {
+            plan,
+            restore_plan,
+            approval,
+            approver_key,
+            evidence_keys,
+            signing_key,
+            scorecard_key,
+            namespace,
+            name,
+            uid,
+            store_contract_version,
+            approval_policy,
+            confirmation_key,
+        }) => logweir::switchover::run(&logweir::switchover::RunArgs {
+            plan,
+            restore_plan,
+            approval,
+            approver_key,
+            evidence_keys,
+            signing_key,
+            scorecard_key,
+            namespace,
+            name,
+            uid,
+            store_contract_version,
+            approval_policy,
+            confirmation_key,
+        }),
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error
         // (`non-exhaustive patterns`), not a runtime stub.

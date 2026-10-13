@@ -712,6 +712,7 @@ fn policy_refusal(
         Err(refusal) => return Some(mismatch(refusal)),
     };
     let expected = ExpectedSubject {
+        kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace,
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),

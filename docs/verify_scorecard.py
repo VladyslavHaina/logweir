@@ -629,7 +629,13 @@ FORMAT_VERSION = "1.4.0"
 # `desired_state` exactly when a topic is exported, named by sha256; and no
 # secret with a value. They fire only on a document carrying the block (OD-7
 # (a)). The shape layer refuses a block that is not the writer's shape.
-SCRIPT_VERSION = "1.32.0"
+#
+# 1.33.0 (PROD-04.2) knows scorecard 1.12.0 and 2.4.0's
+# `integrity.verification.positions_mapping` (arms PM-1 to PM-5, in position
+# before `redactions`), `--positions-mapping <file>` (arms PMD-1 to PMD-7,
+# `check_positions_mapping_document`), and the switchover record's payload
+# type, verified signature-only like the teardown attestation.
+SCRIPT_VERSION = "1.33.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -738,6 +744,30 @@ CONSOLE_MAX_COMPARABLE_LEN = 255
 # (arm US-1, FX-23) -- `UNSAMPLED_TOPICS_SINCE_MINOR` in
 # `crates/logweir-core/src/scorecard.rs`, which it must equal
 # (`docs/test_verify_scorecard.py::test_the_unsampled_topics_minor_is_the_rust_readers`).
+# PROD-04.2: the first minors of formats 1 and 2 that define
+# `integrity.verification.positions_mapping` -- `POSITIONS_MAPPING_SINCE_MINOR`
+# and `POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs` -- and the closed sets and bounds of
+# `crates/logweir-core/src/positions_mapping.rs`.
+SCORECARD_POSITIONS_MAPPING_SINCE_MINOR = 12
+SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2 = 4
+PM_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+PM_RULE = "firstTargetRecordAtOrAboveLineage"
+PM_OMITTED_REASONS = ("tooLarge", "writeFailed")
+PM_SELECTION_EXCLUDED = "selectionExcluded"
+PM_NOT_CAPTURED = "NotCaptured"
+PM_PARTITION_NOT_RESTORED = "PartitionNotRestored"
+PM_UNAVAILABLE_REASONS = (
+    "TransactionalArchive",
+    "ArchiveGap",
+    "PartitionNotRestored",
+    "NoArchivedData",
+    "BeforeLogStart",
+    "BeforeArchive",
+    "BeyondArchive",
+    "PositionBeyondEnd",
+)
+
 SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR = 6
 
 # The first minor of SCORECARD format 1 that defines `integrity.verification`
@@ -1185,6 +1215,7 @@ RECEIPT_CONFIG_SOURCES = (
 # verdict, and it says so in as many words.
 PAYLOAD_TYPES = {
     "scorecard": PAYLOAD_TYPE,
+    "switchover-record": "application/vnd.logweir.switchover-record+json;version=1.0.0",
     "backup-receipt": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
     "catalog-point": "application/vnd.logweir.catalog-point+json;version=1.0.0",
     "receipt": "application/vnd.logweir.drill-put-receipt+json;version=1.0.0",
@@ -1388,6 +1419,303 @@ def _defines_topic_configuration(version) -> bool:
     if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
         return minor >= SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2
     return False
+
+
+def _defines_positions_mapping(version) -> bool:
+    """Whether a document of `version` defines
+    `integrity.verification.positions_mapping` (arm PM-1): a 1.x document from
+    1.12.0 on, a 2.x document from 2.4.0 on -- the twin of
+    `logweir_core::scorecard::defines_positions_mapping`."""
+    major, minor = _major(version), _minor(version)
+    if minor is None:
+        return False
+    if major == 1:
+        return minor >= SCORECARD_POSITIONS_MAPPING_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _pm_u64(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x < 2 ** 64
+
+
+def _positions_mapping_shape_ok(block) -> bool:
+    """`integrity.verification.positions_mapping` has the shape
+    `PositionsMapping` deserialises (PROD-04.2): `document` absent, null or an
+    object of a string `key`, a string `sha256` and a u64 `bytes`; `omitted`
+    absent, null or a string; `counts`, three u64; `groups`, a u32."""
+    if not isinstance(block, dict):
+        return False
+    document = block.get("document")
+    if document is not None and not (
+        isinstance(document, dict)
+        and isinstance(document.get("key"), str)
+        and isinstance(document.get("sha256"), str)
+        and _pm_u64(document.get("bytes"))
+    ):
+        return False
+    omitted = block.get("omitted")
+    if omitted is not None and not isinstance(omitted, str):
+        return False
+    counts = block.get("counts")
+    if not isinstance(counts, dict) or not all(
+        _pm_u64(counts.get(k)) for k in ("exact", "approximate", "unavailable")
+    ):
+        return False
+    groups = block.get("groups")
+    return _pm_u64(groups) and groups < 2 ** 32
+
+
+def _positions_mapping_fault(doc, version) -> str:
+    """Arms PM-1 to PM-5, `logweir_core::positions_mapping::check_block`'s
+    twin, word for word and in order; "" when the block holds or is absent."""
+    verification = doc["integrity"].get("verification")
+    if not isinstance(verification, dict):
+        return ""
+    pm = verification.get("positions_mapping")
+    if pm is None:
+        return ""
+    # PM-1. Defined from 1.12.0 of format 1 and 2.4.0 of format 2.
+    if not _defines_positions_mapping(version):
+        return (
+            "integrity.verification.positions_mapping is present but the format_version does "
+            "not define it: the block is defined from "
+            f"1.{SCORECARD_POSITIONS_MAPPING_SINCE_MINOR}.0 of format 1 and from "
+            f"2.{SCORECARD_POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2}.0 of format 2"
+        )
+    # PM-2. Only over a passing complete verification (08.1-A4).
+    complete = verification.get("complete")
+    covered = isinstance(complete, dict) and complete.get("covered") is True
+    if not (doc.get("outcome") == "pass" and verification.get("coverage") == "complete"
+            and covered):
+        return (
+            "integrity.verification.positions_mapping is present but the run is not a "
+            "passing complete verification; positions are mapped only when outcome is "
+            "pass, coverage is complete and complete.covered is true"
+        )
+    # PM-3. A document, or the reason there is none: exactly one.
+    document, omitted = pm.get("document"), pm.get("omitted")
+    if not ((document is not None and omitted is None)
+            or (document is None and omitted in PM_OMITTED_REASONS)):
+        return (
+            "integrity.verification.positions_mapping names exactly one of document "
+            "and omitted, and omitted is tooLarge or writeFailed"
+        )
+    # PM-4. The document is this run's, and its digest and length are sound.
+    if document is not None and (
+        document["key"] != f"logweir/drills/{doc['run_id']}.positions-mapping.json"
+        or not _is_sha256_prefixed(document["sha256"])
+        or document["bytes"] == 0
+        or document["bytes"] > PM_MAX_DOCUMENT_BYTES
+    ):
+        return (
+            "integrity.verification.positions_mapping.document is not this run's mapping: "
+            "its key is logweir/drills/<run_id>.positions-mapping.json, its sha256 is "
+            f"sha256:<64 lowercase hex> and its length is 1 to {PM_MAX_DOCUMENT_BYTES} bytes"
+        )
+    # PM-5. It maps at least one group.
+    if pm["groups"] == 0:
+        return (
+            "integrity.verification.positions_mapping.groups is 0; a mapping is written only "
+            "for a point that selected consumer groups"
+        )
+    return ""
+
+
+def _pm_is_unavailable_reason(reason) -> bool:
+    if not isinstance(reason, str):
+        return False
+    if reason in PM_UNAVAILABLE_REASONS:
+        return True
+    prefix = PM_NOT_CAPTURED + ": "
+    return reason.startswith(prefix) and len(reason) > len(prefix)
+
+
+def _pm_int(x, low, high) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and low <= x < high
+
+
+def _positions_mapping_document_shape(pm) -> str:
+    """The mapping document has the shape `MappingDocument` deserialises; the
+    Rust reader refuses any other at parse, so a shape fault is the same
+    verdict in other words."""
+    if not isinstance(pm, dict):
+        return "it does not parse as a positions-mapping document: not an object"
+    for name in ("format_version", "run_id", "point_id", "positions_sha256", "rule"):
+        if not isinstance(pm.get(name), str):
+            return f"it does not parse as a positions-mapping document: {name} is not a string"
+    groups = pm.get("groups")
+    if not isinstance(groups, dict):
+        return "it does not parse as a positions-mapping document: groups is not an object"
+    for g in groups.values():
+        if not (
+            isinstance(g, dict)
+            and isinstance(g.get("active_at_capture"), bool)
+            and isinstance(g.get("entries"), list)
+            and _pm_int(g.get("no_committed_position"), 0, 2 ** 32)
+            and (g.get("reason") is None or isinstance(g.get("reason"), str))
+            and (g.get("group_type") is None or isinstance(g.get("group_type"), str))
+        ):
+            return "it does not parse as a positions-mapping document: a group is malformed"
+        for e in g["entries"]:
+            if not (
+                isinstance(e, dict)
+                and isinstance(e.get("topic"), str)
+                and _pm_int(e.get("partition"), 0, 2 ** 32)
+                and isinstance(e.get("class"), str)
+                and (e.get("position") is None or _pm_int(e.get("position"), -(2 ** 63), 2 ** 63))
+                and (e.get("target_topic") is None or isinstance(e.get("target_topic"), str))
+                and (e.get("target_offset") is None
+                     or _pm_int(e.get("target_offset"), -(2 ** 63), 2 ** 63))
+                and (e.get("skipped") is None or _pm_u64(e.get("skipped")))
+                and (e.get("reason") is None or isinstance(e.get("reason"), str))
+            ):
+                return "it does not parse as a positions-mapping document: an entry is malformed"
+    return ""
+
+
+def check_positions_mapping_document(doc, raw, pm) -> str:
+    """Arms PMD-1 to PMD-7, `logweir_core::positions_mapping::validate_document`'s
+    twin, word for word and in order: the mapping document `--positions-mapping`
+    names, against the VERIFIED scorecard's block and its verified partitions."""
+    verification = doc["integrity"].get("verification") or {}
+    block = verification.get("positions_mapping")
+    if block is None:
+        return (
+            "the scorecard carries no positions_mapping block, so it binds no mapping"
+        )
+    run_id = doc["run_id"]
+    # PMD-1. The block names a document.
+    d = block.get("document")
+    if d is None:
+        return (
+            "the scorecard's positions_mapping block names no document (omitted), so there is "
+            "no mapping to verify"
+        )
+    # PMD-2. The exact bytes the scorecard's signature covers.
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if digest != d["sha256"] or len(raw) != d["bytes"]:
+        return (
+            f"the positions-mapping document is {digest} over {len(raw)} bytes but the "
+            f"scorecard binds {d['sha256']} over {d['bytes']} bytes: it is not the mapping "
+            "this scorecard signed"
+        )
+    # PMD-3. Format 1, this run's, by the one rule.
+    if pm["format_version"].split(".")[0] != "1" or pm["run_id"] != run_id or pm["rule"] != PM_RULE:
+        return (
+            f"the positions-mapping document is not a format 1 mapping of run "
+            f"{_rust_debug_str(run_id)} by rule {PM_RULE}"
+        )
+    # PMD-4. The block's counts are what the document says.
+    counts = {"exact": 0, "approximate": 0, "unavailable": 0}
+    for g in pm["groups"].values():
+        for e in g["entries"]:
+            if e["class"] in ("exact", "approximate"):
+                counts[e["class"]] += 1
+            else:
+                counts["unavailable"] += 1
+    if counts != {k: block["counts"][k] for k in counts} or len(pm["groups"]) != block["groups"]:
+        return (
+            "the positions-mapping document's groups and class counts are not the ones the "
+            "scorecard's block records"
+        )
+    verified = {}
+    complete = verification.get("complete")
+    if isinstance(complete, dict):
+        for p in complete.get("partitions", []):
+            verified[(p["topic"], p["partition"])] = p["target_topic"]
+    for gid in sorted(pm["groups"]):
+        g = pm["groups"][gid]
+        shown = _rust_debug_str(gid)
+        # PMD-7. A group the backup did not capture maps nothing.
+        reason = g.get("reason")
+        if reason is not None and (
+            not _pm_is_unavailable_reason(reason)
+            or not reason.startswith(PM_NOT_CAPTURED)
+            or g["entries"]
+        ):
+            return (
+                f"group {shown} carries a reason, so it was not captured: its reason is "
+                "\"NotCaptured: <why>\" and it has no entry"
+            )
+        for e in g["entries"]:
+            where = f"group {shown} entry {_rust_debug_str(e['topic'])}/{e['partition']}"
+            # PMD-5. The class, the offset, the count and the reason fit.
+            cls, offset, skipped, why = (
+                e["class"], e.get("target_offset"), e.get("skipped"), e.get("reason"))
+            if cls == "exact":
+                fits = offset is not None and offset >= 0 and skipped is None and why is None
+            elif cls == "approximate":
+                fits = (offset is not None and offset >= 0 and skipped is not None
+                        and skipped >= 1 and why == PM_SELECTION_EXCLUDED)
+            elif cls == "unavailable":
+                fits = offset is None and skipped is None and _pm_is_unavailable_reason(why)
+            else:
+                fits = False
+            if not fits:
+                return (
+                    f"{where}: an exact entry carries a target offset and nothing else, an "
+                    "approximate one a target offset, skipped of at least 1 and reason "
+                    "selectionExcluded, and an unavailable one only a reason from the closed set"
+                )
+            # PMD-6. A mapped entry lands on a partition this scorecard
+            # verified, in its restored topic; one said not restored was not.
+            at = verified.get((e["topic"], e["partition"]))
+            if cls == "unavailable":
+                landed = why != PM_PARTITION_NOT_RESTORED or at is None
+            else:
+                landed = at is not None and e.get("target_topic") == at
+            if not landed:
+                return (
+                    f"{where}: a mapped entry names a partition the scorecard verified and its "
+                    "restored topic, and one marked PartitionNotRestored names none"
+                )
+    return ""
+
+
+def _positions_mapping_lines(block, verified=None):
+    """The lines `crates/logweir/src/verify.rs::positions_mapping_lines`
+    prints, in the same order and words."""
+    if block is None:
+        return []
+    c = block["counts"]
+    lines = [
+        f"positions_mapping: {block['groups']} group(s); {c['exact']} exact, "
+        f"{c['approximate']} approximate, {c['unavailable']} unavailable"
+    ]
+    d, omitted = block.get("document"), block.get("omitted")
+    if d is not None:
+        lines.append(
+            f"positions_mapping: document {d['key']} ({d['sha256']}, {d['bytes']} bytes) "
+            + ("verified against this scorecard" if verified is not None else
+               "not checked: pass --positions-mapping <file> to verify it and print each "
+               "position")
+        )
+    elif omitted is not None:
+        lines.append(f"positions_mapping: no document ({omitted})")
+    if verified is None:
+        return lines
+    for gid in sorted(verified["groups"]):
+        g = verified["groups"][gid]
+        shown = _rust_debug_str(gid)
+        if g.get("reason") is not None:
+            lines.append(f"positions_mapping[{shown}]: {g['reason']}")
+            continue
+        for e in g["entries"]:
+            at = f"positions_mapping[{shown}][{_rust_debug_str(e['topic'])}:{e['partition']}]"
+            to = f"{e.get('target_topic') or '-'}:{e.get('target_offset') or 0}"
+            position = "-" if e.get("position") is None else str(e["position"])
+            if e["class"] == "exact":
+                lines.append(f"{at}: position {position} -> {to}, exact")
+            elif e["class"] == "approximate":
+                lines.append(
+                    f"{at}: position {position} -> {to}, approximate ({e.get('skipped') or 0} "
+                    "skipped)"
+                )
+            else:
+                lines.append(f"{at}: position {position}, unavailable ({e.get('reason') or '-'})")
+    return lines
 
 
 def _days_from_civil(year: int, month: int, day: int) -> int:
@@ -2511,6 +2839,14 @@ def check_invariants(doc) -> str:
             "integrity.verification is not an object of the shape the writer gives it: "
             "four strings, two arrays of offset ranges and an optional complete block"
         )
+    # PROD-04.2: the positions mapping block, refused at DESERIALISATION over
+    # there when it is not the writer's shape.
+    if isinstance(verification, dict) and verification.get("positions_mapping") is not None \
+            and not _positions_mapping_shape_ok(verification["positions_mapping"]):
+        return (
+            "integrity.verification.positions_mapping is not an object of the shape the "
+            "writer gives it"
+        )
 
     # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
     # finding F1). `isinstance(v, int)` mirrors serde's TYPE and not `u64`'s
@@ -3528,6 +3864,12 @@ def check_invariants(doc) -> str:
                 "target.topic_configuration lists a secret with a value, or another entry "
                 "without one"
             )
+
+    # PM-1 to PM-5 (PROD-04.2), mirrored in this position (after CA-8, before
+    # `redactions`) from `logweir_core::positions_mapping::check_block`.
+    pm_fault = _positions_mapping_fault(doc, version)
+    if pm_fault:
+        return pm_fault
 
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
@@ -5619,7 +5961,17 @@ def main(
     pubkey_path: str,
     payload_type_wanted: str = PAYLOAD_TYPE,
     positions_path=None,
+    mapping_path=None,
 ) -> int:
+    # PROD-04.2: the positions-mapping document is checked against the restore
+    # scorecard that binds it, and against nothing else.
+    if mapping_path is not None and payload_type_wanted != PAYLOAD_TYPE:
+        print(
+            "INVALID: --positions-mapping applies to --payload-type scorecard only: the "
+            "mapping is checked against the restore scorecard that binds it",
+            file=sys.stderr,
+        )
+        return 1
     # PROD-04.1: the positions document is checked against the backup receipt
     # that binds it, and against nothing else.
     if positions_path is not None and payload_type_wanted != PAYLOAD_TYPES["backup-receipt"]:
@@ -5799,6 +6151,34 @@ def main(
             print(f"INVALID: APPROVAL CLAIM NOT VERIFIED: {detail}", file=sys.stderr)
             return 1
 
+        # PROD-04.2: the positions-mapping document, only when given, against
+        # the scorecard that was just verified -- its exact bytes.
+        verified_mapping = None
+        if mapping_path is not None:
+            try:
+                raw = open(mapping_path, "rb").read()
+            except OSError as e:
+                print(
+                    f"INVALID: cannot read positions-mapping document {mapping_path!r}: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                pm = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(
+                    f"INVALID: the positions-mapping document is not valid JSON: {e}",
+                    file=sys.stderr,
+                )
+                return 1
+            problem = _positions_mapping_document_shape(pm) or check_positions_mapping_document(
+                doc, raw, pm
+            )
+            if problem:
+                print(f"INVALID: {problem}", file=sys.stderr)
+                return 1
+            verified_mapping = pm
+
         # Every field below is reachable: `check_invariants` returned "", which
         # required each of these blocks to be present and well-formed.
         integrity = doc["integrity"]
@@ -5865,6 +6245,14 @@ def main(
         # (`crates/logweir/src/verify.rs::verification_lines`).
         for line in _verification_lines(doc["integrity"].get("verification")):
             print(f"       coverage: {line}")
+        # PROD-04.2: the positions mapping, when the run wrote one, and each
+        # mapped position when `--positions-mapping` gave the document and it
+        # held (`crates/logweir/src/verify.rs::positions_mapping_lines`).
+        verification = doc["integrity"].get("verification") or {}
+        for line in _positions_mapping_lines(
+            verification.get("positions_mapping"), verified_mapping
+        ):
+            print(f"       mapping:  {line}")
         # FX-23: what a sampled pass proves at this document's version (review
         # M2), and the topics the cap left out. The same lines `logweir drill
         # verify` prints (`crates/logweir/src/verify.rs::sampled_pass_lines`,
@@ -5953,6 +6341,9 @@ def main(
             "target.creation only from 1.10.0 of format 1 or 2.2.0 of format 2, lineage headers "
             "kept, each created topic once with a partition and its ID or the reason there is "
             "none, and a lifetime only on a scratch clone, from 300 to 2592000 seconds; "
+            "integrity.verification.positions_mapping only from 1.12.0 of format 1 or 2.4.0 of "
+            "format 2, only over a passing complete verification, a document or the reason "
+            "there is none, the run's own key, and at least one group; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -6210,6 +6601,7 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     wanted = PAYLOAD_TYPE
     positions = None
+    mapping = None
     rest = []
     i = 0
     while i < len(argv):
@@ -6225,6 +6617,14 @@ if __name__ == "__main__":
         if a.startswith("--consumer-positions="):
             positions = a.split("=", 1)[1]
             i += 1
+            continue
+        # PROD-04.2: the positions-mapping document a restore scorecard binds.
+        if a == "--positions-mapping":
+            if i + 1 >= len(argv):
+                print("INVALID: --positions-mapping needs a value", file=sys.stderr)
+                sys.exit(1)
+            mapping = argv[i + 1]
+            i += 2
             continue
         if a == "--payload-type":
             if i + 1 >= len(argv):
@@ -6252,8 +6652,9 @@ if __name__ == "__main__":
             f"usage: {sys.argv[0]} "
             "[--payload-type " + "|".join(sorted(PAYLOAD_TYPES)) + "] "
             "[--consumer-positions <positions.json>] "
+            "[--positions-mapping <positions-mapping.json>] "
             "<document.json> <document.sig> <public.pem>",
             file=sys.stderr,
         )
         sys.exit(1)
-    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions))
+    sys.exit(main(rest[0], rest[1], rest[2], wanted, positions, mapping))

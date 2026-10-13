@@ -231,8 +231,8 @@ pub enum TargetMode {
     /// anywhere (Global Constraint 19).
     Scratch,
     /// A real restore into a new topic beside the existing one. Nothing is
-    /// overwritten and nothing is deleted; repointing consumers is tag 2's
-    /// `Switchover` and is not in this group.
+    /// overwritten and nothing is deleted; moving consumer groups onto it is a
+    /// separate, separately approved `Switchover` (PROD-04.2).
     NewTopic,
 }
 
@@ -1012,8 +1012,8 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_topics: Option<Vec<String>>,
     /// The source topics the new ones were restored from. Nothing here was
-    /// written to, in any tag: retiring an old topic is tag 2's `Switchover`
-    /// and is validated against this list.
+    /// written to, in any tag; a `Switchover` moves consumer groups onto the
+    /// new topics and retires or deletes no topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_topics: Option<Vec<String>>,
     /// The Job that ran, or is running, this restore.

@@ -41,7 +41,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'One bounded readiness observation for a Backup, a Restore, a BackupDestination''s grants or a source connection on its own, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.'
+        description: 'One bounded readiness observation for a Backup, a Restore, a BackupDestination''s grants, a source connection on its own, or a Switchover''s review of a verified Restore''s consumer positions, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.'
         properties:
           spec:
             description: '`Preflight.spec`.'
@@ -158,6 +158,7 @@ spec:
                     - Restore
                     - DestinationAccess
                     - SourceConnection
+                    - Switchover
                     type: string
                   restore:
                     description: 'The restore block, for `operation: Restore`.'
@@ -309,6 +310,48 @@ spec:
                     required:
                     - connectionRef
                     type: object
+                  switchover:
+                    description: 'The switchover block, for `operation: Switchover` (PROD-04.2).'
+                    nullable: true
+                    properties:
+                      groups:
+                        description: 'The groups to read; absent: every group the restore''s mapping maps.'
+                        items:
+                          description: One group a switchover review reads.
+                          properties:
+                            source:
+                              description: The captured (source) group, as the restore's mapping names it.
+                              maxLength: 255
+                              minLength: 1
+                              type: string
+                            target:
+                              description: 'The target group a switchover would commit for; absent: the same id.'
+                              maxLength: 255
+                              minLength: 1
+                              nullable: true
+                              type: string
+                          required:
+                          - source
+                          type: object
+                        maxItems: 100
+                        nullable: true
+                        type: array
+                      restoreRef:
+                        description: The verified `Restore` whose mapping a switchover would apply. Its UID, when given, must be the object's.
+                        properties:
+                          name:
+                            description: The referenced object's name, in this namespace.
+                            type: string
+                          uid:
+                            description: Its UID, when the requester knew it.
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - restoreRef
+                    type: object
                   timeoutSeconds:
                     default: 120
                     description: The in-Job budget.
@@ -323,7 +366,7 @@ spec:
                 - message: spec.request is immutable; create a new Preflight
                   rule: self == oldSelf
                 - message: exactly the block matching spec.request.operation may be set
-                  rule: 'self.operation == ''Backup'' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == ''Restore'' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == ''DestinationAccess'' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection)) : (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess))'
+                  rule: 'self.operation == ''Backup'' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == ''Restore'' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == ''DestinationAccess'' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == ''SourceConnection'' ? (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.switchover)) : (has(self.switchover) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection))'
             required:
             - request
             type: object

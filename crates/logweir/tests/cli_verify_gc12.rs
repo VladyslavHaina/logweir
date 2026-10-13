@@ -65,7 +65,7 @@ fn drill_verify_refuses_a_higher_major_format_version_even_when_well_signed() {
 
 // ---------------------------------------------------------------- the backup receipt schema
 // Global Constraint 13, as REVISED: `logweir schema` accepts `scorecard` AND
-// `backup-receipt` in tag 1, and `switchover-record` exits 1 naming tag 2.
+// `backup-receipt` in tag 1; PROD-04.2 adds `positions-mapping` and `switchover-record`.
 //
 // Both assertions read the exit code directly from `Command::output()`'s
 // status (Global Constraint 11 / STANDING RULE 20 — never through a pipe).
@@ -106,29 +106,32 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
     );
 }
 
-/// `logweir schema switchover-record` exits 1 and names **tag 2**.
-///
-/// Without its own arm it would fall through the catch-all, whose "unknown
-/// schema `switchover-record`" reads as "there is no such thing" to an
-/// operator who has read tag 2's design; every other deferred schema names
-/// the thing that introduces it.
+/// **PROD-04.2:** `logweir schema switchover-record` and `positions-mapping`
+/// print the published schemas byte for byte (tag 2 introduced them).
 #[test]
-fn schema_rejects_switchover_record_in_tag_1() {
-    let out = bin()
-        .args(["schema", "switchover-record"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "`logweir schema switchover-record` must exit 1, stdout: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-    let err = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        err.contains("introduced by tag 2 (Switchover)"),
-        "the refusal must name the tag that introduces it, not merely refuse; the \
-         catch-all message names no tag, which is the whole reason this arm exists. \
-         got: {err}"
-    );
+fn schema_prints_the_switchover_documents() {
+    for (name, file) in [
+        (
+            "switchover-record",
+            "schemas/logweir-switchover-record-1.0.0.json",
+        ),
+        (
+            "positions-mapping",
+            "schemas/logweir-positions-mapping-1.0.0.json",
+        ),
+    ] {
+        let out = bin().args(["schema", name]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "logweir schema {name}");
+        let checked_in = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(file),
+        )
+        .expect("read the schema");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&checked_in),
+            "{file} is stale: run `just schema`"
+        );
+    }
 }

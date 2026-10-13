@@ -31,6 +31,11 @@ pub enum Command {
     /// it per record, and emit a signed scorecard.
     #[command(subcommand)]
     Restore(RestoreCmd),
+    /// Apply reviewed consumer positions from a verified restore to stopped
+    /// groups on its target (PROD-04.2): build a plan, build a rollback plan,
+    /// or run one (the `Switchover` Job's entry point).
+    #[command(subcommand)]
+    Switchover(SwitchoverCmd),
     /// Back up a source cluster into an archive, from a Logweir spec.
     #[command(subcommand)]
     Backup(BackupCmd),
@@ -468,6 +473,13 @@ pub enum DrillCmd {
         /// and the document is reported as not checked.
         #[arg(long)]
         consumer_positions: Option<PathBuf>,
+        /// **PROD-04.2.** With `--payload-type scorecard`: the
+        /// positions-mapping document a restore's scorecard binds
+        /// (`<run_id>.positions-mapping.json`, beside it in the evidence
+        /// store), checked against the verified scorecard by digest and by
+        /// its own arms; each mapped position is then printed.
+        #[arg(long)]
+        positions_mapping: Option<PathBuf>,
     },
 }
 
@@ -854,6 +866,81 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
+    /// PROD-04.2: an approval for a `Switchover`; `--spec` is its plan.
+    #[value(name = "Switchover")]
+    Switchover,
+}
+
+/// `logweir switchover` (PROD-04.2).
+#[derive(Subcommand)]
+pub enum SwitchoverCmd {
+    /// Build a switchover plan from a verified restore's scorecard and its
+    /// positions mapping (both local copies). Runs nothing.
+    Plan {
+        /// The restore's signed scorecard.
+        #[arg(long)]
+        scorecard: PathBuf,
+        /// The positions-mapping document the scorecard binds.
+        #[arg(long)]
+        positions_mapping: PathBuf,
+        /// The `Restore`'s name and UID.
+        #[arg(long)]
+        restore_name: String,
+        #[arg(long)]
+        restore_uid: String,
+        /// A captured group to switch over, `source` or `source=target`;
+        /// repeatable. None: every group with a mapped position.
+        #[arg(long = "group")]
+        groups: Vec<String>,
+        #[arg(long, default_value = "switchover-plan.yaml")]
+        out: PathBuf,
+    },
+    /// Build the plan that reverses a switchover record: the priors back,
+    /// expecting the applied positions. Runs nothing.
+    RollbackPlan {
+        /// The switchover record (`logweir/switchovers/<run_id>.record.json`).
+        #[arg(long)]
+        record: PathBuf,
+        #[arg(long, default_value = "switchover-rollback-plan.yaml")]
+        out: PathBuf,
+    },
+    /// Apply an approved plan (the `Switchover` Job).
+    Run {
+        #[arg(long)]
+        plan: PathBuf,
+        /// The restore's plan (`Restore.spec.planBytes`).
+        #[arg(long)]
+        restore_plan: PathBuf,
+        /// The approval document; its `.sig` sidecar beside it.
+        #[arg(long)]
+        approval: PathBuf,
+        #[arg(long)]
+        approver_key: PathBuf,
+        /// The evidence-signing keyring the restore's scorecard is verified
+        /// under.
+        #[arg(long)]
+        evidence_keys: PathBuf,
+        /// The key the switchover record is signed with.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// The restore's scorecard key in its evidence store.
+        #[arg(long)]
+        scorecard_key: String,
+        #[arg(long, default_value = "")]
+        namespace: String,
+        #[arg(long, default_value = "")]
+        name: String,
+        #[arg(long, default_value = "")]
+        uid: String,
+        #[arg(long)]
+        store_contract_version: Option<String>,
+        /// For an authorization document v2: the bound policy's snapshot and
+        /// the console's confirmation key.
+        #[arg(long)]
+        approval_policy: Option<PathBuf>,
+        #[arg(long)]
+        confirmation_key: Option<PathBuf>,
+    },
 }
 
 /// `--approval-subject`'s one value (PROD-15.1). Kebab-case on the command
@@ -882,6 +969,7 @@ impl SubjectKindArg {
         match self {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
+            Self::Switchover => logweir_core::spec::SUBJECT_KIND_SWITCHOVER,
         }
     }
 }

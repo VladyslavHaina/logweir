@@ -783,6 +783,54 @@ pub fn format_version_with_topic_configuration<'a>(
     }
 }
 
+/// The first minor of scorecard format 1 that defines
+/// `integrity.verification.positions_mapping` (arm PM-1). A renumber changes
+/// this and [`FORMAT_VERSION_WITH_POSITIONS_MAPPING`] together, and
+/// `docs/verify_scorecard.py`'s `SCORECARD_POSITIONS_MAPPING_SINCE_MINOR`
+/// follows it.
+pub const POSITIONS_MAPPING_SINCE_MINOR: u64 = 12;
+
+/// The first minor of scorecard format 2 that defines the same block.
+pub const POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2: u64 = 4;
+
+/// **PROD-04.2.** The `format_version` of a format-1 scorecard that carries
+/// `integrity.verification.positions_mapping`. MINOR under OD-7 (a): arms PM-1
+/// to PM-5 read only the new block. Written only for such a run
+/// ([`format_version_with_positions_mapping`]).
+pub const FORMAT_VERSION_WITH_POSITIONS_MAPPING: &str = "1.12.0";
+
+/// The same, for a partition-subset restore (format 2).
+pub const FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING: &str = "2.4.0";
+
+/// Whether a document of `format_version` defines
+/// `integrity.verification.positions_mapping` (arm PM-1).
+#[must_use]
+pub fn defines_positions_mapping(format_version: &str) -> bool {
+    let Some(minor) = minor_version(format_version) else {
+        return false;
+    };
+    match major_version(format_version) {
+        Some(1) => minor >= POSITIONS_MAPPING_SINCE_MINOR,
+        Some(PARTITION_SUBSETS_MAJOR) => minor >= POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2,
+        _ => false,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its positions
+/// mapping is known: raised to the version that defines the block when it
+/// carries one, else `current`. Monotonic within the major.
+#[must_use]
+pub fn format_version_with_positions_mapping(current: &str, mapped: bool) -> &str {
+    if !mapped {
+        return current;
+    }
+    if major_version(current) == Some(PARTITION_SUBSETS_MAJOR) {
+        newer_format_version(current, FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING)
+    } else {
+        newer_format_version(current, FORMAT_VERSION_WITH_POSITIONS_MAPPING)
+    }
+}
+
 /// One of the two people of a console approval, as the console attested
 /// them: an identity provider's issuer and its subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1546,6 +1594,14 @@ pub struct Verification {
     /// Present exactly when `coverage` is `complete` (arm IV-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complete: Option<CompleteVerification>,
+    /// **Format 1.12.0, and 2.4.0 (PROD-04.2).** The consumer positions the
+    /// run mapped onto the target, bound by digest: see
+    /// [`crate::positions_mapping::PositionsMapping`]. Present only over a
+    /// passing complete verification of a point that captured consumer groups
+    /// (arms PM-1 to PM-5). Nested optional; `skip_serializing_if`, so every
+    /// other document keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_mapping: Option<crate::positions_mapping::PositionsMapping>,
 }
 
 /// One inclusive source offset range of one partition, as the manifest
@@ -3406,6 +3462,25 @@ impl Scorecard {
                 }
             }
         }
+        // `integrity.verification.positions_mapping` (PROD-04.2): arms PM-1 to
+        // PM-5, in `crate::positions_mapping::check_block`. They fire only on a
+        // document carrying the block. Mirrored in this position (before
+        // `redactions`) by `docs/verify_scorecard.py::_positions_mapping_fault`.
+        if let Some(v) = &self.integrity.verification {
+            if let Some(pm) = &v.positions_mapping {
+                crate::positions_mapping::check_block(
+                    pm,
+                    &crate::positions_mapping::BlockContext {
+                        run_id: &self.run_id,
+                        defined: defines_positions_mapping(&self.format_version),
+                        passed: self.outcome == Outcome::Pass,
+                        complete: v.coverage == COVERAGE_COMPLETE,
+                        covered: v.complete.as_ref().is_some_and(|c| c.covered),
+                    },
+                )
+                .map_err(InvariantError)?;
+            }
+        }
         // `docs/formats/drill-scorecard.md` states that `redactions` is "Always
         // `[]` in v0.1" as a PROPERTY OF THE FORMAT: a non-empty list would
         // tell an auditor that a field they read first had been removed, and
@@ -4965,6 +5040,7 @@ mod tests {
 
     fn sampled_verification() -> Verification {
         Verification {
+            positions_mapping: None,
             coverage: COVERAGE_SAMPLED.into(),
             comparison_basis: COMPARISON_BASIS_ARCHIVE.into(),
             header_order: HEADER_ORDER_NOT_VERIFIED.into(),
@@ -5009,6 +5085,7 @@ mod tests {
     fn complete_verification() -> Verification {
         let partitions = vec![partition(0, exact(5)), partition(1, exact(7))];
         Verification {
+            positions_mapping: None,
             coverage: COVERAGE_COMPLETE.into(),
             header_order: HEADER_ORDER_VERIFIED.into(),
             complete: Some(CompleteVerification {

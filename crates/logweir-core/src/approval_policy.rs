@@ -1687,6 +1687,10 @@ pub fn numeric_version(version: &str) -> Option<(u64, u64, u64)> {
 /// What a boundary knows about the subject independently of the document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpectedSubject {
+    /// The subject's kind: [`SUBJECT_KIND_RESTORE`], or `Switchover`
+    /// (PROD-04.2; `crate::spec::SUBJECT_KIND_SWITCHOVER`). The document's
+    /// `subject.kind` must equal it.
+    pub kind: String,
     /// The subject's namespace.
     pub namespace: String,
     /// The subject's name.
@@ -1854,7 +1858,7 @@ fn check_document_binding(
     let subject = &doc.subject;
     let mismatch = if subject.api_version != SUBJECT_API_VERSION {
         Some(format!("apiVersion {}", subject.api_version))
-    } else if subject.kind != SUBJECT_KIND_RESTORE {
+    } else if subject.kind != expected.kind {
         Some(format!("kind {}", subject.kind))
     } else if subject.namespace != expected.namespace {
         Some(format!("namespace {}", subject.namespace))
@@ -1867,9 +1871,9 @@ fn check_document_binding(
     };
     if let Some(what) = mismatch {
         return Err(AuthorizationRefusal::SubjectMismatch(format!(
-            "the authorization document names {what}, but the subject is Restore {}/{} UID {}; a \
+            "the authorization document names {what}, but the subject is {} {}/{} UID {}; a \
              document authorises exactly one object",
-            expected.namespace, expected.name, expected.uid
+            expected.kind, expected.namespace, expected.name, expected.uid
         )));
     }
     if doc.plan_hash != expected.plan_hash {
@@ -2543,6 +2547,7 @@ namespaces:
 
     fn expected() -> ExpectedSubject {
         ExpectedSubject {
+            kind: SUBJECT_KIND_RESTORE.to_string(),
             namespace: "team-a".into(),
             name: "rst-1".into(),
             uid: "uid-1".into(),

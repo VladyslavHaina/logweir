@@ -6,7 +6,7 @@ use logweir_core::spec::TargetMode;
 use logweir_evidence::{
     keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
     PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_CATALOG_POINT, PAYLOAD_TYPE_PUT_RECEIPT,
-    PAYLOAD_TYPE_SCORECARD, PAYLOAD_TYPE_TEARDOWN,
+    PAYLOAD_TYPE_SCORECARD, PAYLOAD_TYPE_SWITCHOVER_RECORD, PAYLOAD_TYPE_TEARDOWN,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,11 +38,12 @@ use std::path::Path;
 /// (D3 §5.2 rule 3), and an exit 0 here must not be read as "this point is
 /// available".
 pub fn resolve_payload_type(name: &str) -> Result<&'static str, String> {
-    const TYPES: [(&str, &str); 5] = [
+    const TYPES: [(&str, &str); 6] = [
         ("backup-receipt", PAYLOAD_TYPE_BACKUP_RECEIPT),
         ("catalog-point", PAYLOAD_TYPE_CATALOG_POINT),
         ("receipt", PAYLOAD_TYPE_PUT_RECEIPT),
         ("scorecard", PAYLOAD_TYPE_SCORECARD),
+        ("switchover-record", PAYLOAD_TYPE_SWITCHOVER_RECORD),
         ("teardown", PAYLOAD_TYPE_TEARDOWN),
     ];
     // The short-name arm.
@@ -425,6 +426,74 @@ pub fn verification_lines(v: Option<&logweir_core::scorecard::Verification>) -> 
             v.gaps.len(),
             v.pruned.len()
         ));
+    }
+    lines
+}
+
+/// **PROD-04.2.** The lines both readers print for a scorecard's
+/// `integrity.verification.positions_mapping`: the counts, the document and
+/// whether it was checked, and — when `--positions-mapping` gave the document
+/// and it held (arms PMD-1 to PMD-7) — one line per group or entry.
+/// `docs/verify_scorecard.py::_positions_mapping_lines` prints the same lines.
+#[must_use]
+pub fn positions_mapping_lines(
+    block: Option<&logweir_core::positions_mapping::PositionsMapping>,
+    verified: Option<&logweir_core::positions_mapping::MappingDocument>,
+) -> Vec<String> {
+    use logweir_core::positions_mapping as pm;
+    let Some(b) = block else {
+        return Vec::new();
+    };
+    let c = &b.counts;
+    let mut lines = vec![format!(
+        "positions_mapping: {} group(s); {} exact, {} approximate, {} unavailable",
+        b.groups, c.exact, c.approximate, c.unavailable
+    )];
+    match (&b.document, &b.omitted) {
+        (Some(d), _) => lines.push(format!(
+            "positions_mapping: document {} ({}, {} bytes) {}",
+            d.key,
+            d.sha256,
+            d.bytes,
+            if verified.is_some() {
+                "verified against this scorecard"
+            } else {
+                "not checked: pass --positions-mapping <file> to verify it and print each position"
+            }
+        )),
+        (None, Some(o)) => lines.push(format!("positions_mapping: no document ({o})")),
+        (None, None) => {}
+    }
+    let Some(doc) = verified else {
+        return lines;
+    };
+    for (id, g) in &doc.groups {
+        if let Some(r) = &g.reason {
+            lines.push(format!("positions_mapping[{id:?}]: {r}"));
+            continue;
+        }
+        for e in &g.entries {
+            let at = format!("positions_mapping[{id:?}][{:?}:{}]", e.topic, e.partition);
+            let to = format!(
+                "{}:{}",
+                e.target_topic.as_deref().unwrap_or("-"),
+                e.target_offset.unwrap_or_default()
+            );
+            let position = e
+                .position
+                .map_or_else(|| "-".to_string(), |p| p.to_string());
+            lines.push(match e.class.as_str() {
+                pm::EXACT => format!("{at}: position {position} -> {to}, exact"),
+                pm::APPROXIMATE => format!(
+                    "{at}: position {position} -> {to}, approximate ({} skipped)",
+                    e.skipped.unwrap_or_default()
+                ),
+                _ => format!(
+                    "{at}: position {position}, unavailable ({})",
+                    e.reason.as_deref().unwrap_or("-")
+                ),
+            });
+        }
     }
     lines
 }
@@ -1035,6 +1104,11 @@ pub fn verify_scorecard(
     verify_scorecard_with(scorecard, signature, public_key, payload_type, None)
 }
 
+/// The refusal prefix of a positions-mapping document that does not hold
+/// against its scorecard (PROD-04.2).
+pub const MAPPING_REFUSED: &str = "SIGNATURE VALID but the positions-mapping document is \
+                                   refused: ";
+
 /// The refusal prefix of a positions document that does not hold against its
 /// receipt. `two_reader_parity_positions.rs` strips it, as `INVALID: ` is
 /// stripped from the second reader.
@@ -1068,6 +1142,21 @@ pub fn verify_scorecard_with(
             return Err(ExitCode::Operational);
         }
     };
+    verify_bytes_with(&bytes, signature, public_key, payload_type, positions)
+}
+
+/// [`verify_scorecard_with`] over bytes ALREADY READ, once: everything it
+/// decides is about exactly these bytes, so a caller that checks something
+/// else against the same document (`--positions-mapping`) holds the bytes
+/// that were verified and never reads the file a second time.
+fn verify_bytes_with(
+    bytes: &[u8],
+    signature: &Path,
+    public_key: &Path,
+    payload_type: &str,
+    positions: Option<&Path>,
+) -> Result<Verdict, ExitCode> {
+    let bytes = bytes.to_vec();
     let sidecar: Sidecar = match std::fs::read(signature)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -1343,6 +1432,13 @@ pub fn verify_scorecard_with(
 }
 
 fn print_report(r: &VerifyReport) {
+    print_report_with(r, None);
+}
+
+fn print_report_with(
+    r: &VerifyReport,
+    mapping: Option<&logweir_core::positions_mapping::MappingDocument>,
+) {
     println!("signature: VALID  key {}", r.key_id);
     println!("run_id:    {}", r.run_id);
     // The WIRE spelling, like every other surface. This line was the FOURTH
@@ -1395,6 +1491,15 @@ fn print_report(r: &VerifyReport) {
     // PROD-08.1: nor a verdict over every record when it covered a sample.
     for line in verification_lines(r.verification.as_deref()) {
         println!("coverage:  {line}");
+    }
+    // PROD-04.2: the positions mapping, when the run wrote one.
+    for line in positions_mapping_lines(
+        r.verification
+            .as_deref()
+            .and_then(|v| v.positions_mapping.as_ref()),
+        mapping,
+    ) {
+        println!("mapping:   {line}");
     }
     // FX-23: what a sampled pass proves at this document's version (review
     // M2), and the topics the cap left out.
@@ -1597,6 +1702,116 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
     run_with(scorecard, signature, public_key, payload_type, None)
 }
 
+/// **PROD-04.2.** The positions-mapping document `--positions-mapping` names,
+/// checked against a VERIFIED scorecard's block (arms PMD-1 to PMD-7): its
+/// exact bytes, never a re-serialisation. `Err` is the exit code, the refusal
+/// already printed.
+fn checked_mapping(
+    scorecard_bytes: &[u8],
+    mapping: &Path,
+) -> Result<logweir_core::positions_mapping::MappingDocument, ExitCode> {
+    use logweir_core::positions_mapping as pm;
+    // The scorecard is the one whose signature and arms were just verified:
+    // its bytes are handed down, never read from disk again (a file swapped
+    // between the two reads could otherwise bind the mapping to bytes nobody
+    // verified). The mapping file is read once too, and the digest is over
+    // the bytes that are parsed.
+    let Ok(sc) = serde_json::from_slice::<Scorecard>(scorecard_bytes) else {
+        eprintln!("the verified scorecard does not parse as a scorecard");
+        return Err(ExitCode::Operational);
+    };
+    let bytes = match std::fs::read(mapping) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", mapping.display());
+            return Err(ExitCode::Operational);
+        }
+    };
+    let v = sc.integrity.verification.as_ref();
+    let Some(block) = v.and_then(|v| v.positions_mapping.as_ref()) else {
+        eprintln!(
+            "{MAPPING_REFUSED}the scorecard carries no positions_mapping block, so it binds no \
+             mapping"
+        );
+        return Err(ExitCode::SigningOrLock);
+    };
+    let doc: pm::MappingDocument = match serde_json::from_slice(&bytes) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{MAPPING_REFUSED}it does not parse as a positions-mapping document: {e}");
+            return Err(ExitCode::SigningOrLock);
+        }
+    };
+    let verified: pm::VerifiedPartitions = v
+        .and_then(|v| v.complete.as_ref())
+        .map(|c| {
+            c.partitions
+                .iter()
+                .map(|p| {
+                    (
+                        (p.topic.clone(), i64::from(p.partition)),
+                        p.target_topic.clone(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(e) = pm::validate_document(block, &sc.run_id, &verified, &bytes, &doc) {
+        eprintln!("{MAPPING_REFUSED}{e}");
+        return Err(ExitCode::SigningOrLock);
+    }
+    Ok(doc)
+}
+
+/// [`run_with`], with the positions-mapping document a restore's scorecard
+/// binds (`--positions-mapping`, PROD-04.2).
+pub fn run_with_mapping(
+    scorecard: &Path,
+    signature: &Path,
+    public_key: &Path,
+    payload_type: &str,
+    positions: Option<&Path>,
+    mapping: Option<&Path>,
+) -> ExitCode {
+    let Some(mapping) = mapping else {
+        return run_with(scorecard, signature, public_key, payload_type, positions);
+    };
+    let wanted = match resolve_payload_type(payload_type) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::Operational;
+        }
+    };
+    if wanted != PAYLOAD_TYPE_SCORECARD {
+        eprintln!(
+            "--positions-mapping applies to --payload-type scorecard only: the mapping is \
+             checked against the restore scorecard that binds it"
+        );
+        return ExitCode::Operational;
+    }
+    // ONE read of the scorecard: the bytes verified below are the bytes the
+    // mapping is checked against.
+    let bytes = match std::fs::read(scorecard) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", scorecard.display());
+            return ExitCode::Operational;
+        }
+    };
+    match verify_bytes_with(&bytes, signature, public_key, wanted, positions) {
+        Ok(Verdict::Scorecard(r)) => match checked_mapping(&bytes, mapping) {
+            Ok(doc) => {
+                print_report_with(&r, Some(&doc));
+                ExitCode::Ok
+            }
+            Err(c) => c,
+        },
+        Ok(_) => ExitCode::Operational,
+        Err(c) => c,
+    }
+}
+
 /// [`run`], with the positions document a backup receipt binds
 /// (`--consumer-positions`, PROD-04.1).
 pub fn run_with(
@@ -1674,5 +1889,46 @@ pub fn run_with(
             ExitCode::Ok
         }
         Err(c) => c,
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    fn corpus(name: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/invariants")
+                .join(name),
+        )
+        .expect("a corpus file")
+    }
+
+    /// The security review's TOCTOU finding, closed BY CONSTRUCTION: the
+    /// mapping is checked against the bytes the signature was verified over,
+    /// handed down, and `run_with_mapping` reads the scorecard file exactly
+    /// once. A scorecard swapped on disk after verification cannot reach the
+    /// mapping check, which has no path to read it from; the verdict follows
+    /// the bytes it is given.
+    #[test]
+    fn the_mapping_is_checked_against_the_verified_bytes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mapping = dir.path().join("m.json");
+        std::fs::write(&mapping, corpus("positions_mapping_accepted.mapping.json")).unwrap();
+        let verified = corpus("positions_mapping_accepted.json");
+        assert!(checked_mapping(&verified, &mapping).is_ok());
+        // Another scorecard's bytes (another document key): refused.
+        let other = corpus("positions_mapping_pmd3_another_run.json");
+        assert!(checked_mapping(&other, &mapping).is_err());
+        // One read of the scorecard path in the function that verifies.
+        let src = include_str!("verify.rs");
+        let body = src
+            .split("pub fn run_with_mapping(")
+            .nth(1)
+            .and_then(|b| b.split("\n}\n").next())
+            .expect("run_with_mapping's body");
+        assert_eq!(body.matches("std::fs::read(scorecard)").count(), 1);
+        assert!(body.contains("checked_mapping(&bytes, mapping)"));
     }
 }

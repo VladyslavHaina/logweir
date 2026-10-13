@@ -107,6 +107,7 @@ use std::collections::BTreeMap;
 
 /// The complete lane (`sample.coverage: complete`).
 pub mod complete;
+pub mod positions;
 
 #[derive(Debug)]
 pub struct VerifyOutcome {
@@ -1557,6 +1558,44 @@ pub fn run_after_restore(
     complete_max_records: Option<u64>,
     engine_report: &EngineReport,
 ) -> Result<VerifyOutcome, DrillError> {
+    run_after_restore_with_probes(
+        engine,
+        reader,
+        store,
+        facts,
+        sel,
+        mapping,
+        plan,
+        coverage,
+        mode,
+        verify,
+        complete_max_records,
+        engine_report,
+        None,
+    )
+    .map(|(outcome, _)| outcome)
+}
+
+/// [`run_after_restore`], also probing the bound point's captured positions
+/// in the complete lane's scan (PROD-04.2): the scans come back beside the
+/// outcome, empty on the sampled lane and for an unprobed partition.
+#[allow(clippy::too_many_arguments)]
+pub fn run_after_restore_with_probes(
+    engine: &dyn DataEngine,
+    reader: &dyn ClusterReader,
+    store: &Store,
+    facts: &BackupSetFacts,
+    sel: &[SampleSelection],
+    mapping: &BTreeMap<String, String>,
+    plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
+    mode: TargetMode,
+    verify: Coverage,
+    complete_max_records: Option<u64>,
+    engine_report: &EngineReport,
+    probes: Option<&positions::Probes>,
+) -> Result<(VerifyOutcome, positions::Scans), DrillError> {
+    let mut scans = positions::Scans::new();
     // Zero selections scanned is never a positive result. This one is
     // operational, a plan that named no partition to sample; `roll_up`
     // refuses an empty ledger independently anyway.
@@ -1620,6 +1659,7 @@ pub fn run_after_restore(
             }
             let (gaps, pruned) = complete::ranges_for(facts, &selected);
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Sampled.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 // The sampled lane reconciles `record_fingerprint`, which
@@ -1641,8 +1681,11 @@ pub fn run_after_restore(
                 mapping,
                 plan,
                 complete_max_records,
+                probes,
             )?;
+            scans = out.scans;
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Complete.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 header_order: HEADER_ORDER_VERIFIED.to_string(),
@@ -1691,13 +1734,16 @@ pub fn run_after_restore(
     // the source configuration was captured, and labelled by the run's mode.
     let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage, mode)?;
 
-    Ok(VerifyOutcome {
-        integrity,
-        topic_parity,
-        records_restored,
-        newest_restored_ts_ms: newest_ts(reader, mapping)?,
-        verified_at: chrono::Utc::now(),
-    })
+    Ok((
+        VerifyOutcome {
+            integrity,
+            topic_parity,
+            records_restored,
+            newest_restored_ts_ms: newest_ts(reader, mapping)?,
+            verified_at: chrono::Utc::now(),
+        },
+        scans,
+    ))
 }
 
 #[cfg(test)]

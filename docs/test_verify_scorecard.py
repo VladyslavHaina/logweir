@@ -378,17 +378,19 @@ def test_the_five_payload_types_match_the_rust_constants():
     # PLAT-15.1's catalog point is declared in the same file, for the same
     # reason the backup receipt is: the control plane links the verify-only
     # crate and never the signer.
+    # PROD-04.2 adds the switchover record, verified signature-only.
     types = (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, CATALOG_POINT_TYPE,
-             RECEIPT_TYPE, TEARDOWN_TYPE)
+             RECEIPT_TYPE, TEARDOWN_TYPE,
+             "application/vnd.logweir.switchover-record+json;version=1.0.0")
     rust = (ROOT / "crates" / "logweir-verify" / "src" / "lib.rs").read_text()
     for t in types:
         assert t in rust, f"{t} is not declared in logweir-verify/src/lib.rs"
     py = VERIFIER.read_text()
     for t in types:
         assert t in py, f"{t} is not declared in verify_scorecard.py"
-    # …and the map really has FIVE entries, so a sixth type added to the Rust
+    # …and the map really has SIX entries, so a seventh type added to the Rust
     # crate and forgotten here is not silently covered by the loop above.
-    assert len(_verifier_module().PAYLOAD_TYPES) == 5
+    assert len(_verifier_module().PAYLOAD_TYPES) == 6
 
 
 # ------------------------------------------------------------------ PAE lengths
@@ -905,7 +907,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.32.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.33.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -1001,6 +1003,12 @@ def test_the_version_line_names_the_current_invariant_set():
             "approval inside the request's window, approval.approver the approver's principal, "
             "approval.key_id the console's key, approval.approved_at the instant of the "
             "approval, and target.original_name.approval_mode consoleApproval exactly beside it"
+        ) in r.stdout, r.stdout
+        # 1.33.0's addition (PROD-04.2): `integrity.verification.positions_mapping`.
+        assert (
+            "integrity.verification.positions_mapping only from 1.12.0 of format 1 or 2.4.0 of "
+            "format 2, only over a passing complete verification, a document or the reason "
+            "there is none, the run's own key, and at least one group"
         ) in r.stdout, r.stdout
 
 
@@ -2342,9 +2350,15 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.32.0 (PROD-05.2) adds the scorecard's five `target.topic_configuration`
     # arms (TC-1 to TC-5, format 1.11.0 and 2.3.0) and its shape check. Map
     # still five.
+    #
+    # 1.33.0 (PROD-04.2) adds the scorecard's five `positions_mapping` arms
+    # (PM-1 to PM-5, format 1.12.0 and 2.4.0), the mapping document's seven
+    # (PMD-1 to PMD-7, with --positions-mapping), their shape checks, the
+    # `positions_mapping` lines, and the switchover record's payload type. Map
+    # six.
     mod = _verifier_module()
-    assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.32.0", mod.SCRIPT_VERSION
+    assert len(mod.PAYLOAD_TYPES) == 6, sorted(mod.PAYLOAD_TYPES)
+    assert mod.SCRIPT_VERSION == "1.33.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE

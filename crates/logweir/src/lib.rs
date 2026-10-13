@@ -49,6 +49,8 @@ pub mod show;
 /// (`scripts/check-one-signer.sh`), which visibility does not widen: one type
 /// in this workspace holds a parsed private key.
 pub mod signer;
+/// `logweir switchover plan|rollback-plan|run` (PROD-04.2).
+pub mod switchover;
 /// The ONE read of a projected private-CA location, shared by
 /// every command that dials Kafka over TLS.
 pub mod tls_ca;

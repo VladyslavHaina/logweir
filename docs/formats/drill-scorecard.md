@@ -3,12 +3,12 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.3.0.json`](../../schemas/logweir-drill-scorecard-2.3.0.json)
+[`schemas/logweir-drill-scorecard-2.4.0.json`](../../schemas/logweir-drill-scorecard-2.4.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.11.0.json`](../../schemas/logweir-drill-scorecard-1.11.0.json)
+[`schemas/logweir-drill-scorecard-1.12.0.json`](../../schemas/logweir-drill-scorecard-1.12.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.10.0.json` and `-2.0.0.json` to `-2.2.0.json`,
+schema file, `-1.0.0.json` to `-1.11.0.json` and `-2.0.0.json` to `-2.3.0.json`,
 is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
@@ -67,6 +67,7 @@ chose.
 | 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
 | 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
 | 1.11.0, 2.3.0 | PROD-05.2 | [`target.topic_configuration`](#targettopic_configuration-format-1110-and-230), arms TC-1 to TC-5 | a restore whose plan carries `target.topic_configuration` (2.3.0 for a subset) | MINOR, OD-7 (a) |
+| 1.12.0, 2.4.0 | PROD-04.2 | [`integrity.verification.positions_mapping`](#integrityverificationpositions_mapping-format-1120-and-240), arms PM-1 to PM-5 | a passing complete restore of a point that captured consumer groups (2.4.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -85,6 +86,7 @@ chose.
 | 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
 | 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
 | 1.11.0, 2.3.0 | A verifier older than 1.32.0 and an older `logweir drill verify` accept it and ignore the block; readers before 1.27.0 refuse a 2.3.0 document by its major. An older runner ignores the plan block, creates its topics as before and claims nothing | Documents stay valid |
+| 1.12.0, 2.4.0 | Accepts it, ignores the block and prints no `mapping:` line; `verify_scorecard.py` before 1.33.0 and an older `logweir drill verify` have no `--positions-mapping` | An older `logweir` writes no mapping (a `Switchover` over such a restore is refused `NoPositionsMapping`); documents stay valid |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -100,6 +102,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 1.8.0 | `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; the justfile's `scorecard_format_1_schema_version` and the schema's name; `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`; `SCORECARD_ORIGINAL_NAME_VERSION`; `original_name_*.json` |
 | 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
 | 1.11.0, 2.3.0 | `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`, `FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`, `TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; `topic_configuration_1_11_*.json`, `topic_configuration_under_format_1_10_0.json` |
+| 1.12.0, 2.4.0 | `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING`, `FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`, `POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the `format_version` of every `positions_mapping_*.json` case in `positions-mapping-index.json` (the parity script reads them) |
 
 ---
 
@@ -107,7 +110,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format: `1.0.0` to `1.11.0` (major 1) or `2.0.0` to `2.3.0` (major 2, a partition subset only). See [Versions](#versions). |
+| `format_version` | string | Semver of this format: `1.0.0` to `1.12.0` (major 1) or `2.0.0` to `2.4.0` (major 2, a partition subset only). See [Versions](#versions). |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -1174,6 +1177,54 @@ header order; a complete block's counts, or `INCOMPLETE` and why; and how many
 gaps and pruned ranges the verified partitions record — or the one line saying
 the coverage was not recorded; `logweir drill show` renders the same in its
 qualifiers footer (`integrity.verification`).
+
+### `integrity.verification.positions_mapping` (format 1.12.0 and 2.4.0)
+
+PROD-04.2. When a restore bound to a point whose receipt captured consumer
+groups passes a complete verification that covered every partition, phase 7
+maps every captured position onto the target, in the same in-order scan of
+each restored partition, and writes
+`logweir/drills/<run_id>.positions-mapping.json` (format 1.0.0, unsigned,
+at most 4 MiB, schema `schemas/logweir-positions-mapping-1.0.0.json`, `logweir
+schema positions-mapping`). This block binds it:
+
+```json
+"positions_mapping": {
+  "document": {"key": "logweir/drills/<run_id>.positions-mapping.json", "sha256": "sha256:…", "bytes": 1718},
+  "counts": {"exact": 4, "approximate": 0, "unavailable": 0},
+  "groups": 3
+}
+```
+
+`document` is absent and `omitted` is `tooLarge` (over 4 MiB) or `writeFailed`
+when no document was written. **The rule:** a captured position `P` maps to
+the first restored record whose last `x-original-offset` is at or above `P`
+(the target's end when none is); `exact` unless the restore's own selection
+excluded archived records in between (`approximate`, `skipped` counts them,
+offset holes are not records), or a capture gap or pruned range lies in
+between (`unavailable: ArchiveGap`). An emptied partition (`log_start =
+high_watermark = P`) maps `exact` to 0. Every other case is `unavailable` with
+its name: `TransactionalArchive`, `PartitionNotRestored`, `NoArchivedData`,
+`BeforeLogStart`, `BeforeArchive`, `BeyondArchive`, `PositionBeyondEnd`,
+`NotCaptured: <the capture's reason>`. A group the backup did not capture is
+listed with its reason and no entry.
+
+| Arm | Refuses |
+|---|---|
+| PM-1 | the block under a version before 1.12.0 (format 1) or 2.4.0 (format 2) |
+| PM-2 | the block beside an outcome that is not `pass`, a sampled verification, or `covered: false` |
+| PM-3 | both or neither of `document` and `omitted`, or an `omitted` outside the two words |
+| PM-4 | a document key that is not this run's, a digest that is not `sha256:<64 hex>`, or a length outside 1 to 4,194,304 |
+| PM-5 | `groups: 0` |
+
+With `--positions-mapping <file>` both readers also check the document
+(PMD-1 to PMD-7): the block names one; its bytes are the digest and length the
+block binds; it is format 1 of this run by the one rule; its counts are the
+block's; each entry's class, offset, `skipped` and reason fit; a mapped entry
+names a partition `complete.partitions[]` lists, in its restored topic, and
+one marked `PartitionNotRestored` names none; a group that was not captured has
+no entry. Both then print one `mapping:` line per entry. Applying the mapping
+is a `Switchover`'s ([kubernetes.md](../kubernetes.md#switching-consumer-groups-over)).
 
 ### `partial_reason` must SAY something
 

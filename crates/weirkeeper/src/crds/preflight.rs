@@ -48,7 +48,7 @@ pub const P2_CANCEL_MONOTONIC_RULE: &str = super::topic_discovery::CANCEL_MONOTO
 pub const P2_CANCEL_MONOTONIC_MESSAGE: &str = super::topic_discovery::CANCEL_MONOTONIC_MESSAGE;
 
 /// P3 — exactly the block matching `operation` is set.
-pub const P3_OPERATION_BLOCK_RULE: &str = "self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'DestinationAccess' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection)) : (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess))";
+pub const P3_OPERATION_BLOCK_RULE: &str = "self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == 'DestinationAccess' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection) && !has(self.switchover)) : self.operation == 'SourceConnection' ? (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.switchover)) : (has(self.switchover) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection))";
 /// P3's message.
 pub const P3_OPERATION_BLOCK_MESSAGE: &str =
     "exactly the block matching spec.request.operation may be set";
@@ -188,6 +188,11 @@ pub enum PreflightOperation {
     /// in order to test a connection would be a different question wearing the
     /// "Test connection" label.
     SourceConnection,
+    /// PROD-04.2 §3.8: the review before a `Switchover` — a verified
+    /// `Restore`'s signed mapping, its target, and each requested target
+    /// group's type, state, members and committed positions. Authorises
+    /// nothing; the `Switchover` Job repeats every check.
+    Switchover,
 }
 
 /// A reference to an object with its UID, so a same-named replacement is not
@@ -305,6 +310,32 @@ pub struct SourceConnectionPreflightRequest {
     pub connection_ref: LocalRef,
 }
 
+/// One group a switchover review reads.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverPreflightGroup {
+    /// The captured (source) group, as the restore's mapping names it.
+    #[schemars(length(min = 1, max = 255))]
+    pub source: String,
+    /// The target group a switchover would commit for; absent: the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 255))]
+    pub target: Option<String>,
+}
+
+/// What a switchover review needs to know (PROD-04.2 §3.8).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchoverPreflightRequest {
+    /// The verified `Restore` whose mapping a switchover would apply. Its
+    /// UID, when given, must be the object's.
+    pub restore_ref: UidRef,
+    /// The groups to read; absent: every group the restore's mapping maps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 100))]
+    pub groups: Option<Vec<SwitchoverPreflightGroup>>,
+}
+
 /// What to check. Sealed by P1 once created.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -323,6 +354,9 @@ pub struct PreflightRequest {
     /// The connection block, for `operation: SourceConnection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_connection: Option<SourceConnectionPreflightRequest>,
+    /// The switchover block, for `operation: Switchover` (PROD-04.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switchover: Option<SwitchoverPreflightRequest>,
     /// Checks to leave out. **A skipped blocking check keeps the overall state
     /// `unknown`**: skipping a question is not answering it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,7 +374,7 @@ pub struct PreflightRequest {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "Preflight",
-    doc = "One bounded readiness observation for a Backup, a Restore, a BackupDestination's grants or a source connection on its own, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.",
+    doc = "One bounded readiness observation for a Backup, a Restore, a BackupDestination's grants, a source connection on its own, or a Switchover's review of a verified Restore's consumer positions, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.",
     plural = "preflights",
     singular = "preflight",
     namespaced,

@@ -85,10 +85,11 @@ writes.
 
 | Document | Versions | Defined in |
 |---|---|---|
-| Drill scorecard | 1.0.0–1.11.0, 2.0.0–2.3.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
+| Drill scorecard | 1.0.0–1.12.0, 2.0.0–2.4.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
 | Backup receipt | 1.0.0–1.8.0 | [formats/backup-receipt.md](formats/backup-receipt.md#versions) |
 | Consumer positions document | 1.0.0 | [formats/backup-receipt.md](formats/backup-receipt.md#two-documents-the-receipts-summary-and-the-positions-document) |
 | Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
+| Positions mapping, switchover plan, switchover record | 1.0.0 | [formats/switchover-record.md](formats/switchover-record.md#versions) |
 | Put receipt, teardown attestation | 1.0.0 | [verify-a-scorecard.md](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Approval document v1, authorization document v2 (2.0.0–2.2.0), standing rehearsal authorization (1.0.0, 1.1.0) | as listed | [formats/approval-documents.md](formats/approval-documents.md) |
 

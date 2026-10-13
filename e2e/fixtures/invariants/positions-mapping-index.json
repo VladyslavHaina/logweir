@@ -1,0 +1,115 @@
+[
+  {
+    "id": "accepted",
+    "scorecard": "positions_mapping_accepted.json",
+    "mapping": "positions_mapping_accepted.mapping.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
+  },
+  {
+    "id": "accepted_without_the_document",
+    "scorecard": "positions_mapping_accepted_without_the_document.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
+  },
+  {
+    "id": "accepted_omitted",
+    "scorecard": "positions_mapping_accepted_omitted.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": ""
+  },
+  {
+    "id": "pm1_under_1_11_0",
+    "scorecard": "positions_mapping_pm1_under_1_11_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.verification.positions_mapping is present but the format_version does not define it: the block is defined from 1.12.0 of format 1 and from 2.4.0 of format 2"
+  },
+  {
+    "id": "pm2_over_an_incomplete_verification",
+    "scorecard": "positions_mapping_pm2_over_an_incomplete_verification.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.verification.positions_mapping is present but the run is not a passing complete verification; positions are mapped only when outcome is pass, coverage is complete and complete.covered is true"
+  },
+  {
+    "id": "pm3_document_and_omitted",
+    "scorecard": "positions_mapping_pm3_document_and_omitted.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.verification.positions_mapping names exactly one of document and omitted, and omitted is tooLarge or writeFailed"
+  },
+  {
+    "id": "pm4_another_runs_key",
+    "scorecard": "positions_mapping_pm4_another_runs_key.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.verification.positions_mapping.document is not this run's mapping: its key is logweir/drills/<run_id>.positions-mapping.json, its sha256 is sha256:<64 lowercase hex> and its length is 1 to 4194304 bytes"
+  },
+  {
+    "id": "pm5_no_group",
+    "scorecard": "positions_mapping_pm5_no_group.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "integrity.verification.positions_mapping.groups is 0; a mapping is written only for a point that selected consumer groups"
+  },
+  {
+    "id": "pmd1_omitted",
+    "scorecard": "positions_mapping_pmd1_omitted.json",
+    "mapping": "positions_mapping_pmd1_omitted.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the scorecard's positions_mapping block names no document (omitted), so there is no mapping to verify"
+  },
+  {
+    "id": "pmd2_a_changed_byte",
+    "scorecard": "positions_mapping_pmd2_a_changed_byte.json",
+    "mapping": "positions_mapping_pmd2_a_changed_byte.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions-mapping document is sha256:0f3fc6ce9206e46f7db06e70f03c9040da76fb283257600a8e6c85545c117f69 over 1256 bytes but the scorecard binds sha256:f62ef6f229a846672da85968b8cc6937784433620413f0e63c844c787e28c5e3 over 1256 bytes: it is not the mapping this scorecard signed"
+  },
+  {
+    "id": "pmd3_another_run",
+    "scorecard": "positions_mapping_pmd3_another_run.json",
+    "mapping": "positions_mapping_pmd3_another_run.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions-mapping document is not a format 1 mapping of run \"01J9X2QK7C4V0R8YB3ZP6MTS5A\" by rule firstTargetRecordAtOrAboveLineage"
+  },
+  {
+    "id": "pmd4_counts_disagree",
+    "scorecard": "positions_mapping_pmd4_counts_disagree.json",
+    "mapping": "positions_mapping_pmd4_counts_disagree.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "the positions-mapping document's groups and class counts are not the ones the scorecard's block records"
+  },
+  {
+    "id": "pmd5_exact_with_skipped",
+    "scorecard": "positions_mapping_pmd5_exact_with_skipped.json",
+    "mapping": "positions_mapping_pmd5_exact_with_skipped.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "group \"app\" entry \"orders\"/0: an exact entry carries a target offset and nothing else, an approximate one a target offset, skipped of at least 1 and reason selectionExcluded, and an unavailable one only a reason from the closed set"
+  },
+  {
+    "id": "pmd6_another_target_topic",
+    "scorecard": "positions_mapping_pmd6_another_target_topic.json",
+    "mapping": "positions_mapping_pmd6_another_target_topic.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "group \"app\" entry \"orders\"/0: a mapped entry names a partition the scorecard verified and its restored topic, and one marked PartitionNotRestored names none"
+  },
+  {
+    "id": "pmd7_an_uncaptured_group_with_entries",
+    "scorecard": "positions_mapping_pmd7_an_uncaptured_group_with_entries.json",
+    "mapping": "positions_mapping_pmd7_an_uncaptured_group_with_entries.mapping.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "group \"gone\" carries a reason, so it was not captured: its reason is \"NotCaptured: <why>\" and it has no entry"
+  }
+]
