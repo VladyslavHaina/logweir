@@ -28,11 +28,12 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89 and 90. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below.
+`v0.2.0` release that carries it has its own record below. Items 91 to 97
+landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
 
@@ -414,7 +415,7 @@ accept `1.6.0`. A sampled `pass` from an earlier build over a plan with
 ([verify-a-scorecard.md](verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
 An archive whose timestamps run backwards within a segment can now fail the
 per-partition bound
-([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)).
 **Scope:** a live compose restore whose engine got SIGTERM mid-topic (`e2e/tests/stopped_restore.rs`: `pass` before, `fail-integrity` now, both readers accepting), and unit rows with 25 mutants (`crates/logweir/tests/stopped_restore.rs`); the sampled restore rows are the PoC upgrade's.
 **Rollback:** an older runner samples the first N partitions again and ignores
 the engine report; the 1.6.0 scorecards already written stay valid under both
@@ -2031,6 +2032,246 @@ a read. Live on the compose stack: the e2e row that failed this way in CI
 **Rollback:** an older runner image fails the run on such a drop, as before;
 nothing is stored differently.
 
+#### 91. A scratch restore can be kept for a declared time, then deleted by what its scorecard signed (PROD-11.1a)
+
+**Changed.** A scratch restore can now be kept for a declared time:
+`target.teardown: {ttl_seconds: N}` (five minutes to thirty days;
+`CloneTtlOutOfRange`, and `CloneTtlNeedsScratch` outside scratch mode, both
+exit 3 before anything is read). A passing clone keeps its topics; the
+controller then runs one cleanup Job (`logweir restore cleanup`) at the expiry,
+or at once when the `Restore` is deleted, behind the finalizer
+`logweir.dev/clone-cleanup`. The cleanup deletes only the topics the run's
+signed scorecard records, only on the cluster it records
+(`CloneTargetClusterChanged`) and only while each topic's ID is the one
+recorded at creation (`CloneTargetReplaced` otherwise), signs what it did
+(`logweir/drills/<run>.cleanup.json`) and reports it on `status.clone` and
+`status.teardown`. Anything it cannot settle is `RemovalFailed` with the
+reason, and the finalizer stays until an operator removes it. Every run that
+creates topics now signs them, with their topic IDs and
+`lineage_headers: kept`, in the scorecard's new `target.creation` block
+(format 1.10.0, 2.2.0 for a subset; `verify_scorecard.py` 1.31.0). The restore
+preflight names a selected partition with nothing in the window
+(`emptyInWindow`).
+**Do:** apply the CRDs (`Restore.status.clone`) and keep the runner image as
+new as the controller: a runner from before this release refuses a clone plan
+(`drill spec does not parse`, exit 1) and creates nothing.
+**Scope:** compose rows C40 to C46 on Kafka 4.3.1: a clone kept, then cleaned
+up to exactly its recorded topics while a stranger under the prefix survives;
+a recreated topic left as `CloneTargetReplaced`; a repointed cluster refused
+with nothing deleted; both readers accepting the block; an older runner
+refusing the plan; a failed clone torn down at once; the preview. Unit and
+mock-API rows cover the controller's finalizer paths, each fail-closed path
+with its control, and mutants on the deletion rule and the finalizer were all
+killed.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K7 (expiry) and K8 (deletion first).]
+**Rollback:** an older runner refuses a clone plan, and an older controller
+neither sets nor reads `status.clone`. After a rollback, delete a remaining
+clone's topics by hand and remove its `logweir.dev/clone-cleanup` finalizer.
+Scorecards that carry `target.creation` stay valid: an older verifier ignores
+the block.
+
+#### 92. A restore can rebuild its topics' configuration from the recovery point (PROD-05.2)
+
+**Changed.** A restore plan bound to a recovery point may carry
+`target.topic_configuration: {transition: afterVerification | none, owners?}`.
+Each topic is then created from the point's configuration model: the source's
+partition count, a replication factor bounded by the target's brokers (and
+why), and the source's portable overrides (`min.insync.replicas` capped at the
+factor), beside Logweir's own settings that keep every restored record until
+the verdict. After a passing verdict, phase 9 applies the source's compaction,
+retention and timestamp settings with one full-set `AlterConfigs` per topic,
+only to a topic still holding what it was created with, and proves each by
+reading it back. Inherited values, reassignment throttles, provider keys and
+secrets are never applied and are listed with the source's value; a
+removed-in-Kafka-4 key reaches only a 3.x target. A topic a declarative owner
+manages is created with Logweir's settings only and never altered: its
+desired state is put beside the scorecard as `KafkaTopic` YAML, bound by
+digest. The restore preflight previews the per-topic diff, both
+`validate_only` verdicts and what the new retention deletes; phase 0 refuses,
+before creating anything, `TopicConfigurationNotRecorded`,
+`TopicOwnerNotChecked`, `TopicClassDisagrees` and `TopicConfigRefusedByTarget`
+(naming the setting). `Restore.status.topicConfiguration` and the API show the
+factor, the before and after overrides and the outcome (`applied`, `partial`
+with each topic's remaining step, `notRun`); the phase-9 attestation signs it.
+Logweir never retries a failed transition. The scorecard is 1.11.0 (2.3.0 for a
+partition subset) with the optional `target.topic_configuration`, arms TC-1 to
+TC-5; `verify_scorecard.py` 1.32.0 checks them. Schemas `-1.11.0.json` and
+`-2.3.0.json`; `-1.10.0.json` and `-2.2.0.json` are frozen.
+**Do:** apply the CRDs first (`Restore.status.topicConfiguration`). The restore
+principal needs `DescribeConfigs` and `AlterConfigs` on its restored topics for
+the transition.
+**Scope:** compose rows C20 to C27 on Kafka 3.9.2 and 4.3.1: a 3.9 point
+restored to 3.9 and to 4.3 with its model and the removed key; the factor
+bounded by fewer target brokers and `min.insync.replicas` capped; compaction
+applied after a complete verification; 30-day-old records restored under a
+bounded broker; settings never applied listed; an owned topic exported and its
+neighbour transitioned; a partial transition naming what was not applied, read
+back. Unit rows and 13 mutants on the stage table, the compare, the factor, the
+cap, the class rule, the pass gate and the read-back, all killed.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K6.]
+**Rollback:** an older runner ignores `target.topic_configuration`, creates its
+topics as before and signs no block, so nothing is claimed; an older
+controller ignores `status.topicConfiguration`. Scorecards that carry the
+block stay valid: an older verifier accepts the document and ignores the
+block.
+
+#### 93. Backups record Strimzi owners from the controller (PROD-05.1a)
+
+**Changed.** A `KafkaCluster` may name its Strimzi cluster
+(`spec.strimzi: {namespace, cluster}`). With the chart values
+`strimzi.readKafkaTopics: true` and `strimzi.namespaces` listing that
+namespace, a `Backup` lists its `KafkaTopic`s (read only, a Role per listed
+namespace, never a ClusterRole rule), freezes them with the run, and the
+receipt records each topic's owner, so a restore exports desired state for it
+(item 92). A namespace the chart does not list, a refused list or no served
+`KafkaTopic` resource fails the backup `OwnerDetectionFailed` before any Job.
+**Do:** apply the CRDs first (`KafkaCluster.spec.strimzi`); set the two chart
+values only where a Strimzi cluster's topics should be read.
+**Scope:** mock-API rows (C28): listed `KafkaTopic`s reach the run's inputs, its
+plan and its argv, and the core's owner rule reads them back to one owner; a
+403, an unserved resource and an unlisted namespace are each
+`OwnerDetectionFailed`, the last before any read; no `spec.strimzi`, nothing
+listed.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K10 with only the `KafkaTopic` CRD installed.]
+**Rollback:** a controller older than this field refuses such a frozen plan
+(`PlanConfigMapConflict`); let those runs finish first. An older controller
+prunes `spec.strimzi`, and a restore with the plan block and no owner
+statement is then refused `TopicOwnerNotChecked`.
+
+#### 94. A restore no longer loses a record held out of timestamp order (PROD-01.1b)
+
+**Changed.** The archive describes each segment by its first and last record
+timestamps and the engine selects segments by them. Before it creates
+anything, a restore now reads every segment of the partitions it restores once
+(the pass the transaction-marker check made, now also under
+`restore.allow_transaction_markers: true`) and uses each record's own
+timestamp: the window starts at the oldest archived record, so a record older
+than every segment's first is restored; the count bounds use each segment's
+oldest and newest record, so a correct point-in-time restore no longer fails
+them; and a window that selects a record the engine would skip (in a segment
+whose first record is after the point, or whose last is before a stated start)
+is refused, exit 3, `refusal-reason=PointInTimeSelectionIncomplete`, naming
+the segment and the point or start that reads it. The time basis (FX-8) reads
+the same bounds. Archives in timestamp order restore as before. A segment the
+restore reads and cannot decode is now refused under the marker override too.
+**Do:** a `Restore` or `RehearsalSchedule` slot over such an archive that used
+to run, and could sign a pass with a record left out, is now refused; use the
+point the refusal names. Roll the controller with the runner.
+**Scope:** the three record-semantics rows and the stated-start row on compose
+(Kafka 4.3.1, engine `0.23.3+logweir.3`), orchestrator rows, 11 mutants.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K3.]
+**Rollback:** an older runner selects by first and last record again; an
+older controller shows `exitReason: PointInTimeSelectionIncomplete` without
+the runner's sentence.
+
+#### 95. Consumer positions follow a restore, under review, and a `Switchover` applies them (PROD-04.2)
+
+**Changed.** A complete restore of a recovery point that captured consumer
+groups now maps every captured position onto the restored topics (`exact`,
+`approximate` with the count of records the restore's own selection skipped,
+or `unavailable` with its reason) and binds the mapping into the signed
+scorecard (format 1.12.0, 2.4.0 for a subset,
+`integrity.verification.positions_mapping`; both readers check it,
+`--positions-mapping` verifies the document; `verify_scorecard.py` 1.33.0).
+Nothing is committed by a restore. A new `Switchover` kind applies a reviewed
+plan (`logweir switchover plan`) to stopped groups under its own approval
+(subject kind `Switchover`): each group is classified, held to the target's
+bounds and compare-and-set against the plan, and committed by Logweir's own
+non-member client, which the broker refuses while the group has a member. The
+target topics must be the ones the restore created: their IDs are compared
+with the scorecard's `target.creation` (item 91), so a recreated topic is
+`TargetGenerationChanged`. A signed switchover record
+(`logweir/switchovers/<run_id>.record.json`) records priors, commits and
+readbacks, and `logweir switchover rollback-plan` reverses it within stated
+limits. A `Preflight` with operation `Switchover` (check kind
+`switchoverReadiness`) reviews the same decisions before anything is
+committed.
+**Do:** apply the CRDs (the new `Switchover`, and the `Approval` and
+`Preflight` additions) and roll the controller and the runner image together.
+Upgrade every verifier that will read a 1.12.0 or 2.4.0 scorecard's mapping,
+and stop each group's consumers before its switchover.
+**Scope:** compose rows C1 to C17 on Kafka 4.3.1 (C14 and C2 also on 3.9.2):
+the paused consumer resumes at its record; a live group is refused
+`GroupActive` and a new run recovers; partial application and re-runs; the
+compare-and-set; approximate and not-restored mappings; a compaction hole; an
+emptied partition; a recreated target topic; only a passing complete restore
+maps; a streams group refused by type; a hidden group never created; a
+transactional archive; the rollback and its refusal; the subject kind. The
+review row reads every position before the switchover. 14 mutants on the
+mapping rule, the compare, the admission and the apply were killed; the API's
+approval gates are held to the restore's by a parity table.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K5 and K9.]
+**Rollback:** an older controller ignores `Switchover` objects, so nothing is
+applied, and a Helm rollback leaves the CRD and its objects inert. An older
+verifier ignores the mapping block and refuses the `switchover-record` payload
+type. Positions already committed stay committed: a switchover record's
+`rollback-plan` reverses them.
+
+#### 96. Every runner line a controller acts on is sealed with the Job's token, and a runner older than the controller is named (FX-43)
+
+**Changed.** The controller gives every runner Job `--runner-line-token <hex>`
+and reads only the lines the runner prints sealed with it
+(`@<token> <line>`). That covers `Restore`, `Backup`, the `KafkaCluster`
+probe, the check Jobs of `Preflight`, evidence fetch, `TopicDiscovery`, a
+dynamic `Backup`'s discovery and the `RecoveryCatalog` sync, the
+`RetentionPolicy` Job, the `Switchover` Job (item 95) and a clone's cleanup
+Job (item 91). A check seals its end frame, which binds every other frame by
+digest. The lines read this way are:
+- the evidence keys;
+- the `failure-reason=`/`refusal-reason=` states and the stopped creation
+  step's lists;
+- `topic-preflight=` and `topic-configuration=` (item 92);
+- the teardown lines and the progress lines;
+- the switchover's and the cleanup's lines;
+- the probe's two lines.
+
+A line a plan string, a broker or the Kafka client got into the pod log is
+no longer read. The Kafka client's own log lines are printed by the runner
+on one line each. A bootstrap entry or a storage location holding a control
+character or a line break is refused before any client exists, by the
+runner, by `cluster-probe` and by a pattern on
+`KafkaCluster.spec.bootstrapServers`. The terminal log read is one bound at
+every exit code: 256 lines, 4 MiB.
+
+**Do:** roll `controllerImage` and `runnerImage` together. A runner image
+published before this change (v0.2.0 included) stops at the new flag, and the
+object says so:
+- a `Restore` or `Backup`: `exitReason: RunnerOlderThanController`, and a
+  schedule does not retry it;
+- a `KafkaCluster`: reason `RunnerOlderThanController`;
+- a check: `CheckContractMismatch` naming it;
+- a retention run: `refusalCode: RunnerOlderThanController`, with nothing
+  deleted;
+- a `Switchover` or a clone's cleanup: failed or `RemovalFailed` naming it.
+
+Set `runnerImage` to the controller's build.
+
+**Scope:** unit and controller rows over fake pod logs, including the
+released runner's real refusal of the flag (Restore, Backup, probe, check,
+retention), and the binary's sealed block. 32 mutants were killed. The
+Switchover and cleanup Jobs' wiring is compile-checked and covered by their
+existing rows only.
+[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs FX-43's K-rows.]
+
+**Rollback:** roll both together, or the controller first. An older
+controller reads this runner as before: FX-34's `--line-token` gets FX-34's
+output, and the plain lines are still printed last. Runs created by an older
+controller are read as that controller read them.
+
+#### 97. The control-evidence mapping page is removed (owner's decision)
+
+**Changed.** `docs/control-evidence.md` was removed, together with the test
+that held it to the evidence fields. That page mapped Logweir's evidence onto
+the backup and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and
+HIPAA. The scorecard's limits are stated in
+[docs/verify-a-scorecard.md](verify-a-scorecard.md#what-the-scorecard-does-not-claim),
+which no longer links to the mapping, and the README's documentation table no
+longer lists it. No product behaviour, format or evidence changes.
+**Do:** nothing. A bookmark to the old page finds nothing; read the auditor
+guide instead.
+**Scope:** `just links` and doc_lint over the tree without the page.
+**Rollback:** an older release's documentation still carries the page.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -2170,7 +2411,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89 and 90, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2238,6 +2479,13 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 88 | the console image (the API and the page) | nothing |
 | 89 | the console | nothing; a script waiting for `#/history` after Create waits for `#/operations` |
 | 90 | the runner's evidence writes | nothing |
+| 91 | the `Restore` CRD (`status.clone`), the controller (a finalizer and a cleanup Job), the runner (scorecard 1.10.0), both verifiers, the API | the CRDs applied; the runner rolled with the controller |
+| 92 | the runner (scorecard 1.11.0), the `Restore` CRD (`status.topicConfiguration`), the controller, both verifiers, the API | the CRDs applied; the restore principal granted `AlterConfigs` |
+| 93 | the `KafkaCluster` CRD (`spec.strimzi`), the controller, the chart (`strimzi.*`) | nothing until `strimzi.readKafkaTopics` is set |
+| 94 | the runner's restore selection and one controller refusal code | the two rolled together |
+| 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
+| 96 | the controller and every runner image (a new flag on every runner Job), the `KafkaCluster` CRD (a pattern) | `controllerImage` and `runnerImage` rolled together |
+| 97 | the documentation only | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

@@ -535,7 +535,12 @@ fn the_subcommand_is_cluster_probe_with_the_interface_flags() {
             username,
             tls,
             marker_topic,
+            runner_line_token,
         } => {
+            assert!(
+                runner_line_token.is_none(),
+                "a probe started by hand has none"
+            );
             assert_eq!(bootstrap, "a:9092,b:9092");
             assert_eq!(auth_mode, AUTH_MODE_SCRAM_SHA_512);
             assert_eq!(username.as_deref(), Some("logweir"));

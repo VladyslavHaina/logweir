@@ -66,6 +66,7 @@ use crate::crds::approval::{
 };
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
+use crate::crds::switchover::Switchover;
 use crate::crds::trust_roster::TrustRoster;
 use crate::crds::Condition;
 use crate::trust::{Resolution, ResolvedKey, ResolvedTrust, REASON_TRUST_POLICY_CONFLICT};
@@ -1588,8 +1589,12 @@ pub async fn decide(
 /// authorization document v2 naming its policy. The sidecar's payload type
 /// only chooses which refusal names the mismatch; every path to `Verified`
 /// verifies a signature over those bytes.
+/// The same choice for either plan-bearing kind: a `Restore`,
+/// or a `Switchover` (PROD-04.2), whose approval is decided by the same
+/// namespace binding and must name its own kind (check 8 for a v1 document,
+/// `subject.kind` for a v2 one).
 #[allow(clippy::too_many_arguments)]
-fn evaluate_restore_referent(
+fn evaluate_planned_referent(
     approval: &Approval,
     trust: &ResolvedTrust,
     now: DateTime<Utc>,
@@ -1597,6 +1602,7 @@ fn evaluate_restore_referent(
     plan_bytes: &str,
     referent: Option<&VerifiedSubjectRef>,
     effective: &EffectivePolicy,
+    kind: SubjectKind,
 ) -> Result<Verified, ApprovalRefusal> {
     let payload_type = serde_json::from_str::<Sidecar>(&approval.spec.sidecar_bytes)
         .ok()
@@ -1611,7 +1617,7 @@ fn evaluate_restore_referent(
                 approval.spec.sidecar_bytes.as_bytes(),
                 trust,
                 now,
-                SubjectKind::Restore.as_str(),
+                kind.as_str(),
                 plan_bytes.as_bytes(),
             )
         }
@@ -1620,6 +1626,7 @@ fn evaluate_restore_referent(
                 return Err(policy::v1_under_bound_policy_refusal(bound).into());
             }
             let expected = ExpectedSubject {
+                kind: kind.as_str().to_string(),
                 namespace: namespace.to_string(),
                 name: approval.spec.subject_ref.name.clone(),
                 uid: referent.map(|r| r.uid.clone()).unwrap_or_default(),
@@ -1856,15 +1863,49 @@ pub async fn decide_with_policy_at(
         // Refused at the top of this function; matched here because the enum
         // is closed.
         SubjectKind::RehearsalSchedule => return Ok(standing_withdrawn(approval)),
+        // PROD-04.2: a `Switchover` carries its plan, like a `Restore`.
+        SubjectKind::Switchover => {
+            let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
+            match api.get_opt(&subject.name).await? {
+                Some(sw) => {
+                    let current = switchover_subject(&sw, &subject.name, &namespace)?;
+                    if let Some(previous) = approval
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.verified_subject_ref.as_ref())
+                    {
+                        if previous != &current {
+                            return Ok(ApprovalOutcome::Referent(
+                                ReferentProblem::ReferentUidChanged {
+                                    kind: referent_kind.to_string(),
+                                    name: subject.name.clone(),
+                                    verified_uid: previous.uid.clone(),
+                                    current_uid: current.uid,
+                                },
+                            ));
+                        }
+                    }
+                    (sw.spec.plan_bytes, Some(current))
+                }
+                None => {
+                    return Ok(ApprovalOutcome::Referent(
+                        ReferentProblem::ReferentNotFound {
+                            kind: referent_kind.to_string(),
+                            name: subject.name.clone(),
+                        },
+                    ))
+                }
+            }
+        }
     };
 
     // `.as_bytes()`, with no decode step (interface **I18**): `approvalBytes`
     // and `sidecarBytes` are the UTF-8 document text, never base64.
     let want = sha256_prefixed(plan_bytes.as_bytes());
-    let evaluated = if subject.kind == SubjectKind::Restore {
-        // The one kind an approval policy governs; a `Backup` referent was
+    let evaluated = if matches!(subject.kind, SubjectKind::Restore | SubjectKind::Switchover) {
+        // The two kinds an approval policy governs; a `Backup` referent was
         // refused before this point.
-        evaluate_restore_referent(
+        evaluate_planned_referent(
             approval,
             &trust,
             consumed_at.unwrap_or(now),
@@ -1872,6 +1913,7 @@ pub async fn decide_with_policy_at(
             &plan_bytes,
             verified_subject_ref.as_ref(),
             &policies.resolve(&namespace),
+            subject.kind,
         )
     } else {
         evaluate(
@@ -2339,6 +2381,24 @@ fn restore_subject(
     Ok(VerifiedSubjectRef {
         api_version: Restore::api_version(&()).to_string(),
         kind: SubjectKind::Restore,
+        name: name.to_string(),
+        namespace: namespace.to_string(),
+        uid,
+    })
+}
+
+/// The verified identity of a `Switchover` referent (PROD-04.2).
+fn switchover_subject(
+    sw: &Switchover,
+    name: &str,
+    namespace: &str,
+) -> Result<VerifiedSubjectRef, ReconcileError> {
+    let uid = sw
+        .uid()
+        .ok_or_else(|| ReconcileError::NoUid(name.to_string()))?;
+    Ok(VerifiedSubjectRef {
+        api_version: Switchover::api_version(&()).to_string(),
+        kind: SubjectKind::Switchover,
         name: name.to_string(),
         namespace: namespace.to_string(),
         uid,

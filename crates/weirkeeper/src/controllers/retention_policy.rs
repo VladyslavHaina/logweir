@@ -697,10 +697,14 @@ impl Pass<'_> {
             return None;
         }
         let recorded = run.refusal_code.as_deref()?;
+        // The worker's closed table, or this controller's own name for the
+        // mixed pair (FX-43), which no worker prints.
+        let older = logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER;
         let code = RETENTION_REFUSALS
             .iter()
             .copied()
-            .find(|known| *known == recorded)?;
+            .find(|known| *known == recorded)
+            .or_else(|| (recorded == older).then_some(older))?;
         let variable = run
             .refusal_variable
             .as_deref()
@@ -1048,7 +1052,7 @@ impl Pass<'_> {
             Err(e) if check::is_log_absent(&e) => String::new(),
             Err(e) => return Err(ReconcileError::Api(e)),
         };
-        Ok(parse_run_lines(&log, exit_code))
+        Ok(run_report(&crate::job::job_token(job), &log, exit_code))
     }
 
     async fn report_running(
@@ -2046,14 +2050,16 @@ impl Pass<'_> {
         }
 
         let job_name = self.job_name(&run_id);
-        let job = self.build_job(
+        // FX-43: the worker seals every line it prints for this controller
+        // with the Job's token, and only those lines are read.
+        let job = crate::job::tokened(self.build_job(
             &job_name,
             &run_id,
             &plan_name,
             plan_sha256,
             resolved,
             &evidence_env,
-        );
+        ));
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
 
         // (c) A Job already at this name ends the pass, before the record.
@@ -3689,6 +3695,20 @@ fn refused_run_enforced(
     code: &str,
     variable: Option<&str>,
 ) -> (&'static str, String) {
+    if code == logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER {
+        return (
+            REASON_RUN_FAILED,
+            format!(
+                "retention run {run_id} was REFUSED before deleting anything (exit 3, {code}): \
+                 the retention worker printed no line sealed with this Job's line token, which \
+                 every worker at least as new as this controller does, so the runner image is \
+                 older than the controller (an older worker refuses `{}`). Nothing of its log \
+                 was read and the archive is untouched. Upgrade the runner image to the \
+                 controller's version (the chart's `runnerImage`)",
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+            ),
+        );
+    }
     if code == REASON_CREDENTIAL_BINDING_MISMATCH {
         return (
             REASON_CREDENTIAL_BINDING_MISMATCH,
@@ -3730,9 +3750,33 @@ impl RunReport {
 /// The worker's code for "I stopped on my own ceiling".
 pub const BUDGET_EXHAUSTED_CODE: &str = "BudgetExhausted";
 
+/// A retention Job's report, from the lines its worker sealed with the Job's
+/// token (FX-43, [`runner_log::own_lines`]): a `retention-point=`,
+/// `retention-refusal=` or `retention-record=` line a provider's error body or
+/// a plan got into the log is not read. A Job given the token whose worker
+/// vouched for no exit (an older worker refuses the flag, exit 3) is the
+/// mixed pair, named: `refusal_code` is `RunnerOlderThanController` and
+/// nothing else of the log is read. A Job an older controller built is read
+/// as it always was. Pure.
+#[must_use]
+pub fn run_report(token: &crate::job::JobToken, log: &str, exit_code: Option<i32>) -> RunReport {
+    let lines = runner_log::own_lines(token, log);
+    if !log.is_empty()
+        && exit_code.is_some_and(runner_log::vouches_for_exit)
+        && lines.runner_is_older()
+    {
+        return RunReport {
+            exit_code,
+            refusal_code: Some(logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER),
+            ..RunReport::default()
+        };
+    }
+    parse_run_lines(lines.text(), exit_code)
+}
+
 /// Read a retention Job's key lines. Pure, and bounded: only lines carrying
 /// one of the three prefixes are read, and an unparseable value is skipped,
-/// not guessed.
+/// not guessed. [`run_report`] hands it the lines the worker sealed.
 #[must_use]
 pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
     let mut report = RunReport {

@@ -170,8 +170,9 @@ spec:
                 - message: auth.clientCertificate is required when auth.mode is mtls and refused for every other mode
                   rule: (self.mode == 'mtls') == has(self.clientCertificate)
               bootstrapServers:
-                description: The broker bootstrap addresses, `host:port`.
+                description: 'The broker bootstrap addresses, `host:port`. An entry holding a control character or a line or paragraph separator is refused at admission (FX-43): the Kafka client logs an address by name, and such an entry would start a line of a pod log a controller reads by key.'
                 items:
+                  pattern: ^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$
                   type: string
                 type: array
               markerTopic:
@@ -181,6 +182,26 @@ spec:
               role:
                 description: 'What this cluster is to Logweir — `source` or `target`. A free-form string rather than an enum: the value is a label the adopter picks and the controller reports, and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what actually authorises a target, never a role written next to the address it authorises.'
                 type: string
+              strimzi:
+                description: 'The Strimzi cluster that manages this Kafka cluster''s topics. Set, a `Backup` of this cluster lists the `KafkaTopic` resources of that namespace labelled `strimzi.io/cluster=<cluster>` (read only, granted per namespace by the chart values `strimzi.readKafkaTopics` and `strimzi.namespaces`), and its receipt records each named topic''s Strimzi owner, so a restore exports desired state for it. A namespace the chart does not list, a refused list, or a `KafkaTopic` resource the API server does not serve fails the backup closed (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing is listed, as before.'
+                nullable: true
+                properties:
+                  cluster:
+                    description: 'The `Kafka` resource''s name: the `strimzi.io/cluster` label value, so at most 63 characters (a label value''s bound; a longer one would make every `KafkaTopic` list a 400). The pattern is a subset of a label value''s.'
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  namespace:
+                    description: The namespace of the `Kafka` resource and its `KafkaTopic`s.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - cluster
+                - namespace
+                type: object
             required:
             - auth
             - bootstrapServers

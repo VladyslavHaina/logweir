@@ -82,6 +82,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     // The runner's refusal of an archive holding transaction markers. Exit 3
     // as well; listed for the same reason.
     "TransactionMarkersInArchive",
+    // The runner's refusal of a window that selects records in a segment the
+    // engine skips. Exit 3; listed for the same reason.
+    "PointInTimeSelectionIncomplete",
 ];
 
 /// A condition view with a bounded message.
@@ -975,6 +978,28 @@ pub struct TeardownView {
     pub failed: Vec<TeardownFailureView>,
 }
 
+/// PROD-11.1a: a TTL clone's lifetime and cleanup, from
+/// `Restore.status.clone`.
+#[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneView {
+    /// The plan's lifetime in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+    /// When the cleanup is due.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// `Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Cleanup Jobs started so far (at most 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// Why the cleanup failed or refused, bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// When the capture actually happened — a Backup's.
 #[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1055,6 +1080,10 @@ pub struct OperationView {
     /// A Restore's teardown outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teardown: Option<TeardownView>,
+    /// PROD-11.1a: a TTL clone's lifetime and cleanup, from
+    /// `Restore.status.clone`; absent for every other run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clone: Option<CloneView>,
     /// `scratch` or `newTopic` — a Restore's target mode, absent on a Backup.
     ///
     /// AT THE TOP LEVEL, NOT ON THE COMPLETION PANEL. D3 §3.5 keys its two
@@ -1386,6 +1415,7 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
             }),
         completion: None,
         teardown: None,
+        clone: None,
         target_mode: None,
         operation,
     }
@@ -1517,6 +1547,13 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
                     })
                     .collect(),
             }),
+        clone: status.and_then(|s| s.clone.as_ref()).map(|c| CloneView {
+            ttl_seconds: c.ttl_seconds,
+            expires_at: c.expires_at,
+            phase: c.phase.as_deref().map(|p| bounded(p, 32)),
+            attempts: c.attempts,
+            reason: c.reason.as_deref().map(|r| bounded(r, 1024)),
+        }),
         operation,
     }
 }

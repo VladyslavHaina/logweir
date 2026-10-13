@@ -563,21 +563,37 @@ pub fn execute_with<W: Write>(loaded: &Loaded, out: W, wiring: &dyn kinds::Wirin
     }
 }
 
-/// `logweir check run`.
+/// The lines of a check's stdout that FX-43's token seals (the end frame
+/// binds the rest by digest; `refusal-reason=` is what an exit 3 says).
+pub const SEALED_PREFIXES: &[&str] = &[
+    logweir_core::check_contract::END_FRAME_PREFIX,
+    REFUSAL_REASON_PREFIX,
+];
+
+/// `logweir check run`. Under FX-43's flag the end frame and the refusal are
+/// sealed with the Job's token ([`crate::exit::SealingLines`]), and every
+/// exit ends with a sealed `runner-exit=` ([`crate::exit::print_end`]).
 #[must_use]
 pub fn run(args: &CheckRunArgs) -> ExitCode {
     install_diagnostics();
-    let loaded = match load(args, &|k| std::env::var(k).ok()) {
-        Ok(l) => l,
+    let out = crate::exit::SealingLines::new(std::io::stdout().lock(), SEALED_PREFIXES);
+    let code = match load(args, &|k| std::env::var(k).ok()) {
+        Ok(loaded) => execute(&loaded, out),
         Err(refusal) => {
             tracing::warn!(
                 code = %refusal.code(),
                 "the check plan was refused before any client was built: {}",
                 logweir_core::check_contract::redact(&refusal.detail)
             );
-            let _ = print_refusal_to(&mut std::io::stdout().lock());
-            return ExitCode::GuardRefused;
+            refuse_to(out)
         }
     };
-    execute(&loaded, std::io::stdout().lock())
+    crate::exit::print_end(code);
+    code
+}
+
+/// The refusal line through `out`, which is flushed when it drops here.
+fn refuse_to<W: Write>(mut out: W) -> ExitCode {
+    let _ = print_refusal_to(&mut out);
+    ExitCode::GuardRefused
 }

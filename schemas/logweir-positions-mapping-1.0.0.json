@@ -1,0 +1,137 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-positions-mapping-1.0.0.json",
+  "title": "MappingDocument",
+  "description": "**The positions-mapping document** (`<run_id>.positions-mapping.json`, format 1.0.0). Unsigned: the scorecard's signed block binds its digest and length. Field order is byte order (`det_json`).",
+  "type": "object",
+  "required": [
+    "format_version",
+    "groups",
+    "point_id",
+    "positions_sha256",
+    "rule",
+    "run_id"
+  ],
+  "properties": {
+    "format_version": {
+      "description": "[`DOCUMENT_FORMAT_VERSION`].",
+      "type": "string"
+    },
+    "groups": {
+      "description": "One entry per group the point's receipt selected, keyed by its id.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/GroupMapping"
+      }
+    },
+    "point_id": {
+      "description": "The recovery point the positions came from (the plan's `source.point`).",
+      "type": "string"
+    },
+    "positions_sha256": {
+      "description": "The positions document's digest, as the point's signed receipt binds it.",
+      "type": "string"
+    },
+    "rule": {
+      "description": "[`RULE`].",
+      "type": "string"
+    },
+    "run_id": {
+      "description": "The restore run this mapping belongs to (the scorecard's `run_id`).",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GroupMapping": {
+      "description": "One selected group's mapping.",
+      "type": "object",
+      "required": [
+        "active_at_capture",
+        "entries",
+        "no_committed_position"
+      ],
+      "properties": {
+        "active_at_capture": {
+          "description": "Whether the group had members when its positions were read: they may have moved after, so the review says so.",
+          "type": "boolean"
+        },
+        "entries": {
+          "description": "One entry per position entry of the positions document, in its order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MappingEntry"
+          }
+        },
+        "group_type": {
+          "description": "The receipt's group type (`classic`, `consumer`, or `other`); absent when the receipt records none.",
+          "type": "string",
+          "nullable": true
+        },
+        "no_committed_position": {
+          "description": "Partitions the group had never committed on: they stay without a position on the target, so the consumer's `auto.offset.reset` behaves as it did on the source.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "reason": {
+          "description": "`NotCaptured: <reason>` for a group the backup did not capture; it then has no entry (arm PMD-7).",
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "MappingEntry": {
+      "description": "One captured position, mapped.",
+      "type": "object",
+      "required": [
+        "class",
+        "partition",
+        "topic"
+      ],
+      "properties": {
+        "class": {
+          "description": "[`CLASSES`].",
+          "type": "string"
+        },
+        "partition": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "position": {
+          "description": "The captured next-to-consume offset, when the backup read one.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "reason": {
+          "description": "[`SELECTION_EXCLUDED`] on an `approximate` entry; an unavailable reason on an `unavailable` one; absent on an `exact` one.",
+          "type": "string",
+          "nullable": true
+        },
+        "skipped": {
+          "description": "Archived records the restore's selection excluded between the position and the record it maps to: present exactly on an `approximate` entry.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0,
+          "nullable": true
+        },
+        "target_offset": {
+          "description": "The target offset to commit: present exactly when the class is not `unavailable`.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "target_topic": {
+          "description": "The restored topic, when the restore restored this topic.",
+          "type": "string",
+          "nullable": true
+        },
+        "topic": {
+          "description": "The SOURCE topic.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

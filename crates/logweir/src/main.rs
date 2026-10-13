@@ -85,10 +85,15 @@ fn main() -> std::process::ExitCode {
         cli::Command::Check(cli::CheckCmd::Run {
             plan,
             check_contract_version,
-        }) => logweir::check::run(&logweir::check::CheckRunArgs {
-            plan,
-            check_contract_version,
-        }),
+            runner_line_token,
+        }) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::check::run(&logweir::check::CheckRunArgs {
+                plan,
+                check_contract_version,
+            })
+        }
         cli::Command::Backup(cli::BackupCmd::Run {
             store_contract_version,
             spec,
@@ -102,10 +107,11 @@ fn main() -> std::process::ExitCode {
             strimzi_cluster,
             consumer_groups,
             line_token,
+            runner_line_token,
         }) => {
-            // The Job's line token, held for the one line that carries
-            // it. Set here, once, before anything runs.
-            logweir::exit::set_line_token(line_token);
+            // The Job's line token, held for the lines that carry it. Set
+            // here, once, before anything runs.
+            logweir::exit::set_line_tokens(line_token, runner_line_token);
             logweir::backup::run(&logweir::backup::BackupRunArgs {
                 store_contract_version,
                 spec,
@@ -126,13 +132,19 @@ fn main() -> std::process::ExitCode {
             username,
             tls,
             marker_topic,
-        } => logweir::probe::run(&logweir::probe::ProbeArgs {
-            bootstrap,
-            auth_mode,
-            username,
-            tls,
-            marker_topic,
-        }),
+            runner_line_token,
+        } => {
+            // FX-43: the probe's two contract lines are sealed with the Job's
+            // token, and its end line is printed. Set once, before anything.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::probe::run(&logweir::probe::ProbeArgs {
+                bootstrap,
+                auth_mode,
+                username,
+                tls,
+                marker_topic,
+            })
+        }
         cli::Command::Doctor {
             spec,
             allowed_clusters,
@@ -179,12 +191,14 @@ fn main() -> std::process::ExitCode {
             public_key,
             payload_type,
             consumer_positions,
-        }) => verify::run_with(
+            positions_mapping,
+        }) => verify::run_with_mapping(
             &scorecard,
             &signature,
             &public_key,
             &payload_type,
             consumer_positions.as_deref(),
+            positions_mapping.as_deref(),
         ),
         // THE ONE FUNCTION, TWO NAMES (interface I20). Both arms build the
         // same `RunArgs` through the same `From` impl and call
@@ -194,12 +208,92 @@ fn main() -> std::process::ExitCode {
         // the alias — an alias that could behave differently is not an alias.
         cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
             // See the `backup run` arm.
-            logweir::exit::set_line_token(a.line_token.clone());
+            logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::Restore)
         }
         cli::Command::Drill(cli::DrillCmd::Run(a)) => {
-            logweir::exit::set_line_token(a.line_token.clone());
+            logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
+        }
+        // PROD-11.1a: a TTL clone's cleanup Job.
+        cli::Command::Restore(cli::RestoreCmd::Cleanup(a)) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, a.runner_line_token.clone());
+            logweir::restore_cleanup::run(a.into())
+        }
+        // PROD-04.2: the Switchover's plan builders and its Job.
+        cli::Command::Switchover(cli::SwitchoverCmd::Plan {
+            scorecard,
+            positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) => match logweir::switchover::plan(&logweir::switchover::PlanArgs {
+            scorecard,
+            mapping: positions_mapping,
+            restore_name,
+            restore_uid,
+            groups,
+            out,
+        }) {
+            Ok(summary) => {
+                print!("{summary}");
+                logweir::exit::ExitCode::Ok
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                logweir::exit::ExitCode::Operational
+            }
+        },
+        cli::Command::Switchover(cli::SwitchoverCmd::RollbackPlan { record, out }) => {
+            match logweir::switchover::rollback_plan(&logweir::switchover::RollbackPlanArgs {
+                record,
+                out,
+            }) {
+                Ok(summary) => {
+                    print!("{summary}");
+                    logweir::exit::ExitCode::Ok
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    logweir::exit::ExitCode::Operational
+                }
+            }
+        }
+        cli::Command::Switchover(cli::SwitchoverCmd::Run {
+            plan,
+            restore_plan,
+            approval,
+            approver_key,
+            evidence_keys,
+            signing_key,
+            scorecard_key,
+            namespace,
+            name,
+            uid,
+            store_contract_version,
+            approval_policy,
+            confirmation_key,
+            runner_line_token,
+        }) => {
+            // FX-43: set once, before anything runs.
+            logweir::exit::set_line_tokens(None, runner_line_token);
+            logweir::switchover::run(&logweir::switchover::RunArgs {
+                plan,
+                restore_plan,
+                approval,
+                approver_key,
+                evidence_keys,
+                signing_key,
+                scorecard_key,
+                namespace,
+                name,
+                uid,
+                store_contract_version,
+                approval_policy,
+                confirmation_key,
+            })
         }
         // NO catch-all arm: with every variant named, a subcommand added to
         // `cli.rs` and not dispatched here is a compile error

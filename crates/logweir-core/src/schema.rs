@@ -18,13 +18,29 @@ use crate::scorecard::Scorecard;
 /// Rust type reads both majors, so the requirements that make a document
 /// 2.0.0's are added here, on top of what the type derives.
 ///
-/// **2.1.0**, this file, adds `approval.console` (a partition-subset restore a
-/// second person approved in the console): 2.0.0's fields plus that optional
-/// block and its two definitions, exactly as the type derives them; the frozen
-/// 2.0.0 file is this file without the block
+/// **2.1.0** adds `approval.console` (a partition-subset restore a second
+/// person approved in the console): 2.0.0's fields plus that optional block
+/// and its two definitions, exactly as the type derives them; the frozen
+/// 2.0.0 file is 2.1.0 without the block
 /// (`the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
+///
+/// **2.2.0** adds `target.creation` (PROD-11.1a: the topics a run created and
+/// their IDs): 2.1.0's fields plus that optional block and its two
+/// definitions; the frozen 2.1.0 file is the frozen 2.2.0 file without it
+/// (`the_frozen_2_1_0_scorecard_schema_is_the_frozen_2_2_0_one_without_the_target_creation`).
+///
+/// **2.3.0** adds `target.topic_configuration` (PROD-05.2): 2.2.0's fields
+/// plus that optional block and its definitions; the frozen 2.2.0 file is the
+/// frozen 2.3.0 file without the block
+/// (`the_frozen_2_2_0_scorecard_schema_is_the_frozen_2_3_0_one_without_the_topic_configuration`).
+///
+/// **2.4.0**, this file, adds `integrity.verification.positions_mapping`
+/// (PROD-04.2): 2.3.0's fields plus that optional block and its three
+/// definitions, exactly as the type derives them; the frozen 2.3.0 file is
+/// this file without the block
+/// (`the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block`).
 /// The `$id` is built from
-/// [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`].
+/// [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`].
 ///
 /// **`target.original_name` is NOT in this file, on purpose**: an original-name
 /// restore restores whole topics (arm ON-14), so the block never appears in a
@@ -41,7 +57,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
+        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
     ));
     fn def<'a>(
         definitions: &'a mut schemars::Map<String, Schema>,
@@ -112,32 +128,67 @@ const ORIGINAL_NAME_PROPERTY: &str = "original_name";
 /// The two definitions the `original_name` block brings with it.
 const ORIGINAL_NAME_DEFINITIONS: [&str; 2] = ["OriginalNameInfo", "OriginalNameOwner"];
 
-/// `ApprovalInfo`'s property for the `approval.console` block.
-const CONSOLE_APPROVAL_PROPERTY: &str = "console";
+/// `TargetInfo`'s property for the `topic_configuration` block (PROD-05.2).
+pub const TOPIC_CONFIGURATION_PROPERTY: &str = "topic_configuration";
 
-/// The two definitions the `approval.console` block brings with it.
-const CONSOLE_APPROVAL_DEFINITIONS: [&str; 2] = ["ConsoleApprovalInfo", "ConsolePrincipal"];
+/// The definitions the `target.topic_configuration` block brings with it.
+pub const TOPIC_CONFIGURATION_DEFINITIONS: [&str; 7] = [
+    "Capped",
+    "DesiredStateRef",
+    "NotApplied",
+    "ReplicationChoice",
+    "TopicConfigurationBlock",
+    "TopicDesired",
+    "TopicOwner",
+];
 
 /// Pretty-printed JSON Schema of the NEWEST MINOR OF SCORECARD FORMAT 1:
-/// **1.9.0** (`approval.console`, a restore a second person approved in the
-/// console). It describes every 1.x document this build writes; the 1.8.0 file
-/// (`target.original_name`) is frozen beside it.
+/// **1.12.0** (`integrity.verification.positions_mapping`, PROD-04.2): the
+/// frozen 1.11.0 file (`target.topic_configuration`) plus that optional block
+/// and its three definitions. It describes every 1.x document this build
+/// writes; the 1.11.0 file is frozen beside it.
 ///
 /// The Rust type reads both majors, so what it derives on its own is no longer
 /// format 1's selection block. A MINOR adds optional fields only, so this file
-/// is BUILT AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.8.0
-/// file), plus the optional `approval.console` property and its two definitions
-/// exactly as the type derives them, under the `$id` built from
-/// [`crate::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL`]. So a change to
-/// [`crate::scorecard::ConsoleApprovalInfo`] is a diff of this file
-/// (`just schema-check`), and nothing else of format 1 can move
-/// (`the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`).
+/// is BUILT AS WHAT IT IS: `frozen_predecessor` (the text of the frozen 1.11.0
+/// file), plus the optional `integrity.verification.positions_mapping`
+/// property and its definitions exactly as the type derives them, under the
+/// `$id` built from [`crate::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING`].
+/// So a change to [`crate::positions_mapping::PositionsMapping`] is a diff of
+/// this file (`just schema-check`), and nothing else of format 1 can move
+/// (`the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block`).
 ///
 /// # Panics
 ///
-/// When `frozen_predecessor` is not a JSON Schema that defines `ApprovalInfo`,
+/// When `frozen_predecessor` is not a JSON Schema that defines `Verification`,
 /// or already describes the block: the caller handed the wrong file.
 pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
+    format_1_minor(
+        frozen_predecessor,
+        crate::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING,
+        "Verification",
+        POSITIONS_MAPPING_PROPERTY,
+        &POSITIONS_MAPPING_DEFINITIONS,
+    )
+}
+
+/// `Verification`'s property for the `positions_mapping` block (PROD-04.2).
+pub const POSITIONS_MAPPING_PROPERTY: &str = "positions_mapping";
+
+/// The three definitions the `positions_mapping` block brings with it.
+pub const POSITIONS_MAPPING_DEFINITIONS: [&str; 3] =
+    ["PositionsMapping", "MappingCounts", "DocumentRef"];
+
+/// One MINOR of format 1: `frozen_predecessor` plus one optional `property` of
+/// `owner` and its `definitions`, exactly as the type derives them, under the
+/// `$id` of `version`.
+fn format_1_minor(
+    frozen_predecessor: &str,
+    version: &str,
+    owner: &str,
+    block: &str,
+    definitions: &[&str],
+) -> String {
     use schemars::schema::{RootSchema, Schema};
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -149,30 +200,29 @@ pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
     let mut root: RootSchema =
         serde_json::from_str(frozen_predecessor).expect("the frozen scorecard schema parses");
     root.schema.metadata().id = Some(format!(
-        "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL
+        "https://logweir.dev/schemas/logweir-drill-scorecard-{version}.json"
     ));
-    let property = match derived.definitions.get_mut("ApprovalInfo") {
+    let property = match derived.definitions.get_mut(owner) {
         Some(Schema::Object(o)) => o
             .object()
             .properties
-            .remove(CONSOLE_APPROVAL_PROPERTY)
-            .expect("the scorecard type derives approval.console"),
-        _ => panic!("the scorecard type derives ApprovalInfo"),
+            .remove(block)
+            .unwrap_or_else(|| panic!("the scorecard type derives {owner}.{block}")),
+        _ => panic!("the scorecard type derives {owner}"),
     };
-    match root.definitions.get_mut("ApprovalInfo") {
+    match root.definitions.get_mut(owner) {
         Some(Schema::Object(o)) => {
             assert!(
                 o.object()
                     .properties
-                    .insert(CONSOLE_APPROVAL_PROPERTY.into(), property)
+                    .insert(block.into(), property)
                     .is_none(),
-                "the frozen predecessor must not describe approval.console"
+                "the frozen predecessor must not describe {owner}.{block}"
             );
         }
-        _ => panic!("the frozen scorecard schema defines ApprovalInfo"),
+        _ => panic!("the frozen scorecard schema defines {owner}"),
     }
-    for name in CONSOLE_APPROVAL_DEFINITIONS {
+    for &name in definitions {
         let definition = derived
             .definitions
             .remove(name)
@@ -229,6 +279,42 @@ pub fn consumer_positions_document_schema() -> String {
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-consumer-positions-{}.json",
         crate::consumer_positions::DOCUMENT_FORMAT_VERSION
+    ));
+    let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
+    out.push('\n');
+    out
+}
+
+/// **PROD-04.2.** The positions-mapping document's schema,
+/// `schemas/logweir-positions-mapping-1.0.0.json` (`logweir schema
+/// positions-mapping`).
+pub fn positions_mapping_document_schema() -> String {
+    document_schema::<crate::positions_mapping::MappingDocument>(
+        "positions-mapping",
+        crate::positions_mapping::DOCUMENT_FORMAT_VERSION,
+    )
+}
+
+/// **PROD-04.2.** The switchover record's schema,
+/// `schemas/logweir-switchover-record-1.0.0.json` (`logweir schema
+/// switchover-record`).
+pub fn switchover_record_schema() -> String {
+    document_schema::<crate::switchover::SwitchoverRecord>(
+        "switchover-record",
+        crate::switchover::RECORD_FORMAT_VERSION,
+    )
+}
+
+/// A document's schema under `https://logweir.dev/schemas/logweir-<name>-<version>.json`,
+/// with the scorecard's generator settings.
+fn document_schema<T: schemars::JsonSchema>(name: &str, version: &str) -> String {
+    let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
+        s.option_nullable = true;
+        s.option_add_null_type = false;
+    });
+    let mut root = settings.into_generator().into_root_schema_for::<T>();
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-{name}-{version}.json"
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

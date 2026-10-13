@@ -301,6 +301,7 @@ fn every_controller_row_has_a_catalogue_entry() {
         PreflightOperation::Restore,
         PreflightOperation::DestinationAccess,
         PreflightOperation::SourceConnection,
+        PreflightOperation::Switchover,
     ] {
         let rows = controller_rows(operation);
         assert!(!rows.is_empty(), "{operation:?} owns no row at all");
@@ -4967,6 +4968,27 @@ fn the_expected_rows_are_the_rows_the_runner_emits() {
         "`job_rows` and the runner disagree about a `sourceConnection` plan. The runner emits \
          two rows and `connection.topicsDescribable` is deliberately not one of them; a mirror \
          that listed it would pin every connection test at `unknown`."
+    );
+    // PROD-04.2 §3.8: the switchover review's four rows.
+    let review = CheckRequest::SwitchoverReadiness(Box::new(
+        logweir_core::check_contract::SwitchoverReadinessRequest {
+            restore_name: "incident".to_string(),
+            restore_uid: "r-uid".to_string(),
+            restore_plan_sha256: logweir_core::ids::sha256_prefixed(b"p"),
+            scorecard_key: "logweir/drills/run-1.json".to_string(),
+            target: fixture_connection_plan(),
+            evidence: fixture_destination_plan(),
+            keyring: logweir_core::execution_contract::EvidenceKeyring {
+                format_version: "1.0.0".to_string(),
+                keys: Vec::new(),
+            },
+            groups: Vec::new(),
+        },
+    ));
+    assert_eq!(
+        ids_of(&job_rows(&review, false)),
+        runner_pinned_ids_at_least("a_switchover_review_reports_every_row_it_owns", 4),
+        "`job_rows` and the runner disagree about a `switchoverReadiness` plan"
     );
 }
 

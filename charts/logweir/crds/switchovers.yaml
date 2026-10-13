@@ -1,0 +1,235 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
+# (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
+# re-renders into a temporary directory and `diff -u`s these files against it,
+# so a hand edit here is a red build rather than a silent divergence — the same
+# arrangement the scorecard schema has.
+#
+# Minimum Kubernetes: 1.29 (CEL validation rules GA). See docs/kubernetes.md.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: switchovers.logweir.dev
+spec:
+  group: logweir.dev
+  names:
+    categories: []
+    kind: Switchover
+    plural: switchovers
+    shortNames: []
+    singular: switchover
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.restoreRef.name
+      name: RESTORE
+      type: string
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .status.counts.applied
+      name: APPLIED
+      type: integer
+    - jsonPath: .status.counts.refused
+      name: REFUSED
+      type: integer
+    - jsonPath: .status.reason
+      name: REASON
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'Apply reviewed consumer positions from a verified Restore''s signed positions mapping to stopped consumer groups on that restore''s target. Each group is compare-and-set against the plan; the broker refuses a group that has members. Executed as a Job; nothing commits a position automatically after a restore. `spec` is immutable: the approval binds `planBytes`.'
+        properties:
+          spec:
+            description: '`Switchover.spec`.'
+            properties:
+              approvalRef:
+                description: The `Approval` (subject kind `Switchover`) that authorises it.
+                properties:
+                  name:
+                    description: The referenced object's `metadata.name`, in this namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              deadlineSeconds:
+                description: The Job's `activeDeadlineSeconds`.
+                format: int64
+                minimum: 1
+                type: integer
+              planBytes:
+                description: 'The switchover plan (format 1.0.0), as the exact bytes the approver signed: an opaque string, never a modelled schema, for the reason `Restore.spec.planBytes` gives. `logweir switchover plan` writes it.'
+                type: string
+              restoreRef:
+                description: The `Restore` whose mapping and target the plan applies. A declaration the controller holds to the plan's own `restore` block.
+                properties:
+                  name:
+                    description: The `Restore`'s name, in this namespace.
+                    type: string
+                  uid:
+                    description: 'Its UID: a same-named restore recreated since is another restore.'
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+            required:
+            - approvalRef
+            - deadlineSeconds
+            - planBytes
+            - restoreRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new object instead
+              rule: self == oldSelf
+          status:
+            description: '`Switchover.status`.'
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  description: 'A `metav1.Condition`: the standard six fields with their standard meanings.'
+                  properties:
+                    lastTransitionTime:
+                      description: When the condition last changed from one status to another.
+                      format: date-time
+                      nullable: true
+                      type: string
+                    message:
+                      description: A human-readable message. Never carries key material or a credential.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The `.metadata.generation` this condition was computed from.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A short, machine-readable CamelCase reason for the current status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: '`True`, `False` or `Unknown`.'
+                      type: string
+                    type:
+                      description: The condition type, in CamelCase — `Ready`, `Reachable`, `Loaded`, `Verified`, `Expired`.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              counts:
+                description: The groups counted by outcome.
+                nullable: true
+                properties:
+                  alreadyApplied:
+                    format: uint32
+                    minimum: 0
+                    type: integer
+                  applied:
+                    format: uint32
+                    minimum: 0
+                    type: integer
+                  failed:
+                    format: uint32
+                    minimum: 0
+                    type: integer
+                  refused:
+                    format: uint32
+                    minimum: 0
+                    type: integer
+                  untouched:
+                    format: uint32
+                    minimum: 0
+                    type: integer
+                required:
+                - alreadyApplied
+                - applied
+                - failed
+                - refused
+                - untouched
+                type: object
+              evidence:
+                description: The signed switchover record.
+                nullable: true
+                properties:
+                  recordKey:
+                    description: '`logweir/switchovers/<run_id>.record.json`, in the restore''s evidence store; its `.sig` beside it.'
+                    nullable: true
+                    type: string
+                type: object
+              exitCode:
+                description: 'The runner''s exit code: 0 every group applied, 2 some refused or failed, 3 refused before any group, 1 operational, 4 the record could not be signed.'
+                format: int32
+                nullable: true
+                type: integer
+              exitReason:
+                description: The runner's `refusal-reason=` or `failure-reason=` word.
+                nullable: true
+                type: string
+              groups:
+                description: One entry per plan group, in plan order (at most 100).
+                items:
+                  description: One plan group's outcome.
+                  properties:
+                    created:
+                      default: false
+                      description: Whether the commit created the group.
+                      type: boolean
+                    outcome:
+                      description: '`applied`, `alreadyApplied`, `refused`, `failed` or `untouched`.'
+                      type: string
+                    partitions:
+                      default: 0
+                      description: How many partitions the plan names for it.
+                      format: uint32
+                      minimum: 0
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    source:
+                      description: The captured group.
+                      type: string
+                    target:
+                      description: The target group id.
+                      type: string
+                  required:
+                  - outcome
+                  - source
+                  - target
+                  type: object
+                maxItems: 100
+                type: array
+              jobRef:
+                description: The Job this object created.
+                nullable: true
+                type: string
+              message:
+                description: The sentence beside `reason`.
+                nullable: true
+                type: string
+              phase:
+                description: '`Pending`, `Running`, `Succeeded`, `PartiallyApplied`, `Failed`, `Refused`.'
+                nullable: true
+                type: string
+              reason:
+                description: 'Why the object is where it is: the admission refusal or hold, or the run''s outcome.'
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: Switchover
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

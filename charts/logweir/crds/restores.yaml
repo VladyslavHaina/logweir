@@ -304,6 +304,45 @@ spec:
             description: '`Restore.status`.'
             nullable: true
             properties:
+              clone:
+                description: 'A TTL clone (`target.teardown: {ttl_seconds}` in a scratch plan): when it expires and how its cleanup went. Absent on every other `Restore`, and on anything an older controller reconciled.'
+                nullable: true
+                properties:
+                  attempts:
+                    description: How many cleanup Jobs have been started (at most 3).
+                    format: int64
+                    nullable: true
+                    type: integer
+                  expiresAt:
+                    description: 'When the cleanup is due: the run''s success, as the controller recorded it, plus `ttlSeconds`.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  jobRef:
+                    description: The current cleanup Job.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  phase:
+                    description: '`Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.'
+                    nullable: true
+                    type: string
+                  reason:
+                    description: Why the cleanup failed or refused, when it did; bounded.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  ttlSeconds:
+                    description: The plan's `target.teardown.ttl_seconds`.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
               completion:
                 description: 'What the run actually restored, copied by JSON pointer from the SIGNED scorecard. Written ONLY beside a `Valid` evidence verdict (basis `Current` or `Historical`) over that same scorecard, in the write that records the verdict: it is absent while verification is pending or `NotAttempted`, and it is never written from a scorecard whose verdict is `Invalid` or `Untrusted`.'
                 nullable: true
@@ -900,7 +939,7 @@ spec:
                     type: integer
                 type: object
               oldTopics:
-                description: 'The source topics the new ones were restored from. Nothing here was written to, in any tag: retiring an old topic is tag 2''s `Switchover` and is validated against this list.'
+                description: The source topics the new ones were restored from. Nothing here was written to, in any tag; a `Switchover` moves consumer groups onto the new topics and retires or deletes no topic.
                 items:
                   type: string
                 nullable: true
@@ -1187,6 +1226,109 @@ spec:
                       type: string
                     maxItems: 256
                     type: array
+                type: object
+              topicConfiguration:
+                description: 'For a plan carrying `target.topic_configuration`: each target topic''s replication factor with its reason, its overrides before (Logweir''s during-restore settings and the source''s at-creation set) and after (the whole desired set), and what phase 9''s transition did. Read off the runner''s `topic-configuration=` line and held to this Restore''s mapped target names: a CLAIM, like `topicPreflight`; the signed scorecard''s `target.topic_configuration` and the phase-9 attestation are the evidence. Absent on every other run.'
+                nullable: true
+                properties:
+                  applied:
+                    description: Topics whose desired set was applied and read back.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  desiredStateKey:
+                    description: The desired-state document's evidence key.
+                    nullable: true
+                    type: string
+                  exported:
+                    description: Owned topics, whose configuration is the desired-state document.
+                    items:
+                      type: string
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  failed:
+                    description: 'Topics not transitioned, each with its whole desired set: the remaining step, which the operator applies. Logweir never retries.'
+                    items:
+                      description: One topic the transition did not apply.
+                      properties:
+                        desired:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The topic's whole desired override set.
+                          type: object
+                        error:
+                          description: Why (`ConfigChangedSinceCreation`, or the failure), bounded.
+                          maxLength: 256
+                          type: string
+                        topic:
+                          description: The target topic.
+                          type: string
+                      required:
+                      - error
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  topics:
+                    description: 'Per target topic: the replication factor and the overrides before and after.'
+                    items:
+                      description: One target topic's configuration, before and after.
+                      properties:
+                        after:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The whole desired override set.
+                          type: object
+                        before:
+                          additionalProperties:
+                            type: string
+                          default: {}
+                          description: The overrides it was created with.
+                          type: object
+                        replicationFactor:
+                          description: The replication factor it was created with, and why.
+                          nullable: true
+                          properties:
+                            reason:
+                              description: '`sourceFactor`, `targetBrokers` or `notRecorded`.'
+                              type: string
+                            source:
+                              description: The source's, when recorded.
+                              format: int64
+                              nullable: true
+                              type: integer
+                            target:
+                              description: The factor the topic was created with.
+                              format: int64
+                              type: integer
+                          required:
+                          - reason
+                          - target
+                          type: object
+                        route:
+                          description: '`adminApi` or `desiredStateExport`.'
+                          nullable: true
+                          type: string
+                        topic:
+                          description: The target topic.
+                          type: string
+                      required:
+                      - topic
+                      type: object
+                    maxItems: 256
+                    nullable: true
+                    type: array
+                  transition:
+                    description: '`applied`, `partial`, or `notRun: <reason>` (`transitionNone`, `verdictNotPass`, `topicsNotKept`).'
+                    maxLength: 64
+                    nullable: true
+                    type: string
                 type: object
               topicPreflight:
                 description: |-

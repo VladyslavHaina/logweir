@@ -1,0 +1,48 @@
+{
+  "format_version": "1.0.0",
+  "run_id": "01J9X2QK7C4V0R8YB3ZP6MTS5B",
+  "point_id": "pt-0001",
+  "positions_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "rule": "firstTargetRecordAtOrAboveLineage",
+  "groups": {
+    "app": {
+      "group_type": "classic",
+      "active_at_capture": false,
+      "entries": [
+        {
+          "topic": "orders",
+          "partition": 0,
+          "position": 12,
+          "target_topic": "drill-orders",
+          "class": "exact",
+          "target_offset": 12
+        },
+        {
+          "topic": "orders",
+          "partition": 1,
+          "position": 40,
+          "target_topic": "drill-orders",
+          "class": "approximate",
+          "target_offset": 38,
+          "skipped": 2,
+          "reason": "selectionExcluded"
+        },
+        {
+          "topic": "orders",
+          "partition": 2,
+          "position": 5,
+          "target_topic": "drill-orders",
+          "class": "unavailable",
+          "reason": "PartitionNotRestored"
+        }
+      ],
+      "no_committed_position": 0
+    },
+    "gone": {
+      "active_at_capture": false,
+      "reason": "NotCaptured: GroupNotFound",
+      "entries": [],
+      "no_committed_position": 0
+    }
+  }
+}

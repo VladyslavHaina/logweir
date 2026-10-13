@@ -90,6 +90,14 @@ pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
 /// SIGNATURE-ONLY for exactly that reason.
 pub const PAYLOAD_TYPE_CATALOG_POINT: &str =
     "application/vnd.logweir.catalog-point+json;version=1.0.0";
+/// **PROD-04.2.** The SWITCHOVER RECORD: the signed record of one
+/// `Switchover` run (`logweir/switchovers/<run_id>.record.json`), which
+/// consumer positions it read, committed and read back on a restore's target.
+/// Both readers verify it SIGNATURE-ONLY, like the teardown attestation.
+/// Declared here, in the verify-only crate, for the reason
+/// [`PAYLOAD_TYPE_BACKUP_RECEIPT`] gives.
+pub const PAYLOAD_TYPE_SWITCHOVER_RECORD: &str =
+    "application/vnd.logweir.switchover-record+json;version=1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signature {

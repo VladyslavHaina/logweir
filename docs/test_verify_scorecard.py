@@ -378,17 +378,19 @@ def test_the_five_payload_types_match_the_rust_constants():
     # PLAT-15.1's catalog point is declared in the same file, for the same
     # reason the backup receipt is: the control plane links the verify-only
     # crate and never the signer.
+    # PROD-04.2 adds the switchover record, verified signature-only.
     types = (SCORECARD_TYPE, BACKUP_RECEIPT_TYPE, CATALOG_POINT_TYPE,
-             RECEIPT_TYPE, TEARDOWN_TYPE)
+             RECEIPT_TYPE, TEARDOWN_TYPE,
+             "application/vnd.logweir.switchover-record+json;version=1.0.0")
     rust = (ROOT / "crates" / "logweir-verify" / "src" / "lib.rs").read_text()
     for t in types:
         assert t in rust, f"{t} is not declared in logweir-verify/src/lib.rs"
     py = VERIFIER.read_text()
     for t in types:
         assert t in py, f"{t} is not declared in verify_scorecard.py"
-    # …and the map really has FIVE entries, so a sixth type added to the Rust
+    # …and the map really has SIX entries, so a seventh type added to the Rust
     # crate and forgotten here is not silently covered by the loop above.
-    assert len(_verifier_module().PAYLOAD_TYPES) == 5
+    assert len(_verifier_module().PAYLOAD_TYPES) == 6
 
 
 # ------------------------------------------------------------------ PAE lengths
@@ -905,7 +907,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.30.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.33.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -925,6 +927,11 @@ def test_the_version_line_names_the_current_invariant_set():
         # 1.21.0's addition (PROD-01.3): the closed set is five from 1.5.0.
         assert (
             "format defines when the block is, or from 1.5.0 one of the five"
+        ) in r.stdout, r.stdout
+        # 1.31.0's addition (PROD-11.1a): `target.creation`'s five arms.
+        assert (
+            "target.creation only from 1.10.0 of format 1 or 2.2.0 of format 2, lineage "
+            "headers kept"
         ) in r.stdout, r.stdout
         # 1.11.0's addition: GC12's price for `evidence.offset_report_key` and
         # `evidence.offset_report_sha256`, which travel together or not at all.
@@ -996,6 +1003,12 @@ def test_the_version_line_names_the_current_invariant_set():
             "approval inside the request's window, approval.approver the approver's principal, "
             "approval.key_id the console's key, approval.approved_at the instant of the "
             "approval, and target.original_name.approval_mode consoleApproval exactly beside it"
+        ) in r.stdout, r.stdout
+        # 1.33.0's addition (PROD-04.2): `integrity.verification.positions_mapping`.
+        assert (
+            "integrity.verification.positions_mapping only from 1.12.0 of format 1 or 2.4.0 of "
+            "format 2, only over a passing complete verification, a document or the reason "
+            "there is none, the run's own key, and at least one group"
         ) in r.stdout, r.stdout
 
 
@@ -2329,9 +2342,23 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.30.0 (PROD-02.1) adds the receipt's five `source_watermarks` arms
     # (41-45, format 1.8.0), arm 4's empty window beside them, the shape check
     # and the `source_watermarks` lines. Map still five.
+    #
+    # 1.31.0 (PROD-11.1a) adds the scorecard's five `target.creation` arms
+    # (TCR-1 to TCR-5, format 1.10.0 and 2.2.0), its shape check and the
+    # `target creation:` line. Map still five.
+    #
+    # 1.32.0 (PROD-05.2) adds the scorecard's five `target.topic_configuration`
+    # arms (TC-1 to TC-5, format 1.11.0 and 2.3.0) and its shape check. Map
+    # still five.
+    #
+    # 1.33.0 (PROD-04.2) adds the scorecard's five `positions_mapping` arms
+    # (PM-1 to PM-5, format 1.12.0 and 2.4.0), the mapping document's seven
+    # (PMD-1 to PMD-7, with --positions-mapping), their shape checks, the
+    # `positions_mapping` lines, and the switchover record's payload type. Map
+    # six.
     mod = _verifier_module()
-    assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.30.0", mod.SCRIPT_VERSION
+    assert len(mod.PAYLOAD_TYPES) == 6, sorted(mod.PAYLOAD_TYPES)
+    assert mod.SCRIPT_VERSION == "1.33.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -4781,6 +4808,86 @@ def test_the_console_approval_minors_are_the_rust_readers():
         ("0.9.0", False), ("1.x.0", False), ("1", False), ("", False), (None, False),
     ):
         assert mod._defines_console_approval(version) is defines, version
+
+
+def test_the_target_creation_constants_are_the_rust_readers():
+    # PROD-11.1a: the block's minors, its one lineage word and a clone's bounds
+    # are the Rust reader's, and the version rule matches value for value.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    core = (ROOT / "crates/logweir-core/src/target_creation.rs").read_text()
+    m = re.search(r"pub const TARGET_CREATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m and mod.SCORECARD_TARGET_CREATION_SINCE_MINOR == int(m.group(1))
+    m = re.search(r'pub const FORMAT_VERSION_WITH_TARGET_CREATION: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TARGET_CREATION_SINCE_MINOR
+    m = re.search(r"pub const TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2: u64 = (\d+);", rust)
+    assert m and mod.SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2 == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION: &str = "2\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2
+    assert f'pub const LINEAGE_HEADERS_KEPT: &str = "{mod.LINEAGE_HEADERS_KEPT}";' in core
+    assert f"pub const CLONE_TTL_MIN_SECONDS: u64 = {mod.CLONE_TTL_MIN_SECONDS};" in core
+    assert (
+        f"pub const CLONE_TTL_MAX_SECONDS: u64 = {mod.CLONE_TTL_MAX_SECONDS:_};" in core
+    )
+    for version, defines in (
+        ("1.10.0", True), ("1.11.0", True), ("2.2.0", True), ("2.9.0", True),
+        ("1.9.0", False), ("2.1.0", False), ("3.2.0", False), ("1", False), (None, False),
+    ):
+        assert mod._defines_target_creation(version) is defines, version
+
+
+def test_the_target_creation_line_is_the_rust_readers_sentence():
+    # The `target creation:` line, word for word with
+    # `TargetCreation::lines`'s unit row.
+    mod = _verifier_module()
+    block = {
+        "topics": [
+            {"name": "c-a", "partitions": 3, "topic_id": "Cf6zT_mcTNCoxuPmv1Ztxw"},
+            {"name": "c-b", "partitions": 1, "topic_id": None, "topic_id_reason": "noTopicId"},
+        ],
+        "lineage_headers": "kept",
+    }
+    assert mod._target_creation_lines(block) == [
+        "target creation: this run created 2 topics: c-a (3 partitions, topic ID "
+        "Cf6zT_mcTNCoxuPmv1Ztxw), c-b (1 partition, no topic ID (noTopicId)); restored "
+        "records keep their lineage headers (kept)"
+    ]
+    assert mod._target_creation_lines(None) == []
+
+
+def test_the_topic_configuration_constants_are_the_rust_readers():
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR"
+    assert mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR
+    m = re.search(r"pub const TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2"
+    assert mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2 == int(m.group(1))
+    m = re.search(
+        r'pub const FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION: &str = "2\.(\d+)\.0";', rust)
+    assert m and int(m.group(1)) == mod.SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR_OF_MAJOR_2
+    core = (ROOT / "crates/logweir-core/src/topic_transition.rs").read_text()
+    for name, values in (
+        ("TRANSITION_AFTER_VERIFICATION", mod.TOPIC_CONFIGURATION_TRANSITIONS[0]),
+        ("TRANSITION_NONE", mod.TOPIC_CONFIGURATION_TRANSITIONS[1]),
+        ("ROUTE_ADMIN_API", mod.TOPIC_CONFIGURATION_ROUTES[0]),
+        ("ROUTE_DESIRED_STATE_EXPORT", mod.TOPIC_CONFIGURATION_ROUTES[1]),
+        ("RF_SOURCE_FACTOR", mod.TOPIC_CONFIGURATION_RF_REASONS[0]),
+        ("RF_TARGET_BROKERS", mod.TOPIC_CONFIGURATION_RF_REASONS[1]),
+        ("RF_NOT_RECORDED", mod.TOPIC_CONFIGURATION_RF_REASONS[2]),
+    ):
+        assert f'pub const {name}: &str = "{values}";' in core, name
+    for version, defines in (
+        ("1.11.0", True), ("1.12.0", True), ("2.3.0", True), ("2.9.1", True),
+        ("1.10.0", False), ("1.0.0", False), ("2.2.0", False), ("3.2.0", False),
+        ("1.x.0", False), ("", False), (None, False),
+    ):
+        assert mod._defines_topic_configuration(version) is defines, version
 
 
 def test_the_console_identity_rule_is_the_rust_readers():

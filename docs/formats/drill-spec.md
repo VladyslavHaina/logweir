@@ -1,4 +1,4 @@
-# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name` and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name`, `target.teardown` and `notifications`
 
 **This is not a complete drill-spec reference.** It documents the keys Task 14,
 decision D3, FX-8, PROD-08.1, PROD-11.1 and PROD-15.1 created or changed.
@@ -248,8 +248,7 @@ Optional. **How much of the restore phase 7 verifies.**
   at the archive, unless the plan states a window start,
   `restore.point_in_time: "<start>/<end>"`, which is then the lower bound); every restored record is read back and compared with it by
   its `x-original-offset` — content with headers in order, exact counts,
-  duplicates and order. The manifest's first/last-timestamp count bound is not
-  consulted. The contract is
+  duplicates and order. The segment count bound is not consulted. The contract is
   [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md);
   the signed result is `integrity.verification`
   ([the scorecard format](drill-scorecard.md#integrityverification-format-140)).
@@ -555,6 +554,83 @@ plan at phase 0 (exit 3) before it writes anything. It never restores under
 the original names without the conditions above. The full account, with the
 `Restore` declaration and the approval subject, is
 [kubernetes.md](../kubernetes.md#restoring-under-the-original-topic-names-prod-151).
+
+---
+
+## `target.teardown: {ttl_seconds}`: a clone (PROD-11.1a)
+
+`target.teardown` is a policy, `delete` (the default) or `keep`, or the clone
+form `{ttl_seconds: N}`: a scratch restore whose topics are kept N seconds after
+a passing run, then deleted by `logweir restore cleanup`
+([Kubernetes](../kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
+N is 300 to 2,592,000 (`CloneTtlOutOfRange`), and the form is scratch mode's
+only (`CloneTtlNeedsScratch`); both are exit 3 before anything is read. A run
+that does not pass is torn down at once. A runner from before PROD-11.1a types
+the field as a string, so it refuses the map form (`drill spec does not parse`,
+exit 1) and creates nothing. The signed scorecard records what the run created
+and the lifetime in [`target.creation`](drill-scorecard.md#targetcreation-format-1100-and-220).
+
+`logweir restore cleanup --spec <plan> --run-id <id> --signing-key <key>
+[--evidence-keys <keyring>] [--attempt N]` deletes exactly the topics that
+document records, only on the cluster it records (`CloneTargetClusterChanged`
+otherwise) and only while each one's ID is the recorded one
+(`CloneTargetReplaced`, `CloneTargetIdentityUnknown` otherwise; a missing topic
+is `alreadyAbsent`). It verifies the scorecard's signature, invariants, run id
+and plan hash first, and signs a teardown attestation (`teardown_policy: ttl`)
+at `logweir/drills/<run_id>.cleanup.json` (`.cleanup-N.json` for attempt N).
+Exit 0: every recorded topic deleted, already gone, or left for good by the ID
+rule; 1: a delete failed or an ID could not be read; 3: refused, nothing
+deleted; 4: the attestation was not persisted. Its line (exit 0, 1 and 3,
+not when the store or the cluster did not answer) is
+`clone-cleanup=<JSON>` (`runId`, `deleted`, `alreadyAbsent`, `left[{topic,
+reason}]`, `attestationKey` or `refused`).
+
+## `target.topic_configuration` (PROD-05.2)
+
+```yaml
+target:
+  topic_configuration:
+    transition: afterVerification   # or none
+    owners: []                      # the approver's statement, where the point looked for none
+    # owners: [{topic: orders, kind: strimzi, reference: kafka/orders}]
+```
+
+Optional. **Create each target topic from the bound point's configuration
+model** (receipt 1.3.0, `source.point` required) instead of the target's
+defaults, and, with `afterVerification`, apply the settings that would have
+dropped, compacted, rejected or re-stamped restored records only once the
+signed verdict is a pass. Absent: every topic is created as before, byte for
+byte.
+
+- **At creation:** the model's partition count; a replication factor of
+  `min(source, target brokers)`, with the reason; the source's other portable
+  overrides (`min.insync.replicas` capped at the factor; `removedInKafka4` keys
+  only to a 3.x target); and Logweir's own `retention.ms=-1`,
+  `retention.bytes=-1`, `cleanup.policy=delete`, `CreateTime` and unbounded
+  timestamp bounds. The target broker's own record-timestamp bound then
+  refuses nothing.
+- **After verification** (phase 9, a pass only, topics the run keeps): one
+  `AlterConfigs` per topic with its WHOLE desired set, which removes Logweir's
+  settings; only while the topic's overrides are still the ones it was created
+  with (`ConfigChangedSinceCreation`), proved by reading them back. A shorter
+  `retention.ms` than the restored records' age deletes them at the broker's
+  next retention check: the restore preflight says so.
+- **Never applied:** inherited values, the source's reassignment throttles,
+  provider keys and secrets; each is listed with the source's value.
+- **Owners:** an owned topic is created with Logweir's settings only and never
+  altered; its configuration is put as `KafkaTopic` YAML (or a neutral
+  document for an `external` owner) beside the scorecard. **`owners`** is the
+  approver's statement, by source topic, where the point's backup looked for
+  none (`owner_detection: []`); without either the plan is refused.
+- **Refused before anything is created** (exit 3, the code opens the
+  message): `TopicConfigurationNotRecorded` (no point, or a receipt before
+  1.3.0), `TopicOwnerNotChecked`, `TopicClassDisagrees` (a recorded class this
+  build's table disagrees with), `TopicConfigRefusedByTarget` (the target's
+  `CreateTopics validate_only` refused a setting, named).
+
+**Old runners.** A runner built before PROD-05.2 ignores the block, creates its
+topics as before and signs no `target.topic_configuration`, so nothing is
+claimed.
 
 ---
 

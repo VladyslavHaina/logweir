@@ -818,6 +818,17 @@ pub struct BackupExecutionInputs {
     /// cost, only for runs that select groups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_groups: Option<Vec<String>>,
+    /// **PROD-05.1a.** The Strimzi `KafkaTopic` resources the controller
+    /// listed for this run's topics, when the `KafkaCluster` names its
+    /// Strimzi cluster (`spec.strimzi`). Rendered into
+    /// [`PLAN_KAFKA_TOPIC_RESOURCES_KEY`] and passed to the runner as
+    /// `--kafka-topic-resources`, so the receipt records
+    /// `owner_detection: [kafkaTopicResources]`. `v2`, optional, after
+    /// `consumerGroups`: absent for every other run, which keeps its bytes. A
+    /// controller older than this field refuses a snapshot that carries it
+    /// (`PlanConfigMapConflict`), the rollback cost, only for such runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_topic_resources: Option<KafkaTopicResourcesInputs>,
     /// The archive. `v1`.
     pub archive: ArchiveInputs,
     /// The container argv, deadline and tunables. `v1`.
@@ -852,8 +863,89 @@ impl BackupExecutionInputs {
         view.selection = None;
         view.destination = None;
         view.consumer_groups = None;
+        view.kafka_topic_resources = None;
         view
     }
+}
+
+/// The plan `ConfigMap` key the listed `KafkaTopic` resources are rendered
+/// into (PROD-05.1a).
+pub const PLAN_KAFKA_TOPIC_RESOURCES_KEY: &str = "kafka-topic-resources.yaml";
+
+/// Where the runner reads them.
+pub const KAFKA_TOPIC_RESOURCES_PATH: &str = "/plan/kafka-topic-resources.yaml";
+
+/// **PROD-05.1a.** What the controller listed: the Strimzi cluster, its
+/// namespace, and every `KafkaTopic` there labelled for that cluster, not
+/// unmanaged, that names one of the run's topics. Possibly empty: the list
+/// succeeded and found none, which is a look ("no owner"), never "not
+/// checked".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KafkaTopicResourcesInputs {
+    /// The `strimzi.io/cluster` label value.
+    pub cluster: String,
+    /// The namespace listed.
+    pub namespace: String,
+    /// The resources, by name.
+    pub resources: Vec<KafkaTopicResourceInputs>,
+}
+
+/// One listed `KafkaTopic`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KafkaTopicResourceInputs {
+    /// `metadata.name`.
+    pub name: String,
+    /// `spec.topicName`, when it sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_name: Option<String>,
+}
+
+impl KafkaTopicResourcesInputs {
+    /// The resources as the runner's `--kafka-topic-resources` reads them
+    /// ([`crate::strimzi_topics::document`]).
+    ///
+    /// # Errors
+    ///
+    /// A conflict for a document that does not serialise.
+    pub fn document(&self) -> Result<String, ExecutionRefusal> {
+        crate::strimzi_topics::document(self).map_err(|e| {
+            ExecutionRefusal::conflict(format!(
+                "the listed KafkaTopic resources do not serialise: {e}"
+            ))
+        })
+    }
+}
+
+/// The inputs with the listed `KafkaTopic` resources frozen in, and the
+/// runner told where they are (`--kafka-topic-resources`,
+/// `--strimzi-cluster`). `None` leaves the inputs as they are, byte for byte.
+#[must_use]
+pub fn with_kafka_topic_resources(
+    mut inputs: BackupExecutionInputs,
+    resources: Option<KafkaTopicResourcesInputs>,
+) -> BackupExecutionInputs {
+    if let Some(block) = resources {
+        inputs.runner.args.extend([
+            "--kafka-topic-resources".to_string(),
+            KAFKA_TOPIC_RESOURCES_PATH.to_string(),
+            "--strimzi-cluster".to_string(),
+            block.cluster.clone(),
+        ]);
+        inputs.kafka_topic_resources = Some(block);
+    }
+    inputs
+}
+
+/// The `KafkaTopic` resources a frozen plan carries: `Some(block)` as it was
+/// frozen (`Some(None)` for a frozen run without one), `None` when the plan
+/// holds no readable snapshot. A frozen run never lists again.
+#[must_use]
+pub fn stored_kafka_topic_resources(plan: &ConfigMap) -> Option<Option<KafkaTopicResourcesInputs>> {
+    let stored = plan.data.as_ref()?.get(INPUTS_KEY)?;
+    let inputs: BackupExecutionInputs = serde_json::from_str(stored).ok()?;
+    Some(inputs.kafka_topic_resources)
 }
 
 /// Resolve the inputs of one run from the typed `Backup`, its derived identity,
@@ -1018,6 +1110,8 @@ pub fn resolve_inputs(
         selection: Some(selection.selection.clone()),
         destination: destination.cloned(),
         consumer_groups: crate::policy::selected_groups(&backup.spec).map(<[String]>::to_vec),
+        // Added by `with_kafka_topic_resources`, after the listing.
+        kafka_topic_resources: None,
         source: SourceInputs {
             cluster: ObjectIdentity {
                 namespace: cluster
@@ -1261,6 +1355,13 @@ impl FrozenInputs {
         if let Some(ca) = self.ca_pem.as_ref() {
             documents.insert(ARCHIVE_CA_PLAN_KEY.to_string(), ca.clone());
         }
+        // PROD-05.1a: the listed `KafkaTopic`s, rendered from the snapshot.
+        if let Some(resources) = self.inputs.kafka_topic_resources.as_ref() {
+            documents.insert(
+                PLAN_KAFKA_TOPIC_RESOURCES_KEY.to_string(),
+                resources.document()?,
+            );
+        }
         Ok(documents)
     }
 
@@ -1437,6 +1538,11 @@ pub fn verify_frozen_config_map(
     // is compared against `data` whole.
     if data.contains_key(ARCHIVE_CA_PLAN_KEY) {
         expected_keys.push(ARCHIVE_CA_PLAN_KEY);
+    }
+    // PROD-05.1a's key, proved the same way: `documents()` renders it from
+    // the snapshot and is compared against `data` whole.
+    if data.contains_key(PLAN_KAFKA_TOPIC_RESOURCES_KEY) {
+        expected_keys.push(PLAN_KAFKA_TOPIC_RESOURCES_KEY);
     }
     expected_keys.sort_unstable();
     if keys != expected_keys {

@@ -684,11 +684,13 @@ fn the_start_is_inclusive_and_selects_equal_and_non_monotonic_timestamps() {
 
 /// **The engine's segment rule at the start (PROD-01.1 S7, mirrored).** p0's
 /// first segment holds `[S-100, S+50, S-90, S-80]`: its LAST record is before
-/// `S`, so the engine skips the whole segment and loses `S+50`, which is in
-/// the window. Complete coverage computes the expected output from each
-/// record's own timestamp and FAILS the restore (`missing`); it is never
-/// signed `pass`. The oracle measures the same loss. This is the engine's
-/// limit, PROD-01.1b's to fix; Logweir's job is not to sign it.
+/// `S`, so the engine would skip the whole segment and lose `S+50`, which is
+/// in the window. Before PROD-01.1b the restore ran and complete coverage
+/// failed it (`missing`). Since PROD-01.1b the runner reads each record's own
+/// timestamp first and REFUSES the window before any write, exit 3,
+/// `PointInTimeSelectionIncomplete`, naming the segment and the start that
+/// reads it. The control: that start (`S-80`, the segment's last record)
+/// restores exactly what the oracle expects and passes.
 #[test]
 fn a_segment_whose_bounds_hide_an_in_window_record_is_never_signed_pass() {
     let mut row = Row::new("hidden");
@@ -717,36 +719,70 @@ fn a_segment_whose_bounds_hide_an_in_window_record_is_never_signed_pass() {
         restore_spec(&backup_id, &[&topic], &prefix, &sel, (s, s + 5_000), true),
         Vec::new(),
     );
-    let want = expected(&archive, &sel);
-    let got = observed(&format!("{prefix}{topic}"));
-    let d = diff(&want, &got);
-    write_outcome("hidden", &json!({"verdict": r.summary(), "diff": d}));
-    assert_eq!(
-        d,
-        vec![format!(
-            "p0: expected (offset, ts) [(1, {}), (4, {}), (5, {}), (6, {}), (7, {})], restored \
-             [(4, {}), (5, {}), (6, {}), (7, {})]",
-            s + 50,
-            s + 100,
-            s + 110,
-            s + 120,
-            s + 130,
-            s + 100,
-            s + 110,
-            s + 120,
-            s + 130
-        )],
-        "the engine skips the segment whose last record is before the start"
+    // The control, at the start the refusal names.
+    let earlier = Selection {
+        start: Some(s - 80),
+        end: s + 5_000,
+        ..Selection::default()
+    };
+    let prefix_e = row.prefix("e", &[&topic]);
+    let re = restore_run(
+        restore_spec(
+            &backup_id,
+            &[&topic],
+            &prefix_e,
+            &earlier,
+            (s - 80, s + 5_000),
+            true,
+        ),
+        Vec::new(),
     );
+    let want = expected(&archive, &earlier);
+    let got = observed(&format!("{prefix_e}{topic}"));
+    let d = diff(&want, &got);
+    write_outcome(
+        "hidden",
+        &json!({"verdict": r.summary(), "control": re.summary(), "control_diff": d}),
+    );
+    let first = archive
+        .segments
+        .iter()
+        .find(|g| g.partition == 0 && g.start_timestamp == s - 100)
+        .expect("p0's first segment");
     assert_eq!(
-        (r.exit, r.outcome()),
-        (Some(2), Some("fail-integrity")),
-        "complete coverage must catch it: {}",
+        r.exit,
+        Some(3),
+        "refused before anything runs: {}",
         r.summary()
     );
     assert_eq!(
-        r.scorecard["integrity"]["verification"]["complete"]["replay"]["missing"],
-        json!(1)
+        r.refusal().as_deref(),
+        Some("refusal-reason=PointInTimeSelectionIncomplete"),
+        "{}",
+        r.summary()
+    );
+    assert!(
+        r.stderr.contains(&first.key)
+            && r.stderr
+                .contains(&format!("a window start at or before epoch-ms {}", s - 80)),
+        "the refusal names the segment and the start that reads it: {}",
+        r.stderr
+    );
+    assert!(r.scorecard.is_null(), "nothing signed: {}", r.summary());
+    assert!(
+        !topic_exists(&format!("{prefix}{topic}")),
+        "no target topic"
+    );
+    assert_eq!(d, Vec::<String>::new(), "the control restores exactly");
+    assert!(
+        got[&0].iter().any(|c| c.1 == s + 50),
+        "S+50 restored from the earlier start"
+    );
+    assert_eq!(
+        (re.exit, re.outcome()),
+        (Some(0), Some("pass")),
+        "{}",
+        re.summary()
     );
 }
 

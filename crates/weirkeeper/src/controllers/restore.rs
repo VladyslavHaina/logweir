@@ -92,6 +92,11 @@ use super::backup::{
 };
 use super::Context;
 use crate::check;
+
+/// PROD-11.1a: a TTL clone's lifetime, cleanup Job and finalizer
+/// (`controllers/restore_clone.rs`).
+#[path = "restore_clone.rs"]
+pub mod restore_clone;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
@@ -262,17 +267,11 @@ pub use logweir_core::creation_stop::LINE_PREFIX as TARGET_TOPICS_APPEARED_KEY_P
 /// The most names one list of `status.targetTopicsAppeared` carries.
 pub use logweir_core::creation_stop::MAX_NAMES as TARGET_TOPICS_APPEARED_MAX_NAMES;
 
-/// `tailLines` on the terminal `pods/log` read. Every key this reconciler reads
-/// is in the last [`backup::KEY_SCAN_TAIL_LINES`] non-empty lines, and this
-/// many raw lines leave room for blank ones between them.
-///
-/// It bounds the number of lines, not their length: `limitBytes` keeps the
-/// first bytes of the tail, and the keys are last. The one line parsed as JSON
-/// is refused over `logweir_core::creation_stop::MAX_VALUE_BYTES` before it is
-/// parsed.
-pub const TERMINAL_LOG_TAIL_LINES: i64 = 256;
-
-const _: () = assert!(TERMINAL_LOG_TAIL_LINES as usize >= 16 * backup::KEY_SCAN_TAIL_LINES);
+/// `tailLines` on the terminal `pods/log` read: THE one terminal bound
+/// ([`runner_log::TERMINAL`], FX-43), the same at every exit code. The one
+/// line parsed as JSON is refused over
+/// `logweir_core::creation_stop::MAX_VALUE_BYTES` before it is parsed.
+pub use crate::runner_log::TERMINAL_LOG_TAIL_LINES;
 
 /// What every surface says about a topic a stopped creation step created and
 /// left — the runner's own sentence, from the one place both read.
@@ -707,6 +706,7 @@ fn policy_refusal(
         Err(refusal) => return Some(mismatch(refusal)),
     };
     let expected = ExpectedSubject {
+        kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace,
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),
@@ -3017,6 +3017,40 @@ pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
     (!kept.is_empty()).then(|| json!({ "failed": kept }))
 }
 
+/// **PROD-05.2.** `status.topicConfiguration` from the runner's last
+/// `topic-configuration=` line, held to this Restore's mapped target names and
+/// re-shaped into exactly the CRD's fields (a typed round trip): a topic the
+/// plan does not map is not this run's to name. `None` when there is no line
+/// or it does not parse.
+#[must_use]
+pub fn topic_configuration(log: &str, mapped: &[String]) -> Option<Value> {
+    use crate::crds::restore::RestoreTopicConfiguration;
+    let raw = runner_log::key_values(
+        log,
+        logweir_core::topic_transition::TOPIC_CONFIGURATION_KEY_PREFIX,
+    )
+    .pop()?;
+    let mut doc: RestoreTopicConfiguration = serde_json::from_str(raw).ok()?;
+    let ours = |t: &String| mapped.iter().any(|m| m == t);
+    if let Some(list) = doc.applied.as_mut() {
+        list.retain(ours);
+    }
+    if let Some(list) = doc.exported.as_mut() {
+        list.retain(ours);
+    }
+    if let Some(list) = doc.failed.as_mut() {
+        list.retain(|f| ours(&f.topic));
+        for f in list.iter_mut() {
+            f.error = f.error.chars().take(256).collect();
+        }
+    }
+    if let Some(list) = doc.topics.as_mut() {
+        list.retain(|t| ours(&t.topic));
+    }
+    doc.transition = doc.transition.map(|t| t.chars().take(64).collect());
+    serde_json::to_value(doc).ok()
+}
+
 /// Guard **G-TS**'s observation, read off the pod log by key name.
 ///
 /// Returns the printed object filtered to the three fields
@@ -4949,7 +4983,7 @@ pub fn creation_stop_state(exit_code: i32, log: &str) -> Option<&'static str> {
         .last()?
         .strip_prefix(logweir_core::guard::FAILURE_REASON_PREFIX)?;
     logweir_core::guard::failure_reason_for_exit(
-        logweir_core::guard::FailureReasonKind::Restore,
+        logweir_core::refusal_detail::RefusingRun::Restore,
         exit_code,
         value.trim(),
     )
@@ -6042,18 +6076,29 @@ async fn reconcile_restore_run(
     // admission record is this pass's first write, and seam S7 preconditions
     // every later write on where it left the object.
     let mut written: Option<Restore> = None;
-    let result = reconcile_restore_inner(
+    // PROD-11.1a: a TTL clone's admission, lifetime and cleanup wrap the
+    // reconcile (`restore_clone::around`); every other `Restore` is the
+    // reconcile, unchanged.
+    let result = restore_clone::around(
         restore,
         client,
-        scorecard,
-        verify,
         now,
-        runner,
-        policies,
-        archive_url,
-        pool,
-        memory,
-        &mut written,
+        runner.image.as_deref(),
+        // Boxed: the reconcile's future is large, and holding it by value in
+        // the wrapper's would double what one poll puts on the stack.
+        Box::pin(reconcile_restore_inner(
+            restore,
+            client,
+            scorecard,
+            verify,
+            now,
+            runner,
+            policies,
+            archive_url,
+            pool,
+            memory,
+            &mut written,
+        )),
     )
     .await;
     let restore = written.as_ref().unwrap_or(restore);
@@ -6725,41 +6770,62 @@ async fn reconcile_restore_inner(
     };
 
     // STEP 3. The code is known. Read the log through the `pods/log`
-    // subresource, the only route to a runner's stdout (interface I28).
+    // subresource, the only route to a runner's stdout (interface I28), with
+    // THE terminal bound (`runner_log::TERMINAL`) at every exit code.
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    // A refused run's log is read bounded, and its failure is an answer (see
-    // the `Backup` twin). This `if` is the only gate: every other exit code
-    // takes `runner_log::TERMINAL`, whose failure is still a reconcile error,
-    // and carries no runner reason.
-    let (log, runner_reason) = if exit_code == 3 {
-        // The Job's own line token: a `refusal-detail=` line is the runner's
-        // only when it carries it, so a Job with none (built by an older
-        // controller) has no line read as a reason.
-        let line_token = job::line_token(&job);
+    // The Job's own line token, and by which flag (FX-43): whose lines are
+    // read at all.
+    let job_token = job::job_token(&job);
+    // A refused run's read failure is an answer (see the `Backup` twin). This
+    // `if` is the only gate: every other exit code's failure is still a
+    // reconcile error.
+    let (raw, mut runner_reason) = if exit_code == 3 {
         let read = crate::refusal::read(
             &pods,
             &namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Restore,
-            line_token.as_ref(),
+            &job_token,
         )
         .await;
         (read.body, Some(read.reason))
     } else {
-        let log = runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL)
+        match runner_log::read_terminal(&pods, &pod_name)
             .await
-            .map_err(RestoreError::Api)?;
-        (log, None)
+            .map_err(RestoreError::Api)?
+        {
+            runner_log::TerminalRead::Read(body) => (body, None),
+            // Cut before its end: nothing is taken from it, and nothing is
+            // said about the runner either.
+            runner_log::TerminalRead::OverBound => (String::new(), None),
+        }
     };
-    let keys = restore_evidence_keys(&log);
+    // THE one answer to "whose line is it": only the lines the runner sealed
+    // with this Job's token (a Job an older controller built is read as that
+    // controller read it). Every reader below scans `log`.
+    let lines = runner_log::own_lines(&job_token, &raw);
+    if runner_reason.is_none()
+        && !raw.is_empty()
+        && runner_log::vouches_for_exit(exit_code)
+        && lines.runner_is_older()
+    {
+        runner_reason = Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    }
+    let older = runner_reason == Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    let log = lines.text();
+    let keys = restore_evidence_keys(log);
     // An exit-1 run whose last line names a state on the Restore's closed
     // `failure-reason=` list (a stopped creation step) says so on
     // `status.exitReason`; every other exit 1 keeps the wire reason.
-    let creation_stop = creation_stop_state(exit_code, &log);
-    let refusal = if exit_code == 3 {
+    let creation_stop = creation_stop_state(exit_code, log);
+    let refusal = if older {
+        // The mixed pair, by name, at whatever code the older runner stopped
+        // with: never a generic `operational` a schedule retries.
+        Some(logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.to_string())
+    } else if exit_code == 3 {
         Some(
-            backup::refusal_state(&log)
+            backup::refusal_state(log)
                 .unwrap_or_else(|| TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON.to_string()),
         )
     } else {
@@ -6828,13 +6894,13 @@ async fn reconcile_restore_inner(
     let race = creation_stop.and_then(|_| {
         creation_stop_lists(
             exit_code,
-            &log,
+            log,
             topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
         )
     });
     // Guard **G-TS**: scanned by name out of the same bounded tail as the
     // evidence keys.
-    let preflight = topic_preflight(&log);
+    let preflight = topic_preflight(log);
 
     if !keys.mandatory_complete() {
         if exit_code == 0 {
@@ -6884,11 +6950,20 @@ async fn reconcile_restore_inner(
     };
     // What the run's teardown left, on any exit code.
     if let Some(teardown) = teardown_failed(
-        &log,
+        log,
         topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
     ) {
         if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
             status.insert("teardown".to_string(), teardown);
+        }
+    }
+    // PROD-05.2: what the configuration transition did, by the same rule.
+    if let Some(configured) = topic_configuration(
+        log,
+        topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
+    ) {
+        if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
+            status.insert("topicConfiguration".to_string(), configured);
         }
     }
     let terminal = diagnostics::apply_finished(

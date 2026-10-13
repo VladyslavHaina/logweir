@@ -107,6 +107,7 @@ use std::collections::BTreeMap;
 
 /// The complete lane (`sample.coverage: complete`).
 pub mod complete;
+pub mod positions;
 
 #[derive(Debug)]
 pub struct VerifyOutcome {
@@ -1012,10 +1013,11 @@ fn verdict_for_selection(
 
 /// Folds `classify_parity` over every entry in `mapping`, applying the
 /// topic-rename mapping (module doc) before calling `reader`. The target
-/// partition count is read (`reader.end_offsets`); the target replication
-/// factor is not: `plan.default_replication_factor` is what phase 6 asked
-/// for, so read it as an assertion about the plan, not a measurement (a
-/// broker-side override would go undetected).
+/// partition count is read (`reader.end_offsets`), and so is the target
+/// replication factor (`reader.replication_factors`): a plan carrying
+/// `target.topic_configuration` creates each topic at its own bounded factor,
+/// not at `plan.default_replication_factor`. Only a reader that cannot answer
+/// (a test double) falls back to the plan's factor.
 ///
 /// # A source value that is not recorded is not assessed
 ///
@@ -1088,7 +1090,13 @@ fn classify_parity_all(
             Err(other) => return Err(other.into()),
         };
         let tgt_partitions = reader.end_offsets(tgt)?.len() as i32;
-        let tgt_rf = plan.default_replication_factor;
+        // The factor the topic HAS, measured: with `target.topic_configuration`
+        // it is the bounded source factor, never the plan's default.
+        let tgt_rf = reader
+            .replication_factors(std::slice::from_ref(tgt))?
+            .get(tgt)
+            .and_then(|f| i16::try_from(*f).ok())
+            .unwrap_or(plan.default_replication_factor);
         // What the source's record says, and nothing when it says nothing,
         // never the target's own value: the manifest's factor first, then the
         // verified receipt's.
@@ -1550,6 +1558,44 @@ pub fn run_after_restore(
     complete_max_records: Option<u64>,
     engine_report: &EngineReport,
 ) -> Result<VerifyOutcome, DrillError> {
+    run_after_restore_with_probes(
+        engine,
+        reader,
+        store,
+        facts,
+        sel,
+        mapping,
+        plan,
+        coverage,
+        mode,
+        verify,
+        complete_max_records,
+        engine_report,
+        None,
+    )
+    .map(|(outcome, _)| outcome)
+}
+
+/// [`run_after_restore`], also probing the bound point's captured positions
+/// in the complete lane's scan (PROD-04.2): the scans come back beside the
+/// outcome, empty on the sampled lane and for an unprobed partition.
+#[allow(clippy::too_many_arguments)]
+pub fn run_after_restore_with_probes(
+    engine: &dyn DataEngine,
+    reader: &dyn ClusterReader,
+    store: &Store,
+    facts: &BackupSetFacts,
+    sel: &[SampleSelection],
+    mapping: &BTreeMap<String, String>,
+    plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
+    mode: TargetMode,
+    verify: Coverage,
+    complete_max_records: Option<u64>,
+    engine_report: &EngineReport,
+    probes: Option<&positions::Probes>,
+) -> Result<(VerifyOutcome, positions::Scans), DrillError> {
+    let mut scans = positions::Scans::new();
     // Zero selections scanned is never a positive result. This one is
     // operational, a plan that named no partition to sample; `roll_up`
     // refuses an empty ledger independently anyway.
@@ -1613,6 +1659,7 @@ pub fn run_after_restore(
             }
             let (gaps, pruned) = complete::ranges_for(facts, &selected);
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Sampled.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 // The sampled lane reconciles `record_fingerprint`, which
@@ -1634,8 +1681,11 @@ pub fn run_after_restore(
                 mapping,
                 plan,
                 complete_max_records,
+                probes,
             )?;
+            scans = out.scans;
             let block = Verification {
+                positions_mapping: None,
                 coverage: Coverage::Complete.as_str().to_string(),
                 comparison_basis: COMPARISON_BASIS_ARCHIVE.to_string(),
                 header_order: HEADER_ORDER_VERIFIED.to_string(),
@@ -1684,13 +1734,16 @@ pub fn run_after_restore(
     // the source configuration was captured, and labelled by the run's mode.
     let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage, mode)?;
 
-    Ok(VerifyOutcome {
-        integrity,
-        topic_parity,
-        records_restored,
-        newest_restored_ts_ms: newest_ts(reader, mapping)?,
-        verified_at: chrono::Utc::now(),
-    })
+    Ok((
+        VerifyOutcome {
+            integrity,
+            topic_parity,
+            records_restored,
+            newest_restored_ts_ms: newest_ts(reader, mapping)?,
+            verified_at: chrono::Utc::now(),
+        },
+        scans,
+    ))
 }
 
 #[cfg(test)]
@@ -3121,6 +3174,94 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("no archive facts"));
+    }
+
+    /// **The signed parity compares the factor the topic was created with.**
+    /// A plan with `target.topic_configuration` creates a topic at its own
+    /// bounded factor (here 3, the source's), not at the plan's default (1):
+    /// no `replication_factor` divergence. CONTROL: a topic the target reports
+    /// at 1 is named `not_reconstructed`. KILLS: the plan's default read as
+    /// the target's factor.
+    #[test]
+    fn the_parity_reads_the_created_replication_factor() {
+        struct Target(u32);
+        impl ClusterReader for Target {
+            fn cluster_id(&self) -> Result<String, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn list_topics(
+                &self,
+            ) -> Result<Vec<logweir_kafka::reader::TopicMeta>, logweir_kafka::reader::KafkaError>
+            {
+                unimplemented!()
+            }
+            fn end_offsets(
+                &self,
+                _: &str,
+            ) -> Result<Vec<(i32, i64)>, logweir_kafka::reader::KafkaError> {
+                Ok(vec![(0, 10)])
+            }
+            fn broker_configs(
+                &self,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+            fn topic_configs(
+                &self,
+                _: &str,
+            ) -> Result<BTreeMap<String, String>, logweir_kafka::reader::KafkaError> {
+                Ok(BTreeMap::new())
+            }
+            fn replication_factors(
+                &self,
+                topics: &[String],
+            ) -> Result<BTreeMap<String, u32>, logweir_kafka::reader::KafkaError> {
+                Ok(topics.iter().map(|t| (t.clone(), self.0)).collect())
+            }
+            fn consume_range(
+                &self,
+                _t: &str,
+                _p: i32,
+                _from: i64,
+                _max: usize,
+            ) -> Result<Vec<ConsumedRecord>, logweir_kafka::reader::KafkaError> {
+                unimplemented!()
+            }
+        }
+        let facts = facts_one_segment();
+        let plan = test_plan();
+        let mapping = BTreeMap::from([("orders".to_string(), "drill-orders".to_string())]);
+        let parity = |rf: u32| {
+            classify_parity_all(
+                &facts,
+                &Target(rf),
+                &mapping,
+                &plan,
+                &SourceConfigCoverage::unknown(),
+                TargetMode::NewTopic,
+            )
+            .expect("parity")
+        };
+        let rf_entry = "drill-orders: replication_factor".to_string();
+        let created_at_3 = parity(3);
+        assert!(
+            !created_at_3
+                .not_reconstructed
+                .clone()
+                .unwrap_or_default()
+                .contains(&rf_entry),
+            "{created_at_3:?}"
+        );
+        assert!(!created_at_3.unexpected_divergence.contains(&rf_entry));
+        let created_at_1 = parity(1);
+        assert!(
+            created_at_1
+                .not_reconstructed
+                .clone()
+                .unwrap_or_default()
+                .contains(&rf_entry),
+            "{created_at_1:?}"
+        );
     }
 
     #[test]

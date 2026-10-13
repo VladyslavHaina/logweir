@@ -58,6 +58,12 @@ pub struct TeardownAttestation {
     pub topics_deleted: Vec<String>,
     pub topics_failed: Vec<(String, String)>,
     pub deleted_at: chrono::DateTime<chrono::Utc>,
+    /// **PROD-05.2.** What phase 9's configuration transition did, for a
+    /// restore whose plan carried `target.topic_configuration`; absent on
+    /// every other attestation, which keeps its bytes. Readers verify this
+    /// document signature-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_configuration: Option<logweir_core::topic_transition::TransitionOutcome>,
 }
 
 /// What phase 9 deletes, and what it could not: the deleting half of [`run`],
@@ -214,6 +220,7 @@ pub fn run(
         // Global Constraint 1: the clock is read HERE, in `crates/logweir`,
         // never in `logweir-core`.
         deleted_at: chrono::Utc::now(),
+        topic_configuration: None,
     }
 }
 
@@ -356,10 +363,15 @@ pub fn left_reasons(failed: &[(String, String)]) -> Vec<(String, String)> {
 /// Print the `teardown-failed=` line for `failed`, or nothing when nothing
 /// was left. The controller copies it to `Restore.status.teardown.failed`.
 pub fn print_left(failed: &[(String, String)]) {
-    let _ = print_left_to(&mut std::io::stdout().lock(), failed);
+    // Sealed with the Job's token under FX-43's flag (`crate::exit::print_lines`).
+    if let Some(line) =
+        logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed))
+    {
+        crate::exit::print_lines(&[line]);
+    }
 }
 
-/// [`print_left`] through a writer seam, so the line is testable.
+/// [`print_left`]'s plain line through a writer seam, so the line is testable.
 pub fn print_left_to(
     out: &mut dyn std::io::Write,
     failed: &[(String, String)],

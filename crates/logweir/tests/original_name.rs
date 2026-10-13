@@ -67,6 +67,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             topic_mapping_prefix: SCRATCH_PREFIX.into(),
             default_replication_factor: 1,
             teardown: "delete".into(),
+            topic_configuration: None,
         },
         sample: SampleSpec {
             window_start: ts("2026-09-07T12:00:00Z"),
@@ -1658,7 +1659,7 @@ fn the_creation_step_holds_no_deleter_and_phase_0_deletes_only_its_probe() {
     // nothing either.
     let orchestrator = include_str!("../src/drill/mod.rs");
     let from = orchestrator
-        .find("phase0_admit::create_target_topics(")
+        .find("phase0_admit::create_target_topics_from(")
         .expect("the call site");
     let to = from
         + orchestrator[from..]

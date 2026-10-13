@@ -1258,5 +1258,167 @@
   "rust_exit": 0,
   "python_exit": 0,
   "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_accepted",
+  "file": "target_creation_1_10_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_2_2_partition_subset",
+  "file": "target_creation_2_2_partition_subset.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_ttl_clone",
+  "file": "target_creation_1_10_ttl_clone.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_1_10_without_an_id",
+  "file": "target_creation_1_10_without_an_id.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "target_creation_under_format_1_9_0",
+  "file": "target_creation_under_format_1_9_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation is present but format_version \"1.9.0\" does not define it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2",
+  "arm": "target.creation is present but format_version "
+ },
+ {
+  "id": "target_creation_under_format_2_1_0",
+  "file": "target_creation_under_format_2_1_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation is present but format_version \"2.1.0\" does not define it: the block is defined from 1.10.0 of format 1 and from 2.2.0 of format 2",
+  "arm": "target.creation is present but format_version "
+ },
+ {
+  "id": "target_creation_headers_stripped",
+  "file": "target_creation_headers_stripped.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.lineage_headers is not \"kept\"; every restored record keeps x-original-offset and x-original-timestamp",
+  "arm": "target.creation.lineage_headers is not"
+ },
+ {
+  "id": "target_creation_topic_twice",
+  "file": "target_creation_topic_twice.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics is empty, names a topic twice, or names a blank topic or one with no partitions; the block is present exactly when the run created topics, and names each once",
+  "arm": "target.creation.topics is empty, names a topic twice"
+ },
+ {
+  "id": "target_creation_reserved_topic_id",
+  "file": "target_creation_reserved_topic_id.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics carries a topic_id that is not a topic ID this format defines, or a topic_id_reason outside the closed set, or both or neither; a created topic's identity is its ID or the reason there is none",
+  "arm": "target.creation.topics carries a topic_id that is not"
+ },
+ {
+  "id": "target_creation_id_and_reason",
+  "file": "target_creation_id_and_reason.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.topics carries a topic_id that is not a topic ID this format defines, or a topic_id_reason outside the closed set, or both or neither; a created topic's identity is its ID or the reason there is none",
+  "arm": "target.creation.topics carries a topic_id that is not"
+ },
+ {
+  "id": "target_creation_ttl_on_a_new_topic_restore",
+  "file": "target_creation_ttl_on_a_new_topic_restore.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.teardown_after_seconds is present but target.mode is not scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, kept from five minutes to thirty days",
+  "arm": "target.creation.teardown_after_seconds is present but"
+ },
+ {
+  "id": "target_creation_ttl_below_five_minutes",
+  "file": "target_creation_ttl_below_five_minutes.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.creation.teardown_after_seconds is present but target.mode is not scratch, or it is outside 300 to 2592000; only a scratch restore is a clone, kept from five minutes to thirty days",
+  "arm": "target.creation.teardown_after_seconds is present but"
+ },
+ {
+  "id": "topic_configuration_1_11_accepted",
+  "file": "topic_configuration_1_11_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "topic_configuration_1_11_exported_accepted",
+  "file": "topic_configuration_1_11_exported_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "topic_configuration_under_format_1_10_0",
+  "file": "topic_configuration_under_format_1_10_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration is present but format_version \"1.10.0\" does not define it: the block is defined from 1.11.0 of format 1 and from 2.3.0 of format 2",
+  "arm": "target.topic_configuration is present but format_version "
+ },
+ {
+  "id": "topic_configuration_transition_outside_its_set",
+  "file": "topic_configuration_transition_outside_its_set.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.transition is not \"afterVerification\" or \"none\"",
+  "arm": "target.topic_configuration.transition is not "
+ },
+ {
+  "id": "topic_configuration_route_unknown",
+  "file": "topic_configuration_route_unknown.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0",
+  "arm": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0"
+ },
+ {
+  "id": "topic_configuration_replication_factor_zero",
+  "file": "topic_configuration_replication_factor_zero.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0",
+  "arm": "target.topic_configuration names a route outside adminApi and desiredStateExport, a replication factor reason outside its closed set, or a replication factor of 0"
+ },
+ {
+  "id": "topic_configuration_desired_state_without_an_owned_topic",
+  "file": "topic_configuration_desired_state_without_an_owned_topic.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256",
+  "arm": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256"
+ },
+ {
+  "id": "topic_configuration_owned_topic_without_desired_state",
+  "file": "topic_configuration_owned_topic_without_desired_state.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256",
+  "arm": "target.topic_configuration.desired_state is present exactly when a topic's route is desiredStateExport, and names its document by sha256"
+ },
+ {
+  "id": "topic_configuration_1_11_secret_with_a_value",
+  "file": "topic_configuration_1_11_secret_with_a_value.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.topic_configuration lists a secret with a value, or another entry without one",
+  "arm": "target.topic_configuration lists a secret with a value, or another entry without one"
  }
 ]

@@ -31,6 +31,11 @@ pub enum Command {
     /// it per record, and emit a signed scorecard.
     #[command(subcommand)]
     Restore(RestoreCmd),
+    /// Apply reviewed consumer positions from a verified restore to stopped
+    /// groups on its target (PROD-04.2): build a plan, build a rollback plan,
+    /// or run one (the `Switchover` Job's entry point).
+    #[command(subcommand)]
+    Switchover(SwitchoverCmd),
     /// Back up a source cluster into an archive, from a Logweir spec.
     #[command(subcommand)]
     Backup(BackupCmd),
@@ -107,6 +112,11 @@ pub enum Command {
         /// Accepted and NEVER asserted — see this subcommand's description.
         #[arg(long)]
         marker_topic: Option<String>,
+        /// See `restore run`'s flag of the same name: the controller's per-Job
+        /// token, which seals the two contract lines and the end line
+        /// (FX-43).
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
@@ -239,6 +249,13 @@ pub enum CheckCmd {
         /// do less than the controller believes it did.
         #[arg(long)]
         check_contract_version: u32,
+        /// **FX-43.** The controller's per-Job token. The end frame and
+        /// `refusal-reason=` are printed sealed with it before their plain
+        /// copies (the end frame binds every other frame by digest), and the
+        /// run ends with a sealed `runner-exit=`. A runner that predates the
+        /// flag stops at it, and the controller says so.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 
@@ -468,10 +485,20 @@ pub enum DrillCmd {
         /// and the document is reported as not checked.
         #[arg(long)]
         consumer_positions: Option<PathBuf>,
+        /// **PROD-04.2.** With `--payload-type scorecard`: the
+        /// positions-mapping document a restore's scorecard binds
+        /// (`<run_id>.positions-mapping.json`, beside it in the evidence
+        /// store), checked against the verified scorecard by digest and by
+        /// its own arms; each mapped position is then printed.
+        #[arg(long)]
+        positions_mapping: Option<PathBuf>,
     },
 }
 
 #[derive(Subcommand)]
+// `Run` carries every flag of a restore; the cleanup's few are the small
+// variant, parsed once per process.
+#[allow(clippy::large_enum_variant)]
 pub enum RestoreCmd {
     /// Restore the window the spec names into the target cluster, reconcile it
     /// per record, and emit a signed scorecard.
@@ -495,6 +522,57 @@ pub enum RestoreCmd {
     /// `LOGWEIR_TARGET_TLS_KEY_FILE` — see `drill run` for why there is no
     /// flag for either.
     Run(RestoreRunArgs),
+    /// Remove a TTL clone (PROD-11.1a): delete exactly the topics the run's
+    /// signed scorecard records in `target.creation`, on the cluster it
+    /// records, and only while each topic's ID is the one recorded at
+    /// creation; sign what was deleted and what was left. The controller runs
+    /// it at the clone's `expiresAt`, or when its `Restore` is deleted.
+    ///
+    /// Exit 0: every recorded topic deleted, already gone, or left for good by
+    /// the ID rule; 1: a delete failed or an ID could not be read (try again);
+    /// 3: refused, nothing deleted; 4: the attestation was not persisted.
+    Cleanup(RestoreCleanupArgs),
+}
+
+/// `logweir restore cleanup`'s flags.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct RestoreCleanupArgs {
+    /// The approved restore plan: the run's own `--spec`.
+    #[arg(long)]
+    pub spec: PathBuf,
+    /// The restore run whose clone this removes (its scorecard is
+    /// `logweir/drills/<run-id>.json` in the plan's evidence store).
+    #[arg(long)]
+    pub run_id: String,
+    /// Signs the cleanup attestation; its public half verifies the run's
+    /// scorecard.
+    #[arg(long)]
+    pub signing_key: PathBuf,
+    /// More keys the run's scorecard may verify under (the evidence keyring).
+    #[arg(long)]
+    pub evidence_keys: Option<PathBuf>,
+    /// Which attempt this is; attempt N > 1 writes `.cleanup-N.json`.
+    #[arg(long, default_value_t = 1)]
+    pub attempt: u32,
+    /// D2 §3.5's store-contract handshake, as `restore run` takes it.
+    #[arg(long)]
+    pub store_contract_version: Option<String>,
+    /// FX-43: see `restore run`'s flag of the same name.
+    #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+    pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
+}
+
+impl From<RestoreCleanupArgs> for crate::restore_cleanup::CleanupArgs {
+    fn from(a: RestoreCleanupArgs) -> Self {
+        crate::restore_cleanup::CleanupArgs {
+            spec: a.spec,
+            run_id: a.run_id,
+            signing_key: a.signing_key,
+            evidence_keys: a.evidence_keys,
+            attempt: a.attempt,
+            store_contract_version: a.store_contract_version,
+        }
+    }
 }
 
 /// The flags `logweir restore run` and `logweir drill run` share.
@@ -633,6 +711,21 @@ pub struct RestoreRunArgs {
     /// no value, so `{:?}` of this struct does not either.
     #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
     pub line_token: Option<logweir_core::refusal_detail::LineToken>,
+    /// **FX-43.** The Job's line token, as `--line-token`'s is, with a wider
+    /// promise: EVERY line a controller reads off this run's log is printed
+    /// sealed with it (`@<token> <line>`) before the plain line, and every
+    /// exit this process reaches prints a sealed `runner-exit=<code>` line, so
+    /// the controller can tell this runner's lines from anything else in the
+    /// log and can tell a runner that predates the flag (which stops at
+    /// argument parsing) from one that ran. The controller writes it; a run
+    /// started by hand needs none.
+    #[arg(
+        long,
+        value_name = "HEX",
+        value_parser = parse_line_token,
+        conflicts_with = "line_token"
+    )]
+    pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -747,6 +840,14 @@ pub enum BackupCmd {
         /// See `restore run`'s flag of the same name.
         #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
         line_token: Option<logweir_core::refusal_detail::LineToken>,
+        /// See `restore run`'s flag of the same name (FX-43).
+        #[arg(
+            long,
+            value_name = "HEX",
+            value_parser = parse_line_token,
+            conflicts_with = "line_token"
+        )]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
     },
 }
 
@@ -803,6 +904,85 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
+    // An approval for a `Switchover`; `--spec` is its plan. A plain comment:
+    // a doc comment on a variant switches clap's help to its long list.
+    #[value(name = "Switchover")]
+    Switchover,
+}
+
+/// `logweir switchover` (PROD-04.2).
+#[derive(Subcommand)]
+pub enum SwitchoverCmd {
+    /// Build a switchover plan from a verified restore's scorecard and its
+    /// positions mapping (both local copies). Runs nothing.
+    Plan {
+        /// The restore's signed scorecard.
+        #[arg(long)]
+        scorecard: PathBuf,
+        /// The positions-mapping document the scorecard binds.
+        #[arg(long)]
+        positions_mapping: PathBuf,
+        /// The `Restore`'s name and UID.
+        #[arg(long)]
+        restore_name: String,
+        #[arg(long)]
+        restore_uid: String,
+        /// A captured group to switch over, `source` or `source=target`;
+        /// repeatable. None: every group with a mapped position.
+        #[arg(long = "group")]
+        groups: Vec<String>,
+        #[arg(long, default_value = "switchover-plan.yaml")]
+        out: PathBuf,
+    },
+    /// Build the plan that reverses a switchover record: the priors back,
+    /// expecting the applied positions. Runs nothing.
+    RollbackPlan {
+        /// The switchover record (`logweir/switchovers/<run_id>.record.json`).
+        #[arg(long)]
+        record: PathBuf,
+        #[arg(long, default_value = "switchover-rollback-plan.yaml")]
+        out: PathBuf,
+    },
+    /// Apply an approved plan (the `Switchover` Job).
+    Run {
+        #[arg(long)]
+        plan: PathBuf,
+        /// The restore's plan (`Restore.spec.planBytes`).
+        #[arg(long)]
+        restore_plan: PathBuf,
+        /// The approval document; its `.sig` sidecar beside it.
+        #[arg(long)]
+        approval: PathBuf,
+        #[arg(long)]
+        approver_key: PathBuf,
+        /// The evidence-signing keyring the restore's scorecard is verified
+        /// under.
+        #[arg(long)]
+        evidence_keys: PathBuf,
+        /// The key the switchover record is signed with.
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// The restore's scorecard key in its evidence store.
+        #[arg(long)]
+        scorecard_key: String,
+        #[arg(long, default_value = "")]
+        namespace: String,
+        #[arg(long, default_value = "")]
+        name: String,
+        #[arg(long, default_value = "")]
+        uid: String,
+        #[arg(long)]
+        store_contract_version: Option<String>,
+        /// For an authorization document v2: the bound policy's snapshot and
+        /// the console's confirmation key.
+        #[arg(long)]
+        approval_policy: Option<PathBuf>,
+        #[arg(long)]
+        confirmation_key: Option<PathBuf>,
+        /// FX-43: see `restore run`'s flag of the same name.
+        #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
+        runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
+    },
 }
 
 /// `--approval-subject`'s one value (PROD-15.1). Kebab-case on the command
@@ -831,6 +1011,7 @@ impl SubjectKindArg {
         match self {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
+            Self::Switchover => logweir_core::spec::SUBJECT_KIND_SWITCHOVER,
         }
     }
 }

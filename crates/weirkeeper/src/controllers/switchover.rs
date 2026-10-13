@@ -1,0 +1,1231 @@
+//! The `Switchover` reconciler (PROD-04.2; design §3.4 step 1).
+//!
+//! # Admission, before anything is created
+//!
+//! 1. The plan parses and is bounded, and its `restore` block is
+//!    `spec.restoreRef` (`SwitchoverPlanInvalid`).
+//! 2. The `Restore` exists with that UID, is `Succeeded`, and its evidence
+//!    verdict is `Valid` (`RestoreNotSucceeded`; a restore still running is a
+//!    hold). It is not scratch (`RestoreIsScratch`: a clone is deleted at its
+//!    TTL).
+//! 3. No other non-terminal `Switchover` names it (`SwitchoverInProgress`).
+//! 4. The `Approval` is `Verified=True` for subject kind `Switchover` and this
+//!    object's UID (check 8 compares the kind the approval binds); a pending
+//!    one is a hold, an approval for anything else `SubjectKindMismatch`.
+//!
+//! Then one immutable bundle ConfigMap (the two plans, the approval, the
+//! approver's key, the evidence keyring, and for an authorization v2 the
+//! policy snapshot and the console key) and one Job, `logweir switchover
+//! run`, with the restore's target credential projection and evidence grant.
+//! The controller never dials Kafka.
+//!
+//! # The run's result
+//!
+//! Read off the finished pod's log tail: one `switchover-group=` line per
+//! group into `status.groups`, the counts, the record key, the outcome, and
+//! the `refusal-reason=` or `failure-reason=` word.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use chrono::Utc;
+use futures::StreamExt as _;
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::{ConfigMap, Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::runtime::controller::Action;
+use kube::runtime::{watcher, Controller};
+use kube::{Resource, ResourceExt as _};
+use logweir_core::switchover::{self as so, SwitchoverPlan};
+use serde_json::json;
+use tracing::{info, warn};
+
+use super::Context;
+use crate::crds::approval::{Approval, SubjectKind};
+use crate::crds::kafka_cluster::KafkaCluster;
+use crate::crds::restore::{Restore, TargetMode};
+use crate::crds::switchover::{
+    Switchover, SwitchoverCounts, SwitchoverEvidence, SwitchoverGroupStatus, SwitchoverStatus,
+};
+use crate::job::{self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount};
+
+/// The phases this reconciler writes.
+pub const PHASE_PENDING: &str = "Pending";
+pub const PHASE_RUNNING: &str = "Running";
+/// The terminal phases.
+pub const TERMINAL_PHASES: [&str; 4] = [
+    so::SUCCEEDED,
+    so::PARTIALLY_APPLIED,
+    so::RUN_FAILED,
+    so::RUN_REFUSED,
+];
+
+/// The hold reasons.
+pub const HOLD_APPROVAL_NOT_VERIFIED: &str = "ApprovalNotVerified";
+pub const HOLD_RESTORE_RUNNING: &str = "RestoreNotFinished";
+/// The refusal an approval for another subject gets.
+pub const SUBJECT_KIND_MISMATCH: &str = "SubjectKindMismatch";
+
+/// How long a hold waits before it looks again.
+pub const HOLD_REQUEUE_SECS: u64 = 15;
+
+/// The bundle ConfigMap's members, mounted at [`job::APPROVAL_MOUNT_PATH`].
+pub const PLAN_FILE: &str = "switchover-plan.yaml";
+pub const RESTORE_PLAN_FILE: &str = "restore-plan.yaml";
+pub const APPROVAL_FILE: &str = "approval.json";
+pub const APPROVAL_SIG_FILE: &str = "approval.sig";
+pub const APPROVER_KEY_FILE: &str = "approver.pub.pem";
+pub const EVIDENCE_KEYS_FILE: &str = "evidence-keys.json";
+pub const POLICY_FILE: &str = "approval-policy.json";
+pub const CONFIRMATION_KEY_FILE: &str = "confirmation.pub.pem";
+
+/// The bundle ConfigMap of one `Switchover`.
+#[must_use]
+pub fn bundle_name(switchover: &str) -> String {
+    format!("{switchover}-switchover")
+}
+
+/// What admission decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// Create the bundle and the Job.
+    Admit,
+    /// Wait: `(reason, message)`.
+    Hold(&'static str, String),
+    /// Terminal: `(reason, message)`.
+    Refuse(&'static str, String),
+}
+
+/// Whether a status is terminal.
+#[must_use]
+pub fn is_terminal(status: Option<&SwitchoverStatus>) -> bool {
+    status
+        .and_then(|s| s.phase.as_deref())
+        .is_some_and(|p| TERMINAL_PHASES.contains(&p))
+}
+
+/// **Admission** (steps 1 to 4), pure. `others` are the namespace's other
+/// `Switchover`s.
+#[must_use]
+pub fn admit(
+    sw: &Switchover,
+    restore: Option<&Restore>,
+    others: &[Switchover],
+    approval: Option<&Approval>,
+) -> Admission {
+    // 1. The plan and its restore block.
+    let plan = match SwitchoverPlan::parse(sw.spec.plan_bytes.as_bytes()) {
+        Ok(p) => p,
+        Err(e) => return Admission::Refuse(so::PLAN_INVALID, e),
+    };
+    if plan.restore.name != sw.spec.restore_ref.name || plan.restore.uid != sw.spec.restore_ref.uid
+    {
+        return Admission::Refuse(
+            so::PLAN_INVALID,
+            format!(
+                "the plan names Restore {} UID {}, and spec.restoreRef names {} UID {}",
+                plan.restore.name,
+                plan.restore.uid,
+                sw.spec.restore_ref.name,
+                sw.spec.restore_ref.uid
+            ),
+        );
+    }
+    // 2. The restore.
+    let Some(restore) =
+        restore.filter(|r| r.uid().as_deref() == Some(sw.spec.restore_ref.uid.as_str()))
+    else {
+        return Admission::Refuse(
+            so::RESTORE_NOT_SUCCEEDED,
+            format!(
+                "Restore {} UID {} does not exist in this namespace",
+                sw.spec.restore_ref.name, sw.spec.restore_ref.uid
+            ),
+        );
+    };
+    if restore.spec.target.mode == TargetMode::Scratch {
+        return Admission::Refuse(
+            so::RESTORE_IS_SCRATCH,
+            "the restore is a scratch drill: its topics are torn down, and a clone is deleted at \
+             its TTL, so no group is moved onto them"
+                .to_string(),
+        );
+    }
+    let status = restore.status.as_ref();
+    let phase = status.and_then(|s| s.phase.as_deref()).unwrap_or("");
+    if !matches!(phase, "Succeeded" | "Failed" | "Refused") {
+        return Admission::Hold(
+            HOLD_RESTORE_RUNNING,
+            format!("Restore {} is {phase:?}, not finished", restore.name_any()),
+        );
+    }
+    let verdict = status
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.result.as_deref());
+    if phase != "Succeeded" || verdict != Some("Valid") {
+        return Admission::Refuse(
+            so::RESTORE_NOT_SUCCEEDED,
+            format!(
+                "Restore {} is {phase} and its evidence verdict is {}; a switchover applies only \
+                 a succeeded restore whose signed scorecard verified",
+                restore.name_any(),
+                verdict.unwrap_or("not recorded")
+            ),
+        );
+    }
+    // 3. One switchover at a time per restore: the older one wins.
+    let mine = (
+        sw.metadata.creation_timestamp.as_ref().map(|t| t.0),
+        sw.name_any(),
+    );
+    let blocker = others.iter().find(|o| {
+        o.uid() != sw.uid()
+            && o.spec.restore_ref.name == sw.spec.restore_ref.name
+            && !is_terminal(o.status.as_ref())
+            && (o.status.as_ref().and_then(|s| s.job_ref.as_ref()).is_some()
+                || (
+                    o.metadata.creation_timestamp.as_ref().map(|t| t.0),
+                    o.name_any(),
+                ) < mine)
+    });
+    if let Some(o) = blocker {
+        return Admission::Refuse(
+            so::SWITCHOVER_IN_PROGRESS,
+            format!(
+                "Switchover {} is still applying positions from Restore {}; one runs at a time",
+                o.name_any(),
+                sw.spec.restore_ref.name
+            ),
+        );
+    }
+    // 4. The approval, for THIS object and this kind.
+    let Some(approval) = approval else {
+        return Admission::Hold(
+            HOLD_APPROVAL_NOT_VERIFIED,
+            format!("Approval {} does not exist yet", sw.spec.approval_ref.name),
+        );
+    };
+    if approval.spec.subject_ref.kind != SubjectKind::Switchover {
+        return Admission::Refuse(
+            SUBJECT_KIND_MISMATCH,
+            format!(
+                "Approval {} authorises a {}, and this is a Switchover; an approval binds one kind \
+                 of subject",
+                approval.name_any(),
+                approval.spec.subject_ref.kind
+            ),
+        );
+    }
+    let st = approval.status.as_ref();
+    if st.and_then(|s| s.verified) != Some(true) {
+        return Admission::Hold(
+            HOLD_APPROVAL_NOT_VERIFIED,
+            format!("Approval {} is not Verified=True", approval.name_any()),
+        );
+    }
+    let bound = st.and_then(|s| s.verified_subject_ref.as_ref());
+    let ours = bound.is_some_and(|b| {
+        b.kind == SubjectKind::Switchover
+            && b.name == sw.name_any()
+            && Some(b.uid.as_str()) == sw.uid().as_deref()
+    });
+    if !ours {
+        return Admission::Refuse(
+            SUBJECT_KIND_MISMATCH,
+            format!(
+                "Approval {} was verified for another object, not Switchover {} UID {}",
+                approval.name_any(),
+                sw.name_any(),
+                sw.uid().unwrap_or_default()
+            ),
+        );
+    }
+    if approval.spec.plan_hash != logweir_core::ids::sha256_prefixed(sw.spec.plan_bytes.as_bytes())
+    {
+        return Admission::Refuse(
+            "PlanHashMismatch",
+            "the Approval names another plan hash than spec.planBytes".to_string(),
+        );
+    }
+    Admission::Admit
+}
+
+/// The owner reference every object this reconciler creates carries.
+fn owner_reference(sw: &Switchover) -> OwnerReference {
+    OwnerReference {
+        api_version: Switchover::api_version(&()).to_string(),
+        kind: Switchover::kind(&()).to_string(),
+        name: sw.name_any(),
+        uid: sw.uid().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }
+}
+
+/// The bundle members, by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bundle {
+    pub approver_key_pem: String,
+    pub evidence_keys_json: String,
+    /// The bound policy's snapshot and the console key, for an authorization
+    /// v2.
+    pub v2: Option<(String, String)>,
+}
+
+/// The immutable bundle ConfigMap, pure.
+#[must_use]
+pub fn bundle_config_map(
+    sw: &Switchover,
+    restore: &Restore,
+    approval: &Approval,
+    bundle: &Bundle,
+) -> ConfigMap {
+    let mut data = BTreeMap::new();
+    data.insert(PLAN_FILE.to_string(), sw.spec.plan_bytes.clone());
+    data.insert(
+        RESTORE_PLAN_FILE.to_string(),
+        restore.spec.plan_bytes.clone(),
+    );
+    data.insert(
+        APPROVAL_FILE.to_string(),
+        approval.spec.approval_bytes.clone(),
+    );
+    data.insert(
+        APPROVAL_SIG_FILE.to_string(),
+        approval.spec.sidecar_bytes.clone(),
+    );
+    data.insert(
+        APPROVER_KEY_FILE.to_string(),
+        bundle.approver_key_pem.clone(),
+    );
+    data.insert(
+        EVIDENCE_KEYS_FILE.to_string(),
+        bundle.evidence_keys_json.clone(),
+    );
+    if let Some((policy, confirmation)) = &bundle.v2 {
+        data.insert(POLICY_FILE.to_string(), policy.clone());
+        data.insert(CONFIRMATION_KEY_FILE.to_string(), confirmation.clone());
+    }
+    ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(bundle_name(&sw.name_any())),
+            namespace: sw.namespace(),
+            owner_references: Some(vec![owner_reference(sw)]),
+            ..ObjectMeta::default()
+        },
+        immutable: Some(true),
+        data: Some(data),
+        ..ConfigMap::default()
+    }
+}
+
+/// The restore's evidence and target access, as its Job had them.
+#[derive(Debug, Clone, Default)]
+pub struct Access {
+    pub secret_mounts: Vec<SecretMount>,
+    pub config_map_mounts: Vec<ConfigMapMount>,
+    pub env_from_secret: Vec<EnvFromSecret>,
+    pub env_literal: Vec<(String, String)>,
+    pub service_account_name: String,
+    /// The store contract handshake, for a destination-backed restore.
+    pub store_contract: bool,
+}
+
+/// The restore's target credential projection and evidence grant: the same
+/// resolvers `Restore`'s Job uses, so a switchover reaches exactly what the
+/// restore reached.
+///
+/// # Errors
+///
+/// `(reason, message)` when the connection or a destination does not
+/// resolve.
+pub fn restore_access(
+    restore: &Restore,
+    plan: &logweir_core::spec::RestoreSpec,
+    cluster: &KafkaCluster,
+    destinations: Option<&super::restore::RestoreDestinations>,
+) -> Result<Access, (&'static str, String)> {
+    use super::backup;
+    let namespace = restore.namespace().unwrap_or_default();
+    let connection =
+        crate::connection::resolve(cluster, crate::connection::ConnectionUse::RestoreTarget)
+            .map_err(|e| ("ConnectionNotResolved", e.to_string()))?;
+    connection
+        .check_job_namespace(&namespace)
+        .map_err(|e| ("ConnectionNotResolved", e.to_string()))?;
+    connection
+        .check_restore_target(&plan.target.bootstrap_servers, &plan.target.auth)
+        .map_err(|e| ("ConnectionNotResolved", e.to_string()))?;
+    let projection = connection.project();
+    let mut access = Access {
+        secret_mounts: vec![SecretMount {
+            volume: backup::SIGNING_VOLUME.to_string(),
+            secret_name: backup::SIGNING_KEY_SECRET.to_string(),
+            mount_path: backup::SIGNING_MOUNT_PATH.to_string(),
+            items: vec![(
+                backup::SIGNING_KEY_SECRET_KEY.to_string(),
+                backup::SIGNING_KEY_FILE.to_string(),
+            )],
+        }],
+        config_map_mounts: projection.config_map_mounts,
+        env_from_secret: projection.env_from_secret,
+        env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
+        service_account_name: connection.execution.service_account_name.clone(),
+        store_contract: destinations.is_some(),
+    };
+    access.secret_mounts.extend(projection.secret_mounts);
+    access.secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
+    match destinations {
+        None => {
+            if let Some(secret) = restore.spec.source_archive.secret_ref.as_ref() {
+                for (env, key) in [
+                    (backup::ARCHIVE_ACCESS_KEY_ENV, backup::ARCHIVE_ACCESS_KEY),
+                    (backup::ARCHIVE_SECRET_KEY_ENV, backup::ARCHIVE_SECRET_KEY),
+                ] {
+                    access.env_from_secret.push(EnvFromSecret {
+                        name: env.to_string(),
+                        secret_name: secret.name.clone(),
+                        optional: false,
+                        key: key.to_string(),
+                    });
+                }
+                let binding = super::restore::inline_restore_binding_env(
+                    &secret.name,
+                    plan,
+                    &backup::archive_addressing_env(),
+                );
+                access
+                    .env_from_secret
+                    .extend(binding.from_secret.iter().cloned());
+                access.env_literal.extend(binding.literals.iter().cloned());
+            }
+            access.env_literal.extend(backup::archive_addressing_env());
+        }
+        Some(pair) => {
+            let evidence = pair
+                .evidence
+                .evidence_env(&pair.source)
+                .map_err(|refusal| (refusal.reason(), refusal.message))?;
+            let archive = pair.source.job_env();
+            for env in [&archive, &evidence] {
+                access
+                    .env_from_secret
+                    .extend(env.from_secret.iter().cloned());
+                access.env_literal.extend(env.literals.iter().cloned());
+            }
+            if let Some(sa) = archive
+                .service_account_name
+                .clone()
+                .or_else(|| evidence.service_account_name.clone())
+            {
+                access.service_account_name = sa;
+            }
+        }
+    }
+    access.env_literal.extend(projection.env_literal);
+    Ok(access)
+}
+
+/// The runner's argv.
+#[must_use]
+pub fn runner_argv(sw: &Switchover, scorecard_key: &str, v2: bool, contract: bool) -> Vec<String> {
+    let at = |f: &str| format!("{}/{f}", job::APPROVAL_MOUNT_PATH);
+    let mut argv = vec![
+        "switchover".to_string(),
+        "run".to_string(),
+        "--plan".to_string(),
+        at(PLAN_FILE),
+        "--restore-plan".to_string(),
+        at(RESTORE_PLAN_FILE),
+        "--approval".to_string(),
+        at(APPROVAL_FILE),
+        "--approver-key".to_string(),
+        at(APPROVER_KEY_FILE),
+        "--evidence-keys".to_string(),
+        at(EVIDENCE_KEYS_FILE),
+        "--signing-key".to_string(),
+        format!(
+            "{}/{}",
+            super::backup::SIGNING_MOUNT_PATH,
+            super::backup::SIGNING_KEY_FILE
+        ),
+        "--scorecard-key".to_string(),
+        scorecard_key.to_string(),
+        "--namespace".to_string(),
+        sw.namespace().unwrap_or_default(),
+        "--name".to_string(),
+        sw.name_any(),
+        "--uid".to_string(),
+        sw.uid().unwrap_or_default(),
+    ];
+    if v2 {
+        argv.extend([
+            "--approval-policy".to_string(),
+            at(POLICY_FILE),
+            "--confirmation-key".to_string(),
+            at(CONFIRMATION_KEY_FILE),
+        ]);
+    }
+    if contract {
+        argv.extend([
+            crate::destination::STORE_CONTRACT_VERSION_ARG.to_string(),
+            crate::destination::STORE_CONTRACT_VERSION.to_string(),
+        ]);
+    }
+    argv
+}
+
+/// The Job, pure.
+#[must_use]
+pub fn job_spec(sw: &Switchover, access: Access, scorecard_key: &str, v2: bool) -> RunnerJobSpec {
+    let mut config_map_mounts = vec![ConfigMapMount {
+        volume: job::APPROVAL_VOLUME.to_string(),
+        config_map_name: bundle_name(&sw.name_any()),
+        mount_path: job::APPROVAL_MOUNT_PATH.to_string(),
+        items: {
+            let mut items: Vec<(String, String)> = [
+                PLAN_FILE,
+                RESTORE_PLAN_FILE,
+                APPROVAL_FILE,
+                APPROVAL_SIG_FILE,
+                APPROVER_KEY_FILE,
+                EVIDENCE_KEYS_FILE,
+            ]
+            .iter()
+            .map(|f| (f.to_string(), f.to_string()))
+            .collect();
+            if v2 {
+                for f in [POLICY_FILE, CONFIRMATION_KEY_FILE] {
+                    items.push((f.to_string(), f.to_string()));
+                }
+            }
+            items
+        },
+    }];
+    config_map_mounts.extend(access.config_map_mounts);
+    RunnerJobSpec {
+        name: sw.name_any(),
+        namespace: sw.namespace().unwrap_or_default(),
+        owner: RunnerOwner {
+            api_version: Switchover::api_version(&()).to_string(),
+            kind: Switchover::kind(&()).to_string(),
+            name: sw.name_any(),
+            uid: sw.uid().unwrap_or_default(),
+        },
+        args: runner_argv(sw, scorecard_key, v2, access.store_contract),
+        deadline_seconds: sw.spec.deadline_seconds,
+        service_account_name: access.service_account_name,
+        secret_mounts: access.secret_mounts,
+        config_map_mounts,
+        env_from_secret: access.env_from_secret,
+        env_literal: access.env_literal,
+        plan_config_map: None,
+        image: None,
+        image_pull_policy: None,
+        resources: None,
+    }
+}
+
+/// The status a finished run's exit code and log tail give, pure.
+#[must_use]
+pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverStatus {
+    let lines: Vec<&str> = log.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let last = |key: &str| {
+        lines
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::to_string)
+    };
+    let groups: Vec<SwitchoverGroupStatus> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix(crate_line::GROUP))
+        .filter_map(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .take(crate::crds::switchover::MAX_STATUS_GROUPS)
+        .map(|v| SwitchoverGroupStatus {
+            source: v["source"].as_str().unwrap_or_default().to_string(),
+            target: v["target"].as_str().unwrap_or_default().to_string(),
+            outcome: v["outcome"].as_str().unwrap_or_default().to_string(),
+            reason: v["reason"].as_str().map(str::to_string),
+            created: v["created"].as_bool().unwrap_or(false),
+            partitions: v["partitions"]
+                .as_array()
+                .map_or(0, |a| u32::try_from(a.len()).unwrap_or(u32::MAX)),
+        })
+        .collect();
+    let mut counts = SwitchoverCounts::default();
+    for g in &groups {
+        match g.outcome.as_str() {
+            so::APPLIED => counts.applied += 1,
+            so::ALREADY_APPLIED => counts.already_applied += 1,
+            so::REFUSED => counts.refused += 1,
+            so::FAILED => counts.failed += 1,
+            _ => counts.untouched += 1,
+        }
+    }
+    let outcome = last(crate_line::OUTCOME);
+    let reason_word = last("refusal-reason=").or_else(|| last("failure-reason="));
+    let phase = match (exit_code, outcome.as_deref()) {
+        (0, _) => so::SUCCEEDED,
+        (2, Some(so::PARTIALLY_APPLIED)) => so::PARTIALLY_APPLIED,
+        (2, Some(so::RUN_FAILED)) => so::RUN_FAILED,
+        (2, _) => so::RUN_REFUSED,
+        (3, _) => so::RUN_REFUSED,
+        _ => so::RUN_FAILED,
+    };
+    SwitchoverStatus {
+        phase: Some(phase.to_string()),
+        exit_code: Some(exit_code),
+        exit_reason: reason_word.clone(),
+        reason: Some(reason_word.unwrap_or_else(|| phase.to_string())),
+        message: Some(format!("the switchover Job exited {exit_code}: {phase}")),
+        job_ref: Some(job_name.to_string()),
+        groups,
+        counts: Some(counts),
+        evidence: last(crate_line::RECORD).map(|k| SwitchoverEvidence {
+            record_key: Some(k),
+        }),
+        conditions: None,
+    }
+}
+
+/// The runner's line keys (`logweir::switchover`'s, which this crate does
+/// not link).
+mod crate_line {
+    pub const GROUP: &str = "switchover-group=";
+    pub const OUTCOME: &str = "switchover-outcome=";
+    pub const RECORD: &str = "switchover-record-key=";
+}
+
+/// A reconcile's failure: a Kubernetes API error, retried.
+pub type SwitchoverError = kube::Error;
+
+async fn patch_status(
+    api: &Api<Switchover>,
+    name: &str,
+    status: &SwitchoverStatus,
+) -> Result<(), kube::Error> {
+    api.patch_status(
+        name,
+        &PatchParams::default(),
+        &Patch::Merge(json!({ "status": status })),
+    )
+    .await
+    .map(|_| ())
+}
+
+fn hold_or_refuse(phase: &str, reason: &str, message: String) -> SwitchoverStatus {
+    SwitchoverStatus {
+        phase: Some(phase.to_string()),
+        reason: Some(reason.to_string()),
+        message: Some(message),
+        ..SwitchoverStatus::default()
+    }
+}
+
+/// One reconcile.
+///
+/// # Errors
+///
+/// A Kubernetes API failure.
+pub async fn reconcile(
+    sw: Arc<Switchover>,
+    ctx: Arc<Context>,
+    policies: crate::approval_policy::PolicySource,
+) -> Result<Action, SwitchoverError> {
+    let client = &ctx.client;
+    let name = sw.name_any();
+    let Some(namespace) = sw.namespace() else {
+        return Ok(Action::await_change());
+    };
+    let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
+    if is_terminal(sw.status.as_ref()) {
+        return Ok(Action::await_change());
+    }
+    let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
+    // A Job exists: observe it.
+    if let Some(job) = jobs.get_opt(&name).await? {
+        let st = job.status.clone().unwrap_or_default();
+        if st.succeeded.unwrap_or(0) == 0 && st.failed.unwrap_or(0) == 0 {
+            let mut status = sw.status.clone().unwrap_or_default();
+            if status.phase.as_deref() != Some(PHASE_RUNNING) {
+                status.phase = Some(PHASE_RUNNING.into());
+                status.job_ref = Some(name.clone());
+                patch_status(&api, &name, &status).await?;
+            }
+            return Ok(Action::requeue(std::time::Duration::from_secs(
+                HOLD_REQUEUE_SECS,
+            )));
+        }
+        let found = crate::check::pod::find_owned_pod_by_selectors(
+            client,
+            &namespace,
+            &name,
+            job.uid().as_deref(),
+            &super::backup::pod_selectors(&name),
+        )
+        .await?;
+        let terminated = found
+            .pod
+            .as_ref()
+            .and_then(|p| super::backup::terminated_exit_code(p).map(|c| (p, c)));
+        let status = match terminated {
+            Some((pod, code)) => {
+                let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+                // FX-43: the run's lines are read only through its Job's
+                // token, in one call; a runner older than the controller is
+                // named and nothing of its log is read. A failed read is a
+                // reconcile error (retried), never an empty log.
+                match crate::runner_log::read_own_terminal(&pods, &pod.name_any(), &job, Some(code))
+                    .await?
+                {
+                    crate::runner_log::Terminal::Lines(lines) => {
+                        status_from_run(code, lines.text(), &name)
+                    }
+                    crate::runner_log::Terminal::OverBound => status_from_run(code, "", &name),
+                    crate::runner_log::Terminal::RunnerOlder => SwitchoverStatus {
+                        phase: Some(so::RUN_FAILED.into()),
+                        exit_code: Some(code),
+                        exit_reason: Some(
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.into(),
+                        ),
+                        reason: Some(
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.into(),
+                        ),
+                        message: Some(format!(
+                            "{}: {}",
+                            logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                            crate::runner_log::RUNNER_OLDER_SENTENCE
+                        )),
+                        job_ref: Some(name.clone()),
+                        ..SwitchoverStatus::default()
+                    },
+                }
+            }
+            None => SwitchoverStatus {
+                phase: Some(so::RUN_FAILED.into()),
+                reason: Some(crate::conditions::TERMINAL_STATE_NO_EXIT_CODE.into()),
+                message: Some("the Job finished and no exit code could be read".into()),
+                job_ref: Some(name.clone()),
+                ..SwitchoverStatus::default()
+            },
+        };
+        info!(switchover = %name, phase = ?status.phase, "switchover finished");
+        patch_status(&api, &name, &status).await?;
+        return Ok(Action::await_change());
+    }
+
+    // Admission.
+    let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
+    let restore = restores.get_opt(&sw.spec.restore_ref.name).await?;
+    let others = api.list(&Default::default()).await?.items;
+    let approvals: Api<Approval> = Api::namespaced(client.clone(), &namespace);
+    let approval = approvals.get_opt(&sw.spec.approval_ref.name).await?;
+    match admit(&sw, restore.as_ref(), &others, approval.as_ref()) {
+        Admission::Hold(reason, message) => {
+            patch_status(&api, &name, &hold_or_refuse(PHASE_PENDING, reason, message)).await?;
+            return Ok(Action::requeue(std::time::Duration::from_secs(
+                HOLD_REQUEUE_SECS,
+            )));
+        }
+        Admission::Refuse(reason, message) => {
+            warn!(switchover = %name, reason, "switchover refused: {message}");
+            patch_status(
+                &api,
+                &name,
+                &hold_or_refuse(so::RUN_REFUSED, reason, message),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
+        Admission::Admit => {}
+    }
+    let (Some(restore), Some(approval)) = (restore, approval) else {
+        return Ok(Action::await_change());
+    };
+    let refuse =
+        |reason: &'static str, message: String| hold_or_refuse(so::RUN_REFUSED, reason, message);
+    // Materialization: the restore's plan, target and evidence access.
+    let plan = match super::restore::parse_plan(&restore) {
+        Ok(p) => p,
+        Err(e) => {
+            patch_status(
+                &api,
+                &name,
+                &refuse(so::RESTORE_NOT_SUCCEEDED, e.to_string()),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
+    };
+    let clusters: Api<KafkaCluster> = Api::namespaced(client.clone(), &namespace);
+    let Some(cluster) = clusters
+        .get_opt(&restore.spec.target.cluster_ref.name)
+        .await?
+    else {
+        patch_status(
+            &api,
+            &name,
+            &hold_or_refuse(
+                PHASE_PENDING,
+                "ClusterNotReachable",
+                "the restore's KafkaCluster does not exist".into(),
+            ),
+        )
+        .await?;
+        return Ok(Action::requeue(std::time::Duration::from_secs(
+            HOLD_REQUEUE_SECS,
+        )));
+    };
+    let destinations = match super::restore::admit_restore_destinations(
+        &restore,
+        Some(&plan),
+        client,
+        &namespace,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(super::restore::RestoreDestinationAdmission::NotRequested) => None,
+        Ok(super::restore::RestoreDestinationAdmission::Resolved(pair)) => Some(pair),
+        Ok(super::restore::RestoreDestinationAdmission::Holding { reason, message }) => {
+            patch_status(&api, &name, &hold_or_refuse(PHASE_PENDING, reason, message)).await?;
+            return Ok(Action::requeue(std::time::Duration::from_secs(
+                HOLD_REQUEUE_SECS,
+            )));
+        }
+        Err(e) => {
+            patch_status(
+                &api,
+                &name,
+                &refuse(so::RESTORE_NOT_SUCCEEDED, e.to_string()),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
+    };
+    let access = match restore_access(&restore, &plan, &cluster, destinations.as_deref()) {
+        Ok(a) => a,
+        Err((reason, message)) => {
+            patch_status(&api, &name, &refuse(reason, message)).await?;
+            return Ok(Action::await_change());
+        }
+    };
+    let Some(scorecard_key) = restore
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.scorecard_key.clone())
+    else {
+        patch_status(
+            &api,
+            &name,
+            &refuse(
+                so::NO_POSITIONS_MAPPING,
+                "the restore records no scorecard key".into(),
+            ),
+        )
+        .await?;
+        return Ok(Action::await_change());
+    };
+    // The trust: the approver's key, the evidence keyring, and for a v2
+    // authorization the bound policy's snapshot and the console key.
+    let trust = match crate::trust::resolve(client, &namespace).await? {
+        crate::trust::Resolution::Trust(t) => *t,
+        _ => {
+            patch_status(
+                &api,
+                &name,
+                &hold_or_refuse(
+                    PHASE_PENDING,
+                    crate::trust::REASON_TRUST_POLICY_CONFLICT,
+                    "the namespace resolves to no single trust".into(),
+                ),
+            )
+            .await?;
+            return Ok(Action::requeue(std::time::Duration::from_secs(
+                HOLD_REQUEUE_SECS,
+            )));
+        }
+    };
+    let st = approval.status.clone().unwrap_or_default();
+    let Some(approver) = st.matched_key_id.as_deref().and_then(|k| trust.key(k)) else {
+        patch_status(
+            &api,
+            &name,
+            &refuse(
+                HOLD_APPROVAL_NOT_VERIFIED,
+                "the approval's key is not in the namespace's trust".into(),
+            ),
+        )
+        .await?;
+        return Ok(Action::await_change());
+    };
+    let v2 = match st.authorization.as_ref() {
+        None => None,
+        Some(a) => {
+            let effective = policies.effective().resolve(&namespace);
+            let (Some(bound), Some(console)) =
+                (effective.bound(), trust.key(&a.confirmation_key_id))
+            else {
+                patch_status(
+                    &api,
+                    &name,
+                    &refuse(
+                        "PolicyMismatch",
+                        "the approval's policy or console key is not the namespace's".into(),
+                    ),
+                )
+                .await?;
+                return Ok(Action::await_change());
+            };
+            Some((
+                String::from_utf8_lossy(&bound.snapshot_bytes()).into_owned(),
+                console.spki_pem.clone(),
+            ))
+        }
+    };
+    let evidence_keys_json = match super::restore::evidence_keyring_bytes(&trust) {
+        Ok(k) => k,
+        Err(e) => {
+            patch_status(
+                &api,
+                &name,
+                &refuse(so::NO_POSITIONS_MAPPING, e.to_string()),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
+    };
+    let bundle = Bundle {
+        approver_key_pem: approver.spki_pem.clone(),
+        evidence_keys_json,
+        v2,
+    };
+    let maps: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
+    match maps
+        .create(
+            &PostParams::default(),
+            &bundle_config_map(&sw, &restore, &approval, &bundle),
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        Err(e) => return Err(e),
+    }
+    let mut spec = job_spec(&sw, access, &scorecard_key, bundle.v2.is_some());
+    spec.image = ctx.runner_image.image.clone();
+    spec.image_pull_policy = ctx.runner_image.image_pull_policy.clone();
+    match jobs
+        // FX-43: a fresh line token; only the lines sealed with it are read.
+        .create(&PostParams::default(), &job::tokened(job::build(&spec)))
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        Err(e) => return Err(e),
+    }
+    let status = SwitchoverStatus {
+        phase: Some(PHASE_RUNNING.into()),
+        reason: Some("JobCreated".into()),
+        job_ref: Some(name.clone()),
+        ..SwitchoverStatus::default()
+    };
+    patch_status(&api, &name, &status).await?;
+    info!(switchover = %name, restore = %restore.name_any(), "switchover Job created");
+    Ok(Action::requeue(std::time::Duration::from_secs(
+        HOLD_REQUEUE_SECS,
+    )))
+}
+
+fn error_policy(_: Arc<Switchover>, err: &SwitchoverError, _: Arc<Context>) -> Action {
+    warn!(error = %err, "switchover reconcile failed; retrying");
+    Action::requeue(std::time::Duration::from_secs(HOLD_REQUEUE_SECS))
+}
+
+/// The `Switchover` controller, one watch per watched namespace.
+pub async fn controller(
+    client: kube::Client,
+    runner_image: job::RunnerImage,
+    policies: crate::approval_policy::PolicySource,
+) {
+    crate::scope::run_everywhere(move |namespace| {
+        let api: Api<Switchover> = crate::scope::api(&client, namespace.as_deref());
+        let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+        let ctx = Arc::new(Context {
+            client: client.clone(),
+            archive: None,
+            runner_image: runner_image.clone(),
+        });
+        let policies = policies.clone();
+        async move {
+            Controller::new(api, watcher::Config::default())
+                .owns(jobs, watcher::Config::default())
+                .run(
+                    move |object, context| reconcile(object, context, policies.clone()),
+                    error_policy,
+                    ctx,
+                )
+                .for_each(|_| std::future::ready(()))
+                .await;
+        }
+    })
+    .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logweir_core::switchover::{Expected, PlanGroup, PlanTopic, RestoreRef};
+
+    fn sha(c: char) -> String {
+        format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    fn plan_bytes(restore: &str, uid: &str) -> String {
+        let plan = SwitchoverPlan {
+            format_version: so::PLAN_FORMAT_VERSION.into(),
+            restore: RestoreRef {
+                name: restore.into(),
+                uid: uid.into(),
+                plan_hash: sha('a'),
+                scorecard_sha256: sha('b'),
+                mapping_sha256: sha('c'),
+            },
+            rollback_of: None,
+            groups: vec![PlanGroup {
+                source: "app".into(),
+                target: "app".into(),
+                topics: [(
+                    "r-orders".to_string(),
+                    PlanTopic {
+                        offsets: [(0, 40)].into(),
+                        approximate: vec![],
+                        expected: Expected::none(),
+                    },
+                )]
+                .into(),
+            }],
+        };
+        serde_yaml::to_string(&plan).unwrap()
+    }
+
+    fn switchover(name: &str, uid: &str, plan: &str) -> Switchover {
+        serde_json::from_value(json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
+            "metadata": {"name": name, "namespace": "ns", "uid": uid,
+                         "creationTimestamp": "2026-10-13T08:00:00Z"},
+            "spec": {"planBytes": plan, "approvalRef": {"name": "ok"},
+                     "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 600}
+        }))
+        .unwrap()
+    }
+
+    fn restore(mode: &str, phase: &str, verdict: &str) -> Restore {
+        serde_json::from_value(json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+            "metadata": {"name": "incident", "namespace": "ns", "uid": "r-uid"},
+            "spec": {"planBytes": "x", "approvalRef": {"name": "a"},
+                     "sourceArchive": {"url": "s3://b/p"}, "backupSetRef": "b1",
+                     "pointInTime": "2026-10-13T08:00:00Z",
+                     "target": {"clusterRef": {"name": "c"}, "mode": mode,
+                                "topicNaming": {"prefix": "r-"}},
+                     "deadlineSeconds": 600},
+            "status": {"phase": phase,
+                       "evidence": {"scorecardKey": "logweir/drills/R.json",
+                                    "verification": {"result": verdict}}}
+        }))
+        .unwrap()
+    }
+
+    fn approval(kind: &str, verified: bool, subject_uid: &str, plan: &str) -> Approval {
+        serde_json::from_value(json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+            "metadata": {"name": "ok", "namespace": "ns"},
+            "spec": {"subjectRef": {"kind": kind, "name": "sw"},
+                     "planHash": logweir_core::ids::sha256_prefixed(plan.as_bytes()),
+                     "approvalBytes": "{}", "sidecarBytes": "{}"},
+            "status": {"verified": verified,
+                       "verifiedSubjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": kind,
+                                              "name": "sw", "namespace": "ns", "uid": subject_uid}}
+        }))
+        .unwrap()
+    }
+
+    fn reason(a: &Admission) -> &str {
+        match a {
+            Admission::Admit => "Admit",
+            Admission::Hold(r, _) | Admission::Refuse(r, _) => r,
+        }
+    }
+
+    /// Step 1 to 4's rows. Mutants killed: an approval for the Restore
+    /// accepted (C17's controller half), a scratch restore accepted, a
+    /// second switchover admitted beside a running one, a plan naming
+    /// another restore accepted.
+    #[test]
+    fn admission_refuses_by_name() {
+        let plan = plan_bytes("incident", "r-uid");
+        let sw = switchover("sw", "s-uid", &plan);
+        let ok_restore = restore("newTopic", "Succeeded", "Valid");
+        let ok_approval = approval("Switchover", true, "s-uid", &plan);
+        assert_eq!(
+            admit(&sw, Some(&ok_restore), &[], Some(&ok_approval)),
+            Admission::Admit
+        );
+        let other_plan = switchover("sw", "s-uid", &plan_bytes("other", "r-uid"));
+        assert_eq!(
+            reason(&admit(
+                &other_plan,
+                Some(&ok_restore),
+                &[],
+                Some(&ok_approval)
+            )),
+            so::PLAN_INVALID
+        );
+        assert_eq!(
+            reason(&admit(&sw, None, &[], Some(&ok_approval))),
+            so::RESTORE_NOT_SUCCEEDED
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&restore("scratch", "Succeeded", "Valid")),
+                &[],
+                Some(&ok_approval)
+            )),
+            so::RESTORE_IS_SCRATCH
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&restore("newTopic", "Failed", "Valid")),
+                &[],
+                Some(&ok_approval)
+            )),
+            so::RESTORE_NOT_SUCCEEDED
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&restore("newTopic", "Succeeded", "Invalid")),
+                &[],
+                Some(&ok_approval)
+            )),
+            so::RESTORE_NOT_SUCCEEDED
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&restore("newTopic", "Running", "")),
+                &[],
+                Some(&ok_approval)
+            )),
+            HOLD_RESTORE_RUNNING
+        );
+        let mut running = switchover("first", "f-uid", &plan);
+        running.status = Some(SwitchoverStatus {
+            phase: Some(PHASE_RUNNING.into()),
+            job_ref: Some("first".into()),
+            ..SwitchoverStatus::default()
+        });
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&ok_restore),
+                &[running.clone()],
+                Some(&ok_approval)
+            )),
+            so::SWITCHOVER_IN_PROGRESS
+        );
+        running.status.as_mut().unwrap().phase = Some(so::SUCCEEDED.into());
+        assert_eq!(
+            admit(&sw, Some(&ok_restore), &[running], Some(&ok_approval)),
+            Admission::Admit,
+            "a finished switchover does not block the next"
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&ok_restore),
+                &[],
+                Some(&approval("Restore", true, "r-uid", &plan))
+            )),
+            SUBJECT_KIND_MISMATCH
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&ok_restore),
+                &[],
+                Some(&approval("Switchover", true, "other", &plan))
+            )),
+            SUBJECT_KIND_MISMATCH
+        );
+        assert_eq!(
+            reason(&admit(
+                &sw,
+                Some(&ok_restore),
+                &[],
+                Some(&approval("Switchover", false, "s-uid", &plan))
+            )),
+            HOLD_APPROVAL_NOT_VERIFIED
+        );
+        assert_eq!(
+            reason(&admit(&sw, Some(&ok_restore), &[], None)),
+            HOLD_APPROVAL_NOT_VERIFIED
+        );
+    }
+
+    #[test]
+    fn the_status_is_lifted_from_the_runners_lines() {
+        let log = "switchover-run-id=X\n\
+             {\"level\":\"INFO\"}\n\
+             switchover-group={\"source\":\"a\",\"target\":\"a\",\"outcome\":\"applied\",\"reason\":null,\"created\":true,\"committed\":true,\"partitions\":[{},{}]}\n\
+             switchover-group={\"source\":\"b\",\"target\":\"b\",\"outcome\":\"refused\",\"reason\":\"GroupActive\",\"created\":false,\"committed\":false,\"partitions\":[{}]}\n\
+             switchover-record-key=logweir/switchovers/X.record.json\n\
+             switchover-outcome=PartiallyApplied\n\
+             switchover-counts=applied=1 alreadyApplied=0 refused=1 failed=0 untouched=0\n";
+        let st = status_from_run(2, log, "sw");
+        assert_eq!(st.phase.as_deref(), Some(so::PARTIALLY_APPLIED));
+        assert_eq!(st.groups.len(), 2);
+        assert_eq!(st.groups[0].partitions, 2);
+        assert!(st.groups[0].created);
+        assert_eq!(st.groups[1].reason.as_deref(), Some("GroupActive"));
+        let c = st.counts.unwrap();
+        assert_eq!((c.applied, c.refused), (1, 1));
+        assert_eq!(
+            st.evidence.and_then(|e| e.record_key).as_deref(),
+            Some("logweir/switchovers/X.record.json")
+        );
+        let refused = status_from_run(
+            3,
+            "switchover-outcome=Refused\nrefusal-reason=TargetGenerationChanged\n",
+            "sw",
+        );
+        assert_eq!(refused.phase.as_deref(), Some(so::RUN_REFUSED));
+        assert_eq!(
+            refused.exit_reason.as_deref(),
+            Some("TargetGenerationChanged")
+        );
+        assert_eq!(
+            status_from_run(0, "", "sw").phase.as_deref(),
+            Some(so::SUCCEEDED)
+        );
+    }
+
+    #[test]
+    fn the_job_mounts_the_bundle_and_runs_the_switchover() {
+        let plan = plan_bytes("incident", "r-uid");
+        let sw = switchover("sw", "s-uid", &plan);
+        let spec = job_spec(&sw, Access::default(), "logweir/drills/R.json", true);
+        assert_eq!(&spec.args[..2], ["switchover", "run"]);
+        assert!(spec.args.contains(&"--approval-policy".to_string()));
+        assert_eq!(spec.config_map_mounts[0].config_map_name, "sw-switchover");
+        assert_eq!(spec.owner.kind, "Switchover");
+        assert!(spec.plan_config_map.is_none());
+    }
+}

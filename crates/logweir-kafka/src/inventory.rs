@@ -1005,8 +1005,8 @@ mod client {
     /// [`FaultLog`], because a refusal seen on either handle is a fact about
     /// the same connection.
     pub struct KafkaInventory {
-        consumer: BaseConsumer<CapturingContext>,
-        admin: rdkafka::admin::AdminClient<CapturingContext>,
+        consumer: logweir_rdkafka_ffi::logs::LogPumped<BaseConsumer<CapturingContext>>,
+        admin: logweir_rdkafka_ffi::logs::LogPumped<rdkafka::admin::AdminClient<CapturingContext>>,
         faults: Arc<FaultLog>,
         timeouts: ProbeTimeouts,
         /// The configuration both handles were built from, kept so
@@ -1056,6 +1056,11 @@ mod client {
                         format!("the check admin client could not be built: {e}"),
                     )
                 })?;
+            // FX-43: both handles queue their log lines (`client_config`), and
+            // these print them escaped, one line each.
+            let unrouted = |e: String| CheckFailure::new(CheckCode::BrokerUnreachable, e);
+            let consumer = crate::rdkafka_reader::pumped(consumer).map_err(unrouted)?;
+            let admin = crate::rdkafka_reader::pumped(admin).map_err(unrouted)?;
             Ok(Self {
                 consumer,
                 admin,

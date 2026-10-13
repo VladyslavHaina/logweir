@@ -46,7 +46,8 @@
         "mode": "newTopic",
         "topicPrefix": "restore-20260907T140500Z-",
         "replicationFactor": 1,
-        "teardown": "delete"
+        "teardown": "delete",
+        "lineageHeaders": "kept"
       },
       "topics": [
         {

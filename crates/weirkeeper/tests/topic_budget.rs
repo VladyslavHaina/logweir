@@ -804,7 +804,7 @@ fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
         format!("from_reader::<_, {value}>"),
     ];
     // (file, a fragment of the line, what the bytes are and what bounds them)
-    let allowed: [(&str, &str, &str); 7] = [
+    let allowed: [(&str, &str, &str); 8] = [
         (
             "verification.rs",
             "match serde_json::from_slice::<Value>(payload) {",
@@ -840,6 +840,13 @@ fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
             "backup_execution.rs",
             "let version = serde_json::from_str::<serde_json::Value>(stored)",
             "the frozen inputs of a plan ConfigMap, at most 1 MiB",
+        ),
+        (
+            "controllers/switchover.rs",
+            ".filter_map(|j| serde_json::from_str::<serde_json::Value>(j).ok())",
+            "a Switchover runner's `switchover-group=` lines, never a receipt: one line each, \
+             at most `MAX_STATUS_GROUPS` of them, inside the terminal read's bound and kept \
+             only when sealed with the Job's token",
         ),
     ];
     let src = repo_root().join("crates/weirkeeper/src");

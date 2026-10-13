@@ -66,6 +66,12 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
     //     before any client exists — so a PLAIN password never leaves this
     //     process for a source the plan would have dialled in the clear.
     logweir_core::guard::reject_auth_without_required_tls("source.auth", &spec.source.auth)?;
+    // 1c'. A bootstrap server holding a control character or a line break is
+    //      refused here, exit 3, before any client logs it (FX-43).
+    logweir_core::guard::reject_line_breaking_bootstrap_servers(
+        "source.bootstrap_servers",
+        &spec.source.bootstrap_servers,
+    )?;
 
     // 2. GC18(c) rail 1 / **G-GLOB**, at the SPEC layer.
     //

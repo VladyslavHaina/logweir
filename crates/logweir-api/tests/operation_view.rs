@@ -890,3 +890,31 @@ fn the_diagnosis_list_is_capped_at_eight() {
     let view = view_of(&object);
     assert_eq!(view.diagnostics.len(), logweir_api::status::MAX_DIAGNOSTICS);
 }
+
+/// **PROD-11.1a: a TTL clone's lifetime and cleanup reach the view** from
+/// `Restore.status.clone`; every other Restore carries none.
+#[test]
+fn a_clones_lifetime_and_cleanup_reach_the_view() {
+    let mut object = fixture("restore-legacy-no-progress.json");
+    assert!(restore_view(&restore_from(&object), now()).clone.is_none());
+    set(
+        &mut object,
+        "/status/clone",
+        json!({"ttlSeconds": 300, "expiresAt": "2026-10-13T12:05:00Z", "phase": "RemovalFailed",
+               "attempts": 3, "jobRef": {"name": "logweir-clone-cleanup-u-3"},
+               "reason": "CloneTargetClusterChanged: the target cluster's ID is \"k2\""}),
+    );
+    let clone = restore_view(&restore_from(&object), now())
+        .clone
+        .expect("the clone is published");
+    assert_eq!(clone.ttl_seconds, Some(300));
+    assert_eq!(clone.phase.as_deref(), Some("RemovalFailed"));
+    assert_eq!(clone.attempts, Some(3));
+    assert_eq!(
+        clone.expires_at.map(|t| t.to_rfc3339()),
+        Some("2026-10-13T12:05:00+00:00".to_string())
+    );
+    assert!(clone
+        .reason
+        .is_some_and(|r| r.starts_with("CloneTargetClusterChanged: ")));
+}

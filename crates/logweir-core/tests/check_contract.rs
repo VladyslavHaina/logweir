@@ -94,8 +94,19 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
     enum ForAPlanWithoutCapabilityChecks {
         NotAsked(&'static [CheckId]),
         Instead(CheckId, CheckCode),
+        /// Answered only on the rows of a plan KIND the oldest controller
+        /// never renders (PROD-04.2's `switchoverReadiness`), so it never
+        /// receives the code.
+        OnlyOnKind(CheckPlanKind, &'static [CheckId]),
     }
-    use ForAPlanWithoutCapabilityChecks::{Instead, NotAsked};
+    use ForAPlanWithoutCapabilityChecks::{Instead, NotAsked, OnlyOnKind};
+    const SWITCHOVER: &[CheckId] = &[
+        CheckId::SwitchoverRestore,
+        CheckId::SwitchoverEvidence,
+        CheckId::SwitchoverTarget,
+        CheckId::SwitchoverGroups,
+    ];
+    let switchover = || OnlyOnKind(CheckPlanKind::SwitchoverReadiness, SWITCHOVER);
     const READ_BY_THE_OLDEST_CONTROLLER: usize = 168;
     const ENGINE: &[CheckId] = &[
         CheckId::ConnectionEngineProtocol,
@@ -133,6 +144,15 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
                 CheckCode::BrokerConfigsNotReadable,
             ),
         ),
+        (CheckCode::RestoreSucceeded, switchover()),
+        (CheckCode::RestoreEvidenceVerified, switchover()),
+        (CheckCode::TargetIsTheRestores, switchover()),
+        (CheckCode::GroupsAdmissible, switchover()),
+        (CheckCode::RestoreNotFound, switchover()),
+        (CheckCode::RestoreNotSucceeded, switchover()),
+        (CheckCode::RestoreEvidenceRefused, switchover()),
+        (CheckCode::TargetNotTheRestores, switchover()),
+        (CheckCode::GroupNotAdmissible, switchover()),
     ];
     let listed: std::collections::BTreeSet<CheckCode> = newer.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed.len(), newer.len(), "a code is listed twice");
@@ -165,6 +185,18 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
                         "`{code}` is answered on `{row}`, which every plan asks for: an older \
                          controller would receive it"
                     );
+                }
+            }
+            OnlyOnKind(kind, rows) => {
+                // The seven kinds the oldest controller renders are the
+                // first seven; this one is not among them, and its rows
+                // belong to it alone.
+                assert!(
+                    !CheckPlanKind::ALL[..7].contains(kind),
+                    "`{code}` is answered on a kind an older controller renders"
+                );
+                for row in *rows {
+                    assert_eq!(row.category(), "switchover", "`{code}` on `{row}`");
                 }
             }
             Instead(row, instead) => {
@@ -3076,4 +3108,127 @@ fn a_credential_mode_is_one_of_three() {
         assert_eq!(serde_json::to_string(&m).unwrap(), s);
     }
     assert!(serde_json::from_str::<CredentialMode>("\"instanceRole\"").is_err());
+}
+
+/// **PROD-04.2 §3.8: a `switchoverReadiness` plan** is the restore, its
+/// plan hash and scorecard key, the target connection, the evidence
+/// destination, the namespace's public evidence keys and at most 100 groups
+/// — and nothing else. Every bound is held on the read side too.
+/// KILLS: a plan that names no evidence key (no scorecard could verify), a
+/// malformed plan hash, more groups than a plan, a target group named twice,
+/// a grant binding the review never compares, or a field the runner would
+/// drop.
+#[test]
+fn a_switchover_readiness_plan_is_bounded_and_closed() {
+    use logweir_core::check_contract::{SwitchoverReadinessGroup, SwitchoverReadinessRequest};
+    use logweir_core::execution_contract::{EvidenceKey, EvidenceKeyring};
+    use logweir_core::trust::{KeyState, KeyUsage, TrustedKey};
+    let key = EvidenceKey {
+        public_key_pem: "-----BEGIN PUBLIC KEY-----\nAA==\n-----END PUBLIC KEY-----\n".into(),
+        trust: TrustedKey {
+            key_id: "k".repeat(64),
+            principal_id: "install:x".into(),
+            usages: vec![KeyUsage::EvidenceSigning],
+            not_before: t("2026-01-01T00:00:00Z"),
+            not_after: t("2027-01-01T00:00:00Z"),
+            state: KeyState::Active,
+            retired_at: None,
+            revoked_at: None,
+            revocation_reason: None,
+            revocation_effective_from: None,
+        },
+    };
+    let request = || SwitchoverReadinessRequest {
+        restore_name: "incident".into(),
+        restore_uid: "r-uid".into(),
+        restore_plan_sha256: sha256_prefixed(b"plan"),
+        scorecard_key: "logweir/drills/run-1.json".into(),
+        target: connection(),
+        evidence: destination(),
+        keyring: EvidenceKeyring {
+            format_version: "1.0.0".into(),
+            keys: vec![key.clone()],
+        },
+        groups: vec![SwitchoverReadinessGroup {
+            source: "app".into(),
+            target: None,
+        }],
+    };
+    let plan = |r: SwitchoverReadinessRequest| CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.into(),
+        contract_version: CHECK_CONTRACT_VERSION,
+        subject_uid: "u".into(),
+        timeout_seconds: 120,
+        policy_digest: None,
+        request: CheckRequest::SwitchoverReadiness(Box::new(r)),
+    };
+    let ok = plan(request());
+    ok.validate().expect("a bounded plan");
+    assert_eq!(ok.kind(), CheckPlanKind::SwitchoverReadiness);
+    assert_eq!(
+        CheckPlanKind::SwitchoverReadiness.as_str(),
+        "switchoverReadiness"
+    );
+    assert_eq!(CheckPlanKind::SwitchoverReadiness.job_discriminator(), "sw");
+    let bytes = plan_bytes(&ok);
+    let round = CheckPlan::parse_and_verify(&bytes, &sha256_prefixed(&bytes), "u").expect("parses");
+    assert_eq!(round.request, ok.request);
+    let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    v["request"]["switchoverReadiness"]["commit"] = serde_json::json!(true);
+    let bytes = serde_json::to_vec(&v).unwrap();
+    assert!(matches!(
+        CheckPlan::parse_and_verify(&bytes, &sha256_prefixed(&bytes), "u"),
+        Err(CheckPlanError::Parse(_))
+    ));
+
+    let refused = |mutate: &dyn Fn(&mut SwitchoverReadinessRequest), field: &str| {
+        let mut r = request();
+        mutate(&mut r);
+        let err = plan(r).validate().expect_err(field);
+        assert!(format!("{err:?}").contains(field), "{field}: {err:?}");
+    };
+    refused(
+        &|r| r.restore_plan_sha256 = "sha256:XY".into(),
+        "restorePlanSha256",
+    );
+    refused(
+        &|r| r.scorecard_key = "logweir/drills/run-1.sig".into(),
+        "scorecardKey",
+    );
+    refused(&|r| r.keyring.keys.clear(), "keyring");
+    refused(
+        &|r| {
+            r.groups = (0..101)
+                .map(|i| SwitchoverReadinessGroup {
+                    source: format!("g{i}"),
+                    target: None,
+                })
+                .collect();
+        },
+        "groups",
+    );
+    refused(
+        &|r| {
+            r.groups.push(SwitchoverReadinessGroup {
+                source: "other".into(),
+                target: Some("app".into()),
+            });
+        },
+        "groups[1].target",
+    );
+    refused(
+        &|r| {
+            r.groups[0].source = "bad\u{7}id".into();
+        },
+        "groups[0]",
+    );
+    refused(
+        &|r| {
+            r.evidence.grant_bindings = vec![logweir_core::check_contract::GrantBindingRef {
+                role: DestinationRole::EvidenceRead,
+                secret_name: "s".into(),
+            }];
+        },
+        "grantBindings",
+    );
 }

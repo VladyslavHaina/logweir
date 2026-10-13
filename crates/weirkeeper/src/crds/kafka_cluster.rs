@@ -272,6 +272,14 @@ pub const TLS_CA_EXACTLY_ONE_SOURCE_RULE: &str =
 pub const TLS_CA_EXACTLY_ONE_SOURCE_MESSAGE: &str =
     "auth.tlsCa names exactly one of secretKeyRef or configMapKeyRef";
 
+/// **FX-43.** Every `spec.bootstrapServers` entry: no C0 or C1 control
+/// character and no line or paragraph separator, the set
+/// `logweir_core::runner_line::holds_line_breaking_or_control` refuses at the
+/// runner and `logweir cluster-probe` at its argument. An OpenAPI `pattern`
+/// (RE2, the API server's) rather than a CEL rule: a regex match over an
+/// unbounded list of unbounded strings is over the CEL cost budget.
+pub const BOOTSTRAP_SERVER_PATTERN: &str = r"^[^\x00-\x1f\x7f-\x9f\x{2028}\x{2029}]*$";
+
 /// **PROD-01.3.** The CEL rule on `spec.auth`: SASL/PLAIN only over TLS.
 /// Vacuously true for every mode but `plain`, so every object written before
 /// the mode existed satisfies it.
@@ -340,7 +348,11 @@ pub const CONNECTION_RULES: [(&[&str], &str, &str); 5] = [
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaClusterSpec {
-    /// The broker bootstrap addresses, `host:port`.
+    /// The broker bootstrap addresses, `host:port`. An entry holding a control
+    /// character or a line or paragraph separator is refused at admission
+    /// (FX-43): the Kafka client logs an address by name, and such an entry
+    /// would start a line of a pod log a controller reads by key.
+    #[schemars(inner(regex(path = "BOOTSTRAP_SERVER_PATTERN")))]
     pub bootstrap_servers: Vec<String>,
     /// How Logweir authenticates here.
     pub auth: AuthBlock,
@@ -356,9 +368,42 @@ pub struct KafkaClusterSpec {
     /// and a `mode: scratch` restore against this cluster is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_topic: Option<String>,
+    /// The Strimzi cluster that manages this Kafka cluster's topics. Set, a
+    /// `Backup` of this cluster lists the `KafkaTopic` resources of that
+    /// namespace labelled `strimzi.io/cluster=<cluster>` (read only, granted
+    /// per namespace by the chart values `strimzi.readKafkaTopics` and
+    /// `strimzi.namespaces`), and its receipt records each named topic's
+    /// Strimzi owner, so a restore exports desired state for it. A namespace
+    /// the chart does not list, a refused list, or a `KafkaTopic` resource the
+    /// API server does not serve fails the backup closed
+    /// (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing
+    /// is listed, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strimzi: Option<StrimziRef>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub unrecognized_fields: UnrecognizedFields,
+}
+
+/// Where a Strimzi cluster's `KafkaTopic` resources live.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StrimziRef {
+    /// The namespace of the `Kafka` resource and its `KafkaTopic`s.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    )]
+    pub namespace: String,
+    /// The `Kafka` resource's name: the `strimzi.io/cluster` label value, so
+    /// at most 63 characters (a label value's bound; a longer one would make
+    /// every `KafkaTopic` list a 400). The pattern is a subset of a label
+    /// value's.
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
+    )]
+    pub cluster: String,
 }
 
 /// `KafkaCluster.status` — entirely observations.

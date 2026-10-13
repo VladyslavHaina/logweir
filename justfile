@@ -164,22 +164,38 @@ golden:
 # frozen beside the new files
 # (`the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block`,
 # `the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approval`).
-# The two generated files are now `-2.1.0.json`, from the type, and
-# `-1.9.0.json`, which is the frozen `-1.8.0.json` plus the block as the type
+# PROD-11.1a added `target.creation` (the topics a run created and their IDs),
+# an optional block in BOTH lines: 1.10.0 and 2.2.0, written by every run that
+# creates topics. PROD-16.2's `-1.9.0.json` and `-2.1.0.json` are frozen beside
+# them; `-1.10.0.json` is the frozen `-1.9.0.json` plus the block as the type
 # derives it
-# (`the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_block`).
-# This build writes 1.9.0 or 2.1.0 only for such a restore.
+# (`the_frozen_1_10_0_scorecard_schema_is_the_frozen_1_9_0_plus_the_target_creation_block`,
+# `the_frozen_2_1_0_scorecard_schema_is_the_frozen_2_2_0_one_without_the_target_creation`).
+# PROD-05.2 added `target.topic_configuration` at 1.11.0 and 2.3.0, written
+# only for a restore whose plan carries it; `-1.10.0.json` and `-2.2.0.json`
+# are frozen beside them
+# (`the_frozen_1_11_0_scorecard_schema_is_the_frozen_1_10_0_plus_the_topic_configuration_block`,
+# `the_frozen_2_2_0_scorecard_schema_is_the_frozen_2_3_0_one_without_the_topic_configuration`).
+# PROD-04.2 adds `integrity.verification.positions_mapping` at 1.12.0 and
+# 2.4.0; `-1.11.0.json` and `-2.3.0.json` are frozen beside them
+# (`the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block`).
+# The two generated files are now `-2.4.0.json`, from the type, and
+# `-1.12.0.json`, which is the frozen `-1.11.0.json` plus the block as the type
+# derives it
+# (`the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block`).
+# This build writes 1.12.0 or 2.4.0 only for a passing complete restore that
+# mapped consumer positions.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`,
+# (`scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`,
 # `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
 # `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new. The scorecard's format-1 file is named by
-# `scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL` the same way.
-scorecard_schema_version := "2.1.0"
-scorecard_format_1_schema_version := "1.9.0"
+# `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING` the same way.
+scorecard_schema_version := "2.4.0"
+scorecard_format_1_schema_version := "1.12.0"
 receipt_schema_version := "1.8.0"
 catalog_schema_version := "1.7.0"
 
@@ -190,6 +206,8 @@ schema:
     cargo run -p logweir-api --example emit_openapi > schemas/logweir-api-v1.openapi.json
     cargo run -p logweir --example emit_catalog_point_schema > schemas/logweir-catalog-point-{{catalog_schema_version}}.json
     cargo run -p logweir-core --example emit_consumer_positions_schema > schemas/logweir-consumer-positions-1.0.0.json
+    cargo run -p logweir-core --example emit_positions_mapping_schema > schemas/logweir-positions-mapping-1.0.0.json
+    cargo run -p logweir-core --example emit_switchover_record_schema > schemas/logweir-switchover-record-1.0.0.json
 
 # Compare regenerated schemas without changing the working tree.
 schema-check:
@@ -204,12 +222,16 @@ schema-check:
     cargo run --locked -p logweir-api --example emit_openapi > "$tmp/api.json"
     cargo run --locked -p logweir --example emit_catalog_point_schema > "$tmp/catalog-point.json"
     cargo run --locked -p logweir-core --example emit_consumer_positions_schema > "$tmp/consumer-positions.json"
+    cargo run --locked -p logweir-core --example emit_positions_mapping_schema > "$tmp/positions-mapping.json"
+    cargo run --locked -p logweir-core --example emit_switchover_record_schema > "$tmp/switchover-record.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json "$tmp/scorecard.json"
     diff -u schemas/logweir-drill-scorecard-{{scorecard_format_1_schema_version}}.json "$tmp/scorecard-format-1.json"
     diff -u schemas/logweir-backup-receipt-{{receipt_schema_version}}.json "$tmp/receipt.json"
     diff -u schemas/logweir-api-v1.openapi.json "$tmp/api.json"
     diff -u schemas/logweir-catalog-point-{{catalog_schema_version}}.json "$tmp/catalog-point.json"
     diff -u schemas/logweir-consumer-positions-1.0.0.json "$tmp/consumer-positions.json"
+    diff -u schemas/logweir-positions-mapping-1.0.0.json "$tmp/positions-mapping.json"
+    diff -u schemas/logweir-switchover-record-1.0.0.json "$tmp/switchover-record.json"
 
 # Compatibility alias; the main check runs schema-check only once.
 receipt-schema-check: schema-check

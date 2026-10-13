@@ -1,9 +1,7 @@
 # Verifying a Logweir drill scorecard
 
 How to authenticate a scorecard, check it, and read its limits, with Logweir or
-with the independent Python verifier. What the evidence supports against the
-backup and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and
-HIPAA is the [control-evidence mapping](control-evidence.md).
+with the independent Python verifier.
 
 ## What the artifact is
 
@@ -318,9 +316,8 @@ to a change record: the table cannot be verified.
 
 ## What the scorecard does **not** claim
 
-A signature authenticates the bytes; judge the claims' scope separately. The
-[control-evidence mapping](control-evidence.md#what-the-evidence-does-not-show)
-states these limits against each clause.
+A signature authenticates the bytes; judge the claims' scope separately. Each
+section below states one limit.
 
 ### A pass compares the restored topic with the archive, not with the source
 
@@ -343,11 +340,12 @@ cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
   copy's position with the last copy's value; undetected. A record that already
   carried `x-original-offset` keeps only the backup's, and a drill sampling it
   fails.
-- **Out-of-order timestamps.** Point selection reads each segment's first and
-  last timestamps, so a point-in-time restore can omit a record without the
-  drill noticing; a record older than every segment's first is dropped from every
-  restore (a full restore's count check fails, a point-in-time drill can pass),
-  and a correct point-in-time restore can fail the count check.
+- **Out-of-order timestamps.** The engine selects segments by their first and
+  last timestamps. Since PROD-01.1b the runner reads each record's own
+  timestamp first: the window starts at the oldest record, and a window whose
+  record the engine would skip is refused before anything is written
+  ([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)). A scorecard signed by
+  an earlier runner may be a point-in-time pass that omitted such a record.
 
 Order within a partition, keys, values, null versus empty, header values,
 tombstones and a compacted source's records at backup time are preserved. A
@@ -415,10 +413,10 @@ At 1.6.0 or later a sampled `pass` also means:
 
 It still does not establish that every record of a partition is the archive's,
 that header order was kept, or more than one record of a straddling segment:
-ask for `sample.coverage: complete`. The bounds assume a segment's timestamps
-do not run backwards; a record older than every segment's first is dropped and
-the bound then fails a faithful restore
-([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+ask for `sample.coverage: complete`. Since PROD-01.1b the bounds use each
+segment's oldest and newest record; an earlier runner's assumed its timestamps
+do not run backwards
+([the limitation](stability.md#out-of-order-timestamps-inside-a-segment)).
 A sampled 1.4.0 or 1.5.0 document, from before FX-23, was judged by one count
 bound over all topics, and its `max_partitions` kept the first partitions in
 manifest order: an engine stopped early could leave later topics empty under a
@@ -458,7 +456,7 @@ allowlist. A value inherited from a broker default is never compared: a
 (measured by FX-4). The receipt's `config_coverage` records the effective value;
 comparing other effective values is PROD-05.1's.
 
-### A `newTopic` restore does not reconstruct the source's topic settings
+### A `newTopic` restore does not reconstruct the source's topic settings unless its plan asks
 
 A restore creates its topics at the plan's replication factor, with
 `retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch drill
@@ -467,6 +465,10 @@ NOT reconstructed, listed in 1.2.0's `topic_parity.not_reconstructed` and in
 `unexpected_divergence`. **A `newTopic` scorecard before 1.2.0 labels them
 `intentionally_deviated`; that label is the defect FX-3 fixed, not intent**
 ([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings)).
+A plan with `target.topic_configuration` creates them from the point's model
+and applies the source's compaction and retention after a passing verdict;
+its document (1.11.0, 2.3.0) carries `target.topic_configuration`, and
+`topic_parity` still describes what phase 7 saw, before that transition.
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
@@ -514,13 +516,15 @@ drill), not as a defect in the artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.30.0` and the
+The Python report ends with `verifier: verify_scorecard.py 1.33.0` and the
 checks applied. That is the **verifier's** version, not the document's
 `format_version` (scorecard `1.0.0`; `1.1.0` FX-4; `1.2.0` FX-3; `1.3.0` FX-8;
 `1.4.0` PROD-08.1; `1.5.0` PROD-01.3's auth modes; `1.6.0` every sampled drill
 since FX-23; `1.7.0` a window start, PROD-11.1; `1.8.0` original names,
 PROD-15.1; `1.9.0`/`2.1.0` a console approval, PROD-16.2; `2.0.0` a partition
-subset, PROD-11.1b). It moves when the accepted-document set changes:
+subset, PROD-11.1b; `1.10.0`/`2.2.0` every run that created topics, PROD-11.1a;
+`1.11.0`/`2.3.0` a target topic configuration, PROD-05.2; `1.12.0`/`2.4.0` a
+positions mapping, PROD-04.2). It moves when the accepted-document set changes:
 
 | Version | Changed checks |
 | --- | --- |
@@ -554,6 +558,9 @@ subset, PROD-11.1b). It moves when the accepted-document set changes:
 | `1.28.0` | Scorecard `1.8.0` (PROD-15.1): ON-1 to ON-14, the two `original name:` lines. |
 | `1.29.0` | Scorecard `1.9.0` and `2.1.0` (PROD-16.2): CA-1 to CA-8, ON-5 by version, the `console approval:` line. |
 | `1.30.0` | Receipt `1.8.0` (PROD-02.1): `source_watermarks` arms 41–45; an empty capture only beside the block. |
+| `1.31.0` | Scorecard `1.10.0` and `2.2.0` (PROD-11.1a): `target.creation` arms TCR-1 to TCR-5, the `target creation:` line. |
+| `1.32.0` | Scorecard `1.11.0` and `2.3.0` (PROD-05.2): `target.topic_configuration` arms TC-1 to TC-5 and its shape. |
+| `1.33.0` | Scorecard `1.12.0` and `2.4.0` (PROD-04.2): `positions_mapping` arms PM-1 to PM-5; with `--positions-mapping <file>`, the mapping document's PMD-1 to PMD-7 and one line per mapped position; `--payload-type switchover-record`, signature only. |
 
 Every document without a version's new field is decided as before it. One
 diagnostic-order difference remains: with both `run_id` and `engine` absent,

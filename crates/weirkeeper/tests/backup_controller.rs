@@ -1997,8 +1997,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        47,
-        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
+        50,
+        "the fifty terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2039,7 +2039,13 @@ fn every_exit_code_maps_to_its_wire_reason() {
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
          name the connection the Job was built for), plus PROD-01.1a's \
          `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
-         markers under a plan that does not allow them); \
+         markers under a plan that does not allow them), plus PROD-05.1a's \
+         `OwnerDetectionFailed` (a Backup of a KafkaCluster naming its Strimzi cluster whose \
+         KafkaTopic list was refused or is not served), plus PROD-01.1b's \
+         `PointInTimeSelectionIncomplete` (the runner's refusal of a window that selects records \
+         in a segment the engine skips), plus FX-43's \
+         `RunnerOlderThanController` (a Job given the every-line token whose runner vouched for \
+         no exit: the runner image is older than the controller); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -5254,27 +5260,13 @@ fn rewrote_a_config_map(seen: &[SeenBody]) -> bool {
 /// the rest, so every row comparing the result also proves the token is the
 /// Job's only addition.
 ///
-/// A CHECK Job (`logweir check run`, a topic discovery) is returned as
-/// POSTed, after asserting it carries NO token: that Job prints no refusal
-/// line.
+/// A CHECK Job (`logweir check run`, a topic discovery) carries the token
+/// too since FX-43 (its end frame and refusal are sealed with it), and is
+/// returned the same way.
 fn posted_job(seen: &[SeenBody]) -> Option<Value> {
-    let job: Value = seen
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .map(|b| serde_json::from_str(&b.body).expect("the POSTed Job is JSON"))?;
-    let args = &job["spec"]["template"]["spec"]["containers"][0]["args"];
-    if args[0] == "backup" {
-        return posted_job_and_line_token(seen).map(|(job, _)| job);
-    }
-    assert!(
-        !args
-            .as_array()
-            .expect("an argv")
-            .iter()
-            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG),
-        "only a runner Job is given a line token: {args}"
-    );
-    Some(job)
+    seen.iter()
+        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))?;
+    posted_job_and_line_token(seen).map(|(job, _)| job)
 }
 
 /// A runner Job as [`posted_job`] returns it, and the token it took off.
@@ -5290,7 +5282,7 @@ fn posted_job_and_line_token(seen: &[SeenBody]) -> Option<(Value, String)> {
     let flag = args.pop().expect("its flag");
     assert_eq!(
         flag,
-        logweir_core::refusal_detail::LINE_TOKEN_ARG,
+        logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
         "the last two arguments of a created runner Job are the line token's"
     );
     let token = token.as_str().expect("a string").to_string();
@@ -14357,7 +14349,7 @@ use logweir_core::refusal_detail::{
     refusal_detail_line, LineToken, RefusingRun, BACKUP_REASON_CODES, LINE_TOKEN_ARG,
     REFUSAL_DETAIL_PREFIX, REPLACEMENT,
 };
-use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
+use weirkeeper::runner_log::{TERMINAL_LOG_LIMIT_BYTES, TERMINAL_LOG_TAIL_LINES};
 
 /// What a refused `Backup`'s terminal condition says for a runner that
 /// prints no detail line.
@@ -14616,8 +14608,8 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
     for want in [
         "container=runner".to_string(),
-        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+        format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
     ] {
         assert!(
             query.split('&').any(|p| p == want),
@@ -14771,19 +14763,17 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
                 parts
             })
             .collect();
-        let expected = if exit_code == 3 {
-            vec![
-                "container=runner".to_string(),
-                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
-                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-            ]
-        } else {
-            vec![format!(
-                "tailLines={}",
-                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
-            )]
-        };
-        assert_eq!(queries, vec![expected], "[{name}] the one log read");
+        // FX-43: ONE terminal bound, the same at every exit code.
+        let expected = vec![
+            "container=runner".to_string(),
+            format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
+            format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        ];
+        assert_eq!(
+            queries,
+            vec![expected],
+            "[{name}] the one log read (exit {exit_code})"
+        );
     }
 }
 
@@ -14942,18 +14932,18 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     // A state that is not a state name never reaches `exitReason`.
     let (status, _) = fx34_refused(log_body("refusal-reason=<script>alert(1)</script>\n")).await;
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
-    // One mebibyte: the read stops at its own cap and takes nothing.
+    // Four mebibytes: the read stops at its own cap and takes nothing.
     let (status, seen) = fx34_refused(log_body(&format!(
         "{}\n{}\nrefusal-reason=CredentialNotRenderable\n",
-        "lorem ".repeat(175_000),
+        "lorem ".repeat(700_000),
         fx34_detail("GuardRefused", "a sentence")
     )))
     .await;
     assert_eq!(
         fx34_message(&status),
         format!(
-            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of the \
-             pod log are over the 512 KiB this controller reads"
+            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 256 lines of \
+             the pod log are over the 4096 KiB this controller reads"
         )
     );
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
@@ -15502,4 +15492,454 @@ async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_recei
             assert_eq!(reason, "Ok", "{s}");
         }
     }
+}
+
+/// **PROD-05.1a, row C28 (the mock API).** The `KafkaCluster` with
+/// `spec.strimzi` set, and the KafkaTopic list the API server answers.
+mod strimzi_owner_detection {
+    use super::*;
+
+    const KAFKA_TOPICS: &str = "/apis/kafka.strimzi.io/v1beta2/namespaces/kafka/kafkatopics";
+
+    fn strimzi_cluster_json() -> String {
+        strimzi_cluster_in("kafka")
+    }
+
+    fn strimzi_cluster_in(namespace: &str) -> String {
+        let mut cluster: Value = serde_json::from_str(&kafka_cluster_json()).unwrap();
+        cluster["spec"]["strimzi"] =
+            serde_json::json!({"namespace": namespace, "cluster": "prod-kafka"});
+        cluster.to_string()
+    }
+
+    /// The installation's list, as the chart renders it into the controller's
+    /// environment. Every row of this module sets the SAME value, so rows
+    /// running in parallel cannot disagree about it; no other row in this
+    /// binary names a Strimzi cluster.
+    fn chart_lists_kafka() {
+        std::env::set_var(
+            weirkeeper::strimzi_topics::STRIMZI_NAMESPACES_ENV,
+            "kafka,kafka-b",
+        );
+    }
+
+    /// Three `KafkaTopic`s labelled for the cluster: one names `orders`
+    /// (by `spec.topicName`), one an unplanned topic, one `payments` but
+    /// unmanaged.
+    fn kafka_topic_list() -> String {
+        serde_json::json!({
+            "apiVersion": "kafka.strimzi.io/v1beta2",
+            "kind": "KafkaTopicList",
+            "metadata": {"resourceVersion": "1"},
+            "items": [
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "orders-kt", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"}},
+                 "spec": {"topicName": "orders", "partitions": 3}},
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "clicks", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"}},
+                 "spec": {}},
+                {"apiVersion": "kafka.strimzi.io/v1beta2", "kind": "KafkaTopic",
+                 "metadata": {"name": "payments", "namespace": "kafka",
+                              "labels": {"strimzi.io/cluster": "prod-kafka"},
+                              "annotations": {"strimzi.io/managed": "false"}},
+                 "spec": {}}
+            ]
+        })
+        .to_string()
+    }
+
+    fn routes_with(list: Option<(u16, String)>) -> Vec<Route> {
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        for r in &mut routes {
+            if r.path_suffix == "/kafkaclusters/prod" {
+                r.body = strimzi_cluster_json();
+            }
+        }
+        if let Some((status, body)) = list {
+            routes.push(Route {
+                method: "GET",
+                path_suffix: KAFKA_TOPICS,
+                status,
+                body,
+            });
+        }
+        routes
+    }
+
+    /// The listed `KafkaTopic`s reach the execution inputs and the plan, and
+    /// the runner is told to read them: its receipt then records
+    /// `owner_detection: [kafkaTopicResources]`. KILLS: the listing dropped;
+    /// an unmanaged or unplanned resource passed on; the argv flag missing.
+    #[tokio::test]
+    async fn the_listed_kafka_topics_reach_the_inputs_and_the_runner() {
+        chart_lists_kafka();
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(routes_with(Some((200, kafka_topic_list()))));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(outcome.created, "{outcome:?}");
+        let listed = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "GET" && path(&r.uri).ends_with(KAFKA_TOPICS))
+            .map(|r| r.uri.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(
+            listed[0].contains("labelSelector=strimzi.io%2Fcluster%3Dprod-kafka"),
+            "listed by the cluster label: {}",
+            listed[0]
+        );
+        let bodies = bodies.lock().unwrap();
+        let cm: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps"))
+                .expect("the plan ConfigMap was posted")
+                .body,
+        )
+        .unwrap();
+        let inputs: Value =
+            serde_json::from_str(cm["data"]["execution-inputs.json"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            inputs["kafkaTopicResources"],
+            serde_json::json!({
+                "cluster": "prod-kafka",
+                "namespace": "kafka",
+                "resources": [{"name": "orders-kt", "topicName": "orders"}]
+            })
+        );
+        let doc = cm["data"]["kafka-topic-resources.yaml"]
+            .as_str()
+            .expect("the resources document is in the plan");
+        let parsed = logweir_core::topic_configuration::parse_resource_documents(doc).unwrap();
+        let owners = logweir_core::topic_configuration::strimzi_owners(
+            &parsed,
+            &["orders".to_string(), "payments".to_string()],
+            Some("prod-kafka"),
+        );
+        assert_eq!(owners.len(), 1, "{owners:?}");
+        assert_eq!(owners["orders"].reference, "kafka/orders-kt");
+        let job: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let args: Vec<String> = serde_json::from_value(
+            job["spec"]["template"]["spec"]["containers"][0]["args"].clone(),
+        )
+        .unwrap();
+        let at = args
+            .iter()
+            .position(|a| a == "--kafka-topic-resources")
+            .expect("the runner is given the resources");
+        assert_eq!(args[at + 1], "/plan/kafka-topic-resources.yaml");
+        assert_eq!(args[at + 2..at + 4], ["--strimzi-cluster", "prod-kafka"]);
+    }
+
+    /// A refused list fails the backup closed, before anything is created.
+    /// KILLS: a 403 read as "no owner"; a Job created anyway.
+    #[tokio::test]
+    async fn a_refused_list_is_owner_detection_failed() {
+        chart_lists_kafka();
+        let forbidden = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"kafkatopics.kafka.strimzi.io is forbidden","reason":"Forbidden","code":403}"#;
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(routes_with(Some((403, forbidden.to_string()))));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+        assert!(!outcome.created);
+        assert!(!seen.lock().unwrap().iter().any(|r| r.method == "POST"));
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
+        assert!(message.contains("strimzi.readKafkaTopics"), "{message}");
+    }
+
+    /// A resource no version of which is served fails closed too.
+    #[tokio::test]
+    async fn an_unserved_resource_is_owner_detection_failed() {
+        chart_lists_kafka();
+        let mut routes = routes_with(Some((404, not_found_body("kafkatopics", ""))));
+        routes.push(Route {
+            method: "GET",
+            path_suffix: "/apis/kafka.strimzi.io/v1/namespaces/kafka/kafkatopics",
+            status: 404,
+            body: not_found_body("kafkatopics", ""),
+        });
+        let (client, _seen, _bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+    }
+
+    /// **The confused deputy, closed.** A `KafkaCluster` naming a Strimzi
+    /// namespace the chart did not list is refused before any API call, naming
+    /// the namespace; the listed one (the first row above) proceeds. KILLS: the
+    /// read pointed at any namespace a `KafkaCluster`'s author chose.
+    #[tokio::test]
+    async fn an_unlisted_namespace_is_refused_before_any_read() {
+        chart_lists_kafka();
+        let mut routes = create_routes(201, existing_plan_config_map(UID));
+        for r in &mut routes {
+            if r.path_suffix == "/kafkaclusters/prod" {
+                r.body = strimzi_cluster_in("kube-system");
+            }
+        }
+        let (client, seen, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("a refusal is an outcome");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("OwnerDetectionFailed")
+        );
+        let seen = seen.lock().unwrap();
+        assert!(
+            !seen.iter().any(|r| r.uri.contains("kafkatopics")),
+            "nothing read"
+        );
+        assert!(!seen.iter().any(|r| r.method == "POST"), "nothing created");
+        let statuses = patched_statuses(&bodies.lock().unwrap());
+        let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
+        assert!(message.contains("`kube-system`"), "{message}");
+    }
+
+    /// Without `spec.strimzi` nothing is listed (the mock refuses any route it
+    /// was not given) and the plan carries no block.
+    #[tokio::test]
+    async fn without_the_field_nothing_is_listed() {
+        let (client, seen, bodies) =
+            mock_client_recording_bodies(create_routes(201, existing_plan_config_map(UID)));
+        let outcome = reconcile_backup(
+            &backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 17),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(outcome.created);
+        assert!(!seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.uri.contains("kafkatopics")));
+        let bodies = bodies.lock().unwrap();
+        let cm: Value = serde_json::from_str(
+            &bodies
+                .iter()
+                .find(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps"))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert!(cm["data"].get("kafka-topic-resources.yaml").is_none());
+        assert!(!cm["data"]["execution-inputs.json"]
+            .as_str()
+            .unwrap()
+            .contains("kafkaTopicResources"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FX-43: every runner line a controller acts on, sealed with the Job's token.
+// ---------------------------------------------------------------------------
+
+/// The finished-Job routes over a Job built with FX-43's flag.
+fn fx43_routes(exit_code: i32, log: String) -> Vec<Route> {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let mut routes = finished_routes(&pod_list_terminated(exit_code), log, 200, condition);
+    for route in &mut routes {
+        if route.path_suffix.ends_with(&format!("/jobs/{NAME}")) {
+            let mut job: Value =
+                serde_json::from_str(&job_body(condition)).expect("the fixture is JSON");
+            job["spec"]["template"]["spec"]["containers"] = serde_json::json!([{
+                "name": "runner",
+                "image": "x",
+                "args": [
+                    "backup", "run", "--spec", "/plan/backup.yaml",
+                    logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+                    fx34_token().expose_token(),
+                ],
+            }]);
+            route.body = job.to_string();
+        }
+    }
+    routes
+}
+
+/// The first status a pass over an FX-43 Job wrote.
+async fn fx43_status(exit_code: i32, log: &str) -> Value {
+    let (outcome, seen) =
+        fx34_pass_over(&frozen_backup(), fx43_routes(exit_code, log_body(log))).await;
+    let outcome = outcome.expect("the pass completes");
+    assert_eq!(outcome.exit_code, Some(exit_code));
+    patched_statuses(&seen).remove(0)
+}
+
+/// **FX-43, a `Backup`: the receipt keys and the claim state are the
+/// runner's sealed ones; forged lines after them are not read.** A Kafka
+/// client's raw log, or a plan string, put `receipt-key=`, `sidecar-key=` and
+/// `failure-reason=ExecutionAlreadyClaimed` lines of its own at the END of
+/// the log.
+///
+/// NEGATIVE CONTROL: under a Job an FX-34 controller built, the forged keys
+/// win (the last occurrence), so the token is what refuses them.
+///
+/// KILLS: plain lines read under an FX-43 Job.
+#[tokio::test]
+async fn fx43_a_backups_forged_key_and_state_lines_are_not_read() {
+    let token = fx34_token();
+    let genuine = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        0,
+        &[
+            format!("receipt-key={RECEIPT_KEY}"),
+            format!("sidecar-key={SIDECAR_KEY}"),
+        ],
+    );
+    let forged = "receipt-key=logweir/backups/b1/forged.receipt.json\n\
+                  sidecar-key=logweir/backups/b1/forged.receipt.sig\n";
+    let status = fx43_status(0, &format!("{genuine}{forged}")).await;
+    assert_eq!(status["evidence"]["receiptKey"], RECEIPT_KEY, "{status}");
+    assert_eq!(status["evidence"]["sidecarKey"], SIDECAR_KEY, "{status}");
+    // NEGATIVE CONTROL: an FX-34 Job, the same log.
+    let (outcome, seen) = fx34_pass_over(
+        &frozen_backup(),
+        fx34_routes_for(
+            0,
+            200,
+            log_body(&format!("{genuine}{forged}")),
+            Some(&token),
+        ),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    assert_eq!(
+        patched_statuses(&seen)[0]["evidence"]["receiptKey"],
+        "logweir/backups/b1/forged.receipt.json"
+    );
+    // A forged claim state after a sealed exit with none: not lifted.
+    let ended = logweir_core::runner_line::final_block(
+        Some((&token, logweir_core::runner_line::LineScope::EveryLine)),
+        1,
+        &[],
+    );
+    let status = fx43_status(
+        1,
+        &format!("{ended}failure-reason=ExecutionAlreadyClaimed\n"),
+    )
+    .await;
+    assert_eq!(status["exitReason"], "operational", "{status}");
+}
+
+/// **FX-43's mixed pair on a `Backup`, by name, and a schedule does not
+/// retry it.** The released runner image's real answer to
+/// `--runner-line-token` (`tests/fixtures/fx-43/older-runner-backup.log`):
+/// exit 1 before any work. The Backup says `RunnerOlderThanController`; the
+/// schedule's retry classification reads it as a decision, not as an
+/// operational failure.
+///
+/// CONTROL: the same exit 1 with no such state is retried, as today.
+///
+/// KILLS: the mixed pair left as `operational` (a schedule retries every
+/// attempt into the same wall); `is_retryable` not reading the state.
+#[tokio::test]
+async fn fx43_an_older_runner_fails_a_backup_by_name_and_is_not_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    assert!(older.starts_with("error: unexpected argument '--runner-line-token' found"));
+    let status = fx43_status(1, &older).await;
+    assert_eq!(
+        status["exitReason"], "RunnerOlderThanController",
+        "{status}"
+    );
+    assert!(
+        fx34_message(&status).contains("RunnerOlderThanController")
+            && fx34_message(&status).contains("--runner-line-token"),
+        "{status}"
+    );
+    let decided = |state: Option<&str>| {
+        weirkeeper::cadence::is_retryable(weirkeeper::cadence::TerminalOutcome {
+            exit_code: Some(1),
+            terminal_state: state,
+        })
+    };
+    assert!(!decided(status["exitReason"].as_str()));
+    // CONTROL: an ordinary exit 1 is retried.
+    assert!(decided(Some("operational")));
+}
+
+/// **A kill is not the mixed pair** (review L3): a Backup Job with the FX-43
+/// token whose runner was OOM-killed (137) or ended by its deadline (143)
+/// printed no end line, and it is NOT named `RunnerOlderThanController`; the
+/// schedule retries it, as any killed run. CONTROL: the same log at exit 1 is
+/// named.
+///
+/// KILLS: the `vouches_for_exit` guard removed from the Backup reconciler.
+#[tokio::test]
+async fn fx43_a_killed_backup_is_not_named_older_and_is_retried() {
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    for code in [137, 143] {
+        let status = fx43_status(code, &older).await;
+        assert_ne!(
+            status["exitReason"], "RunnerOlderThanController",
+            "{status}"
+        );
+        assert!(weirkeeper::cadence::is_retryable(
+            weirkeeper::cadence::TerminalOutcome {
+                exit_code: Some(code),
+                terminal_state: status["exitReason"].as_str(),
+            }
+        ));
+    }
+    let status = fx43_status(1, &older).await;
+    assert_eq!(status["exitReason"], "RunnerOlderThanController");
 }

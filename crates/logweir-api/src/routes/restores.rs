@@ -19,12 +19,13 @@ use kube::ResourceExt as _;
 use logweir_core::approval_policy::{
     ApprovalMode, ApprovalRoute, EffectivePolicy, Requester, RestoreAuthorization,
 };
-use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
+use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectRef};
 use weirkeeper::crds::restore::{
     Restore, RestoreSpec, RestoreTarget, TargetMode, TopicNaming, VerificationCoverage,
 };
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
+use super::subject::{GatedPlan, Subject};
 use super::{authorize, create_idempotent, get_object, json, list_page, list_query, ApiPath};
 use crate::app::AppState;
 use crate::approval;
@@ -57,6 +58,59 @@ pub const MAX_PLAN_BYTES: usize = 256 * 1024;
 /// The most mapping rows a declaration may carry — the same bound
 /// `CreateScheduleRequest` puts on a named topic list.
 pub const MAX_TOPIC_MAPPING_ROWS: usize = 1000;
+
+/// **The opaque plan and its approval name**, as every create that carries
+/// them checks them (a `Restore`'s and a `Switchover`'s, PROD-04.2): the plan
+/// present and at most [`MAX_PLAN_BYTES`], `planHash` well formed and the
+/// SHA-256 of exactly those bytes, `approvalRef.name` an object name.
+#[must_use]
+pub(crate) fn plan_and_approval_errors(
+    plan_bytes: &str,
+    plan_hash: &str,
+    approval_name: &str,
+) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+    if plan_bytes.is_empty() {
+        errors.push(FieldError::new(
+            "planBytes",
+            "required",
+            "the plan document is required",
+        ));
+    } else if plan_bytes.len() > MAX_PLAN_BYTES {
+        errors.push(FieldError::new(
+            "planBytes",
+            "too_long",
+            format!("the plan document is at most {MAX_PLAN_BYTES} bytes"),
+        ));
+    }
+    let well_formed_hash = plan_hash.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    });
+    if !well_formed_hash {
+        errors.push(FieldError::new(
+            "planHash",
+            "invalid_format",
+            "must be sha256: followed by 64 lowercase hexadecimal characters",
+        ));
+    } else if logweir_core::ids::sha256_prefixed(plan_bytes.as_bytes()) != plan_hash {
+        errors.push(FieldError::new(
+            "planHash",
+            "plan_hash_mismatch",
+            "is not the SHA-256 of planBytes exactly as submitted",
+        ));
+    }
+    if !validate::is_dns_subdomain(approval_name) {
+        errors.push(FieldError::new(
+            "approvalRef.name",
+            "invalid_name",
+            "must be a Kubernetes object name",
+        ));
+    }
+    errors
+}
 
 /// Check a declared `topicMapping` against the prefix the same request stores.
 ///
@@ -183,50 +237,11 @@ fn is_backup_set_ref(value: &str) -> bool {
 ///
 /// `validation_failed` naming every invalid field.
 pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, ApiError> {
-    let mut errors = Vec::new();
-    if request.plan_bytes.is_empty() {
-        errors.push(FieldError::new(
-            "planBytes",
-            "required",
-            "the plan document is required",
-        ));
-    } else if request.plan_bytes.len() > MAX_PLAN_BYTES {
-        errors.push(FieldError::new(
-            "planBytes",
-            "too_long",
-            format!("the plan document is at most {MAX_PLAN_BYTES} bytes"),
-        ));
-    }
-    let well_formed_hash = request
-        .plan_hash
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        });
-    if !well_formed_hash {
-        errors.push(FieldError::new(
-            "planHash",
-            "invalid_format",
-            "must be sha256: followed by 64 lowercase hexadecimal characters",
-        ));
-    } else if logweir_core::ids::sha256_prefixed(request.plan_bytes.as_bytes()) != request.plan_hash
-    {
-        errors.push(FieldError::new(
-            "planHash",
-            "plan_hash_mismatch",
-            "is not the SHA-256 of planBytes exactly as submitted",
-        ));
-    }
-    if !validate::is_dns_subdomain(&request.approval_ref.name) {
-        errors.push(FieldError::new(
-            "approvalRef.name",
-            "invalid_name",
-            "must be a Kubernetes object name",
-        ));
-    }
+    let mut errors = plan_and_approval_errors(
+        &request.plan_bytes,
+        &request.plan_hash,
+        &request.approval_ref.name,
+    );
     match (
         request.source_destination_ref.as_ref(),
         request.evidence_destination_ref.as_ref(),
@@ -553,22 +568,17 @@ pub async fn create(
         .map_err(KubeFailure::into_api_error)?;
     let effective = policies.resolve(&ns);
     refuse_typed_confirmation(&effective, &request)?;
-    refuse_before_create(&state, &actor, &ns, &effective, &request)?;
-    if effective.mode() == ApprovalMode::Governed
-        && !effective.is_legacy()
-        && request.approval_ref.name.len() > approval::MAX_GOVERNED_APPROVAL_NAME
-    {
-        return Err(ApiError::validation(vec![FieldError::new(
-            "approvalRef.name",
-            "too_long",
-            format!(
-                "at most {} characters in a namespace bound to a Governed policy, so that its \
-                 confirmation `<name>{}` is still an object name",
-                approval::MAX_GOVERNED_APPROVAL_NAME,
-                approval::CONFIRMATION_SUFFIX
-            ),
-        )]));
-    }
+    refuse_before_create(
+        &state,
+        &actor,
+        &ns,
+        &effective,
+        &CreateGate {
+            ticket: request.ticket.as_deref(),
+            approval_name: &request.approval_ref.name,
+            plan: GatedPlan::Restore(&request.plan_bytes),
+        },
+    )?;
     // Canonical form for the request hash: equivalent RFC 3339 spellings of
     // one instant are one request. `planBytes` is NOT canonicalised.
     request.point_in_time = point_in_time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
@@ -596,8 +606,7 @@ pub async fn create(
         &state,
         &actor,
         &ns,
-        &created.object,
-        &request.approval_ref.name,
+        &Subject::of_restore(&ns, &created.object),
         &effective,
         SignedBesideThePlan {
             ticket: request.ticket.as_deref(),
@@ -695,9 +704,22 @@ fn refuse_typed_confirmation(
 /// What a create request asks the console to sign beside the plan hash: the
 /// change ticket and, on a one-person confirmation of an original-name
 /// restore, the typed topic names.
-struct SignedBesideThePlan<'a> {
-    ticket: Option<&'a str>,
-    confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
+pub(crate) struct SignedBesideThePlan<'a> {
+    /// The change ticket.
+    pub ticket: Option<&'a str>,
+    /// The typed topic names (a `Restore` under the original names only).
+    pub confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
+}
+
+/// What the create gates read of a request, for either kind
+/// ([`refuse_before_create`]).
+pub(crate) struct CreateGate<'a> {
+    /// The change ticket.
+    pub ticket: Option<&'a str>,
+    /// `approvalRef.name`.
+    pub approval_name: &'a str,
+    /// The plan, for the two-person scope gate.
+    pub plan: GatedPlan<'a>,
 }
 
 /// The typed confirmation a request carries, as the console signs it.
@@ -729,19 +751,24 @@ fn typed_confirmation(
 /// * **A requester a two-person approval can compare**: under a policy whose
 ///   approval the console signs, the requester is one of the two people every
 ///   reader tells apart (`logweir_core::approval_policy::console_principal`).
+/// * **An `approvalRef.name` whose confirmation is still a name** under a
+///   Governed policy (`approval::MAX_GOVERNED_APPROVAL_NAME`).
+///
+/// THE SAME FUNCTION GATES A `Switchover`'s create (PROD-04.2): only the
+/// plan's scope rule differs, by [`GatedPlan`].
 ///
 /// # Errors
 ///
 /// `policy_mismatch` or `validation_failed`.
-fn refuse_before_create(
+pub(crate) fn refuse_before_create(
     state: &AppState,
     actor: &Actor,
     ns: &str,
     effective: &EffectivePolicy,
-    request: &CreateRestoreRequest,
+    gate: &CreateGate<'_>,
 ) -> Result<(), ApiError> {
     let Some(policy) = effective.bound() else {
-        if request.ticket.is_some() {
+        if gate.ticket.is_some() {
             return Err(ApiError::validation(vec![FieldError::new(
                 "ticket",
                 "not_accepted",
@@ -817,7 +844,7 @@ fn refuse_before_create(
         // or approved under a strict policy. The ticket is shown to the approver by
         // the same rule, so a ticket the scope would refuse is refused here, by
         // name, without echoing it.
-        if let Some(ticket) = request.ticket.as_deref() {
+        if let Some(ticket) = gate.ticket {
             if !logweir_core::approval_scope::showable(ticket) {
                 actor.audit.set_failure("ticket_not_showable");
                 return Err(ApiError::validation(vec![FieldError::new(
@@ -834,9 +861,7 @@ fn refuse_before_create(
                 )]));
             }
         }
-        if let Err(incomplete) =
-            logweir_core::approval_scope::plan_scope(request.plan_bytes.as_bytes())
-        {
+        if let Err(incomplete) = gate.plan.scope() {
             actor.audit.set_failure("scope_incomplete");
             actor
                 .audit
@@ -845,19 +870,18 @@ fn refuse_before_create(
                 "planBytes",
                 "scope_incomplete",
                 format!(
-                    "Namespace {ns} is bound to approval policy {} (two-person). {incomplete}. \
-                     Nothing was created.",
-                    policy.name
+                    "Namespace {ns} is bound to approval policy {} (two-person). {}. Nothing was \
+                     created.",
+                    policy.name,
+                    incomplete.sentence_for(gate.plan.scope_of())
                 ),
             )]));
         }
     }
-    if let Err(reason) =
-        logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())
-    {
+    if let Err(reason) = logweir_core::approval_policy::check_ticket(policy.mode, gate.ticket) {
         return Err(ApiError::validation(vec![FieldError::new(
             "ticket",
-            if request.ticket.is_none() {
+            if gate.ticket.is_none() {
                 "required"
             } else {
                 "invalid"
@@ -866,10 +890,7 @@ fn refuse_before_create(
         )]));
     }
     if policy.mode == ApprovalMode::Governed
-        && request
-            .approval_ref
-            .name
-            .ends_with(approval::CONFIRMATION_SUFFIX)
+        && gate.approval_name.ends_with(approval::CONFIRMATION_SUFFIX)
     {
         return Err(ApiError::validation(vec![FieldError::new(
             "approvalRef.name",
@@ -881,30 +902,45 @@ fn refuse_before_create(
             ),
         )]));
     }
+    if policy.mode == ApprovalMode::Governed
+        && gate.approval_name.len() > approval::MAX_GOVERNED_APPROVAL_NAME
+    {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalRef.name",
+            "too_long",
+            format!(
+                "at most {} characters in a namespace bound to a Governed policy, so that its \
+                 confirmation `<name>{}` is still an object name",
+                approval::MAX_GOVERNED_APPROVAL_NAME,
+                approval::CONFIRMATION_SUFFIX
+            ),
+        )]));
+    }
     Ok(())
 }
 
-/// The v2 document an existing object carries, when it is THIS Restore's
+/// The v2 document an existing object carries, when it is THIS subject's
 /// under THIS policy — the replay test for a create sequence that was
 /// interrupted after the console signed.
 fn existing_is_ours(
     existing: &Approval,
-    restore: &Restore,
+    subject: &Subject,
     policy: &logweir_core::approval_policy::ApprovalPolicy,
     ticket: Option<Option<&str>>,
     confirmation: Option<Option<&logweir_core::original_name::OriginalNameConfirmation>>,
 ) -> Option<RestoreAuthorization> {
     let doc = RestoreAuthorization::from_bytes(existing.spec.approval_bytes.as_bytes()).ok()?;
-    let ours = existing.spec.subject_ref.kind == SubjectKind::Restore
-        && existing.spec.subject_ref.name == restore.name_any()
-        && doc.subject.uid == restore.uid().unwrap_or_default()
-        && doc.subject.namespace == restore.namespace().unwrap_or_default()
-        && doc.plan_hash == logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes())
+    let ours = existing.spec.subject_ref.kind == subject.crd_kind()
+        && existing.spec.subject_ref.name == subject.name
+        && doc.subject.kind == subject.wire()
+        && doc.subject.uid == subject.uid
+        && doc.subject.namespace == subject.namespace
+        && doc.plan_hash == subject.plan_hash()
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
         && doc.authorization_mode == policy.mode
-        // And the approval subject this Restore declares.
-        && doc.approval_subject.as_deref() == restore_approval_subject(restore).wire()
+        // And the approval subject this object declares.
+        && doc.approval_subject.as_deref() == subject.approval_subject.wire()
         // A replay must also carry the ticket it signed; `None` is "any"
         // (the approval route, which reads the confirmation as it is).
         && ticket.is_none_or(|t| doc.ticket.as_deref() == t)
@@ -945,16 +981,18 @@ fn policy_identity(effective: &EffectivePolicy) -> String {
 /// * Governed — the console-signed document is stored as the CONFIRMATION
 ///   object an approver countersigns (`awaitingApproval`).
 ///
+/// The same function routes a `Switchover`'s submission (PROD-04.2); the
+/// document binds the subject's kind, which every verifier compares.
+///
 /// # Errors
 ///
-/// `state_conflict` when an object this Restore did not produce holds the
+/// `state_conflict` when an object this subject did not produce holds the
 /// name, or the adapter's failure.
-async fn authorize_submission(
+pub(crate) async fn authorize_submission(
     state: &AppState,
     actor: &Actor,
     namespace: &str,
-    restore: &Restore,
-    approval_name: &str,
+    subject: &Subject,
     effective: &EffectivePolicy,
     signed: SignedBesideThePlan<'_>,
 ) -> Result<RestoreRoutingView, ApiError> {
@@ -962,6 +1000,7 @@ async fn authorize_submission(
         ticket,
         confirmation,
     } = signed;
+    let approval_name = subject.approval_name.as_str();
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(effective));
@@ -1021,8 +1060,9 @@ async fn authorize_submission(
             ProblemCode::StateConflict,
             format!(
                 "An Approval named {target} already exists in {namespace} and is not this \
-                 Restore's console confirmation under policy {}; it is never adopted. Submit \
-                 with another approval name.",
+                 {}'s console confirmation under policy {}; it is never adopted. Submit with \
+                 another approval name.",
+                subject.title(),
                 policy.name
             ),
         )
@@ -1031,7 +1071,7 @@ async fn authorize_submission(
         Ok(existing) => {
             let doc = existing_is_ours(
                 &existing,
-                restore,
+                subject,
                 policy,
                 Some(ticket),
                 Some(confirmation.as_ref()),
@@ -1044,21 +1084,24 @@ async fn authorize_submission(
         Err(other) => return Err(other.into_api_error()),
     }
 
-    let doc = approval::document(
+    let mut doc = approval::document(
         policy,
         namespace,
-        &restore.name_any(),
-        &restore.uid().unwrap_or_default(),
-        &logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes()),
+        &subject.name,
+        &subject.uid,
+        &subject.plan_hash(),
         Requester {
             issuer: actor.issuer.clone(),
             subject: actor.subject.clone(),
         },
         state.now(),
         ticket.map(str::to_string),
-        restore_approval_subject(restore),
+        subject.approval_subject,
         confirmation.clone(),
     );
+    // THE KIND THE DOCUMENT BINDS, which every verifier compares: a
+    // Restore's authorization never authorises a Switchover and back.
+    doc.subject.kind = subject.wire().to_string();
     let bytes = doc.to_bytes();
     let sidecar = key
         .sign(&bytes)
@@ -1086,8 +1129,8 @@ async fn authorize_submission(
         },
         spec: ApprovalSpec {
             subject_ref: SubjectRef {
-                kind: SubjectKind::Restore,
-                name: restore.name_any(),
+                kind: subject.crd_kind(),
+                name: subject.name.clone(),
             },
             plan_hash: doc.plan_hash.clone(),
             approval_bytes: String::from_utf8(bytes).map_err(|_| {
@@ -1123,7 +1166,7 @@ async fn authorize_submission(
                 .map_err(KubeFailure::into_api_error)?;
             let doc = existing_is_ours(
                 &existing,
-                restore,
+                subject,
                 policy,
                 Some(ticket),
                 Some(confirmation.as_ref()),
@@ -1160,7 +1203,6 @@ async fn authorize_submission(
 /// `forbidden` for self-approval, `policy_mismatch` outside a Governed
 /// binding or for a confirmation issued under another policy, `not_found`,
 /// `state_conflict`, `validation_failed`.
-#[allow(clippy::too_many_lines)]
 pub async fn submit_approval(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
@@ -1172,6 +1214,32 @@ pub async fn submit_approval(
     authorize(&state, &actor, &ns, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: SubmitApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
+    let submitted = submitted_files(&actor, &request)?;
+    let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
+    submit_for(
+        &state,
+        &actor,
+        request_id,
+        &ns,
+        &Subject::of_restore(&ns, &restore),
+        request,
+        submitted,
+    )
+    .await
+}
+
+/// **What an approval submission's files must be before anything is read**,
+/// for either kind: no private-key text, a sidecar of at most
+/// [`MAX_SIDECAR_BYTES`] that parses as a DSSE sidecar, an approval document
+/// of at most the same. Returns the parsed sidecar.
+///
+/// # Errors
+///
+/// `validation_failed`, naming the field; the text is never echoed.
+pub(crate) fn submitted_files(
+    actor: &Actor,
+    request: &SubmitApprovalRequest,
+) -> Result<logweir_evidence::Sidecar, ApiError> {
     // NO PRIVATE KEY IS EVER STORED (D0). The page refuses it
     // first; this is the same rule where the bytes are written. The text is
     // never echoed.
@@ -1220,16 +1288,38 @@ pub async fn submit_approval(
             format!("the approval document is at most {MAX_SIDECAR_BYTES} bytes"),
         )]));
     }
-    let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
+    Ok(submitted)
+}
+
+/// The submission, once its files passed [`submitted_files`] and the subject
+/// was read: by the namespace's policy, a v1 record (unbound) or a strict
+/// countersignature over the console's request. A `Switchover`'s submission
+/// is this same function (PROD-04.2).
+///
+/// # Errors
+///
+/// See [`submit_approval`].
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn submit_for(
+    state: &AppState,
+    actor: &Actor,
+    request_id: String,
+    ns: &str,
+    subject: &Subject,
+    request: SubmitApprovalRequest,
+    submitted: logweir_evidence::Sidecar,
+) -> Result<Response, ApiError> {
+    let name = subject.name.as_str();
     let effective = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?
-        .resolve(&ns);
+        .resolve(ns);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(&effective));
     if matches!(effective, EffectivePolicy::Legacy) {
-        return record_legacy_approval(&state, &actor, request_id, &ns, &restore, request).await;
+        return record_legacy_approval(state, actor, request_id, ns, subject, request, &submitted)
+            .await;
     }
     if request.approval_bytes.is_some() {
         return Err(ApiError::validation(vec![FieldError::new(
@@ -1279,29 +1369,32 @@ pub async fn submit_approval(
             ));
         }
     }
-    let approval_name = restore.spec.approval_ref_name().to_string();
+    let approval_name = subject.approval_name.clone();
     let confirmation_name = approval::confirmation_name(&approval_name);
-    let confirmation = match state.kube().get::<Approval>(&ns, &confirmation_name).await {
+    let confirmation = match state.kube().get::<Approval>(ns, &confirmation_name).await {
         Ok(object) => object,
         Err(KubeFailure::NotFound) => {
             return Err(ApiError::new(
                 ProblemCode::NotFound,
                 format!(
-                    "Restore {name} has no console confirmation {confirmation_name}; only a \
-                     request the console confirmed can be approved."
+                    "{} {name} has no console confirmation {confirmation_name}; only a request \
+                     the console confirmed can be approved.",
+                    subject.title()
                 ),
             ))
         }
         Err(other) => return Err(other.into_api_error()),
     };
-    let Some(doc) = existing_is_ours(&confirmation, &restore, policy, None, None) else {
+    let Some(doc) = existing_is_ours(&confirmation, subject, policy, None, None) else {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "The confirmation {confirmation_name} does not name this Restore's UID, plan hash \
-                 and the current policy {} ({}); submit the Restore again.",
+                "The confirmation {confirmation_name} does not name this {}'s UID, plan hash and \
+                 the current policy {} ({}); submit the {} again.",
+                subject.title(),
                 policy.name,
-                policy.digest()
+                policy.digest(),
+                subject.title()
             ),
         ));
     };
@@ -1313,8 +1406,9 @@ pub async fn submit_approval(
             ProblemCode::StateConflict,
             format!(
                 "The request expired at {}; an expired request authorises nothing. Submit the \
-                 Restore again.",
-                doc.expires_at.to_rfc3339()
+                 {} again.",
+                doc.expires_at.to_rfc3339(),
+                subject.title()
             ),
         ));
     }
@@ -1327,8 +1421,9 @@ pub async fn submit_approval(
         return Err(ApiError::new(
             ProblemCode::Forbidden,
             format!(
-                "You requested this restore ({requester}); policy {} requires the approver to be \
-                 a different principal from the requester, and no role changes that.",
+                "You requested this {} ({requester}); policy {} requires the approver to be a \
+                 different principal from the requester, and no role changes that.",
+                subject.noun(),
                 policy.name
             ),
         ));
@@ -1352,7 +1447,7 @@ pub async fn submit_approval(
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(approval_name.clone()),
-            namespace: Some(ns.clone()),
+            namespace: Some(ns.to_string()),
             annotations: Some(
                 [
                     (
@@ -1373,8 +1468,8 @@ pub async fn submit_approval(
         },
         spec: ApprovalSpec {
             subject_ref: SubjectRef {
-                kind: SubjectKind::Restore,
-                name: restore.name_any(),
+                kind: subject.crd_kind(),
+                name: subject.name.clone(),
             },
             plan_hash: doc.plan_hash.clone(),
             // THE CONFIRMATION'S EXACT BYTES — never re-serialised.
@@ -1388,12 +1483,12 @@ pub async fn submit_approval(
         },
         status: None,
     };
-    let (stored, replayed) = match state.kube().create(&ns, &object).await {
+    let (stored, replayed) = match state.kube().create(ns, &object).await {
         Ok(created) => (created, false),
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(&ns, &approval_name)
+                .get::<Approval>(ns, &approval_name)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             if existing.spec.approval_bytes != object.spec.approval_bytes
@@ -1446,8 +1541,9 @@ async fn record_legacy_approval(
     actor: &Actor,
     request_id: String,
     ns: &str,
-    restore: &Restore,
+    subject: &Subject,
     request: SubmitApprovalRequest,
+    submitted: &logweir_evidence::Sidecar,
 ) -> Result<Response, ApiError> {
     let Some(approval_bytes) = request.approval_bytes else {
         return Err(ApiError::validation(vec![FieldError::new(
@@ -1457,62 +1553,74 @@ async fn record_legacy_approval(
              beside its sidecar",
         )]));
     };
-    let payload_type = serde_json::from_str::<serde_json::Value>(&request.sidecar_bytes)
-        .ok()
-        .and_then(|v| {
-            v.get("payloadType")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        });
-    if payload_type.as_deref() != Some(PAYLOAD_TYPE_APPROVAL_V1) {
+    // The sidecar parsed in `submitted_files`; its payload type is the v1's.
+    if submitted.payload_type != PAYLOAD_TYPE_APPROVAL_V1 {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
                 "Namespace {ns} is bound to no approval policy ({}), which records the approval \
                  `logweir drill approve` signs; this sidecar's payload type is {}.",
                 logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME,
-                payload_type.as_deref().unwrap_or("absent")
+                submitted.payload_type
             ),
         ));
     }
-    let plan_hash = logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes());
-    let signed_hash = serde_json::from_str::<serde_json::Value>(&approval_bytes)
-        .ok()
-        .and_then(|v| {
-            v.get("plan_hash")
-                .and_then(|h| h.as_str())
-                .map(str::to_string)
-        });
-    if signed_hash.as_deref() != Some(plan_hash.as_str()) {
+    // THE DOCUMENT, PARSED ONCE: one that does not parse is refused by name,
+    // never read as "no plan hash".
+    let Ok(signed) =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&approval_bytes)
+    else {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "not_an_approval",
+            "must be the approval.json `logweir drill approve` wrote (a JSON object)",
+        )]));
+    };
+    let text = |key: &str| signed.get(key).and_then(serde_json::Value::as_str);
+    let plan_hash = subject.plan_hash();
+    if text("plan_hash") != Some(plan_hash.as_str()) {
         return Err(ApiError::validation(vec![FieldError::new(
             "approvalBytes",
             "plan_mismatch",
             format!(
-                "the approval document names plan hash {} and Restore {} hashes to {plan_hash}; \
-                 sign this Restore's plan",
-                signed_hash.as_deref().unwrap_or("none"),
-                restore.name_any()
+                "the approval document names plan hash {} and {} {} hashes to {plan_hash}; sign \
+                 this {}'s plan",
+                text("plan_hash").unwrap_or("none"),
+                subject.title(),
+                subject.name,
+                subject.title()
             ),
         )]));
     }
-    // The signed approval subject must be the one this Restore
+    // THE KIND IT BINDS, refused here as the plan hash is: a v1 document
+    // without the field is a Restore's (`ApprovalDoc`'s compatibility
+    // default); the controller refuses any other mismatch
+    // (`SubjectKindMismatch`), and nothing is stored that it would.
+    let kind = match signed.get("subject_kind") {
+        None => Some(logweir_core::approval_policy::SUBJECT_KIND_RESTORE),
+        Some(value) => value.as_str(),
+    };
+    if kind != Some(subject.wire()) {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "subject_kind_mismatch",
+            format!(
+                "the approval document does not authorise a {}; sign it with `logweir drill \
+                 approve --subject-kind {}`",
+                subject.title(),
+                subject.title()
+            ),
+        )]));
+    }
+    // The signed approval subject must be the one this object
     // needs, refused here as the plan hash is — before an Approval exists
     // that the controller would refuse (`ApprovalSubjectMismatch`).
-    let signed_subject = serde_json::from_str::<serde_json::Value>(&approval_bytes)
-        .ok()
-        .and_then(|v| {
-            v.get("approval_subject")
-                .and_then(|h| h.as_str())
-                .map(str::to_string)
-        });
-    let subject_refusal =
-        logweir_core::original_name::ApprovalSubject::from_wire(signed_subject.as_deref())
-            .and_then(|signed| {
-                logweir_core::original_name::check_approval_subject(
-                    restore_approval_subject(restore),
-                    signed,
-                )
-            });
+    let subject_refusal = logweir_core::original_name::ApprovalSubject::from_wire(text(
+        "approval_subject",
+    ))
+    .and_then(|signed| {
+        logweir_core::original_name::check_approval_subject(subject.approval_subject, signed)
+    });
     if let Err(reason) = subject_refusal {
         return Err(ApiError::validation(vec![FieldError::new(
             "approvalBytes",
@@ -1520,7 +1628,7 @@ async fn record_legacy_approval(
             reason,
         )]));
     }
-    let approval_name = restore.spec.approval_ref_name().to_string();
+    let approval_name = subject.approval_name.clone();
     actor.audit.note("approverPrincipal", &actor.id());
     actor
         .audit
@@ -1544,8 +1652,8 @@ async fn record_legacy_approval(
         },
         spec: ApprovalSpec {
             subject_ref: SubjectRef {
-                kind: SubjectKind::Restore,
-                name: restore.name_any(),
+                kind: subject.crd_kind(),
+                name: subject.name.clone(),
             },
             plan_hash,
             // EXACTLY AS THEY ARRIVED: the controller hashes these bytes.

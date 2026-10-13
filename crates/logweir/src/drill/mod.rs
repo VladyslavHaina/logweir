@@ -4,6 +4,7 @@
 /// Execution contract **v2**'s two pre-data-plane bindings (D3 §4.3, §5.5).
 /// Not a phase: everything in it runs before phase 0, before `context`, and
 /// therefore before any broker client exists.
+pub mod archive_scan;
 pub mod binding;
 pub mod phase0_admit;
 pub mod phase1_approval;
@@ -15,6 +16,7 @@ pub mod phase6_restore;
 pub mod phase7_verify;
 pub mod phase8_score;
 pub mod phase9_teardown;
+pub mod phase9_transition;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
@@ -184,14 +186,16 @@ pub fn record<T>(
 
 /// Print one `progress-phase=` line, or nothing (D3 §2.4).
 ///
-/// The only `println!` of a progress line in this crate. `progress_phase_line`
+/// The only printer of a progress line in this crate. `progress_phase_line`
 /// is a filter: a name outside `[a-z0-9-]`, an over-long name or a phase
 /// outside `-1..=9` renders nothing, so a credential, a broker error or a
 /// newline never reaches the channel a controller reads. Absence is not an
 /// error. `crates/logweir/tests/progress_channel.rs` pins both halves.
 pub fn print_progress_phase(phase: i8, name: &str) {
     if let Some(line) = logweir_core::execution_contract::progress_phase_line(phase, name) {
-        println!("{line}");
+        // Sealed with the Job's token under FX-43's flag
+        // (`crate::exit::print_lines`).
+        crate::exit::print_lines(&[line]);
     }
 }
 
@@ -952,12 +956,9 @@ pub fn run_with(
     // where the contract-aware line is emitted, so it announces the version
     // this BUILD implements — which is the only true answer for an invocation
     // that was handed its handles instead of a controller's environment.
-    println!(
-        "{}",
-        logweir_core::execution_contract::progress_contract_line(
-            logweir_core::execution_contract::ContractVersion::V2
-        )
-    );
+    crate::exit::print_lines(&[logweir_core::execution_contract::progress_contract_line(
+        logweir_core::execution_contract::ContractVersion::V2,
+    )]);
     let outcome = execute_with_outcome(args, run_id, c);
     report(args, run_id, outcome)
 }
@@ -1096,14 +1097,18 @@ fn exiting(
         }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "drill finished");
-    // [I9] After the tracing line, so the reason is the last thing on stdout:
-    // a controller reads the pod log's final line, and the pod log API has no
-    // stream selector. Every guard refusal prints it (Global Constraint 11).
-    // `print_refusal` writes `refusal-detail=` first, so the state line stays
-    // last. `unwrap_or("")` is fail-safe: an empty message classifies as
-    // `GuardRefused`.
+    // Every line below goes into ONE block, printed last and in one write
+    // (`crate::exit::FinalLines`): after the tracing line, because a
+    // controller reads the pod log's bounded tail and the pod log API has no
+    // stream selector. Under FX-43's `--runner-line-token` the block is the
+    // sealed lines, the sealed `runner-exit=`, then these plain lines, which
+    // stay in the order and place an older reader expects.
+    let mut last = crate::exit::FinalLines::default();
+    // [I9] Every guard refusal prints its pair (Global Constraint 11):
+    // `refusal-detail=` first, so the state line stays last. `unwrap_or("")`
+    // is fail-safe: an empty message classifies as `GuardRefused`.
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal(
+        last.refusal(
             logweir_core::refusal_detail::RefusingRun::Restore,
             refusal_message.unwrap_or(""),
         );
@@ -1111,11 +1116,9 @@ fn exiting(
     // The stopped creation step, named. Exit 1 like any operational failure,
     // but the controller lifts `failure-reason=` onto `status.exitReason` and
     // the bounded line before it onto `status.targetTopicsAppeared`. The
-    // reason is the last line (`print_creation_stop_to`).
+    // reason is the last line (`creation_stop_lines`).
     if let (ExitCode::Operational, Some(race)) = (code, race) {
-        // A closed stdout is not a reason to change the exit code, which
-        // GC11 has already decided.
-        let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);
+        last.extend(creation_stop_lines(race));
     }
     // [I8], and the order is the contract: `scorecard-key=`, `sidecar-key=`,
     // `offset-report-key=` are the final stdout lines of a run that signed a
@@ -1133,11 +1136,11 @@ fn exiting(
     // they stay the final lines. Only on exit 0: a refused or crashed run has
     // no completed phase 0 to report.
     if let (ExitCode::Ok, Some(p)) = (code, topic_preflight) {
-        println!(
+        last.push(format!(
             "{}{}",
             phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX,
             p.status_line_value()
-        );
+        ));
     }
     // D3 §2.4's `teardown-key=`, before I8's keys for the same reason: readers
     // scan a bounded tail by prefix, so a line in front costs nothing and a
@@ -1149,46 +1152,54 @@ fn exiting(
     // but kept structural. The note it reads was pushed after phase 8 signed.
     if code != ExitCode::GuardRefused {
         if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
-            println!(
+            last.push(format!(
                 "{}{key}",
                 logweir_core::execution_contract::TEARDOWN_KEY_PREFIX
-            );
+            ));
         }
     }
     if let (ExitCode::Ok | ExitCode::DrillNotPass, Some(e)) = (code, evidence) {
-        println!("scorecard-key={}", e.scorecard_key);
-        println!("sidecar-key={}", e.sidecar_key);
+        last.push(format!("scorecard-key={}", e.scorecard_key));
+        last.push(format!("sidecar-key={}", e.sidecar_key));
         if let Some(k) = &e.offset_report_key {
-            println!("offset-report-key={k}");
+            last.push(format!("offset-report-key={k}"));
         }
     }
+    last.print(code);
     code
 }
 
-/// The stopped creation step's two stdout lines, through a writer seam like
-/// `crate::exit::print_refusal_to`'s: they carry everything a controller
-/// learns about the stop.
+/// The stopped creation step's two stdout lines: they carry everything a
+/// controller learns about the stop.
 ///
-/// EXACTLY these bytes, in this order, each ended by one newline:
+/// EXACTLY these lines, in this order:
 ///
 /// ```text
 /// target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],…}
 /// failure-reason=<TargetTopicAppeared|CreatedTopicsLeft>
 /// ```
 ///
-/// `failure-reason=` is LAST: the controller lifts the pair only when it is
-/// the log's last non-empty line with the lists on the line before it, so
-/// nothing may be printed between them or after them on exit 1.
+/// `failure-reason=` is LAST: a controller reading a Job with no FX-43 token
+/// lifts the pair only when it is the log's last non-empty line with the lists
+/// on the line before it, so nothing may be printed between them or after
+/// them on exit 1 (`crate::exit::FinalLines` prints the plain lines last).
+#[must_use]
+pub fn creation_stop_lines(stop: &phase0_admit::CreationStop) -> [String; 2] {
+    [
+        stop.lists().line(),
+        logweir_core::guard::failure_reason_line(stop.reason),
+    ]
+}
+
+/// [`creation_stop_lines`] through a writer seam, as a run with no token
+/// prints them, so a test asserts the bytes.
 pub fn print_creation_stop_to<W: std::io::Write>(
     w: &mut W,
     stop: &phase0_admit::CreationStop,
 ) -> std::io::Result<()> {
-    writeln!(w, "{}", stop.lists().line())?;
-    writeln!(
-        w,
-        "{}",
-        logweir_core::guard::failure_reason_line(stop.reason)
-    )
+    let [lists, reason] = creation_stop_lines(stop);
+    writeln!(w, "{lists}")?;
+    writeln!(w, "{reason}")
 }
 
 /// The scorecard file is written by `write_scorecard_artifact` from the bytes
@@ -1825,15 +1836,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     // D3 §2.4's channel version, once, before the first phase line. No such
     // line means a runner that predates the channel, which is not an error. A
     // standalone invocation announces the version this build implements.
-    println!(
-        "{}",
-        logweir_core::execution_contract::progress_contract_line(
-            contract
-                .as_ref()
-                .map_or(logweir_core::execution_contract::ContractVersion::V2, |c| c
-                    .version)
-        )
-    );
+    crate::exit::print_lines(&[logweir_core::execution_contract::progress_contract_line(
+        contract
+            .as_ref()
+            .map_or(logweir_core::execution_contract::ContractVersion::V2, |c| {
+                c.version
+            }),
+    )]);
     // First: a projected credential whose binding does not name the
     // connection this Job was built for is refused before it is validated
     // (`CredentialBindingMismatch`, exit 3).
@@ -1869,6 +1878,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         "target.auth",
         &authenticated_spec.target.auth,
     )?;
+    // A bootstrap server holding a control character or a line break, before
+    // `context` builds the client that would log it raw (FX-43). Phase 0
+    // repeats the check.
+    logweir_core::guard::reject_line_breaking_bootstrap_servers(
+        "target.bootstrap_servers",
+        &authenticated_spec.target.bootstrap_servers,
+    )?;
     // A plan that still names a notification sink is refused here, exit 3,
     // before the point binding reads the archive and before `context` dials.
     // Phase 0 repeats the check.
@@ -1893,6 +1909,13 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     // name, exit 3. Phase 0 repeats the check (`phase0_admit::local`) for
     // every path that reaches it another way.
     if let Some(refusal) = logweir_core::original_name::refuse_shape(&authenticated_spec) {
+        return Err(GuardRefusal(refusal).into());
+    }
+    // PROD-11.1a: a clone (`target.teardown: {ttl_seconds}`) is a scratch
+    // restore with a bounded lifetime; refused by name, exit 3, before
+    // anything is read or dialled. Phase 0 repeats the check.
+    if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(&authenticated_spec)
+    {
         return Err(GuardRefusal(refusal).into());
     }
     // The approval subject, over the authenticated plan and before anything is
@@ -2203,6 +2226,17 @@ fn execute_with_validated_approval(
     // pin the position.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
+    // PROD-05.2: each topic's desired state from the bound point's model, and
+    // the target's `validate_only` verdict, once the restored set is proved
+    // the point's and before anything is created. Every refusal is exit 3
+    // with nothing written (`validate_only` creates nothing).
+    let configured = phase0_admit::admit_topic_configuration(
+        &c.spec,
+        &c.source_config_coverage,
+        &admitted.topic_mapping,
+        reader,
+        creator,
+    )?;
     // An empty capture is refused by name, here: a set with no segment for any
     // topic this restore names is refused exit 3 before phase 2 and before any
     // other archive-based refusal, never phase 4's exit 1 over an "empty
@@ -2218,6 +2252,36 @@ fn execute_with_validated_approval(
             named.iter().copied().collect::<Vec<&str>>().join(", ")
         ))));
     }
+    let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
+    // PROD-01.1b: one bounded pass over every segment of the restored
+    // partitions (`archive_scan`), before phase 2, for the transaction-marker
+    // check below and the records' own timestamps. From here on the run reads
+    // `facts` with each read segment's first/last widened to its records'
+    // min/max (`record_times::widen`): the floor G-WIN binds is the oldest
+    // archived record and the count bounds are true bounds. `manifest_facts`
+    // is the archive as described, which the engine selects segments by.
+    //
+    // The replay selection first, over the manifest as described (as the
+    // preview resolves it), so its cheap refusals come before the pass: a
+    // window outside the archive's coverage or a subset naming an unlisted
+    // partition is refused exit 3 with no target topic created and no engine
+    // started. `None` for a plan that states no selection. The same function
+    // binds the window in `build_plan` and previews it in the restore
+    // preflight (`logweir_core::replay_selection`).
+    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
+    let window = logweir_core::replay_selection::ReplaySelection {
+        topics: selected.iter().cloned().collect(),
+        ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
+            .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+    };
+    let scan = archive_scan::run(
+        &c.archive,
+        &facts,
+        &window,
+        !c.spec.restore.allow_transaction_markers,
+    )?;
+    let manifest_facts = facts;
+    let facts = logweir_core::record_times::widen(&manifest_facts, &scan.times);
     // The time basis, decided here and nowhere later: the first point at which
     // both its records (the manifest's timestamp-type override, the verified
     // receipt's effective type) are in hand, and before phase 2, so a refused
@@ -2227,18 +2291,10 @@ fn execute_with_validated_approval(
     // and deleted (the documented exception, `docs/stability.md`).
     // `orchestrator.rs::the_time_basis_refusal_creates_no_target_topic` pins
     // the position.
-    let selected: Vec<String> = admitted.topic_mapping.keys().cloned().collect();
     let time_basis =
         logweir_core::time_basis::decide(&c.spec, &facts, &c.source_config_coverage, &selected)
             .map_err(|refusal| DrillError::Guard(GuardRefusal(refusal)))?;
     sc.source = source_info(&facts, time_basis);
-    // The replay selection, resolved against the archive before phase 2: a
-    // window outside the archive's coverage or a subset naming an unlisted
-    // partition is refused exit 3 with no target topic created and no engine
-    // started. `None` for a plan that states no selection. The same function
-    // binds the window in `build_plan` and previews it in the restore
-    // preflight (`logweir_core::replay_selection`).
-    let replay_selection = resolve_selection(&c.spec, &admitted.topic_mapping, &facts)?;
     // The selection is signed (`source.selection`) in every document this run
     // writes from here on: format 1.7.0 for a window start only, 2.0.0 for a
     // partition subset, which older readers refuse as an unsupported major.
@@ -2262,28 +2318,40 @@ fn execute_with_validated_approval(
     let marker_note = if c.spec.restore.allow_transaction_markers {
         Some(logweir_core::transaction_markers::OVERRIDE_NOTE.to_string())
     } else {
-        let window = logweir_core::replay_selection::ReplaySelection {
-            topics: selected.iter().cloned().collect(),
-            ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
-                .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
-        };
-        let scan = count_transaction_markers(&c.archive, &facts, &window)?;
-        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.counts) {
+        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.markers) {
             return Err(DrillError::Guard(GuardRefusal(refusal)));
         }
-        // Never silent: the runner's output names the segments, and the
-        // scorecard's note below says how many.
-        let unread = &scan.unread_after_window;
-        (!unread.is_empty()).then(|| {
-            let note = logweir_core::transaction_markers::unread_after_window_note(unread.len());
-            // One line whatever a manifest key holds (`exit::one_line`).
-            eprintln!(
-                "{}",
-                crate::exit::one_line(&format!("{note}: {}", unread.join(", ")))
-            );
-            note
-        })
+        archive_scan::noted(
+            &scan.markers_unread,
+            logweir_core::transaction_markers::unread_after_window_note,
+        )
     };
+    // PROD-01.1b: a segment the engine skips by its first and last timestamps
+    // while it holds a record the window selects is refused exit 3,
+    // `PointInTimeSelectionIncomplete`, with no target topic created and no
+    // engine started. The window is the one phase 5 holds the rendered
+    // document to: the stated start, else the floor over the widened facts.
+    let floor_ms = facts
+        .earliest_covered_timestamp_ms(&named)
+        .unwrap_or(i64::MIN);
+    let skipped =
+        logweir_core::record_times::skipped(&manifest_facts, &scan.times, &window, floor_ms);
+    if let Some(refusal) = logweir_core::record_times::refusal(
+        &skipped,
+        window.window_start_ms.unwrap_or(floor_ms),
+        window.window_end_ms,
+    ) {
+        return Err(DrillError::Guard(GuardRefusal(refusal)));
+    }
+    // The record-time note first: the marker note stays last, where
+    // `logweir show` and its rows read it.
+    let marker_note = [
+        archive_scan::noted(&scan.times_unread, logweir_core::record_times::unread_note),
+        marker_note,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|a, b| format!("{a}; {b}"));
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -2327,23 +2395,12 @@ fn execute_with_validated_approval(
     .to_string();
     // A narrowed restore's existing `sample.coverage_note` opens with its
     // window, so a reader that predates `source.selection` reads what was
-    // restored; under the sampled lane it also names the one limit a start
-    // adds. Both version steps are monotonic, so the 1.7.0 chosen with the
-    // block stands.
+    // restored. Both version steps are monotonic, so the 1.7.0 chosen with the
+    // block stands. (The limit a start added, an in-window record in a segment
+    // the engine skips, is refused before phase 2 since PROD-01.1b.)
     if let Some(label) = &sc.source.selection {
-        // The engine's segment rule at a start: only a plan that states one
-        // has it; a subset from the archive's floor does not.
-        let limit = if c.spec.sample.coverage == logweir_core::spec::Coverage::Sampled
-            && label.window_start_ms.is_some()
-        {
-            "; a sampled check does not find an in-window record held in a segment whose last \
-             record is before the start (the engine skips that segment); sample.coverage: \
-             complete does"
-        } else {
-            ""
-        };
         sc.sample.coverage_note = format!(
-            "{}{limit}; {}",
+            "{}; {}",
             label.coverage_note(c.spec.sample.coverage),
             sc.sample.coverage_note
         );
@@ -2488,23 +2545,52 @@ fn execute_with_validated_approval(
             deleter,
             &admitted.topic_mapping,
             created,
-            &c.spec.target.teardown,
+            // A TTL clone that failed is torn down at once (PROD-11.1a).
+            c.spec.target.teardown.phase9_policy(false),
             c.spec.target.mode,
             run_id,
             &mut std::io::stdout().lock(),
         );
     };
+    // PROD-05.2: the signed `target.topic_configuration`, and the owned
+    // topics' desired-state document it binds, put before anything is
+    // created, so a failed put leaves the target as it was.
+    if let Some(configured) = configured.as_ref() {
+        sc.target.topic_configuration = Some(topic_configuration_block(configured, run_id, c)?);
+        sc.format_version = logweir_core::scorecard::format_version_with_topic_configuration(
+            &sc.format_version,
+            sc.target.topic_configuration.as_ref(),
+        )
+        .to_string();
+    }
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
-    // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
-    phase0_admit::create_target_topics(
+    // creates them, with `TARGET_TOPIC_CONFIGS` on every one (or, with
+    // `target.topic_configuration`, each topic's own creation set).
+    phase0_admit::create_target_topics_from(
         creator,
         reader,
         &admitted.topic_mapping,
         &facts,
         c.spec.target.default_replication_factor,
+        configured.as_ref(),
         &mut topic_preflight,
     )?;
     let created = topic_preflight.topics_created.clone();
+    // PROD-11.1a: what this run created, with each topic's ID at creation,
+    // signed as `target.creation` (and a TTL clone's lifetime). The clone's
+    // cleanup and the switchover read it.
+    sc.target.creation = phase0_admit::created_topics_identity(
+        reader,
+        &admitted.topic_mapping,
+        &facts,
+        &created,
+        c.spec.target.teardown.ttl_seconds(),
+    );
+    sc.format_version = logweir_core::scorecard::format_version_with_target_creation(
+        &sc.format_version,
+        sc.target.creation.as_ref(),
+    )
+    .to_string();
     let torn_down = |e: DrillError| -> DrillError {
         remove_created(&created);
         e
@@ -2562,6 +2648,7 @@ fn execute_with_validated_approval(
                 deleter,
                 &admitted.topic_mapping,
                 &logweir_core::ids::sha256_prefixed(&signed.bytes),
+                configured.as_ref(),
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
@@ -2576,8 +2663,14 @@ fn execute_with_validated_approval(
     }
 
     // 7
-    let verified = record(&mut sc, 7, "verify", || {
-        phase7_verify::run_after_restore(
+    // PROD-04.2: a complete verification of a point that captured consumer
+    // groups also probes their positions in its scan of the target.
+    let bound_positions = (c.spec.sample.coverage == logweir_core::spec::Coverage::Complete)
+        .then(|| phase7_verify::positions::fetch(&c.spec, &c.archive))
+        .flatten();
+    let probes = bound_positions.as_ref().map(|b| b.probes());
+    let (verified, position_scans) = record(&mut sc, 7, "verify", || {
+        phase7_verify::run_after_restore_with_probes(
             c.engine.as_ref(),
             reader,
             &c.archive,
@@ -2595,6 +2688,7 @@ fn execute_with_validated_approval(
             // The engine's offset report, which phase 7 refuses when
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
+            probes.as_ref(),
         )
     })
     .map_err(torn_down)?;
@@ -2635,6 +2729,20 @@ fn execute_with_validated_approval(
     // Nothing assigns `sc.integrity.pass_rate_measured` here: phase 7's
     // `roll_up` is its only writer (see `phase8_score::decide`).
 
+    // PROD-04.2: the positions mapping, only over a passing complete
+    // verification, written before the scorecard that binds it is signed.
+    if let Some(bound) = &bound_positions {
+        attach_positions_mapping(
+            &mut sc,
+            &c.store,
+            run_id,
+            bound,
+            &admitted.topic_mapping,
+            &position_scans,
+            c.spec.restore.allow_transaction_markers,
+        );
+    }
+
     // 8
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
@@ -2655,6 +2763,7 @@ fn execute_with_validated_approval(
         deleter,
         &admitted.topic_mapping,
         &signed_bytes_sha256,
+        configured.as_ref(),
     );
     // The mainline exit-2 gate: a drill that ran every phase and was scored
     // `fail-objective` or `fail-integrity` is a drill result, exit 2, with the
@@ -2668,6 +2777,65 @@ fn execute_with_validated_approval(
         topic_preflight,
         evidence,
     })
+}
+
+/// **PROD-04.2.** Maps the bound point's captured positions onto the target
+/// and binds the mapping into the scorecard about to be signed: only when the
+/// run passed a complete verification that covered every partition (08.1-A4).
+/// The document is put create-only BEFORE the scorecard is signed, so a signed
+/// block never names a document that is not there; a document over 4 MiB, or
+/// one whose put failed, is `omitted` with its counts. Nothing is committed:
+/// a `Switchover` applies a reviewed subset later.
+fn attach_positions_mapping(
+    sc: &mut Scorecard,
+    store: &Store,
+    run_id: &str,
+    bound: &phase7_verify::positions::BoundPositions,
+    topic_mapping: &std::collections::BTreeMap<String, String>,
+    scans: &phase7_verify::positions::Scans,
+    transactional: bool,
+) {
+    let passing_complete = sc.outcome == Outcome::Pass
+        && sc.integrity.verification.as_ref().is_some_and(|v| {
+            v.coverage == logweir_core::scorecard::COVERAGE_COMPLETE
+                && v.complete.as_ref().is_some_and(|c| c.covered)
+        });
+    if !passing_complete {
+        tracing::info!(
+            "consumer positions not mapped: the run is not a passing complete verification"
+        );
+        return;
+    }
+    let doc = bound.map(run_id, topic_mapping, scans, transactional);
+    let (mut block, bytes) = match doc.block() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("consumer positions not mapped: {e}");
+            return;
+        }
+    };
+    if let (Some(bytes), Some(d)) = (bytes, block.document.clone()) {
+        if let Err(e) = store.put_create_only(&d.key, &bytes) {
+            tracing::warn!(key = %d.key, "the positions mapping was not written: {e}");
+            block.document = None;
+            block.omitted = Some(logweir_core::positions_mapping::OMITTED_WRITE_FAILED.into());
+        } else {
+            println!("positions-mapping-key={}", d.key);
+        }
+    }
+    let c = block.counts;
+    println!(
+        "positions-mapping exact={} approximate={} unavailable={} groups={}",
+        c.exact, c.approximate, c.unavailable, block.groups
+    );
+    if let Some(v) = sc.integrity.verification.as_mut() {
+        v.positions_mapping = Some(block);
+        sc.format_version = logweir_core::scorecard::format_version_with_positions_mapping(
+            &sc.format_version,
+            true,
+        )
+        .to_string();
+    }
 }
 
 /// Everything ONE restore run produced. The scorecard is the signed evidence;
@@ -2727,6 +2895,7 @@ impl EvidenceKeys {
 /// The attestation is BOUND to the signed bytes, not to the run id again:
 /// binding to the run id twice carries no independent information and cannot
 /// identify WHICH signed document this teardown accompanies.
+#[allow(clippy::too_many_arguments)]
 fn teardown(
     sc: &mut Scorecard,
     run_id: &str,
@@ -2735,12 +2904,23 @@ fn teardown(
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
     scorecard_sha256: &str,
+    configured: Option<&phase0_admit::TopicConfigurationAdmission>,
 ) {
+    // PROD-11.1a: a TTL clone keeps a passing run's topics for its cleanup and
+    // tears any other run down at once; the attestation names the declared
+    // policy (`ttl`).
+    let passed = sc.outcome == Outcome::Pass;
+    let desired_state_key = sc
+        .target
+        .topic_configuration
+        .as_ref()
+        .and_then(|b| b.desired_state.as_ref())
+        .map(|d| d.key.clone());
     let attested = record(sc, 9, "teardown", || {
-        let a = phase9_teardown::run(
+        let mut a = phase9_teardown::run(
             deleter,
             mapping,
-            &c.spec.target.teardown,
+            c.spec.target.teardown.phase9_policy(passed),
             // Global Constraint 19, passed rather than re-derived: phase 9
             // deletes only in `scratch` mode, and the mode travels onto the
             // teardown attestation so a reader can tell "nothing, and nothing
@@ -2749,6 +2929,32 @@ fn teardown(
             run_id,
             scorecard_sha256,
         );
+        a.teardown_policy = c.spec.target.teardown.policy().to_string();
+        // PROD-05.2: the configuration transition, after the signed verdict,
+        // on the topics the run keeps (a TTL clone keeps a passing run's);
+        // attested beside the teardown and printed for
+        // `Restore.status.topicConfiguration`.
+        if let Some(configured) = configured {
+            let kept = c.spec.target.mode == logweir_core::spec::TargetMode::NewTopic
+                || c.spec.target.teardown.phase9_policy(passed) != "delete";
+            let outcome = phase9_transition::run(
+                configured,
+                passed,
+                kept,
+                desired_state_key.as_deref(),
+                c.client.as_reader(),
+                c.client.as_creator(),
+                phase9_transition::READBACK_WITHIN,
+            );
+            // FX-43: sealed with the Job's token, so the controller lifts it
+            // into `status.topicConfiguration` (it reads only sealed lines).
+            crate::exit::print_lines(&[format!(
+                "{}{}",
+                logweir_core::topic_transition::TOPIC_CONFIGURATION_KEY_PREFIX,
+                logweir_core::topic_transition::status_line_value(&outcome, &configured.topics)
+            )]);
+            a.topic_configuration = Some(outcome);
+        }
         // A teardown that left topics is a warning event: the names travel in
         // the `topics` field and in the message (JSON and plain-text
         // consumers), and `run_id` is on the event, not only on the span,
@@ -2908,7 +3114,9 @@ pub fn build_plan(
     // Guard G-WIN, the binding half, here where the plan is built (the
     // renderer only prints it). `time_window.0` is the archive's earliest
     // covered timestamp from the manifest, never the spec's: widening the
-    // start to the archive floor cannot lose records. `time_window.1` is
+    // start to the archive floor cannot lose records. A run hands it facts
+    // widened by the restored segments' records (PROD-01.1b), so there the
+    // floor is the oldest archived record. `time_window.1` is
     // `spec.restore.point_in_time` when present, else `spec.sample.window_end`.
     // The floor is the minimum over the topics this restore names, the
     // instant the backup receipt's `covered.from_ms` reports for the same
@@ -2997,99 +3205,6 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
-}
-
-/// What the transaction-marker check found.
-struct MarkerScan {
-    /// Marker-shaped records per topic and partition.
-    counts: logweir_core::transaction_markers::MarkerCounts,
-    /// The segments after the window's end it could not read.
-    unread_after_window: Vec<String>,
-}
-
-/// The records shaped like a transaction marker in the selected partitions'
-/// segments that the window overlaps (the engine's own rule,
-/// `ReplaySelection::segment_overlaps`) and in every segment after the
-/// window's end: a marker there closes a transaction that can have records in
-/// the window. Segments whose last record is before the window's start are
-/// skipped (out-of-order timestamps can put a closing marker there:
-/// `docs/stability.md` lists it as not detected). Each is streamed through the
-/// bounded `kbak::scan_segment` (one stored segment and a few hundred KiB held
-/// at a time).
-///
-/// A segment the restore reads and the scan cannot decode refuses the run
-/// (`GuardRefused`); one the store does not hold is left to the restore. A
-/// segment after the window that is absent or cannot be read never refuses
-/// (the restore does not read it); it is listed in `unread_after_window`,
-/// which the run reports.
-fn count_transaction_markers(
-    archive: &Store,
-    facts: &BackupSetFacts,
-    window: &logweir_core::replay_selection::ReplaySelection,
-) -> Result<MarkerScan, DrillError> {
-    use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
-    use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
-    use logweir_engine_oso::storage::{caps, StoreError};
-    let limits = ScanLimits {
-        max_decompressed: caps::SEGMENT,
-        deadline: None,
-    };
-    let start = window.window_start_ms.unwrap_or(i64::MIN);
-    let mut scan = MarkerScan {
-        counts: MarkerCounts::new(),
-        unread_after_window: Vec::new(),
-    };
-    for topic in &facts.topics {
-        for p in topic
-            .partitions
-            .iter()
-            .filter(|p| window.selects_partition(&topic.name, p.partition_id))
-        {
-            for seg in p.segments.iter().filter(|s| s.end_timestamp >= start) {
-                let after = seg.start_timestamp > window.window_end_ms;
-                let bytes = match archive.get_capped(&seg.key, caps::SEGMENT) {
-                    Ok((bytes, _)) => bytes,
-                    Err(_) if after => {
-                        scan.unread_after_window.push(seg.key.clone());
-                        continue;
-                    }
-                    Err(StoreError::NotFound(_)) => continue,
-                    Err(e) => return Err(logweir_core::engine::EngineError::from(e).into()),
-                };
-                let mut found = 0u64;
-                let read = scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
-                    if is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys) {
-                        found += 1;
-                    }
-                    true
-                });
-                if found > 0 {
-                    *scan
-                        .counts
-                        .entry(topic.name.clone())
-                        .or_default()
-                        .entry(p.partition_id)
-                        .or_default() += found;
-                }
-                match read {
-                    Ok(_) => {}
-                    Err(_) if after => scan.unread_after_window.push(seg.key.clone()),
-                    Err(e) => {
-                        return Err(DrillError::Guard(GuardRefusal(format!(
-                            "the transaction-marker check could not read archive segment `{}` \
-                             of topic `{}` partition {} ({e}), so it cannot say the restored \
-                             partitions hold no transaction marker. The run stopped before any \
-                             target topic was created. State \
-                             `restore.allow_transaction_markers: true` in the plan to restore \
-                             without the check.",
-                            seg.key, topic.name, p.partition_id
-                        ))))
-                    }
-                }
-            }
-        }
-    }
-    Ok(scan)
 }
 
 /// The signed `source.selection` block of a resolved selection: its stated
@@ -3350,6 +3465,8 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             // Written once phase 1 has verified the approval
             // subject (`original_name_info`), never on a draft.
             original_name: None,
+            creation: None,
+            topic_configuration: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -3681,6 +3798,42 @@ fn target_info(
         // point at which the approval subject is VERIFIED; a block written
         // here would sign a subject nobody had checked yet.
         original_name: None,
+        creation: None,
+        // Filled once the creation step has created the topics with it
+        // (`topic_configuration_block`).
+        topic_configuration: None,
+    })
+}
+
+/// **PROD-05.2.** The signed `target.topic_configuration` of a run whose
+/// topics were created from its desired set, and the owned topics'
+/// desired-state document, put create-only beside the scorecard and bound by
+/// its digest.
+fn topic_configuration_block(
+    configured: &phase0_admit::TopicConfigurationAdmission,
+    run_id: &str,
+    c: &Ctx,
+) -> Result<logweir_core::topic_transition::TopicConfigurationBlock, DrillError> {
+    use logweir_core::topic_transition as tt;
+    let desired_state = match tt::desired_state_document(&configured.topics) {
+        None => None,
+        Some(doc) => {
+            let key = tt::desired_state_key(run_id);
+            c.store
+                .put_create_only(&key, doc.as_bytes())
+                .map_err(|e| DrillError::Operational(format!("{key}: {e}")))?;
+            Some(tt::DesiredStateRef {
+                key,
+                sha256: logweir_core::ids::sha256_prefixed(doc.as_bytes()),
+                bytes: doc.len() as u64,
+            })
+        }
+    };
+    Ok(tt::TopicConfigurationBlock {
+        transition: configured.transition.wire_name().to_string(),
+        target_line: configured.line.wire_name().to_string(),
+        topics: configured.topics.clone(),
+        desired_state,
     })
 }
 
@@ -3778,12 +3931,14 @@ mod pod_log_lines_pin {
     }
 
     /// **`exiting` prints the stopped creation step's two lines
-    /// through the seam, on exit 1 only, and nothing else in this file prints
-    /// a `failure-reason=`.** The bytes are pinned by
+    /// through the one terminal block, on exit 1 only, and nothing else in
+    /// this file builds a `failure-reason=`.** The bytes are pinned by
     /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
-    /// this pins that the terminal path calls it. KILLS: `exiting` no longer
-    /// printing the pair (the Restore would be a generic `Failed`, with the
-    /// left topics named nowhere durable); a second printer.
+    /// this pins that the terminal path pushes them, and prints the block
+    /// once, last (FX-43: `crate::exit::FinalLines`). KILLS: `exiting` no
+    /// longer printing the pair (the Restore would be a generic `Failed`,
+    /// with the left topics named nowhere durable); a second printer; the
+    /// block printed before a line is pushed.
     #[test]
     fn exiting_prints_the_stopped_creation_step_through_its_seam() {
         let drill = include_str!("mod.rs");
@@ -3792,35 +3947,39 @@ mod pod_log_lines_pin {
             .next()
             .expect("the production half");
         let exiting = fn_body(production, "exiting");
-        let call = "let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);";
+        let call = "last.extend(creation_stop_lines(race));";
         let guard = "if let (ExitCode::Operational, Some(race)) = (code, race) {";
         let at = exiting.find(guard).expect("on exit 1, with a stop");
         assert!(
-            exiting[at..]
-                .trim_start_matches(guard)
-                .trim_start()
-                .starts_with("// A closed stdout"),
-            "the guard's body is the seam call"
+            exiting[at + guard.len()..].trim_start().starts_with(call),
+            "the guard's body pushes the pair"
         );
         assert_eq!(exiting.matches(call).count(), 1);
-        // The definition is generic (`…_to<W: …>(`), so this counts calls.
         assert_eq!(
-            production.matches("print_creation_stop_to(").count(),
-            1,
-            "called from exactly one place"
+            production.matches("creation_stop_lines(").count(),
+            3,
+            "the definition, the writer seam over it, and `exiting`"
         );
-        // One printer of the reason in this command, inside the seam.
+        // ONE print of the block, after every push.
+        assert_eq!(exiting.matches("last.print(code);").count(), 1);
+        let printed = exiting.find("last.print(code);").expect("the block");
+        assert!(
+            exiting.rfind("last.push(").is_some_and(|p| p < printed)
+                && exiting.rfind("last.extend(").is_some_and(|p| p < printed),
+            "every line is pushed before the one print"
+        );
+        // One builder of the reason in this command, inside the pair.
         assert_eq!(production.matches("failure_reason_line(").count(), 1);
         let seam = production
-            .find("pub fn print_creation_stop_to<W: std::io::Write>(")
-            .expect("the seam");
+            .find("pub fn creation_stop_lines(")
+            .expect("the pair");
         let seam = &production[seam..];
-        let seam = &seam[..seam.find("\n}\n").expect("the seam ends")];
+        let seam = &seam[..seam.find("\n}\n").expect("the pair ends")];
         let lists = seam.find("stop.lists().line()").expect("the lists' line");
         let reason = seam
             .find("failure_reason_line(stop.reason)")
             .expect("the reason");
-        assert!(reason > lists, "the reason is printed LAST");
+        assert!(reason > lists, "the reason is LAST");
     }
 }
 
@@ -4096,7 +4255,7 @@ mod tests {
             "phase2_target::run(",
             "phase3_diff::run(",
             "&c.source_config_coverage",
-            "create_target_topics(",
+            "create_target_topics_from(",
         ] {
             assert!(check < at(later), "the set check must precede `{later}`");
         }

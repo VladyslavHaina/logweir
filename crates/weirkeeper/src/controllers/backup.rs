@@ -2536,7 +2536,7 @@ pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
         .pop()
         .and_then(|v| {
             logweir_core::guard::failure_reason_for_exit(
-                logweir_core::guard::FailureReasonKind::Backup,
+                logweir_core::refusal_detail::RefusingRun::Backup,
                 exit_code,
                 v.trim(),
             )
@@ -4616,6 +4616,37 @@ async fn reconcile_backup_inner(
                 destination.as_deref(),
             )?,
         };
+        // PROD-05.1a: the Strimzi `KafkaTopic` resources of a cluster that
+        // names its Strimzi cluster, listed once and frozen with the run; a
+        // frozen run reads them back and never lists again.
+        let kafka_topics = match stored_plan
+            .as_ref()
+            .and_then(backup_execution::stored_kafka_topic_resources)
+        {
+            Some(frozen) => frozen,
+            None => crate::strimzi_topics::resolve(
+                client,
+                &cluster,
+                &selection.topics,
+                &crate::strimzi_topics::process_namespaces(),
+            )
+            .await
+            .map_err(|e| match e {
+                crate::strimzi_topics::StrimziListError::Refused(message) => BackupError::Refused(
+                    crate::conditions::TERMINAL_STATE_OWNER_DETECTION_FAILED,
+                    message,
+                ),
+                crate::strimzi_topics::StrimziListError::Api(e) => BackupError::Api(e),
+            })?,
+        };
+        let desired = match kafka_topics {
+            None => desired,
+            Some(block) => FrozenInputs::freeze_with_ca(
+                backup_execution::with_kafka_topic_resources(desired.inputs, Some(block)),
+                desired.ca_pem,
+            )
+            .map_err(refused)?,
+        };
 
         // The plan ConfigMap, in this same pass and before the Job `POST`; it
         // is the freeze boundary. The Job mounts `<name>-plan`, so a Job created
@@ -4875,39 +4906,58 @@ async fn reconcile_backup_inner(
     };
 
     // STEP 3. The code is known. Read the log through the `pods/log`
-    // subresource, the only route to a runner's stdout (interface I28).
+    // subresource, the only route to a runner's stdout (interface I28), with
+    // THE terminal bound (`runner_log::TERMINAL`) at every exit code.
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    // A refused run's log is read bounded, and its failure is an answer. Exit
-    // 3 wrote no artifact, so all its log owes is the refusal lines at its
-    // end: `crate::refusal::read` asks for a bounded tail, never fails the
-    // pass, and says why when there is nothing to read. This `if` is the only
-    // gate: every other exit code takes `runner_log::TERMINAL` (the last 256
-    // lines, whose failure is still a reconcile error).
-    let (log, runner_reason) = if exit_code == 3 {
-        // The Job's own line token: a `refusal-detail=` line is the runner's
-        // only when it carries it, so a Job with none (built by an older
-        // controller) has no line read as a reason.
-        let line_token = job::line_token(&job);
+    // The Job's own line token, and by which flag (FX-43): whose lines are
+    // read at all.
+    let job_token = job::job_token(&job);
+    // A refused run's read failure is an answer: `crate::refusal::read` never
+    // fails the pass and says why when there is nothing to read. This `if` is
+    // the only gate: every other exit code's failure is still a reconcile
+    // error.
+    let (raw, mut runner_reason) = if exit_code == 3 {
         let read = crate::refusal::read(
             &pods,
             &namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Backup,
-            line_token.as_ref(),
+            &job_token,
         )
         .await;
         (read.body, Some(read.reason))
     } else {
-        let log = runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL)
+        match runner_log::read_terminal(&pods, &pod_name)
             .await
-            .map_err(BackupError::Api)?;
-        (log, None)
+            .map_err(BackupError::Api)?
+        {
+            runner_log::TerminalRead::Read(body) => (body, None),
+            // Cut before its end: nothing is taken from it, and nothing is
+            // said about the runner either.
+            runner_log::TerminalRead::OverBound => (String::new(), None),
+        }
     };
-    let keys = evidence_keys(&log);
-    let refusal = if exit_code == 3 {
+    // THE one answer to "whose line is it" (`runner_log::own_lines`): every
+    // reader below scans `log`.
+    let lines = runner_log::own_lines(&job_token, &raw);
+    if runner_reason.is_none()
+        && !raw.is_empty()
+        && runner_log::vouches_for_exit(exit_code)
+        && lines.runner_is_older()
+    {
+        runner_reason = Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    }
+    let older = runner_reason == Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    let log = lines.text();
+    let keys = evidence_keys(log);
+    let refusal = if older {
+        // The mixed pair, by name: never a generic `operational` a schedule
+        // retries (`crate::cadence::is_retryable`).
+        Some(logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER.to_string())
+    } else if exit_code == 3 {
         Some(
-            refusal_state(&log)
+            refusal_state(log)
                 .unwrap_or_else(|| TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON.to_string()),
         )
     } else {
@@ -4960,7 +5010,7 @@ async fn reconcile_backup_inner(
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
     // The claim outcome the runner named, lifted only beside its own exit code
     // (`failure_state` is closed and paired).
-    let failure = failure_state(exit_code, &log);
+    let failure = failure_state(exit_code, log);
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
     let reported_receipt_sha256 = keys.receipt_sha256.as_deref();

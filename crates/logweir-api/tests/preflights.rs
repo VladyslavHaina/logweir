@@ -2263,3 +2263,107 @@ async fn a_catalog_point_is_refused_beside_a_backup_point_or_with_a_malformed_id
         .await;
     assert_eq!(response.status.as_u16(), 202, "{}", response.text());
 }
+
+/// **PROD-04.2 §3.8: `POST …/preflights` with `operation: switchover`** — the
+/// review before a `Switchover`. The request names a `Restore` (and, when
+/// known, its UID) and at most 100 groups; it is stored as
+/// `spec.request.switchover`, and the controller does the rest. Refused by
+/// name: no block, another operation's block beside it, a restore name that
+/// is not an object name, more than 100 groups, a blank or control-character
+/// group id, and a target group named twice.
+/// KILLS: a switchover block accepted under another operation, a review
+/// stored without its UID, an unbounded group list.
+#[tokio::test]
+async fn a_switchover_review_names_its_restore_and_bounded_groups() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let created = app
+        .post(
+            &path,
+            Some("preflight-sw-00001"),
+            &json!({
+                "operation": "switchover",
+                "switchover": {
+                    "restoreName": "incident",
+                    "restoreUid": "r-uid",
+                    "groups": [{"source": "app"}, {"source": "billing", "target": "billing-v2"}]
+                }
+            })
+            .to_string(),
+        )
+        .await;
+    assert_eq!(created.status.as_u16(), 202, "{}", created.text());
+    let item = created.json()["item"].clone();
+    assert_eq!(item["operation"], "switchover");
+    let id = item["id"].as_str().expect("an id").to_string();
+    let stored = app.fake.object("preflights", NS_A, &id).expect("stored");
+    assert_eq!(stored["spec"]["request"]["operation"], "Switchover");
+    assert_eq!(
+        stored["spec"]["request"]["switchover"],
+        json!({
+            "restoreRef": {"name": "incident", "uid": "r-uid"},
+            "groups": [{"source": "app"}, {"source": "billing", "target": "billing-v2"}]
+        })
+    );
+    assert!(stored["spec"]["request"]["restore"].is_null());
+
+    let refused = |body: serde_json::Value, key: &'static str| {
+        let app = &app;
+        let path = path.clone();
+        async move {
+            let response = app.post(&path, Some(key), &body.to_string()).await;
+            response.assert_problem(422, "validation_failed");
+            field_names(&response.json())
+        }
+    };
+    assert!(
+        refused(json!({"operation": "switchover"}), "preflight-sw-00002")
+            .await
+            .contains(&"switchover".to_string())
+    );
+    assert!(refused(
+        json!({"operation": "restore", "restore": {"restoreName": "incident"},
+               "switchover": {"restoreName": "incident"}}),
+        "preflight-sw-00003"
+    )
+    .await
+    .contains(&"switchover".to_string()));
+    assert!(refused(
+        json!({"operation": "switchover", "switchover": {"restoreName": "Not A Name"}}),
+        "preflight-sw-00004"
+    )
+    .await
+    .contains(&"switchover.restoreName".to_string()));
+    let many: Vec<serde_json::Value> = (0..101)
+        .map(|i| json!({"source": format!("g{i}")}))
+        .collect();
+    assert!(refused(
+        json!({"operation": "switchover", "switchover": {"restoreName": "incident", "groups": many}}),
+        "preflight-sw-00005"
+    )
+    .await
+    .contains(&"switchover.groups".to_string()));
+    assert!(refused(
+        json!({"operation": "switchover", "switchover": {"restoreName": "incident",
+               "groups": [{"source": " "}]}}),
+        "preflight-sw-00006"
+    )
+    .await
+    .contains(&"switchover.groups[0]".to_string()));
+    assert!(refused(
+        json!({"operation": "switchover", "switchover": {"restoreName": "incident",
+               "groups": [{"source": "a", "target": "x"}, {"source": "x"}]}}),
+        "preflight-sw-00007"
+    )
+    .await
+    .contains(&"switchover.groups[1].target".to_string()));
+    let unknown = app
+        .post(
+            &path,
+            Some("preflight-sw-00008"),
+            &json!({"operation": "switchover", "switchover": {"restoreName": "incident", "commit": true}})
+                .to_string(),
+        )
+        .await;
+    assert_eq!(unknown.status.as_u16(), 422, "{}", unknown.text());
+}

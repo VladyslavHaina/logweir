@@ -152,6 +152,19 @@
         }
       }
     },
+    "strimzi": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`readKafkaTopics: true` grants the controller `get` and `list` on Strimzi `kafkatopics` (`kafka.strimzi.io`) through a Role and RoleBinding in each namespace `namespaces` lists, and nothing else, so a Backup of a KafkaCluster whose `spec.strimzi.namespace` is one of them records each topic's Strimzi owner. Off by default; a KafkaCluster naming any other namespace, or any namespace with it off, fails its Backup closed (`OwnerDetectionFailed`).",
+      "properties": {
+        "readKafkaTopics": { "type": "boolean" },
+        "namespaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 }
+        }
+      }
+    },
     "notify": {
       "description": "WITHDRAWN (release notes, item 74): alert sinks are gone, so this block configures nothing. Accepted here only so the render can refuse it by name; remove it from your values."
     },

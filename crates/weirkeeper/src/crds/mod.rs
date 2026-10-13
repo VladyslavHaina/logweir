@@ -5,8 +5,9 @@
 //! is `scratch` (spec §3.1; Global Constraint 34). A `Restore` only ever writes
 //! a new topic, so a drill's only distinguishing behaviour is a scratch target
 //! plus phase-9 teardown, a field rather than a lifecycle. `MetadataSnapshot`
-//! stays reserved and unbuilt; `Switchover` appears nowhere in this crate, not
-//! even in [`approval::SubjectKind`].
+//! stays reserved and unbuilt. `Switchover` (Amendment A's reserved kind) is
+//! built by Amendment K (PROD-04.2): it applies reviewed consumer positions
+//! and is an [`approval::SubjectKind`].
 //!
 //! The group is ours alone: [`GROUP`] is `logweir.dev` (Global Constraints 5
 //! and 14), and `weirkeeper` reads and creates no vendor custom resource.
@@ -47,6 +48,7 @@ pub mod recovery_catalog;
 pub mod restore;
 pub mod retention_policy;
 pub mod selection;
+pub mod switchover;
 pub mod topic_discovery;
 pub mod trust_policy;
 pub mod trust_roster;
@@ -66,10 +68,11 @@ pub const VERSION: &str = "v1alpha1";
 /// `TrustPolicy`, `ProtectionPolicy`, `RecoveryCatalog` and
 /// `RetentionPolicy`). `TrustRoster` stays served and reconciled, deprecated in
 /// its own description, while `TrustPolicy` is adopted.
+/// Amendment K added `Switchover` (PROD-04.2).
 /// `the_kind_list_is_exactly_the_adr` asserts the emitted set against this
-/// list, and that no kind is named `Drill`, `RestoreDrill`, `Switchover` or
+/// list, and that no kind is named `Drill`, `RestoreDrill` or
 /// `MetadataSnapshot` or contains `Kafka` other than `KafkaCluster`.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "KafkaCluster",
     "BackupSchedule",
     "Backup",
@@ -83,6 +86,7 @@ pub const KINDS: [&str; 13] = [
     "ProtectionPolicy",
     "RecoveryCatalog",
     "RetentionPolicy",
+    "Switchover",
 ];
 
 /// The CRD spelling of a Kubernetes `metav1.Time`: an RFC 3339 string
@@ -1085,6 +1089,12 @@ pub fn render_all() -> Vec<Rendered> {
             crd
         },
         &retention_policy::SPEC_RULES,
+    );
+    push(
+        "Switchover",
+        "switchovers.yaml",
+        switchover::Switchover::crd(),
+        &switchover::SPEC_RULES,
     );
 
     out

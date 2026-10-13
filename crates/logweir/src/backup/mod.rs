@@ -580,12 +580,9 @@ fn execute_with_signer(
     // `upload`) plus this one. The channel version comes first, once: a Backup
     // Job carries no execution-contract environment on this build, so the only
     // true answer is the version this BINARY implements.
-    println!(
-        "{}",
-        logweir_core::execution_contract::progress_contract_line(
-            logweir_core::execution_contract::ContractVersion::V2
-        )
-    );
+    crate::exit::print_lines(&[logweir_core::execution_contract::progress_contract_line(
+        logweir_core::execution_contract::ContractVersion::V2,
+    )]);
     print_progress_step(PROGRESS_STEP_ADMIT);
     let inputs = read_inputs(args)?;
     // Phase −1. EVERY guard, before the engine and before any document is
@@ -1041,9 +1038,9 @@ fn summary_line(o: &BackupOutcome) -> String {
     ))
 }
 
-/// Logs the exit code and what it means, then returns it unchanged — and, for
-/// exit 3 ONLY, prints `refusal-reason=<TerminalState>` as the process's FINAL
-/// stdout line (**I9**).
+/// Logs the exit code and what it means, prints the lines a controller reads
+/// as the process's FINAL stdout lines (`refusal-reason=<TerminalState>` last
+/// at exit 3, **I9**), then returns the code unchanged.
 ///
 /// A backup-specific twin of `drill::exiting` rather than a call into it: the
 /// `meaning` strings are the operator-facing description of what happened, and
@@ -1093,26 +1090,30 @@ fn exiting(
         }
     };
     tracing::info!(run_id = %run_id, exit_code = code as u8 as i64, meaning, "backup finished");
-    // [I9] AFTER the tracing line, so the reason is the LAST thing on stdout.
-    // `unwrap_or("")` is the fail-safe direction: an empty message classifies
-    // as `GuardRefused`, so a future path reaching exit 3 without one still
-    // satisfies GC11 rather than printing nothing. `refusal-detail=` first,
-    // then the state line (`crate::exit::print_refusal`).
+    // Every line below goes into ONE block, printed last and in one write
+    // (`crate::exit::FinalLines`), AFTER the tracing line, so the lines a
+    // controller reads are the last thing on stdout. Under FX-43's
+    // `--runner-line-token` the block is the sealed lines, the sealed
+    // `runner-exit=`, then these plain lines in their old order and place.
+    let mut last = crate::exit::FinalLines::default();
+    // [I9] `unwrap_or("")` is the fail-safe direction: an empty message
+    // classifies as `GuardRefused`, so a future path reaching exit 3 without
+    // one still satisfies GC11 rather than printing nothing. `refusal-detail=`
+    // first, then the state line (`crate::exit::refusal_lines`).
     if code == ExitCode::GuardRefused {
-        crate::exit::print_refusal(
+        last.refusal(
             logweir_core::refusal_detail::RefusingRun::Backup,
             refusal_message.unwrap_or(""),
         );
     }
-    // `failure-reason=` as the FINAL stdout line of an exit 1
-    // or 4 whose state is more specific than its code, for the same reason
-    // I9's line is last. Nothing follows it: the key lines below print only
-    // on exit 0.
+    // `failure-reason=` as the FINAL plain line of an exit 1 or 4 whose state
+    // is more specific than its code, for the same reason I9's line is last.
+    // Nothing follows it: the key lines below print only on exit 0.
     if let (ExitCode::Operational | ExitCode::SigningOrLock, Some(state)) = (code, failure_reason) {
-        println!("{}", logweir_core::guard::failure_reason_line(state));
+        last.push(logweir_core::guard::failure_reason_line(state));
     }
     // [I7], and the order is the contract: `receipt-key=` then
-    // `sidecar-key=` are the final two stdout lines of a successful run, with
+    // `sidecar-key=` are the final two plain lines of a successful run, with
     // nothing after them; a controller cannot tell stdout from stderr through
     // the pod log API. Only on exit 0: a line naming a key nothing was written
     // to would be the worst possible output.
@@ -1123,16 +1124,17 @@ fn exiting(
     // pair last. Absent when the catalog write failed; the log says what to do.
     if code == ExitCode::Ok {
         if let Some(catalog_key) = catalog_key {
-            println!("catalog-key={catalog_key}");
+            last.push(format!("catalog-key={catalog_key}"));
         }
         if let Some(receipt_sha256) = receipt_sha256 {
-            println!("receipt-sha256={receipt_sha256}");
+            last.push(format!("receipt-sha256={receipt_sha256}"));
         }
     }
     if let (ExitCode::Ok, Some((receipt_key, sidecar_key))) = (code, evidence_keys) {
-        println!("receipt-key={receipt_key}");
-        println!("sidecar-key={sidecar_key}");
+        last.push(format!("receipt-key={receipt_key}"));
+        last.push(format!("sidecar-key={sidecar_key}"));
     }
+    last.print(code);
     code
 }
 

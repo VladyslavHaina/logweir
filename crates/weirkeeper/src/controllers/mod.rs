@@ -54,6 +54,7 @@ pub mod recovery_catalog;
 pub mod restore;
 pub mod retention_policy;
 pub mod schedule_history;
+pub mod switchover;
 pub mod topic_discovery;
 pub mod trust_policy;
 pub mod trust_roster;

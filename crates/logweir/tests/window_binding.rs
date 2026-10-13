@@ -649,6 +649,44 @@ fn phase5_accepts_the_rendered_start_when_it_is_the_floor() {
     );
 }
 
+/// **PROD-01.1b.** The LATER segment holds a record older than every
+/// segment's first, out of timestamp order. Over the facts the runner widens
+/// by the decoded record times (`record_times::widen`) the plan binds that
+/// record's instant, so no window drops it, and phase 5 accepts the rendered
+/// start; phase 5 over the manifest as described refuses the same plan, so
+/// the two seams must read the same facts.
+///
+/// KILLS: `widen` not lowering a start; the floor taken off the first
+/// segment only.
+#[test]
+fn the_floor_is_the_oldest_record_over_the_widened_facts() {
+    use logweir_core::record_times::{widen, RecordTimes, SegmentTimes};
+    let facts = facts_with_two_segments();
+    let mut times = RecordTimes::new();
+    times.insert(
+        facts.topics[0].partitions[0].segments[1].key.clone(),
+        SegmentTimes {
+            min_ms: FLOOR_MS - 1_000,
+            max_ms: LATER_SEGMENT_MS + 60_000,
+            selected: 100,
+        },
+    );
+    let wide = widen(&facts, &times);
+    let plan = build_plan(&spec(), &set(), &mapping(), &wide, "01J9X", None).expect("builds");
+    assert_eq!(plan.time_window.0.timestamp_millis(), FLOOR_MS - 1_000);
+    assert_eq!(plan.window_floor_source, WindowFloorSource::ArchiveManifest);
+    assert_eq!(
+        exit_of(&phase5_preflight::check_rendered_window_floor(&plan, &wide)),
+        ExitCode::Ok
+    );
+    assert_eq!(
+        exit_of(&phase5_preflight::check_rendered_window_floor(
+            &plan, &facts
+        )),
+        ExitCode::GuardRefused
+    );
+}
+
 /// A manifest with no segment at all has no earliest covered timestamp, and
 /// neither seam may invent one: plan construction refuses, and so does the
 /// phase-5 check if it is ever reached with such a manifest.

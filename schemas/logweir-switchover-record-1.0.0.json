@@ -1,0 +1,373 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://logweir.dev/schemas/logweir-switchover-record-1.0.0.json",
+  "title": "SwitchoverRecord",
+  "description": "**The switchover record** (`logweir/switchovers/<run_id>.record.json`, format 1.0.0, payload type `application/vnd.logweir.switchover-record+json;version=1.0.0`). Signed; both readers verify it signature-only. Field order is byte order.",
+  "type": "object",
+  "required": [
+    "approval",
+    "counts",
+    "finished_at",
+    "format_version",
+    "groups",
+    "outcome",
+    "plan_hash",
+    "restore_ref",
+    "run_id",
+    "started_at",
+    "switchover",
+    "target_cluster_id",
+    "topics"
+  ],
+  "properties": {
+    "approval": {
+      "description": "How the plan was approved, and by whom.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ApprovalSummary"
+        }
+      ]
+    },
+    "counts": {
+      "$ref": "#/definitions/GroupCounts"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "format_version": {
+      "description": "[`RECORD_FORMAT_VERSION`].",
+      "type": "string"
+    },
+    "groups": {
+      "description": "One per plan group, in plan order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GroupRecord"
+      }
+    },
+    "outcome": {
+      "description": "[`SUCCEEDED`], [`PARTIALLY_APPLIED`], [`RUN_FAILED`] or [`RUN_REFUSED`].",
+      "type": "string"
+    },
+    "plan_hash": {
+      "description": "The plan's hash (`sha256:` over the approved plan bytes).",
+      "type": "string"
+    },
+    "reason": {
+      "description": "A whole-run refusal's sentence.",
+      "type": "string",
+      "nullable": true
+    },
+    "restore_ref": {
+      "description": "The restore, as the plan bound it.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RestoreRef"
+        }
+      ]
+    },
+    "rollback_of": {
+      "description": "The record a rollback plan reversed.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/RecordRef"
+        }
+      ],
+      "nullable": true
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "switchover": {
+      "description": "The `Switchover` object.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectRef"
+        }
+      ]
+    },
+    "target_cluster_id": {
+      "description": "The target cluster id read now, which must be the scorecard's.",
+      "type": "string"
+    },
+    "topics": {
+      "description": "Each restored topic checked, with the topic ID read now.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TopicChecked"
+      }
+    }
+  },
+  "definitions": {
+    "AppliedState": {
+      "description": "`applied`: a boolean, or the word `unknown`.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/UnknownWord"
+        }
+      ]
+    },
+    "ApprovalSummary": {
+      "description": "The approval a run was admitted under.",
+      "type": "object",
+      "required": [
+        "approver",
+        "key_id",
+        "mode"
+      ],
+      "properties": {
+        "approver": {
+          "description": "Who approved (`approver`), and who asked when that is known.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "The key that signed the approval.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "The namespace's approval mode as the controller applied it.",
+          "type": "string"
+        },
+        "requester": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "GroupCounts": {
+      "description": "Groups counted by outcome.",
+      "type": "object",
+      "required": [
+        "already_applied",
+        "applied",
+        "failed",
+        "refused",
+        "untouched"
+      ],
+      "properties": {
+        "already_applied": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "applied": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "refused": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "untouched": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "GroupRecord": {
+      "description": "One group's outcome, as recorded.",
+      "type": "object",
+      "required": [
+        "classification",
+        "committed",
+        "created",
+        "outcome",
+        "partitions",
+        "source",
+        "target"
+      ],
+      "properties": {
+        "classification": {
+          "description": "How the target group was classified before the commit.",
+          "type": "string"
+        },
+        "committed": {
+          "description": "Whether this run sent a commit for the group.",
+          "type": "boolean"
+        },
+        "created": {
+          "description": "Whether the commit created the group.",
+          "type": "boolean"
+        },
+        "outcome": {
+          "description": "[`GROUP_OUTCOMES`].",
+          "type": "string"
+        },
+        "partitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PartitionRecord"
+          }
+        },
+        "reason": {
+          "type": "string",
+          "nullable": true
+        },
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "ObjectRef": {
+      "description": "A Kubernetes object, named.",
+      "type": "object",
+      "required": [
+        "name",
+        "namespace",
+        "uid"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "string"
+        }
+      }
+    },
+    "PartitionRecord": {
+      "description": "One planned partition, as recorded.",
+      "type": "object",
+      "required": [
+        "applied",
+        "partition",
+        "planned",
+        "topic"
+      ],
+      "properties": {
+        "applied": {
+          "description": "`true`, `false`, or `unknown` (a commit that failed after it may have been applied, whose readback failed too).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppliedState"
+            }
+          ]
+        },
+        "partition": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "planned": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "prior": {
+          "description": "The committed position read before any commit; absent: none.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "readback": {
+          "description": "The committed position read back after the commit; absent: none, or not read.",
+          "type": "integer",
+          "format": "int64",
+          "nullable": true
+        },
+        "topic": {
+          "description": "The restored topic.",
+          "type": "string"
+        }
+      }
+    },
+    "RecordRef": {
+      "description": "The switchover record a rollback plan reverses.",
+      "type": "object",
+      "required": [
+        "key",
+        "sha256"
+      ],
+      "properties": {
+        "key": {
+          "description": "[`record_key`] of the run.",
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      }
+    },
+    "RestoreRef": {
+      "description": "The restore a plan is about, bound by its evidence's digests.",
+      "type": "object",
+      "required": [
+        "mapping_sha256",
+        "name",
+        "plan_hash",
+        "scorecard_sha256",
+        "uid"
+      ],
+      "properties": {
+        "mapping_sha256": {
+          "description": "The positions-mapping document's digest, as the scorecard binds it.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "plan_hash": {
+          "description": "The restore plan's hash (the scorecard's `approval.plan_hash`): the target cluster, credentials and evidence location come from it.",
+          "type": "string"
+        },
+        "scorecard_sha256": {
+          "description": "The signed scorecard's digest.",
+          "type": "string"
+        },
+        "uid": {
+          "type": "string"
+        }
+      }
+    },
+    "TopicChecked": {
+      "description": "A restored topic the run checked.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "created_id": {
+          "description": "The topic ID recorded at creation (`target.creation`).",
+          "type": "string",
+          "nullable": true
+        },
+        "current_id": {
+          "description": "The topic ID read now.",
+          "type": "string",
+          "nullable": true
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "UnknownWord": {
+      "description": "The word `unknown`.",
+      "type": "string",
+      "enum": [
+        "unknown"
+      ]
+    }
+  }
+}

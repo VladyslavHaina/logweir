@@ -64,9 +64,13 @@ pub mod ids;
 /// probe's scratch name.
 pub mod original_name;
 pub mod outcome;
+pub mod positions_mapping;
 /// The facts a reader takes from a backup receipt without building a
 /// tree of it — the shared controller's bounded read.
 pub mod receipt_facts;
+/// Recovery-point selection over out-of-order timestamps: segment bounds
+/// widened by their records, and the `PointInTimeSelectionIncomplete` refusal.
+pub mod record_times;
 /// A guard refusal's reason code and sentence as one validated,
 /// cleaned and bounded `refusal-detail=` line.
 pub mod refusal_detail;
@@ -76,10 +80,17 @@ pub mod rehearsal_scope;
 /// The replay selection — an inclusive window start and per-topic
 /// partition subsets — and the one function preview and execution select by.
 pub mod replay_selection;
+/// FX-43: every runner line a controller acts on, sealed with the Job's line
+/// token; the one-line escape every printed text goes through.
+pub mod runner_line;
 pub mod schema;
 pub mod schema_dependency;
 pub mod scorecard;
 pub mod spec;
+pub mod switchover;
+/// The scorecard's `target.creation` block, a clone's declared lifetime
+/// (`target.teardown: {ttl_seconds}`) and the rule its cleanup deletes by.
+pub mod target_creation;
 /// Which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
@@ -92,6 +103,9 @@ pub mod topic_configuration;
 /// The topic ID's canonical text, its closed sets, and the
 /// generation rule two points' IDs are read by.
 pub mod topic_identity;
+/// A restore's target topic configuration in stages (PROD-05.2): the stage
+/// table, the desired set and diff, and the phase-9 guard.
+pub mod topic_transition;
 /// Transaction markers in a restored archive, and the
 /// `TransactionMarkersInArchive` refusal.
 pub mod transaction_markers;
