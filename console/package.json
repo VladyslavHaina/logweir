@@ -1,0 +1,41 @@
+{
+  "name": "logweir-console",
+  "private": true,
+  "version": "0.0.0-prototype",
+  "description": "PROD-18.1 prototype of the rebuilt Logweir console (mock data; not served or shipped).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "gen:api": "openapi-typescript ../schemas/logweir-api-v1.openapi.json --default-non-nullable false -o src/api/schema.d.ts",
+    "check:api": "openapi-typescript ../schemas/logweir-api-v1.openapi.json --default-non-nullable false -o src/api/schema.d.ts --check",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "build:single": "tsc --noEmit && vite build --mode single",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.9.1",
+    "@patternfly/react-core": "6.6.1",
+    "@patternfly/react-icons": "6.6.1",
+    "@patternfly/react-table": "6.6.1",
+    "@tanstack/react-query": "5.104.0",
+    "@tanstack/react-router": "1.170.39",
+    "openapi-fetch": "0.17.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-hook-form": "7.89.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.1"
+  }
+}
