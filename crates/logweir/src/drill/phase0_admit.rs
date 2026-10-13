@@ -2109,3 +2109,140 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod topic_configuration_tests {
+    //! PROD-05.2's phase-0 half: the `validate_only` refusal names the topic,
+    //! the stage and the key, before anything is created.
+    use super::*;
+    use logweir_kafka::reader::KafkaError;
+    use std::sync::Mutex;
+
+    /// A target that refuses any creation carrying `refuse` and records every
+    /// request it was asked to judge or make.
+    struct Target {
+        refuse: &'static str,
+        validated: Mutex<usize>,
+        created: Mutex<usize>,
+    }
+
+    impl TopicCreator for Target {
+        fn create_topics(
+            &self,
+            _: &[NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            *self.created.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+        fn validate_create_topics(
+            &self,
+            topics: &[NewTopicSpec],
+        ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
+            *self.validated.lock().unwrap() += 1;
+            Ok(topics
+                .iter()
+                .map(|t| {
+                    let refused = t.configs.iter().any(|(k, _)| k == self.refuse);
+                    (
+                        t.name.clone(),
+                        if refused {
+                            Err("InvalidConfig".to_string())
+                        } else {
+                            Ok(())
+                        },
+                    )
+                })
+                .collect())
+        }
+    }
+
+    fn spec(name: &str, configs: &[(&str, &str)]) -> NewTopicSpec {
+        NewTopicSpec {
+            name: name.into(),
+            num_partitions: 3,
+            replication_factor: 1,
+            configs: configs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }
+    }
+
+    /// KILLS: a refusal that does not name the key; a create attempted after
+    /// a refused validation.
+    #[test]
+    fn a_refused_setting_is_named_and_nothing_is_created() {
+        let target = Target {
+            refuse: "remote.storage.enable",
+            validated: Mutex::new(0),
+            created: Mutex::new(0),
+        };
+        let specs = [
+            spec("r-a", &[("retention.ms", "-1")]),
+            spec(
+                "r-b",
+                &[("retention.ms", "-1"), ("remote.storage.enable", "true")],
+            ),
+        ];
+        let err = validate_or_name_the_key(&target, &specs, "at creation").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("TopicConfigRefusedByTarget: "), "{msg}");
+        assert!(msg.contains("`r-b`"), "{msg}");
+        assert!(msg.contains("`remote.storage.enable=true`"), "{msg}");
+        assert!(msg.contains("at creation"), "{msg}");
+        assert_eq!(*target.created.lock().unwrap(), 0);
+        // NEGATIVE CONTROL: the same sets without the refused key pass.
+        let ok = [spec("r-a", &[("retention.ms", "-1")])];
+        assert!(validate_or_name_the_key(&target, &ok, "at creation").is_ok());
+    }
+
+    #[test]
+    fn a_plan_without_the_block_asks_the_target_nothing() {
+        let spec: DrillSpec =
+            serde_yaml::from_str(include_str!("../../../../examples/restore.yaml"))
+                .expect("the example parses");
+        assert!(spec.target.topic_configuration.is_none());
+        struct Unreachable;
+        impl ClusterReader for Unreachable {
+            fn cluster_id(&self) -> Result<String, KafkaError> {
+                unreachable!()
+            }
+            fn list_topics(&self) -> Result<Vec<logweir_kafka::reader::TopicMeta>, KafkaError> {
+                unreachable!()
+            }
+            fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+                unreachable!()
+            }
+            fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!()
+            }
+            fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+                unreachable!("no broker read for a plan without the block")
+            }
+            fn consume_range(
+                &self,
+                _: &str,
+                _: i32,
+                _: i64,
+                _: usize,
+            ) -> Result<Vec<logweir_kafka::reader::ConsumedRecord>, KafkaError> {
+                unreachable!()
+            }
+        }
+        let target = Target {
+            refuse: "x",
+            validated: Mutex::new(0),
+            created: Mutex::new(0),
+        };
+        let got = admit_topic_configuration(
+            &spec,
+            &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            &BTreeMap::new(),
+            &Unreachable,
+            &target,
+        )
+        .unwrap();
+        assert_eq!(got, None);
+        assert_eq!(*target.validated.lock().unwrap(), 0);
+    }
+}
