@@ -15,12 +15,16 @@
 //!   wrote to, and every restored topic a requested group maps onto still
 //!   carries the ID recorded at creation
 //!   ([`crate::switchover::target_is_the_restores`], step 5).
-//! * **`switchover.groups`** — each requested target group's type, state and
-//!   members admit a commit ([`so::admit_group`], §3.5), and its committed
-//!   positions on the mapped partitions are none or already the mapped ones.
-//!   Every group, topic and partition goes to the details stream, one line per
-//!   group and restored topic, with the mapped offset, its class and the
-//!   committed position read (`GET …/preflights/{id}/details`).
+//! * **`switchover.groups`** — each requested group goes through the run's
+//!   OWN decision, [`decide_group`] (steps 1 to 4 of `switchover run`), over
+//!   the plan group `logweir switchover plan` would write: §3.5's admission,
+//!   every mapped offset inside the target's log start and high watermark
+//!   ([`so::check_bounds`]), the priors and the compare-and-set
+//!   ([`so::compare`]). Admissible exactly when the run would commit or find
+//!   the group already applied; otherwise the run's own reason. Every group,
+//!   topic and partition goes to the details stream, one line per group and
+//!   restored topic, with the mapped offset, its class and the committed
+//!   position read (`GET …/preflights/{id}/details`).
 //!
 //! # What it never does
 //!
@@ -40,7 +44,8 @@ use logweir_core::switchover as so;
 
 use super::{from_broker_failure, from_store_failure, ready, runner_contract, Wiring};
 use crate::check::{catalogue, Deadline, Emission};
-use crate::switchover::target::{Part, ReadFailure, SwitchoverTarget};
+use crate::switchover::apply::{decide_group, Verdict};
+use crate::switchover::target::{Part, SwitchoverTarget};
 
 /// The remedy of a refused evidence row.
 pub const EVIDENCE_REMEDY: &str = "Restore again with `coverage: complete` from a point that \
@@ -96,6 +101,9 @@ pub struct GroupReading {
     pub classified: Option<(String, String, u32)>,
     /// Whether the group is absent (a switchover would create it).
     pub absent: bool,
+    /// Whether every planned partition already holds its mapped offset (the
+    /// run would find it `alreadyApplied` and commit nothing).
+    pub already_applied: bool,
     /// Per restored topic, every mapping entry of this group onto it:
     /// `(partition, mapped offset, class, committed now)`.
     pub topics: BTreeMap<String, Vec<PositionReading>>,
@@ -114,14 +122,21 @@ pub struct PositionReading {
     pub committed: Option<i64>,
 }
 
-/// **One group, read**: admission by its classification (§3.5), then its
-/// committed positions on the mapped partitions, which must be none or
-/// already the mapped ones (a plan's `expected: none`). Pure over the target
-/// trait, so every rule is a unit row.
+/// **One group, read — by the Job's own decision.** The group is planned
+/// exactly as `logweir switchover plan` plans it ([`so::plan_from_mapping`]:
+/// every mapped entry, `expected: none`), and that plan group goes through
+/// [`decide_group`], steps 1 to 4 of `switchover run`: §3.5's admission,
+/// every planned offset inside the target's `marks` ([`so::check_bounds`]),
+/// the priors and the compare-and-set ([`so::compare`]). Admissible exactly
+/// when the run would commit or find it already applied; otherwise the run's
+/// own reason. Nothing is committed. A group the mapping does not name, or
+/// maps nothing of, is refused before that by name.
 #[must_use]
 pub fn read_group(
     target: &dyn SwitchoverTarget,
     mapping: &MappingDocument,
+    restore: &so::RestoreRef,
+    marks: &BTreeMap<Part, (i64, i64)>,
     group: &Selected,
 ) -> GroupReading {
     let mut reading = GroupReading {
@@ -129,6 +144,7 @@ pub fn read_group(
         refusal: None,
         classified: None,
         absent: false,
+        already_applied: false,
         topics: BTreeMap::new(),
     };
     let Some(mapped) = mapping.groups.get(&group.source) else {
@@ -141,16 +157,10 @@ pub fn read_group(
         ));
         return reading;
     };
-    let mut parts: Vec<(Part, i64)> = Vec::new();
     for e in &mapped.entries {
         let Some(topic) = e.target_topic.clone() else {
             continue;
         };
-        if e.mapped() {
-            if let Some(o) = e.target_offset {
-                parts.push(((topic.clone(), e.partition), o));
-            }
-        }
         reading
             .topics
             .entry(topic)
@@ -163,7 +173,7 @@ pub fn read_group(
                 committed: None,
             });
     }
-    if parts.is_empty() {
+    if !mapped.entries.iter().any(|e| e.mapped()) {
         reading.refusal = Some((
             "NothingMapped".to_string(),
             match mapped.reason.as_deref() {
@@ -173,74 +183,52 @@ pub fn read_group(
         ));
         return reading;
     }
-    let classified = target.classify(&group.target);
+    let choice = so::GroupChoice {
+        source: group.source.clone(),
+        target: group.target.clone(),
+    };
+    let plan = match so::plan_from_mapping(mapping, restore.clone(), &[choice]) {
+        Ok((plan, _)) => plan,
+        Err(why) => {
+            reading.refusal = Some((so::PLAN_INVALID.to_string(), why));
+            return reading;
+        }
+    };
+    let Some(plan_group) = plan.groups.first() else {
+        reading.refusal = Some((
+            "NothingMapped".to_string(),
+            "no position of the group maps onto a restored partition".to_string(),
+        ));
+        return reading;
+    };
+    let decided = decide_group(target, plan_group, marks);
     if let so::TargetGroup::Consumer {
         group_type,
         state,
         members,
-    } = &classified
+    } = &decided.classified
     {
         reading.classified = Some((group_type.clone(), state.clone(), *members));
     }
-    reading.absent = classified == so::TargetGroup::Absent;
-    let created = match so::admit_group(&classified) {
-        Ok(created) => created,
-        Err(word) => {
-            let detail = match &classified {
-                so::TargetGroup::Consumer { state, members, .. } => {
-                    format!("the group is {state} with {members} member(s)")
-                }
-                so::TargetGroup::Unreachable(why) => format!("it could not be classified: {why}"),
-                other => format!("{other:?}"),
-            };
-            reading.refusal = Some((word.to_string(), detail));
-            return reading;
+    reading.absent = decided.classified == so::TargetGroup::Absent;
+    for p in &decided.parts {
+        if let Some(entry) = reading
+            .topics
+            .get_mut(&p.topic)
+            .and_then(|v| v.iter_mut().find(|e| e.partition == p.partition))
+        {
+            entry.committed = p.current;
         }
-    };
-    let keys: Vec<Part> = parts.iter().map(|(p, _)| p.clone()).collect();
-    match target.committed(&group.target, &keys, !created) {
-        Err(f) => {
-            let (word, why) = match f {
-                ReadFailure::NotAuthorized => (
-                    so::NOT_AUTHORIZED,
-                    "the target principal may not read the group's offsets".to_string(),
-                ),
-                ReadFailure::NotVisible => (
-                    so::TARGET_NOT_VISIBLE,
-                    "the group may exist and this principal may not see it".to_string(),
-                ),
-                ReadFailure::Unstable => (
-                    so::TARGET_POSITIONS_CHANGED,
-                    "a transactional offset commit is pending on the group".to_string(),
-                ),
-                ReadFailure::Other(why) => (so::COMMIT_FAILED, why),
-            };
-            reading.refusal = Some((word.to_string(), why));
-        }
-        Ok(now) => {
-            let mut differ = 0usize;
-            for ((topic, partition), mapped_offset) in &parts {
-                let held = now.get(&(topic.clone(), *partition)).copied().flatten();
-                if let Some(entry) = reading
-                    .topics
-                    .get_mut(topic)
-                    .and_then(|v| v.iter_mut().find(|p| p.partition == *partition))
-                {
-                    entry.committed = held;
-                }
-                if held.is_some_and(|h| h != *mapped_offset) {
-                    differ += 1;
-                }
-            }
-            if differ > 0 {
-                reading.refusal = Some((
-                    so::TARGET_POSITIONS_CHANGED.to_string(),
-                    format!(
-                        "the group holds committed positions other than the mapped ones on \
-                         {differ} partition(s); a plan expecting none is refused"
-                    ),
-                ));
-            }
+    }
+    match decided.verdict {
+        Verdict::Commit { .. } => {}
+        Verdict::AlreadyApplied => reading.already_applied = true,
+        Verdict::Stop(record) => {
+            let reason = record.reason.unwrap_or_else(|| record.outcome.clone());
+            reading.refusal = Some(match reason.split_once(": ") {
+                Some((word, why)) => (word.to_string(), why.to_string()),
+                None => (reason, decided.words),
+            });
         }
     }
     reading
@@ -257,6 +245,7 @@ pub fn detail_lines(readings: &[GroupReading]) -> Vec<String> {
                 "target": r.group.target,
                 "admissible": r.refusal.is_none(),
                 "absent": r.absent,
+                "alreadyApplied": r.already_applied,
             });
             if let Some((t, s, m)) = &r.classified {
                 line["type"] = serde_json::json!(t);
@@ -515,10 +504,20 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
         }
     }
 
-    // 3. Every requested group.
+    // 3. Every requested group, by the run's own decision over the plan
+    //    `logweir switchover plan` would write, against the marks read once
+    //    for every restored topic (as the run reads them before any group).
+    let restore = so::RestoreRef {
+        name: req.restore_name.clone(),
+        uid: req.restore_uid.clone(),
+        plan_hash: req.restore_plan_sha256.clone(),
+        scorecard_sha256: ev.scorecard_sha256.clone(),
+        mapping_sha256: ev.mapping_sha256.clone(),
+    };
+    let marks = target.marks(&topics);
     let readings: Vec<GroupReading> = groups
         .iter()
-        .map(|g| read_group(target.as_ref(), &ev.mapping, g))
+        .map(|g| read_group(target.as_ref(), &ev.mapping, &restore, &marks, g))
         .collect();
     checks.push(groups_row(&readings, now));
     result.checks = checks;
@@ -533,7 +532,7 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::switchover::target::CommitFailure;
+    use crate::switchover::target::{CommitFailure, ReadFailure};
     use logweir_core::check_contract::{
         ConnectionPlan, CredentialMode, DestinationPlan, SwitchoverReadinessGroup,
     };
@@ -664,6 +663,30 @@ mod tests {
         }
     }
 
+    fn restore_ref() -> so::RestoreRef {
+        let sha = |c: char| format!("sha256:{}", c.to_string().repeat(64));
+        so::RestoreRef {
+            name: "incident".into(),
+            uid: "r-uid".into(),
+            plan_hash: sha('a'),
+            scorecard_sha256: sha('b'),
+            mapping_sha256: sha('c'),
+        }
+    }
+
+    /// `r-orders` partitions 0 and 1 at `[0, 100]`.
+    fn wide_marks() -> BTreeMap<Part, (i64, i64)> {
+        [
+            (("r-orders".to_string(), 0), (0, 100)),
+            (("r-orders".to_string(), 1), (0, 100)),
+        ]
+        .into()
+    }
+
+    fn rg(t: &FakeTarget, m: &MappingDocument, g: &Selected) -> GroupReading {
+        read_group(t, m, &restore_ref(), &wide_marks(), g)
+    }
+
     fn word(r: &GroupReading) -> Option<&str> {
         r.refusal.as_ref().map(|(w, _)| w.as_str())
     }
@@ -728,10 +751,10 @@ mod tests {
         t.committed
             .insert("locked".into(), Err(ReadFailure::NotAuthorized));
 
-        let absent = read_group(&t, &m, &sel("app", "fresh"));
+        let absent = rg(&t, &m, &sel("app", "fresh"));
         assert_eq!(word(&absent), None);
         assert!(absent.absent);
-        let stopped = read_group(&t, &m, &sel("app", "stopped"));
+        let stopped = rg(&t, &m, &sel("app", "stopped"));
         assert_eq!(word(&stopped), None);
         assert_eq!(
             stopped.classified,
@@ -742,44 +765,146 @@ mod tests {
             vec![("fresh".to_string(), false), ("stopped".to_string(), true)]
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "busy"))),
+            word(&rg(&t, &m, &sel("app", "busy"))),
             Some(so::GROUP_ACTIVE)
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "streams"))),
+            word(&rg(&t, &m, &sel("app", "streams"))),
             Some(so::TARGET_GROUP_TYPE_UNSUPPORTED)
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "old"))),
+            word(&rg(&t, &m, &sel("app", "old"))),
             Some(so::TARGET_GROUP_TYPE_UNPROVEN)
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "hidden"))),
+            word(&rg(&t, &m, &sel("app", "hidden"))),
             Some(so::TARGET_NOT_VISIBLE)
         );
-        let done = read_group(&t, &m, &sel("app", "done"));
+        let done = rg(&t, &m, &sel("app", "done"));
         assert_eq!(word(&done), None, "already the mapped positions");
         assert_eq!(done.topics["r-orders"][0].committed, Some(40));
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "moved"))),
+            word(&rg(&t, &m, &sel("app", "moved"))),
             Some(so::TARGET_POSITIONS_CHANGED)
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("app", "locked"))),
+            word(&rg(&t, &m, &sel("app", "locked"))),
             Some(so::NOT_AUTHORIZED)
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("nobody", "nobody"))),
+            word(&rg(&t, &m, &sel("nobody", "nobody"))),
             Some("NotInMapping")
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("gone", "gone"))),
+            word(&rg(&t, &m, &sel("gone", "gone"))),
             Some("NothingMapped")
         );
         assert_eq!(
-            word(&read_group(&t, &m, &sel("dark", "dark"))),
+            word(&rg(&t, &m, &sel("dark", "dark"))),
             Some("NothingMapped")
         );
+    }
+
+    /// **Review M1: the review decides as the run decides.** The marks
+    /// (`so::check_bounds`): a mapped offset below the log start (retention
+    /// moved it, design §2.3) is `BelowTargetLogStart`, one above the high
+    /// watermark `AboveTargetEnd`, a partition with no marks
+    /// `TargetMarksUnreadable`; the compare-and-set (`so::compare`): one
+    /// partition at its mapped offset and another without a position is
+    /// `TargetPositionsChanged`, never admissible. Controls: the same groups
+    /// with the marks around the offsets, and with no position anywhere, are
+    /// admissible; every partition already at its offset is admissible and
+    /// already applied. And each refusal is the run's own: `apply_group` over
+    /// the same plan group and marks refuses with the same word.
+    /// KILLS: a review without the bounds, or with a looser compare than the
+    /// run's (the shapes the review named in M1).
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn the_review_decides_as_the_run_decides() {
+        let m = mapping();
+        let mut t = FakeTarget::default();
+        for g in ["app", "mixed", "done"] {
+            t.groups.insert(g.into(), consumer("Empty", 0));
+        }
+        let part = |p: u32| ("r-orders".to_string(), p);
+        t.committed.insert(
+            "mixed".into(),
+            Ok([(part(0), Some(40)), (part(1), None)].into()),
+        );
+        t.committed.insert(
+            "done".into(),
+            Ok([(part(0), Some(40)), (part(1), Some(12))].into()),
+        );
+        let marks = |p0: (i64, i64), p1: Option<(i64, i64)>| {
+            let mut out: BTreeMap<Part, (i64, i64)> = [(part(0), p0)].into();
+            if let Some(p1) = p1 {
+                out.insert(part(1), p1);
+            }
+            out
+        };
+        let at = |g: &str, marks: &BTreeMap<Part, (i64, i64)>| {
+            read_group(&t, &m, &restore_ref(), marks, &sel("app", g))
+        };
+        let cases: [(&str, &str, BTreeMap<Part, (i64, i64)>, Option<&str>); 6] = [
+            (
+                "retention moved the log start",
+                "app",
+                marks((41, 100), Some((0, 100))),
+                Some(so::BELOW_TARGET_LOG_START),
+            ),
+            (
+                "past the end",
+                "app",
+                marks((0, 100), Some((0, 11))),
+                Some(so::ABOVE_TARGET_END),
+            ),
+            (
+                "marks not read",
+                "app",
+                marks((0, 100), None),
+                Some(so::TARGET_MARKS_UNREADABLE),
+            ),
+            (
+                "mixed: applied and absent",
+                "mixed",
+                wide_marks(),
+                Some(so::TARGET_POSITIONS_CHANGED),
+            ),
+            (
+                "control: inside the marks",
+                "app",
+                marks((40, 40), Some((12, 12))),
+                None,
+            ),
+            ("control: already applied", "done", wide_marks(), None),
+        ];
+        for (name, group, marks, want) in cases {
+            let r = at(group, &marks);
+            assert_eq!(word(&r), want, "{name}: {:?}", r.refusal);
+            if want.is_none() {
+                assert_eq!(r.already_applied, group == "done", "{name}");
+                continue;
+            }
+            // The run's own answer over the same plan group and marks.
+            let (plan, _) = so::plan_from_mapping(
+                &m,
+                restore_ref(),
+                &[so::GroupChoice {
+                    source: "app".into(),
+                    target: group.into(),
+                }],
+            )
+            .expect("a plan");
+            let run = crate::switchover::apply::apply_group(&t, &plan.groups[0], &marks);
+            assert_eq!(run.outcome, so::REFUSED, "{name}");
+            assert!(
+                run.reason
+                    .as_deref()
+                    .is_some_and(|w| w.starts_with(want.unwrap_or_default())),
+                "{name}: the run says {:?}",
+                run.reason
+            );
+        }
     }
 
     /// **The row and the details**: ready names the counts by class; one
@@ -794,7 +919,7 @@ mod tests {
         let mut t = FakeTarget::default();
         t.groups.insert("busy".into(), consumer("Stable", 3));
         let now = chrono::Utc::now();
-        let ok = vec![read_group(&t, &m, &sel("app", "app"))];
+        let ok = vec![rg(&t, &m, &sel("app", "app"))];
         let row = groups_row(&ok, now);
         assert_eq!(row.state, CheckState::Ready);
         assert_eq!(row.code, CheckCode::GroupsAdmissible);
@@ -819,8 +944,8 @@ mod tests {
             ])
         );
         let mixed = vec![
-            read_group(&t, &m, &sel("app", "app")),
-            read_group(&t, &m, &sel("app", "busy")),
+            rg(&t, &m, &sel("app", "app")),
+            rg(&t, &m, &sel("app", "busy")),
         ];
         let row = groups_row(&mixed, now);
         assert_eq!(row.state, CheckState::NotReady);

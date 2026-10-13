@@ -113,13 +113,44 @@ fn changed_reason(changed: &[(String, u32, Option<i64>)], parts: &[PlannedPartit
     format!("{}: {}", so::TARGET_POSITIONS_CHANGED, what.join("; "))
 }
 
-/// **One plan group, applied.** `marks` are the target partitions' `(log
-/// start, high watermark)` read before any commit of the run.
-pub fn apply_group(
+/// What steps 1 to 4 decided for one group, before any commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Every check held: commit (`creates`: the commit creates the group).
+    Commit { creates: bool },
+    /// Every planned partition already holds its planned offset: no commit.
+    AlreadyApplied,
+    /// Refused or failed before any commit; the record says why.
+    Stop(Box<GroupRecord>),
+}
+
+/// **Steps 1 to 4 of one group, read-only**: the classification and §3.5's
+/// admission, every planned offset inside the target's marks, the priors
+/// (RequireStable) and the compare-and-set. `switchover run` commits on
+/// [`Verdict::Commit`]; the `switchoverReadiness` review reports the same
+/// verdict over the plan `logweir switchover plan` would write, and commits
+/// nothing — ONE decision, so the review and the run cannot disagree.
+#[derive(Debug, Clone)]
+pub struct Decided {
+    /// The classification.
+    pub classified: TargetGroup,
+    /// The classification, in the record's words.
+    pub words: String,
+    /// The planned partitions, each with its prior once read.
+    pub parts: Vec<PlannedPartition>,
+    /// The priors, once read.
+    pub priors: Option<BTreeMap<Part, Option<i64>>>,
+    pub verdict: Verdict,
+}
+
+/// See [`Decided`]. `marks` are the target partitions' `(log start, high
+/// watermark)` read before any commit of the run.
+#[must_use]
+pub fn decide_group(
     target: &dyn SwitchoverTarget,
     g: &PlanGroup,
     marks: &BTreeMap<Part, (i64, i64)>,
-) -> GroupRecord {
+) -> Decided {
     let mut parts = planned(g);
     let keys: Vec<Part> = parts
         .iter()
@@ -127,6 +158,14 @@ pub fn apply_group(
         .collect();
     let classified = target.classify(&g.target);
     let words = classification_words(&classified);
+    let stop =
+        |record: GroupRecord, parts: Vec<PlannedPartition>, classified: TargetGroup| Decided {
+            classified,
+            words: words.clone(),
+            parts,
+            priors: None,
+            verdict: Verdict::Stop(Box::new(record)),
+        };
     let refused = |reason: String, parts: &[PlannedPartition]| {
         record(
             g,
@@ -144,7 +183,7 @@ pub fn apply_group(
     let creates = match so::admit_group(&classified) {
         Ok(creates) => creates,
         Err(reason) if reason == so::COMMIT_FAILED => {
-            return record(
+            let r = record(
                 g,
                 words.clone(),
                 so::FAILED,
@@ -153,13 +192,18 @@ pub fn apply_group(
                 None,
                 None,
                 false,
-            )
+            );
+            return stop(r, parts, classified);
         }
-        Err(reason) => return refused(reason.to_string(), &parts),
+        Err(reason) => {
+            let r = refused(reason.to_string(), &parts);
+            return stop(r, parts, classified);
+        }
     };
     // 2. Every planned offset inside the target partition now.
     if let Err(why) = so::check_bounds(&parts, marks) {
-        return refused(why, &parts);
+        let r = refused(why, &parts);
+        return stop(r, parts, classified);
     }
     // 3. The priors, read BEFORE any commit (RequireStable).
     let priors = match target.committed(&g.target, &keys, !creates) {
@@ -173,7 +217,7 @@ pub fn apply_group(
                     so::TARGET_POSITIONS_CHANGED
                 ),
                 ReadFailure::Other(why) => {
-                    return record(
+                    let r = record(
                         g,
                         words.clone(),
                         so::FAILED,
@@ -185,10 +229,12 @@ pub fn apply_group(
                         None,
                         None,
                         false,
-                    )
+                    );
+                    return stop(r, parts, classified);
                 }
             };
-            return refused(reason, &parts);
+            let r = refused(reason, &parts);
+            return stop(r, parts, classified);
         }
     };
     for p in &mut parts {
@@ -198,8 +244,45 @@ pub fn apply_group(
             .flatten();
     }
     // 4. The compare-and-set.
-    match so::compare(&parts) {
-        Decision::AlreadyApplied => {
+    let verdict = match so::compare(&parts) {
+        Decision::AlreadyApplied => Verdict::AlreadyApplied,
+        Decision::Changed(changed) => {
+            let mut r = refused(changed_reason(&changed, &parts), &parts);
+            for (rp, p) in r.partitions.iter_mut().zip(&parts) {
+                rp.prior = p.current;
+            }
+            Verdict::Stop(Box::new(r))
+        }
+        Decision::Apply => Verdict::Commit { creates },
+    };
+    Decided {
+        classified,
+        words,
+        parts,
+        priors: Some(priors),
+        verdict,
+    }
+}
+
+/// **One plan group, applied.** `marks` are the target partitions' `(log
+/// start, high watermark)` read before any commit of the run. Steps 1 to 4
+/// are [`decide_group`]'s; 5 and 6 commit and read back.
+pub fn apply_group(
+    target: &dyn SwitchoverTarget,
+    g: &PlanGroup,
+    marks: &BTreeMap<Part, (i64, i64)>,
+) -> GroupRecord {
+    let Decided {
+        words,
+        parts,
+        priors,
+        verdict,
+        ..
+    } = decide_group(target, g, marks);
+    let priors = priors.unwrap_or_default();
+    let creates = match verdict {
+        Verdict::Stop(r) => return *r,
+        Verdict::AlreadyApplied => {
             return record(
                 g,
                 words,
@@ -211,15 +294,12 @@ pub fn apply_group(
                 false,
             )
         }
-        Decision::Changed(changed) => {
-            let mut r = refused(changed_reason(&changed, &parts), &parts);
-            for (rp, p) in r.partitions.iter_mut().zip(&parts) {
-                rp.prior = p.current;
-            }
-            return r;
-        }
-        Decision::Apply => {}
-    }
+        Verdict::Commit { creates } => creates,
+    };
+    let keys: Vec<Part> = parts
+        .iter()
+        .map(|p| (p.topic.clone(), p.partition))
+        .collect();
     // 5. The commit, from a non-member: the broker refuses it for the whole
     //    request while the group has any member.
     let positions: Vec<(Part, i64)> = parts

@@ -2457,7 +2457,8 @@ restore's target. Nothing commits a position automatically after a restore.
    Then, per group, independently: a group with members is `GroupActive`; a
    share or streams group `TargetGroupTypeUnsupported`; one the principal
    cannot see `TargetNotVisible`; an offset outside the partition now
-   `BelowTargetLogStart`/`AboveTargetEnd`; the committed positions are read
+   `BelowTargetLogStart`/`AboveTargetEnd` (`TargetMarksUnreadable` when a
+   partition's marks could not be read); the committed positions are read
    (the priors) and compared — `applied` when they are what the plan expects,
    `alreadyApplied` when they are the plan's, `TargetPositionsChanged`
    otherwise — and the commit is Logweir's own non-member commit, which the
@@ -2475,6 +2476,19 @@ rollback-plan --record R` builds `offsets := prior, expected := applied`; a
 group whose consumers ran since is refused, naming how many records they read,
 and a prior that was absent cannot be restored through a commit — it is listed
 with the `kafka-consumer-groups.sh --delete-offsets` command to run.
+
+**A group left `failed: CommitFailed` with some partitions applied** (the
+record's `applied` per partition says which) can be neither re-run (its
+positions are no longer all what the plan expects: `TargetPositionsChanged`)
+nor rolled back (`rollback-plan` reverses `applied` groups only). Both refuse,
+so nothing is overwritten. The way out, with the group stopped, is the
+broker's own tool: remove the positions the record shows applied
+(`kafka-consumer-groups.sh --bootstrap-server <b> --group <g> --topic <t>:<p>
+--delete-offsets`, one per applied partition), check with `--describe` that
+the group holds no position on the restored topic, and create a new
+`Switchover` with the same plan. (Setting the rest by hand with
+`--reset-offsets --to-offset <planned> --execute` also works, and no signed
+record then shows that commit.)
 
 **Permissions.** The runner's target principal needs Describe on the cluster
 (a complete group listing), Describe and Read on each target group, and

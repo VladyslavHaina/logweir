@@ -14,7 +14,7 @@
 //! | row | rows | proves |
 //! |---|---|---|
 //! | `the_headline_a_paused_consumer_resumes_at_its_record` | C1, C3, C8, C9, C17 | positions absent after the restore; a paused group resumes on the restored topic at `x-original-offset = P` with the source key and value (log start 5); a caught-up group at the end, a new record its first; an emptied partition exact at 0; the Restore's approval cannot run it; committing `P` unmapped lands 5 off |
-//! | `live_groups_are_refused_and_a_new_run_recovers` | C2 (4.3), C4, C5 | a live classic and a live KIP-848 group refused `GroupActive`, readback unchanged; `PartiallyApplied`; the same plan again: `alreadyApplied` for the applied, the others applied once their members stopped; a moved group `TargetPositionsChanged`; a member's own commit is accepted by the broker |
+//! | `live_groups_are_refused_and_a_new_run_recovers` | C2 (4.3), C4, C5 | a live classic and a live KIP-848 group refused `GroupActive`, readback unchanged; `PartiallyApplied`; the same plan again: `alreadyApplied` for the applied, the others applied once their members stopped; a moved group `TargetPositionsChanged`; a commit by a second member of the SAME live group is accepted and moves its readback |
 //! | `a_rollback_restores_priors_and_is_refused_once_consumers_moved` | C15 | a rollback plan restores the priors and lists the absent ones; after a consumer read 10 records it is refused naming them |
 //! | `a_recreated_target_topic_is_refused` | C10 | `TargetGenerationChanged`, nothing applied; unchanged: applies |
 //! | `only_a_passing_complete_restore_maps_positions` | C11 | a sampled restore writes no mapping and is refused naming `coverage`; a complete restore with a record planted before verification is refused naming `unexpected` |
@@ -1166,36 +1166,66 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
             .all(|p| p.prior.is_none() && p.readback == Some(p.planned)));
     }
 
-    // C2's negative control: a MEMBER's own commit is accepted by the broker.
-    let member_commit = {
+    // C2's negative control (review L2): a commit by a MEMBER OF THE SAME
+    // LIVE GROUP is accepted by the broker and moves that group's readback,
+    // so "readback unchanged" above would have caught a commit made as one.
+    let (member_commit, member_partition) = {
         let c: BaseConsumer = rdkafka::config::ClientConfig::new()
             .set("bootstrap.servers", harness::bootstrap())
-            .set("group.id", format!("member-{n}"))
+            .set("group.id", gs[2].as_str())
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
             .create()
             .expect("a consumer");
         c.subscribe(&[&target]).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(90);
         while c.assignment().map(|a| a.count()).unwrap_or(0) == 0 && Instant::now() < deadline {
             let _ = c.poll(Duration::from_millis(500));
         }
+        let partition = c
+            .assignment()
+            .ok()
+            .and_then(|a| a.elements().first().map(|e| e.partition()))
+            .expect("the second member of the live group is assigned a partition");
         let mut tpl = rdkafka::TopicPartitionList::new();
-        tpl.add_partition_offset(&target, 0, rdkafka::Offset::Offset(7))
+        tpl.add_partition_offset(&target, partition, rdkafka::Offset::Offset(7))
             .unwrap();
         let res = c.commit(&tpl, rdkafka::consumer::CommitMode::Sync);
+        c.unsubscribe();
         drop(c);
-        res.is_ok()
+        (res.is_ok(), partition)
     };
     assert!(
         member_commit,
-        "C2 control: the broker accepts the member's own commit"
+        "C2 control: the broker accepts a commit from a member of the live group"
     );
-    assert_eq!(committed(&format!("member-{n}"), &target, 1), vec![Some(7)]);
+    let moved = committed(&gs[2], &target, 2);
+    assert_eq!(
+        moved[usize::try_from(member_partition).expect("a partition")],
+        Some(7),
+        "C2 control: a member's commit on the SAME group moves its readback: {moved:?}"
+    );
 
-    // The members stop; the SAME plan in a new run.
+    // The members stop; the control's own commit is removed once the group
+    // is empty, so the SAME plan meets the group as the first run did.
     stop_member(&gs[2]);
     stop_member(&gs[3]);
+    let deleted = harness::compose_exec_broker(&[
+        "/opt/kafka/bin/kafka-consumer-groups.sh",
+        "--bootstrap-server",
+        IN_NETWORK,
+        "--delete-offsets",
+        "--group",
+        &gs[2],
+        "--topic",
+        &target,
+    ]);
+    assert!(
+        deleted.status.success(),
+        "delete-offsets:\n{}",
+        text(&deleted)
+    );
+    assert_eq!(committed(&gs[2], &target, 2), vec![None, None]);
     let second = switchover(&r, &sc_key, &p, &approval);
     let o = outcomes(&second);
     let by = |g: &str| o.iter().find(|x| x.0 == g).cloned().expect("an outcome");
@@ -1219,7 +1249,9 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
     );
     write_evidence(
         "c2_c4_c5",
-        &json!({"first": rec, "second": rec2, "first_lines": text(&first.out), "member_commit": member_commit}),
+        &json!({"first": rec, "second": rec2, "first_lines": text(&first.out),
+                "member_commit": member_commit, "member_partition": member_partition,
+                "readback_after_member_commit": moved}),
     );
 }
 

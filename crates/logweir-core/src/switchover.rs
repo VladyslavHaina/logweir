@@ -85,6 +85,10 @@ pub const TARGET_GENERATION_CHANGED: &str = "TargetGenerationChanged";
 pub const TARGET_IDENTITY_UNKNOWN: &str = "TargetIdentityUnknown";
 pub const BELOW_TARGET_LOG_START: &str = "BelowTargetLogStart";
 pub const ABOVE_TARGET_END: &str = "AboveTargetEnd";
+/// A planned partition whose log start and high watermark could not be read
+/// on the target (the partition is missing, or its offsets could not be
+/// listed): the offset cannot be held to them.
+pub const TARGET_MARKS_UNREADABLE: &str = "TargetMarksUnreadable";
 pub const GROUP_ACTIVE: &str = "GroupActive";
 pub const TARGET_GROUP_TYPE_UNSUPPORTED: &str = "TargetGroupTypeUnsupported";
 pub const TARGET_GROUP_TYPE_UNPROVEN: &str = "TargetGroupTypeUnproven";
@@ -742,7 +746,8 @@ pub fn compare(partitions: &[PlannedPartition]) -> Decision {
 ///
 /// # Errors
 ///
-/// [`BELOW_TARGET_LOG_START`] or [`ABOVE_TARGET_END`], with the partition.
+/// [`BELOW_TARGET_LOG_START`] or [`ABOVE_TARGET_END`], with the partition;
+/// [`TARGET_MARKS_UNREADABLE`] for a partition whose marks were not read.
 pub fn check_bounds(
     partitions: &[PlannedPartition],
     marks: &BTreeMap<(String, u32), (i64, i64)>,
@@ -750,7 +755,9 @@ pub fn check_bounds(
     for p in partitions {
         let Some(&(start, end)) = marks.get(&(p.topic.clone(), p.partition)) else {
             return Err(format!(
-                "{ABOVE_TARGET_END}: {}:{} has no partition on the target",
+                "{TARGET_MARKS_UNREADABLE}: {}:{}: the target's log start and high watermark \
+                 could not be read for it (the partition is missing, or its offsets could not \
+                 be listed), so the planned offset cannot be held to them",
                 p.topic, p.partition
             ));
         };
@@ -1253,6 +1260,13 @@ mod tests {
         assert!(check_bounds(&[pp(51, None, None)], &marks)
             .unwrap_err()
             .starts_with(ABOVE_TARGET_END));
+        // A partition whose marks were not read is named for that, never as
+        // above the end (review L4).
+        let mut other = pp(5, None, None);
+        other.partition = 1;
+        assert!(check_bounds(&[other], &marks)
+            .unwrap_err()
+            .starts_with(TARGET_MARKS_UNREADABLE));
     }
 
     /// AP-04.2-1/-2/-5/-6/-7.
@@ -1366,6 +1380,26 @@ mod tests {
             .offsets
             .insert(0, 31);
         assert!(check_against_record(&wrong, &r).is_err());
+        // Review L1: an `expected` edited to where the consumers are now (50)
+        // would commit the priors over their progress; the plan is refused
+        // because its expectations are not the record's readback.
+        let mut edited = plan.clone();
+        edited.groups[0]
+            .topics
+            .get_mut("r-orders")
+            .unwrap()
+            .expected = Expected::Positions([(0, 50)].into());
+        let why = check_against_record(&edited, &r).unwrap_err();
+        assert!(why.contains("expects the recorded readback"), "{why}");
+        // And `expected: none` is no rollback plan at all.
+        let mut none_expected = plan.clone();
+        none_expected.groups[0]
+            .topics
+            .get_mut("r-orders")
+            .unwrap()
+            .expected = Expected::none();
+        assert!(validate(&none_expected).is_err());
+        assert!(check_against_record(&none_expected, &r).is_err());
         // A record with no prior anywhere has nothing to roll back.
         let mut none = r.clone();
         none.groups[0].partitions.retain(|p| p.prior.is_none());
