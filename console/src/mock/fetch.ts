@@ -178,6 +178,8 @@ async function route(request: Request): Promise<Response> {
 
   if (method === "GET" && path === "/session") return json(200, session);
   { const approvals = await approvalsMock(request, method, path); if (approvals) return approvals; }
+  // A switchover review is R7's preflight: before R5's and R2's, which refuse other checks.
+  if (/\/preflights(\/|$)/.test(path)) { const so = await switchoversMock(request); if (so) return so; }
   // After the approvals demo namespaces (R6), before R2's preflight mock, which refuses a restore check.
   { const r5 = await restoresMock(request); if (r5) return r5; }
   { const settings = (await connectionsMock(request, method, path)) ?? (await destinationsMock(request, method, path)); if (settings) return settings; }
