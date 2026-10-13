@@ -228,10 +228,10 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                   <Tr>
                     <Th screenReaderText="Details" />
                     <Th>Point</Th>
-                    <Th>Availability</Th>
-                    <Th>Verification</Th>
+                    <Th modifier="fitContent">Availability</Th>
+                    <Th modifier="fitContent">Verification</Th>
                     <Th>Signed by</Th>
-                    <Th screenReaderText="Restore" />
+                    <Th screenReaderText="Restore" modifier="fitContent" />
                   </Tr>
                 </Thead>
                 {rows.map((p, i) => {
