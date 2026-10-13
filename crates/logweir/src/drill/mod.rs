@@ -3792,12 +3792,14 @@ mod pod_log_lines_pin {
     }
 
     /// **`exiting` prints the stopped creation step's two lines
-    /// through the seam, on exit 1 only, and nothing else in this file prints
-    /// a `failure-reason=`.** The bytes are pinned by
+    /// through the one terminal block, on exit 1 only, and nothing else in
+    /// this file builds a `failure-reason=`.** The bytes are pinned by
     /// `tests/original_name.rs::the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last`;
-    /// this pins that the terminal path calls it. KILLS: `exiting` no longer
-    /// printing the pair (the Restore would be a generic `Failed`, with the
-    /// left topics named nowhere durable); a second printer.
+    /// this pins that the terminal path pushes them, and prints the block
+    /// once, last (FX-43: `crate::exit::FinalLines`). KILLS: `exiting` no
+    /// longer printing the pair (the Restore would be a generic `Failed`,
+    /// with the left topics named nowhere durable); a second printer; the
+    /// block printed before a line is pushed.
     #[test]
     fn exiting_prints_the_stopped_creation_step_through_its_seam() {
         let drill = include_str!("mod.rs");
@@ -3806,35 +3808,39 @@ mod pod_log_lines_pin {
             .next()
             .expect("the production half");
         let exiting = fn_body(production, "exiting");
-        let call = "let _ = print_creation_stop_to(&mut std::io::stdout().lock(), race);";
+        let call = "last.extend(creation_stop_lines(race));";
         let guard = "if let (ExitCode::Operational, Some(race)) = (code, race) {";
         let at = exiting.find(guard).expect("on exit 1, with a stop");
         assert!(
-            exiting[at..]
-                .trim_start_matches(guard)
-                .trim_start()
-                .starts_with("// A closed stdout"),
-            "the guard's body is the seam call"
+            exiting[at + guard.len()..].trim_start().starts_with(call),
+            "the guard's body pushes the pair"
         );
         assert_eq!(exiting.matches(call).count(), 1);
-        // The definition is generic (`…_to<W: …>(`), so this counts calls.
         assert_eq!(
-            production.matches("print_creation_stop_to(").count(),
-            1,
-            "called from exactly one place"
+            production.matches("creation_stop_lines(").count(),
+            3,
+            "the definition, the writer seam over it, and `exiting`"
         );
-        // One printer of the reason in this command, inside the seam.
+        // ONE print of the block, after every push.
+        assert_eq!(exiting.matches("last.print(code);").count(), 1);
+        let printed = exiting.find("last.print(code);").expect("the block");
+        assert!(
+            exiting.rfind("last.push(").is_some_and(|p| p < printed)
+                && exiting.rfind("last.extend(").is_some_and(|p| p < printed),
+            "every line is pushed before the one print"
+        );
+        // One builder of the reason in this command, inside the pair.
         assert_eq!(production.matches("failure_reason_line(").count(), 1);
         let seam = production
-            .find("pub fn print_creation_stop_to<W: std::io::Write>(")
-            .expect("the seam");
+            .find("pub fn creation_stop_lines(")
+            .expect("the pair");
         let seam = &production[seam..];
-        let seam = &seam[..seam.find("\n}\n").expect("the seam ends")];
+        let seam = &seam[..seam.find("\n}\n").expect("the pair ends")];
         let lists = seam.find("stop.lists().line()").expect("the lists' line");
         let reason = seam
             .find("failure_reason_line(stop.reason)")
             .expect("the reason");
-        assert!(reason > lists, "the reason is printed LAST");
+        assert!(reason > lists, "the reason is LAST");
     }
 }
 

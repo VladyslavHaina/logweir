@@ -3857,9 +3857,9 @@ async fn fx19_a_crash_whose_ttl_patch_failed_warns_once() {
     assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
 }
 
-/// **The probe's log read is a bounded tail**: it asks for the last
-/// `TERMINAL_LOG_TAIL_LINES` lines and nothing else, the read a `Restore`
-/// makes at every exit but 3. The two contract lines are last, so the verdict
+/// **The probe's log read is a bounded tail**: the one terminal bound
+/// (`runner_log::TERMINAL`, FX-43), the read a `Restore` and a `Backup` make
+/// at every exit code. The two contract lines are last, so the verdict
 /// is the one the whole log gives.
 ///
 /// KILLS: the unbounded read (an empty query).
@@ -3877,9 +3877,22 @@ async fn the_probe_log_read_asks_for_a_bounded_tail() {
         .filter_map(|r| r.uri.split_once("/log?"))
         .map(|(_, query)| query.split('&').filter(|p| !p.is_empty()).collect())
         .collect();
-    let bound = format!(
+    // FX-43: the one terminal bound every Job-owning kind reads with.
+    let lines = format!(
         "tailLines={}",
-        weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
+        weirkeeper::runner_log::TERMINAL_LOG_TAIL_LINES
     );
-    assert_eq!(queries, vec![vec![bound.as_str()]], "{seen:?}");
+    let bytes = format!(
+        "limitBytes={}",
+        weirkeeper::runner_log::TERMINAL_LOG_LIMIT_BYTES
+    );
+    let mut got = queries.clone();
+    for q in &mut got {
+        q.sort_unstable();
+    }
+    assert_eq!(
+        got,
+        vec![vec!["container=runner", bytes.as_str(), lines.as_str()]],
+        "{seen:?}"
+    );
 }

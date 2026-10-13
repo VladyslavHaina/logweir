@@ -122,7 +122,14 @@ async fn a_key_on_the_last_line_of_a_long_log_is_found() {
     );
     let (client, _) = kubelet_client(long_log(pair.trim_end()));
     let pods: Api<Pod> = Api::namespaced(client, NS);
-    let read = refusal::read(&pods, NS, POD, RefusingRun::Restore, Some(&token)).await;
+    let read = refusal::read(
+        &pods,
+        NS,
+        POD,
+        RefusingRun::Restore,
+        &weirkeeper::job::JobToken::RefusalDetail(token.clone()),
+    )
+    .await;
     assert!(
         matches!(read.reason, RunnerReason::Stated(_)),
         "{:?}",

@@ -2214,7 +2214,7 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
                 .expect("runner args");
             let token = args.pop().expect("the token");
             let flag = args.pop().expect("its flag");
-            assert_eq!(flag, logweir_core::refusal_detail::LINE_TOKEN_ARG);
+            assert_eq!(flag, logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG);
             token.as_str().expect("a string").to_string()
         })
         .collect();
@@ -11448,9 +11448,8 @@ use logweir_core::refusal_detail::{
     REFUSAL_DETAIL_PREFIX, REPLACEMENT, RESTORE_REASON_CODES, TRUNCATION_MARKER,
 };
 use weirkeeper::controllers::restore::finished_status_patch_with_reason;
-use weirkeeper::refusal::{
-    runner_reason, RunnerReason, REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES,
-};
+use weirkeeper::refusal::{runner_reason, RunnerReason};
+use weirkeeper::runner_log::{TERMINAL_LOG_LIMIT_BYTES, TERMINAL_LOG_TAIL_LINES};
 
 /// What a refused `Restore`'s terminal condition says for a runner that
 /// prints no detail line.
@@ -11758,17 +11757,18 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
     let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
     for want in [
         "container=runner".to_string(),
-        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+        format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
     ] {
         assert!(
             query.split('&').any(|p| p == want),
             "the exit-3 read carries `{want}`: {query}"
         );
     }
+    // FX-43: the one terminal bound, 256 lines and 256 times CRI's 16 KiB.
     assert_eq!(
-        (REFUSAL_LOG_TAIL_LINES, REFUSAL_LOG_LIMIT_BYTES),
-        (32, 524_288)
+        (TERMINAL_LOG_TAIL_LINES, TERMINAL_LOG_LIMIT_BYTES),
+        (256, 4_194_304)
     );
     fx34_assert_nothing_raw(&seen, "k3");
 
@@ -11925,19 +11925,17 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
                 parts
             })
             .collect();
-        let expected = if exit_code == 3 {
-            vec![
-                "container=runner".to_string(),
-                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
-                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-            ]
-        } else {
-            vec![format!(
-                "tailLines={}",
-                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
-            )]
-        };
-        assert_eq!(queries, vec![expected], "[{name}] the one log read");
+        // FX-43: ONE terminal bound, the same at every exit code.
+        let expected = vec![
+            "container=runner".to_string(),
+            format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
+            format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        ];
+        assert_eq!(
+            queries,
+            vec![expected],
+            "[{name}] the one log read (exit {exit_code})"
+        );
     }
 }
 
@@ -12128,17 +12126,17 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     // is taken from it: not a detail line, not a state.
     for (label, tail) in [
         (
-            "1 MiB of detail line",
+            "4 MiB of detail line",
             format!(
                 "{}\nrefusal-reason=TargetTopicConfigRefused\n",
-                fx34_detail("GuardRefused", &words(1024 * 1024))
+                fx34_detail("GuardRefused", &words(4 * 1024 * 1024))
             ),
         ),
         (
-            "1 MiB of noise, then a valid detail line",
+            "4 MiB of noise, then a valid detail line",
             format!(
                 "{}\n{}\nrefusal-reason=TargetTopicConfigRefused\n",
-                words(1024 * 1024),
+                words(4 * 1024 * 1024),
                 fx34_detail("GuardRefused", "a sentence")
             ),
         ),
@@ -12147,8 +12145,8 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
         assert_eq!(
             fx34_message(&status),
             format!(
-                "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of \
-                 the pod log are over the 512 KiB this controller reads"
+                "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 256 lines \
+                 of the pod log are over the 4096 KiB this controller reads"
             ),
             "[{label}]"
         );
@@ -12337,9 +12335,15 @@ async fn a_created_job_carries_a_fresh_line_token_and_nothing_else_does() {
             .as_array_mut()
             .expect("runner args");
         assert_eq!(args.pop().expect("the token"), token.as_str());
-        assert_eq!(args.pop().expect("its flag"), LINE_TOKEN_ARG);
+        assert_eq!(
+            args.pop().expect("its flag"),
+            logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+        );
         assert!(
-            !args.iter().any(|a| a == LINE_TOKEN_ARG),
+            !args
+                .iter()
+                .any(|a| a == LINE_TOKEN_ARG
+                    || a == logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG),
             "the flag is given once"
         );
         // With the two arguments off, the Job holds it nowhere: not the

@@ -1997,8 +1997,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        47,
-        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
+        48,
+        "the forty-eight terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2039,7 +2039,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
          name the connection the Job was built for), plus PROD-01.1a's \
          `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
-         markers under a plan that does not allow them); \
+         markers under a plan that does not allow them), plus FX-43's \
+         `RunnerOlderThanController` (a Job given the every-line token whose runner vouched for \
+         no exit: the runner image is older than the controller); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -5271,7 +5273,8 @@ fn posted_job(seen: &[SeenBody]) -> Option<Value> {
             .as_array()
             .expect("an argv")
             .iter()
-            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG),
+            .any(|a| a == logweir_core::refusal_detail::LINE_TOKEN_ARG
+                || a == logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG),
         "only a runner Job is given a line token: {args}"
     );
     Some(job)
@@ -5290,7 +5293,7 @@ fn posted_job_and_line_token(seen: &[SeenBody]) -> Option<(Value, String)> {
     let flag = args.pop().expect("its flag");
     assert_eq!(
         flag,
-        logweir_core::refusal_detail::LINE_TOKEN_ARG,
+        logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
         "the last two arguments of a created runner Job are the line token's"
     );
     let token = token.as_str().expect("a string").to_string();
@@ -14357,7 +14360,7 @@ use logweir_core::refusal_detail::{
     refusal_detail_line, LineToken, RefusingRun, BACKUP_REASON_CODES, LINE_TOKEN_ARG,
     REFUSAL_DETAIL_PREFIX, REPLACEMENT,
 };
-use weirkeeper::refusal::{REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES};
+use weirkeeper::runner_log::{TERMINAL_LOG_LIMIT_BYTES, TERMINAL_LOG_TAIL_LINES};
 
 /// What a refused `Backup`'s terminal condition says for a runner that
 /// prints no detail line.
@@ -14616,8 +14619,8 @@ async fn a_refused_backup_says_why_in_its_terminal_condition() {
     let query = reads[0].uri.split_once('?').map_or("", |(_, q)| q);
     for want in [
         "container=runner".to_string(),
-        format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-        format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
+        format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
     ] {
         assert!(
             query.split('&').any(|p| p == want),
@@ -14771,19 +14774,17 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
                 parts
             })
             .collect();
-        let expected = if exit_code == 3 {
-            vec![
-                "container=runner".to_string(),
-                format!("limitBytes={REFUSAL_LOG_LIMIT_BYTES}"),
-                format!("tailLines={REFUSAL_LOG_TAIL_LINES}"),
-            ]
-        } else {
-            vec![format!(
-                "tailLines={}",
-                weirkeeper::controllers::restore::TERMINAL_LOG_TAIL_LINES
-            )]
-        };
-        assert_eq!(queries, vec![expected], "[{name}] the one log read");
+        // FX-43: ONE terminal bound, the same at every exit code.
+        let expected = vec![
+            "container=runner".to_string(),
+            format!("limitBytes={TERMINAL_LOG_LIMIT_BYTES}"),
+            format!("tailLines={TERMINAL_LOG_TAIL_LINES}"),
+        ];
+        assert_eq!(
+            queries,
+            vec![expected],
+            "[{name}] the one log read (exit {exit_code})"
+        );
     }
 }
 
@@ -14942,18 +14943,18 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
     // A state that is not a state name never reaches `exitReason`.
     let (status, _) = fx34_refused(log_body("refusal-reason=<script>alert(1)</script>\n")).await;
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");
-    // One mebibyte: the read stops at its own cap and takes nothing.
+    // Four mebibytes: the read stops at its own cap and takes nothing.
     let (status, seen) = fx34_refused(log_body(&format!(
         "{}\n{}\nrefusal-reason=CredentialNotRenderable\n",
-        "lorem ".repeat(175_000),
+        "lorem ".repeat(700_000),
         fx34_detail("GuardRefused", "a sentence")
     )))
     .await;
     assert_eq!(
         fx34_message(&status),
         format!(
-            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 32 lines of the \
-             pod log are over the 512 KiB this controller reads"
+            "{FX34_OLD_MESSAGE}; the runner's reason could not be read: the last 256 lines of \
+             the pod log are over the 4096 KiB this controller reads"
         )
     );
     assert_eq!(status["exitReason"], "GuardRefusedUnknownReason");

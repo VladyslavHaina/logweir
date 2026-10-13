@@ -90,7 +90,14 @@ where
     let _guard = tracing::subscriber::set_default(subscriber);
     let client = make_client();
     let pods: Api<Pod> = Api::namespaced(client, NS);
-    let log = read(&pods, NS, POD, RefusingRun::Restore, Some(&token())).await;
+    let log = read(
+        &pods,
+        NS,
+        POD,
+        RefusingRun::Restore,
+        &weirkeeper::job::JobToken::RefusalDetail(token()),
+    )
+    .await;
     let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
     let events = text
         .lines()
@@ -249,7 +256,11 @@ async fn a_read_logs_nothing_the_pod_wrote_and_never_the_token() {
     assert_eq!(levels(&events), vec!["DEBUG"]);
     assert!(!leaked(&events), "{events:?}");
 
-    let over = format!("{}\n{detail}\n", SENTENCE.repeat(12_000));
+    let over = format!(
+        "{}\n{detail}\n",
+        SENTENCE
+            .repeat(weirkeeper::runner_log::TERMINAL_LOG_LIMIT_BYTES as usize / SENTENCE.len() + 1)
+    );
     let (log, events, _) = capture(200, over).await;
     assert_eq!(log.reason, RunnerReason::TailOverBound);
     assert!(log.body.is_empty());

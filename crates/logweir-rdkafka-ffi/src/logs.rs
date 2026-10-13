@@ -288,12 +288,12 @@ impl<T: OwnsClient> LogPumped<T> {
     /// made. The client is dropped with the error.
     pub fn new(inner: T, sink: LogSink) -> Result<Self, CallError> {
         let queue = Queue::new(inner.native_client())?;
-        // SAFETY: `inner.native_client().native_ptr()` is the live
-        // `rd_kafka_t` that `inner` owns for this whole call, and `queue` is a
-        // live queue of that handle; librdkafka takes its own reference to the
-        // queue (`rd_kafka_q_keep`). The code is read as an integer (T12).
-        let code =
-            unsafe { sys::set_log_queue(inner.native_client().native_ptr(), queue.as_ptr()) };
+        let rk = inner.native_client().native_ptr();
+        // SAFETY: `rk` is the live `rd_kafka_t` that `inner` owns for this
+        // whole call, and `queue` is a live queue of that handle; librdkafka
+        // takes its own reference to the queue (`rd_kafka_q_keep`). The code
+        // is read as an integer (T12).
+        let code = unsafe { sys::set_log_queue(rk, queue.as_ptr()) };
         if code != 0 {
             return Err(CallError::Call {
                 code,

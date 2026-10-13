@@ -1061,14 +1061,15 @@ fn a_run_prints_the_token_it_was_given_in_one_line_and_none_otherwise() {
 ///
 /// * exit code 3 is PRODUCED in one place per runner, the `Guard` arm of its
 ///   error's `exit_code`;
-/// * `exiting` is called from one place per runner, and it is where
-///   `crate::exit::print_refusal(` is called, once, directly under
+/// * `exiting` is called from one place per runner, and it is where the pair
+///   is pushed into the terminal block (`last.refusal(`, FX-43's
+///   `crate::exit::FinalLines`), once, directly under
 ///   `if code == ExitCode::GuardRefused {`;
 /// * nothing in either runner prints the state line by itself, which would
 ///   leave the detail line's position to whatever came before; and
 ///   `src/exit.rs` has no printer of the state line alone to reach for
 ///   (`refusal_reason_line` is called in one place, inside
-///   `print_refusal_to`).
+///   `refusal_lines`, which both the block and the writer seam use).
 ///
 /// KILLS: a second exit-3 path that returns the code without `exiting`; the
 /// state line printed alone; a printer of the state line alone put back.
@@ -1121,18 +1122,24 @@ fn every_exit_three_of_a_run_leaves_through_the_one_printer() {
             "{path}: `exiting` has one caller, the one terminal path"
         );
         let printer = format!(
-            "    if code == ExitCode::GuardRefused {{\n        crate::exit::print_refusal(\n            \
+            "    if code == ExitCode::GuardRefused {{\n        last.refusal(\n            \
              logweir_core::refusal_detail::RefusingRun::{run},\n"
         );
         assert_eq!(
             count(&text, &printer),
             1,
-            "{path}: the pair is printed under the exit-3 gate, for this kind of run"
+            "{path}: the pair is pushed under the exit-3 gate, for this kind of run"
+        );
+        assert_eq!(count(&text, ".refusal("), 1, "{path}: and nowhere else");
+        assert_eq!(
+            count(&text, "print_refusal"),
+            0,
+            "{path}: and printed by no other path"
         );
         assert_eq!(
-            count(&text, "print_refusal("),
+            count(&text, "last.print(code);"),
             1,
-            "{path}: and nowhere else"
+            "{path}: the block is printed once"
         );
         assert_eq!(
             count(&text, "print_refusal_reason"),
@@ -1171,7 +1178,13 @@ fn every_exit_three_of_a_run_leaves_through_the_one_printer() {
     assert_eq!(count(&exit, "refusal_detail_line("), 1);
     assert_eq!(
         count(&exit, "pub fn print_refusal"),
-        2,
-        "`print_refusal` and its writer seam, and no third"
+        1,
+        "the writer seam, and no second printer: the terminal paths push the pair into \
+         `FinalLines`"
+    );
+    assert_eq!(
+        count(&exit, "pub fn refusal_lines("),
+        1,
+        "one builder of the pair"
     );
 }

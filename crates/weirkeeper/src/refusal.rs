@@ -380,8 +380,14 @@ pub async fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::JobToken;
     use futures::AsyncReadExt as _;
     use RefusingRun::{Backup, Restore};
+
+    /// A Job an FX-34 controller built: the token in `refusal-detail=`'s JSON.
+    fn fx34(token: &LineToken) -> JobToken {
+        JobToken::RefusalDetail(token.clone())
+    }
 
     /// This Job's token and another Job's, assembled so that no source line
     /// holds a secret-shaped literal.
@@ -717,18 +723,18 @@ mod tests {
     fn a_body_at_the_byte_bound_is_not_scanned() {
         let own = own();
         let genuine = pair(Restore, Some(&own), "a sentence");
-        let mut body = "x".repeat(REFUSAL_LOG_LIMIT_BYTES as usize - genuine.len() - 1);
+        let mut body = "x".repeat(TERMINAL_LOG_LIMIT_BYTES as usize - genuine.len() - 1);
         body.push('\n');
         body.push_str(genuine.trim_end_matches('\n'));
         // One byte under the bound: read.
-        assert_eq!(body.len() as i64, REFUSAL_LOG_LIMIT_BYTES - 1);
+        assert_eq!(body.len() as i64, TERMINAL_LOG_LIMIT_BYTES - 1);
         assert!(matches!(
-            interpret(Restore, Some(&own), body.as_bytes()).reason,
+            interpret(Restore, &fx34(&own), body.as_bytes()).reason,
             RunnerReason::Stated(_)
         ));
         // At the bound: cut, so nothing is taken from it, the body included.
         body.push('\n');
-        let cut = interpret(Restore, Some(&own), body.as_bytes());
+        let cut = interpret(Restore, &fx34(&own), body.as_bytes());
         assert_eq!(cut.reason, RunnerReason::TailOverBound);
         assert!(cut.body.is_empty());
     }
@@ -740,7 +746,7 @@ mod tests {
     /// buffer is eight times the bound).
     #[tokio::test]
     async fn the_stream_is_read_to_the_bound_and_no_further() {
-        let cap = REFUSAL_LOG_LIMIT_BYTES as u64 + 1;
+        let cap = TERMINAL_LOG_LIMIT_BYTES as u64 + 1;
         let mut source = futures::io::repeat(b'x').take(8 * cap);
         let bytes = read_capped(&mut source)
             .await
@@ -748,7 +754,7 @@ mod tests {
         assert_eq!(bytes.len() as u64, cap);
         assert_eq!(source.limit(), 7 * cap, "the rest was never pulled");
         assert_eq!(
-            interpret(Restore, Some(&own()), &bytes).reason,
+            interpret(Restore, &fx34(&own()), &bytes).reason,
             RunnerReason::TailOverBound,
             "and what was read is a cut body, from which nothing is taken"
         );
@@ -764,7 +770,7 @@ mod tests {
         let mut bytes = b"engine said \xFF\xFE\n".to_vec();
         bytes.extend_from_slice(pair(Restore, Some(&own), "a sentence").as_bytes());
         assert!(matches!(
-            interpret(Restore, Some(&own), &bytes).reason,
+            interpret(Restore, &fx34(&own), &bytes).reason,
             RunnerReason::Stated(_)
         ));
         // Inside the sentence itself: one replacement character.
@@ -774,7 +780,7 @@ mod tests {
         )
         .into_bytes();
         bytes.extend_from_slice(b"\xFF\xC0 bytes\"}\nrefusal-reason=GuardRefused\n");
-        match interpret(Restore, Some(&own), &bytes).reason {
+        match interpret(Restore, &fx34(&own), &bytes).reason {
             RunnerReason::Stated(d) => assert_eq!(d.message(), "bad \u{FFFD} bytes"),
             other => panic!("{other:?}"),
         }
@@ -789,7 +795,7 @@ mod tests {
             b"\xFF\",\"code\":\"GuardRefused\",\"message\":\"m\"}\nrefusal-reason=GuardRefused\n",
         );
         assert_eq!(
-            interpret(Restore, Some(&own), &bytes).reason,
+            interpret(Restore, &fx34(&own), &bytes).reason,
             RunnerReason::NotStated
         );
     }
