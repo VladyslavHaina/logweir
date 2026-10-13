@@ -43,6 +43,7 @@ import ArchiveIcon from "@patternfly/react-icons/dist/esm/icons/archive-icon";
 import OutlinedClockIcon from "@patternfly/react-icons/dist/esm/icons/outlined-clock-icon";
 import ShieldAltIcon from "@patternfly/react-icons/dist/esm/icons/shield-alt-icon";
 import HistoryIcon from "@patternfly/react-icons/dist/esm/icons/history-icon";
+import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import UserCheckIcon from "@patternfly/react-icons/dist/esm/icons/user-check-icon";
 import CatalogIcon from "@patternfly/react-icons/dist/esm/icons/catalog-icon";
 import KeyIcon from "@patternfly/react-icons/dist/esm/icons/key-icon";
@@ -80,6 +81,7 @@ export const NAV: { group: string | null; items: Entry[] }[] = [
     group: "Recover",
     items: [
       { path: "restores", label: "Restores", icon: HistoryIcon, flag: "restoresRead" },
+      { path: "switchovers", label: "Switchovers", icon: ExchangeAltIcon, flag: "restoresRead" },
       { path: "approvals", label: "Approvals", icon: UserCheckIcon, flag: "approvalsRead" },
     ],
   },

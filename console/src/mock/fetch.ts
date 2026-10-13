@@ -23,6 +23,7 @@ import { schedulesMock } from "./schedules";
 import { backupsMock } from "./backups";
 import { approvalsMock } from "./approvals";
 import { restoresFallback, restoresMock } from "./restores";
+import { switchoversMock } from "./switchovers";
 
 const LATENCY_MS = 350;
 
@@ -275,6 +276,7 @@ async function route(request: Request): Promise<Response> {
     return json(200, { ...page(points), truncated: false, viewExpired: false });
   }
 
+  { const so = await switchoversMock(request); if (so) return so; }
   return (await restoresFallback(request)) ?? problem(404, "not_found", `The prototype has no mock for ${method} ${path}.`);
 }
 

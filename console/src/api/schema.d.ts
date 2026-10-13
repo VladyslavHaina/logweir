@@ -349,6 +349,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/namespaces/{ns}/switchovers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted. */
+        get: operations["listSwitchovers"];
+        put?: never;
+        /** PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict. */
+        post: operations["createSwitchover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/namespaces/{ns}/switchovers/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** PROD-04.2: one Switchover projection, planBytes included. */
+        get: operations["getSwitchover"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/namespaces/{ns}/switchovers/{name}/approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job. */
+        post: operations["submitSwitchoverApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing. */
+        get: operations["getSwitchoverApprovalRequest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200. */
+        post: operations["approveSwitchoverInConsole"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/namespaces/{ns}/approval-policy": {
         parameters: {
             query?: never;
@@ -1905,6 +1991,28 @@ export interface components {
         };
         /** @description One check's verdict. */
         CheckVerdict: "ready" | "notReady" | "unknown" | "skipped";
+        /** @description PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`. */
+        CloneView: {
+            /**
+             * Format: int64
+             * @description Cleanup Jobs started so far (at most 3).
+             */
+            attempts?: number | null;
+            /**
+             * Format: date-time
+             * @description When the cleanup is due.
+             */
+            expiresAt?: string | null;
+            /** @description `Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`. */
+            phase?: string | null;
+            /** @description Why the cleanup failed or refused, bounded. */
+            reason?: string | null;
+            /**
+             * Format: int64
+             * @description The plan's lifetime in seconds.
+             */
+            ttlSeconds?: number | null;
+        };
         /** @description **PROD-08.1a.** A complete verification's result, copied from `Restore.status.integrity.complete` (itself copied from the signed scorecard) and never recomputed. */
         CompleteVerificationView: {
             /** @description `true` when every SELECTED partition of every restored topic was compared: every partition of a topic unless `selection.partitions` narrows it (PROD-11.1b). `false` is NEVER a pass, on any surface. */
@@ -2256,6 +2364,8 @@ export interface components {
              * @default null
              */
             sourceConnection?: components["schemas"]["SourceConnectionPreflightRequest"];
+            /** @description The switchover block (PROD-04.2). */
+            switchover?: components["schemas"]["SwitchoverPreflightRequest"];
             /**
              * Format: int32
              * @description The check budget in seconds, 30 to 600.
@@ -2373,6 +2483,24 @@ export interface components {
              * @default []
              */
             topics?: string[];
+        };
+        /** @description `POST .../switchovers`: a reviewed plan (`logweir switchover plan`) to apply to stopped groups on a verified restore's target. */
+        CreateSwitchoverRequest: {
+            /** @description The Approval (subject kind `Switchover`) that will authorise it. */
+            approvalRef: components["schemas"]["NameRef"];
+            /**
+             * Format: int64
+             * @description The Job's deadline, 60 to 86400 seconds.
+             */
+            deadlineSeconds: number;
+            /** @description The plan document, exactly as approved, at most 256 KiB. */
+            planBytes: string;
+            /** @description `sha256:<lowercase hex>` of `planBytes`. */
+            planHash: string;
+            /** @description The restore the plan names; it must be the plan's own `restore` block. */
+            restoreRef: components["schemas"]["SwitchoverRestoreRef"];
+            /** @description The change ticket, signed beside the plan in a bound namespace. */
+            ticket?: string | null;
         };
         /** @description `POST .../connections/{name}/topic-discoveries`. */
         CreateTopicDiscoveryRequest: {
@@ -3266,6 +3394,8 @@ export interface components {
             awaitingApproval: boolean;
             /** @description A Backup's capture window. */
             capture?: components["schemas"]["CaptureView"];
+            /** @description PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`; absent for every other run. */
+            clone?: components["schemas"]["CloneView"];
             /** @description A Restore's completion panel. */
             completion?: components["schemas"]["CompletionView"];
             /** @description The status conditions, at most 16. */
@@ -3680,7 +3810,7 @@ export interface components {
             referents: components["schemas"]["ReferentView"][];
         };
         /** @description What a preflight is about. */
-        PreflightOperationDto: "backup" | "restore" | "destinationAccess" | "sourceConnection";
+        PreflightOperationDto: "backup" | "restore" | "destinationAccess" | "sourceConnection" | "switchover";
         /** @description One `Preflight`. */
         PreflightResponse: {
             /** @description The item. */
@@ -4045,6 +4175,8 @@ export interface components {
             targetTopicsAppeared?: components["schemas"]["CreationStopView"];
             /** @description FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never "every selection used the topics' own clocks". */
             timeBasis?: components["schemas"]["RestoreTimeBasisView"];
+            /** @description **PROD-05.2.** `status.topicConfiguration`: for a plan carrying `target.topic_configuration`, each topic's replication factor and overrides before and after, and what the configuration transition did. A CLAIM read off the runner's log; the signed scorecard's block and the phase-9 attestation are the evidence. ABSENT on every other run. */
+            topicConfiguration?: components["schemas"]["TopicConfigurationView"];
             /** @description What phase 0 found about the target topics (`status.topicPreflight`). ABSENT on a run that did not complete phase 0. */
             topicPreflight?: components["schemas"]["TopicPreflightView"];
             /** @description The Kubernetes UID. */
@@ -4747,19 +4879,35 @@ export interface components {
             authUsername?: string | null;
             /** @description The bootstrap servers the runner dials. */
             bootstrapServers: string[];
+            /** @description PROD-11.1a: always `kept`: every restored record keeps its lineage headers (`x-original-offset`, `x-original-timestamp`). */
+            lineageHeaders: string;
             /** @description `scratch` or `newTopic`. */
             mode: string;
             /** @description For a restore under the original topic names only: the requester's statement about declarative owners, which alone decides whether such a run writes. Absent for every other restore. */
             ownerStatement?: components["schemas"]["ScopeOwnerStatementView"];
             /**
              * Format: int16
-             * @description The replication factor of every topic the run creates.
+             * @description `target.default_replication_factor`: the factor of every topic the run creates, except with `topic_configuration`, where a topic the point records a factor for is created at that factor, bounded by the target's brokers, and only one without gets this.
              */
             replicationFactor: number;
             /** @description `target.teardown`: what happens to a SCRATCH run's targets afterwards (`delete`: the topics the run created are deleted; a `newTopic` restore deletes nothing whatever it says). */
             teardown: string;
+            /**
+             * Format: uint64
+             * @description PROD-11.1a: a clone's lifetime in seconds (`target.teardown: {ttl_seconds}`); its topics are deleted that long after the run. Absent for every other plan.
+             */
+            teardownAfterSeconds?: number | null;
+            /** @description PROD-05.2: `target.topic_configuration`, the plan's configuration choice: topics created from the recovery point's configuration model and, with `afterVerification`, the source's compaction, retention and timestamp settings applied after a passing verdict. Absent: the topics are created as always. */
+            topicConfiguration?: components["schemas"]["ScopeTopicConfigurationView"];
             /** @description The prefix every source topic is mapped through; empty for a restore under the original topic names. */
             topicPrefix: string;
+        };
+        /** @description PROD-05.2: the plan's configuration choice, as a second person approves it. */
+        ScopeTopicConfigurationView: {
+            /** @description The requester's owner statement, by source topic. Absent: the plan states none, and the recovery point's own detection decides. */
+            owners?: components["schemas"]["ScopeOwnerView"][] | null;
+            /** @description `afterVerification` or `none`. */
+            transition: string;
         };
         /** @description PROD-16.2: one source topic and the name it is restored under. */
         ScopeTopicView: {
@@ -4962,6 +5110,166 @@ export interface components {
             /** @description The DSSE sidecar. At most 64 KiB. */
             sidecarBytes: string;
         };
+        /** @description `GET .../switchovers/{name}/approval-request`. */
+        SwitchoverApprovalRequestResponse: {
+            item: components["schemas"]["SwitchoverApprovalRequestView"];
+            requestId: string;
+        };
+        /** @description A two-person switchover request as the second person is shown it (`ApprovalRequestView`'s rules; PROD-04.2). */
+        SwitchoverApprovalRequestView: {
+            /** @description The Approval the Switchover references, which a click creates. */
+            approvalName: string;
+            approve: components["schemas"]["ApproveOfferView"];
+            /** Format: date-time */
+            approvedAt?: string | null;
+            approver?: string | null;
+            /** @description The stored request, `<approvalName>-confirmation`. */
+            confirmationName: string;
+            /** @description What a click must name. */
+            confirmationSha256?: string | null;
+            /** Format: date-time */
+            expiresAt?: string | null;
+            /** Format: date-time */
+            issuedAt?: string | null;
+            namespace: string;
+            planHash?: string | null;
+            policy: string;
+            policyDigest: string;
+            requester?: string | null;
+            /** @description Present exactly when `scopeComplete`. */
+            scope?: components["schemas"]["SwitchoverScopeView"];
+            /** @description Whether `scope` is everything a second person approves, in full. */
+            scopeComplete: boolean;
+            /** @description Why not: `tooManyGroups`, `tooManyPositions`, `planUnreadable`, … */
+            scopeIncomplete?: string | null;
+            scopeSentence?: string | null;
+            state: components["schemas"]["ApprovalRequestState"];
+            stateSentence: string;
+            /** @description The Switchover the request is for. */
+            switchover: string;
+            /** @description Its UID, now. */
+            switchoverUid: string;
+            ticket?: string | null;
+        };
+        /** @description One group's outcome, as the status carries it. */
+        SwitchoverGroupView: {
+            created: boolean;
+            outcome: string;
+            /** Format: uint32 */
+            partitions: number;
+            reason?: string | null;
+            source: string;
+            target: string;
+        };
+        /** @description `GET .../switchovers`. */
+        SwitchoverList: {
+            items: components["schemas"]["SwitchoverView"][];
+            page: components["schemas"]["Page"];
+            requestId: string;
+        };
+        /** @description One group a switchover review reads. */
+        SwitchoverPreflightGroup: {
+            /** @description The captured (source) group, as the restore's mapping names it. */
+            source: string;
+            /** @description The target group a switchover would commit for; absent: the same id. */
+            target?: string | null;
+        };
+        /** @description The switchover half of a preflight request (PROD-04.2 §3.8). */
+        SwitchoverPreflightRequest: {
+            /** @description At most 100 groups; absent: every group the restore's mapping maps. */
+            groups?: components["schemas"]["SwitchoverPreflightGroup"][] | null;
+            /** @description The verified `Restore`, in this namespace. */
+            restoreName: string;
+            /** @description Its UID, when the caller knows it: a replaced restore is then refused. */
+            restoreUid?: string | null;
+        };
+        /** @description `GET .../switchovers/{name}` and `POST .../switchovers`. */
+        SwitchoverResponse: {
+            /** @description On a create, where the submission goes next. */
+            authorization?: components["schemas"]["RestoreRoutingView"];
+            item: components["schemas"]["SwitchoverView"];
+            replayed?: boolean | null;
+            requestId: string;
+        };
+        /** @description The restore a switchover applies, by name and UID. */
+        SwitchoverRestoreRef: {
+            /** @description The `Restore`'s name, in this namespace. */
+            name: string;
+            /** @description Its UID. */
+            uid: string;
+        };
+        /** @description One consumer group a switchover commits for. */
+        SwitchoverScopeGroupView: {
+            /** @description The captured (source) group. */
+            source: string;
+            /** @description The target group committed for. */
+            target: string;
+            topics: components["schemas"]["SwitchoverScopeTopicView"][];
+        };
+        /** @description One position a switchover commits. */
+        SwitchoverScopePositionView: {
+            /** @description The mapping class is `approximate` (else `exact`). */
+            approximate: boolean;
+            /**
+             * Format: int64
+             * @description The committed position the group must hold first; absent: none.
+             */
+            expected?: number | null;
+            /**
+             * Format: int64
+             * @description The target offset committed.
+             */
+            offset: number;
+            /** Format: uint32 */
+            partition: number;
+        };
+        /** @description The switchover record a rollback plan reverses. */
+        SwitchoverScopeRecordView: {
+            key: string;
+            sha256: string;
+        };
+        /** @description The restore a switchover scope applies, as its plan binds it. */
+        SwitchoverScopeRestoreView: {
+            mappingSha256: string;
+            name: string;
+            /** @description The restore plan's hash: its target cluster and credentials. */
+            planHash: string;
+            scorecardSha256: string;
+            uid: string;
+        };
+        /** @description One restored topic of a scope group, every planned partition. */
+        SwitchoverScopeTopicView: {
+            positions: components["schemas"]["SwitchoverScopePositionView"][];
+            topic: string;
+        };
+        /** @description **Everything a second person approves for a switchover**: the restore it applies and every group, topic and position, never a slice. */
+        SwitchoverScopeView: {
+            groups: components["schemas"]["SwitchoverScopeGroupView"][];
+            /** Format: uint */
+            groupsCount: number;
+            /** Format: uint */
+            positionsCount: number;
+            restore: components["schemas"]["SwitchoverScopeRestoreView"];
+            rollbackOf?: components["schemas"]["SwitchoverScopeRecordView"];
+        };
+        /** @description A `Switchover`, projected. */
+        SwitchoverView: {
+            approvalName: string;
+            /** Format: int32 */
+            exitCode?: number | null;
+            groups: components["schemas"]["SwitchoverGroupView"][];
+            name: string;
+            namespace: string;
+            phase?: string | null;
+            /** @description The plan, on a single object's read only. */
+            planBytes?: string | null;
+            /** @description `sha256:` of `planBytes`. */
+            planHash: string;
+            reason?: string | null;
+            recordKey?: string | null;
+            restore: components["schemas"]["SwitchoverRestoreRef"];
+            uid: string;
+        };
         /** @description Where the last walk got to. */
         SyncCursorView: {
             /** @description Whether the walk finished. `false` is a budgeted walk that will continue, not a failure. */
@@ -5016,6 +5324,59 @@ export interface components {
             kind: string;
             /** @description The object's name. */
             name: string;
+        };
+        /** @description One topic the transition did not apply. */
+        TopicConfigurationFailureView: {
+            /** @description The whole desired override set: the remaining step. */
+            desired: {
+                [key: string]: string;
+            };
+            /** @description Why. */
+            error: string;
+            /** @description The target topic. */
+            topic: string;
+        };
+        /** @description One target topic's configuration, before and after. */
+        TopicConfigurationTopicView: {
+            /** @description The whole desired override set. */
+            after: {
+                [key: string]: string;
+            };
+            /** @description The overrides it was created with. */
+            before: {
+                [key: string]: string;
+            };
+            /**
+             * Format: int64
+             * @description The factor the topic was created with.
+             */
+            replicationFactor?: number | null;
+            /** @description Why: `sourceFactor`, `targetBrokers` or `notRecorded`. */
+            replicationFactorReason?: string | null;
+            /** @description `adminApi` or `desiredStateExport`. */
+            route?: string | null;
+            /**
+             * Format: int64
+             * @description The source's replication factor, when recorded.
+             */
+            sourceReplicationFactor?: number | null;
+            /** @description The target topic. */
+            topic: string;
+        };
+        /** @description PROD-05.2: `Restore.topicConfiguration`. */
+        TopicConfigurationView: {
+            /** @description Topics whose desired set was applied and read back. */
+            applied: string[];
+            /** @description The desired-state document's evidence key. */
+            desiredStateKey?: string | null;
+            /** @description Owned topics, exported in the desired-state document. */
+            exported: string[];
+            /** @description Topics not transitioned, each with its whole desired set. */
+            failed: components["schemas"]["TopicConfigurationFailureView"][];
+            /** @description Per target topic: the replication factor and the overrides before and after. */
+            topics: components["schemas"]["TopicConfigurationTopicView"][];
+            /** @description `applied`, `partial`, or `notRun: <reason>`. */
+            transition?: string | null;
         };
         /** @description A bounded topic inventory. */
         TopicDiscovery: {
@@ -6487,6 +6848,263 @@ export interface operations {
         };
     };
     approveInConsole: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsoleApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description This approver already approved this request (a replay). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResponse"];
+                };
+            };
+            /** @description The Approval was created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listSwitchovers: {
+        parameters: {
+            query?: {
+                /** @description Page size, 1 to 200. Default 50. */
+                limit?: number;
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                cursor?: string;
+                /** @description Equality-only label selector, key=value terms separated by commas. */
+                labelSelector?: string;
+            };
+            header?: never;
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchoverList"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    createSwitchover: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                "Idempotency-Key": string;
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSwitchoverRequest"];
+            };
+        };
+        responses: {
+            /** @description Replayed an identical earlier request; the same object. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchoverResponse"];
+                };
+            };
+            /** @description Created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchoverResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getSwitchover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The object. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchoverResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    submitSwitchoverApproval: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description An identical Approval already exists (a replay). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResponse"];
+                };
+            };
+            /** @description The Approval was created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getSwitchoverApprovalRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
+                ns: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchoverApprovalRequestResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    approveSwitchoverInConsole: {
         parameters: {
             query?: never;
             header: {

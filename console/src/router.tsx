@@ -17,20 +17,15 @@ import { Overview } from "./pages/Overview";
 import { Restores } from "./pages/restores/RestoreList";
 import { RestoreWizard, restoreSearch } from "./pages/restores/RestoreWizard";
 import { RestoreDetail } from "./pages/restores/RestoreDetail";
-import { Cutover } from "./pages/Cutover";
 import { Planned } from "./pages/Planned";
 import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
 import { scheduleRoutes } from "./pages/schedules/routes";
 import { backupRoutes } from "./pages/backups/routes";
 import { approvalRoutes } from "./pages/approvals/routes";
+import { cutoverRoutes } from "./pages/cutover/routes";
 
 export type RouterContext = { session: Session };
-
-/** Pages still drawn on the mock (the cutover review, theme A's R7): shown in the mock
- *  builds; in a live build each waits for its run, which drops its `PROTOTYPE ?`. The test
- *  is inline (not a helper) so a live build drops the page and the mock it reads. */
-const PROTOTYPE = import.meta.env.VITE_LOGWEIR_API !== "live";
 
 const root = createRootRouteWithContext<RouterContext>()({ component: Outlet });
 
@@ -53,7 +48,6 @@ const restoreNew = createRoute({
   validateSearch: restoreSearch,
 });
 const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
-const cutover = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name/cutover", component: PROTOTYPE ? Cutover : Planned });
 const planned = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: Planned });
 
 const routeTree = root.addChildren([
@@ -64,7 +58,7 @@ const routeTree = root.addChildren([
     restores,
     restoreNew,
     restore,
-    cutover,
+    ...cutoverRoutes(nsRoute),
     ...connectionRoutes(nsRoute),
     ...destinationRoutes(nsRoute),
     ...scheduleRoutes(nsRoute),

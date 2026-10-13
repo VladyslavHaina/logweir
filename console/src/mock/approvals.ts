@@ -194,6 +194,7 @@ function scopeOf(name: string, topics: { source: string; target: string; origina
       bootstrapServers: PAYMENT_SERVERS,
       authMode: "scramSha512",
       authUsername: "logweir-restorer",
+      lineageHeaders: "kept",
       mode: "newTopic",
       topicPrefix: prefix,
       replicationFactor: 3,

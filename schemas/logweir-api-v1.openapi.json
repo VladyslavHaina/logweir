@@ -1861,6 +1861,514 @@
         ]
       }
     },
+    "/api/v1/namespaces/{ns}/switchovers": {
+      "get": {
+        "operationId": "listSwitchovers",
+        "summary": "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createSwitchover",
+        "summary": "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSwitchoverRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}": {
+      "get": {
+        "operationId": "getSwitchover",
+        "summary": "PROD-04.2: one Switchover projection, planBytes included.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}/approval": {
+      "post": {
+        "operationId": "submitSwitchoverApproval",
+        "summary": "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Approval was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An identical Approval already exists (a replay).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request": {
+      "get": {
+        "operationId": "getSwitchoverApprovalRequest",
+        "summary": "PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwitchoverApprovalRequestResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval": {
+      "post": {
+        "operationId": "approveSwitchoverInConsole",
+        "summary": "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsoleApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Approval was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "This approver already approved this request (a replay).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
     "/api/v1/namespaces/{ns}/approval-policy": {
       "get": {
         "operationId": "getApprovalPolicy",
@@ -7083,6 +7591,40 @@
           }
         ]
       },
+      "CloneView": {
+        "description": "PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`.",
+        "type": "object",
+        "properties": {
+          "attempts": {
+            "description": "Cleanup Jobs started so far (at most 3).",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When the cleanup is due.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "phase": {
+            "description": "`Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Why the cleanup failed or refused, bounded.",
+            "type": "string",
+            "nullable": true
+          },
+          "ttlSeconds": {
+            "description": "The plan's lifetime in seconds.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
       "CompleteVerificationView": {
         "description": "**PROD-08.1a.** A complete verification's result, copied from `Restore.status.integrity.complete` (itself copied from the signed scorecard) and never recomputed.",
         "type": "object",
@@ -7800,6 +8342,11 @@
             "$ref": "#/components/schemas/SourceConnectionPreflightRequest",
             "nullable": true
           },
+          "switchover": {
+            "description": "The switchover block (PROD-04.2).",
+            "$ref": "#/components/schemas/SwitchoverPreflightRequest",
+            "nullable": true
+          },
           "timeoutSeconds": {
             "description": "The check budget in seconds, 30 to 600.",
             "default": null,
@@ -7981,6 +8528,46 @@
             "items": {
               "type": "string"
             }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateSwitchoverRequest": {
+        "description": "`POST .../switchovers`: a reviewed plan (`logweir switchover plan`) to apply to stopped groups on a verified restore's target.",
+        "type": "object",
+        "required": [
+          "approvalRef",
+          "deadlineSeconds",
+          "planBytes",
+          "planHash",
+          "restoreRef"
+        ],
+        "properties": {
+          "approvalRef": {
+            "description": "The Approval (subject kind `Switchover`) that will authorise it.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "deadlineSeconds": {
+            "description": "The Job's deadline, 60 to 86400 seconds.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "planBytes": {
+            "description": "The plan document, exactly as approved, at most 256 KiB.",
+            "type": "string"
+          },
+          "planHash": {
+            "description": "`sha256:<lowercase hex>` of `planBytes`.",
+            "type": "string"
+          },
+          "restoreRef": {
+            "description": "The restore the plan names; it must be the plan's own `restore` block.",
+            "$ref": "#/components/schemas/SwitchoverRestoreRef"
+          },
+          "ticket": {
+            "description": "The change ticket, signed beside the plan in a bound namespace.",
+            "type": "string",
+            "nullable": true
           }
         },
         "additionalProperties": false
@@ -10020,6 +10607,11 @@
             "$ref": "#/components/schemas/CaptureView",
             "nullable": true
           },
+          "clone": {
+            "description": "PROD-11.1a: a TTL clone's lifetime and cleanup, from `Restore.status.clone`; absent for every other run.",
+            "$ref": "#/components/schemas/CloneView",
+            "nullable": true
+          },
           "completion": {
             "description": "A Restore's completion panel.",
             "$ref": "#/components/schemas/CompletionView",
@@ -10953,6 +11545,13 @@
             "type": "string",
             "enum": [
               "sourceConnection"
+            ]
+          },
+          {
+            "description": "PROD-04.2 §3.8: the review before a `Switchover` — a verified restore's signed mapping, its target, and each group's type, state, members and committed positions (every position in the details). Authorises nothing.",
+            "type": "string",
+            "enum": [
+              "switchover"
             ]
           }
         ]
@@ -11972,6 +12571,11 @@
           "timeBasis": {
             "description": "FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never \"every selection used the topics' own clocks\".",
             "$ref": "#/components/schemas/RestoreTimeBasisView",
+            "nullable": true
+          },
+          "topicConfiguration": {
+            "description": "**PROD-05.2.** `status.topicConfiguration`: for a plan carrying `target.topic_configuration`, each topic's replication factor and overrides before and after, and what the configuration transition did. A CLAIM read off the runner's log; the signed scorecard's block and the phase-9 attestation are the evidence. ABSENT on every other run.",
+            "$ref": "#/components/schemas/TopicConfigurationView",
             "nullable": true
           },
           "topicPreflight": {
@@ -13422,6 +14026,7 @@
         "required": [
           "authMode",
           "bootstrapServers",
+          "lineageHeaders",
           "mode",
           "replicationFactor",
           "teardown",
@@ -13448,6 +14053,10 @@
               "type": "string"
             }
           },
+          "lineageHeaders": {
+            "description": "PROD-11.1a: always `kept`: every restored record keeps its lineage headers (`x-original-offset`, `x-original-timestamp`).",
+            "type": "string"
+          },
           "mode": {
             "description": "`scratch` or `newTopic`.",
             "type": "string"
@@ -13458,7 +14067,7 @@
             "nullable": true
           },
           "replicationFactor": {
-            "description": "The replication factor of every topic the run creates.",
+            "description": "`target.default_replication_factor`: the factor of every topic the run creates, except with `topic_configuration`, where a topic the point records a factor for is created at that factor, bounded by the target's brokers, and only one without gets this.",
             "type": "integer",
             "format": "int16"
           },
@@ -13466,8 +14075,41 @@
             "description": "`target.teardown`: what happens to a SCRATCH run's targets afterwards (`delete`: the topics the run created are deleted; a `newTopic` restore deletes nothing whatever it says).",
             "type": "string"
           },
+          "teardownAfterSeconds": {
+            "description": "PROD-11.1a: a clone's lifetime in seconds (`target.teardown: {ttl_seconds}`); its topics are deleted that long after the run. Absent for every other plan.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0,
+            "nullable": true
+          },
+          "topicConfiguration": {
+            "description": "PROD-05.2: `target.topic_configuration`, the plan's configuration choice: topics created from the recovery point's configuration model and, with `afterVerification`, the source's compaction, retention and timestamp settings applied after a passing verdict. Absent: the topics are created as always.",
+            "$ref": "#/components/schemas/ScopeTopicConfigurationView",
+            "nullable": true
+          },
           "topicPrefix": {
             "description": "The prefix every source topic is mapped through; empty for a restore under the original topic names.",
+            "type": "string"
+          }
+        }
+      },
+      "ScopeTopicConfigurationView": {
+        "description": "PROD-05.2: the plan's configuration choice, as a second person approves it.",
+        "type": "object",
+        "required": [
+          "transition"
+        ],
+        "properties": {
+          "owners": {
+            "description": "The requester's owner statement, by source topic. Absent: the plan states none, and the recovery point's own detection decides.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScopeOwnerView"
+            },
+            "nullable": true
+          },
+          "transition": {
+            "description": "`afterVerification` or `none`.",
             "type": "string"
           }
         }
@@ -13950,6 +14592,493 @@
         },
         "additionalProperties": false
       },
+      "SwitchoverApprovalRequestResponse": {
+        "description": "`GET .../switchovers/{name}/approval-request`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/SwitchoverApprovalRequestView"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverApprovalRequestView": {
+        "description": "A two-person switchover request as the second person is shown it (`ApprovalRequestView`'s rules; PROD-04.2).",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "approve",
+          "confirmationName",
+          "namespace",
+          "policy",
+          "policyDigest",
+          "scopeComplete",
+          "state",
+          "stateSentence",
+          "switchover",
+          "switchoverUid"
+        ],
+        "properties": {
+          "approvalName": {
+            "description": "The Approval the Switchover references, which a click creates.",
+            "type": "string"
+          },
+          "approve": {
+            "$ref": "#/components/schemas/ApproveOfferView"
+          },
+          "approvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "approver": {
+            "type": "string",
+            "nullable": true
+          },
+          "confirmationName": {
+            "description": "The stored request, `<approvalName>-confirmation`.",
+            "type": "string"
+          },
+          "confirmationSha256": {
+            "description": "What a click must name.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "planHash": {
+            "type": "string",
+            "nullable": true
+          },
+          "policy": {
+            "type": "string"
+          },
+          "policyDigest": {
+            "type": "string"
+          },
+          "requester": {
+            "type": "string",
+            "nullable": true
+          },
+          "scope": {
+            "description": "Present exactly when `scopeComplete`.",
+            "$ref": "#/components/schemas/SwitchoverScopeView",
+            "nullable": true
+          },
+          "scopeComplete": {
+            "description": "Whether `scope` is everything a second person approves, in full.",
+            "type": "boolean"
+          },
+          "scopeIncomplete": {
+            "description": "Why not: `tooManyGroups`, `tooManyPositions`, `planUnreadable`, …",
+            "type": "string",
+            "nullable": true
+          },
+          "scopeSentence": {
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "$ref": "#/components/schemas/ApprovalRequestState"
+          },
+          "stateSentence": {
+            "type": "string"
+          },
+          "switchover": {
+            "description": "The Switchover the request is for.",
+            "type": "string"
+          },
+          "switchoverUid": {
+            "description": "Its UID, now.",
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SwitchoverGroupView": {
+        "description": "One group's outcome, as the status carries it.",
+        "type": "object",
+        "required": [
+          "created",
+          "outcome",
+          "partitions",
+          "source",
+          "target"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "partitions": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverList": {
+        "description": "`GET .../switchovers`.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverView"
+            }
+          },
+          "page": {
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverPreflightGroup": {
+        "description": "One group a switchover review reads.",
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "description": "The captured (source) group, as the restore's mapping names it.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The target group a switchover would commit for; absent: the same id.",
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SwitchoverPreflightRequest": {
+        "description": "The switchover half of a preflight request (PROD-04.2 §3.8).",
+        "type": "object",
+        "required": [
+          "restoreName"
+        ],
+        "properties": {
+          "groups": {
+            "description": "At most 100 groups; absent: every group the restore's mapping maps.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverPreflightGroup"
+            },
+            "nullable": true
+          },
+          "restoreName": {
+            "description": "The verified `Restore`, in this namespace.",
+            "type": "string"
+          },
+          "restoreUid": {
+            "description": "Its UID, when the caller knows it: a replaced restore is then refused.",
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SwitchoverResponse": {
+        "description": "`GET .../switchovers/{name}` and `POST .../switchovers`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "authorization": {
+            "description": "On a create, where the submission goes next.",
+            "$ref": "#/components/schemas/RestoreRoutingView",
+            "nullable": true
+          },
+          "item": {
+            "$ref": "#/components/schemas/SwitchoverView"
+          },
+          "replayed": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverRestoreRef": {
+        "description": "The restore a switchover applies, by name and UID.",
+        "type": "object",
+        "required": [
+          "name",
+          "uid"
+        ],
+        "properties": {
+          "name": {
+            "description": "The `Restore`'s name, in this namespace.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "Its UID.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SwitchoverScopeGroupView": {
+        "description": "One consumer group a switchover commits for.",
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "topics"
+        ],
+        "properties": {
+          "source": {
+            "description": "The captured (source) group.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The target group committed for.",
+            "type": "string"
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopeTopicView"
+            }
+          }
+        }
+      },
+      "SwitchoverScopePositionView": {
+        "description": "One position a switchover commits.",
+        "type": "object",
+        "required": [
+          "approximate",
+          "offset",
+          "partition"
+        ],
+        "properties": {
+          "approximate": {
+            "description": "The mapping class is `approximate` (else `exact`).",
+            "type": "boolean"
+          },
+          "expected": {
+            "description": "The committed position the group must hold first; absent: none.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "offset": {
+            "description": "The target offset committed.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "partition": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
+      "SwitchoverScopeRecordView": {
+        "description": "The switchover record a rollback plan reverses.",
+        "type": "object",
+        "required": [
+          "key",
+          "sha256"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeRestoreView": {
+        "description": "The restore a switchover scope applies, as its plan binds it.",
+        "type": "object",
+        "required": [
+          "mappingSha256",
+          "name",
+          "planHash",
+          "scorecardSha256",
+          "uid"
+        ],
+        "properties": {
+          "mappingSha256": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "planHash": {
+            "description": "The restore plan's hash: its target cluster and credentials.",
+            "type": "string"
+          },
+          "scorecardSha256": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeTopicView": {
+        "description": "One restored topic of a scope group, every planned partition.",
+        "type": "object",
+        "required": [
+          "positions",
+          "topic"
+        ],
+        "properties": {
+          "positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopePositionView"
+            }
+          },
+          "topic": {
+            "type": "string"
+          }
+        }
+      },
+      "SwitchoverScopeView": {
+        "description": "**Everything a second person approves for a switchover**: the restore it applies and every group, topic and position, never a slice.",
+        "type": "object",
+        "required": [
+          "groups",
+          "groupsCount",
+          "positionsCount",
+          "restore"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverScopeGroupView"
+            }
+          },
+          "groupsCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "positionsCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "restore": {
+            "$ref": "#/components/schemas/SwitchoverScopeRestoreView"
+          },
+          "rollbackOf": {
+            "$ref": "#/components/schemas/SwitchoverScopeRecordView",
+            "nullable": true
+          }
+        }
+      },
+      "SwitchoverView": {
+        "description": "A `Switchover`, projected.",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "groups",
+          "name",
+          "namespace",
+          "planHash",
+          "restore",
+          "uid"
+        ],
+        "properties": {
+          "approvalName": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SwitchoverGroupView"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "nullable": true
+          },
+          "planBytes": {
+            "description": "The plan, on a single object's read only.",
+            "type": "string",
+            "nullable": true
+          },
+          "planHash": {
+            "description": "`sha256:` of `planBytes`.",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "recordKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "restore": {
+            "$ref": "#/components/schemas/SwitchoverRestoreRef"
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
       "SyncCursorView": {
         "description": "Where the last walk got to.",
         "type": "object",
@@ -14066,6 +15195,133 @@
           "name": {
             "description": "The object's name.",
             "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationFailureView": {
+        "description": "One topic the transition did not apply.",
+        "type": "object",
+        "required": [
+          "desired",
+          "error",
+          "topic"
+        ],
+        "properties": {
+          "desired": {
+            "description": "The whole desired override set: the remaining step.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "description": "Why.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "The target topic.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationTopicView": {
+        "description": "One target topic's configuration, before and after.",
+        "type": "object",
+        "required": [
+          "after",
+          "before",
+          "topic"
+        ],
+        "properties": {
+          "after": {
+            "description": "The whole desired override set.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "before": {
+            "description": "The overrides it was created with.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "replicationFactor": {
+            "description": "The factor the topic was created with.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "replicationFactorReason": {
+            "description": "Why: `sourceFactor`, `targetBrokers` or `notRecorded`.",
+            "type": "string",
+            "nullable": true
+          },
+          "route": {
+            "description": "`adminApi` or `desiredStateExport`.",
+            "type": "string",
+            "nullable": true
+          },
+          "sourceReplicationFactor": {
+            "description": "The source's replication factor, when recorded.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "topic": {
+            "description": "The target topic.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicConfigurationView": {
+        "description": "PROD-05.2: `Restore.topicConfiguration`.",
+        "type": "object",
+        "required": [
+          "applied",
+          "exported",
+          "failed",
+          "topics"
+        ],
+        "properties": {
+          "applied": {
+            "description": "Topics whose desired set was applied and read back.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "desiredStateKey": {
+            "description": "The desired-state document's evidence key.",
+            "type": "string",
+            "nullable": true
+          },
+          "exported": {
+            "description": "Owned topics, exported in the desired-state document.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "description": "Topics not transitioned, each with its whole desired set.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicConfigurationFailureView"
+            }
+          },
+          "topics": {
+            "description": "Per target topic: the replication factor and the overrides before and after.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicConfigurationTopicView"
+            }
+          },
+          "transition": {
+            "description": "`applied`, `partial`, or `notRun: <reason>`.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
