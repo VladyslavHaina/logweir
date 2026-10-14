@@ -53,6 +53,7 @@ use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
 };
 use logweir_engine_oso::storage::{PutOutcome, StoreError};
+use logweir_kafka::access::{ReadDenied, TopicRead};
 use logweir_kafka::api_versions::ApiVersions;
 use logweir_kafka::inventory::{
     CheckFailure, InventoryProbe, ListedTopic, Listing, TopicCreateOutcome, TopicPresence,
@@ -531,6 +532,12 @@ struct ProbeState {
     /// Topics whose DescribeConfigs fails, and how.
     topic_config_faults: BTreeMap<String, (CheckCode, String)>,
     topic_config_calls: Vec<String>,
+    /// FX-45: what the broker's authorized operations say about READ, per
+    /// topic. A topic not named here gets the trait's own default (unknown).
+    topic_reads: BTreeMap<String, TopicRead>,
+    topic_read_calls: usize,
+    /// FX-45: the whole DescribeTopics call fails, and how.
+    topic_reads_fault: Option<(CheckCode, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -587,6 +594,26 @@ impl FakeProbe {
 
     fn api_versions_calls(&self) -> usize {
         self.state.lock().unwrap().api_versions_calls
+    }
+
+    /// FX-45: the broker's READ answer for `topic`.
+    fn with_topic_read(self, topic: &str, read: TopicRead) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .topic_reads
+            .insert(topic.to_string(), read);
+        self
+    }
+
+    fn topic_read_calls(&self) -> usize {
+        self.state.lock().unwrap().topic_read_calls
+    }
+
+    /// FX-45: the whole authorized-operations read fails.
+    fn failing_topic_reads(self, code: CheckCode, message: &str) -> Self {
+        self.state.lock().unwrap().topic_reads_fault = Some((code, message.to_string()));
+        self
     }
 
     fn failing_topic_configs(self, topic: &str, code: CheckCode, message: &str) -> Self {
@@ -732,6 +759,28 @@ impl InventoryProbe for FakeProbe {
                 "this probe does not observe the endpoint's ApiVersions answer",
             )),
         }
+    }
+
+    fn topic_read_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, TopicRead)>, CheckFailure> {
+        let mut s = self.state.lock().unwrap();
+        s.topic_read_calls += 1;
+        if let Some((c, m)) = &s.topic_reads_fault {
+            return Err(CheckFailure::new(*c, m));
+        }
+        Ok(topics
+            .iter()
+            .map(|t| {
+                let read = s.topic_reads.get(t).cloned().unwrap_or_else(|| {
+                    TopicRead::Unknown(
+                        "this probe does not ask the broker for authorized operations".into(),
+                    )
+                });
+                (t.clone(), read)
+            })
+            .collect())
     }
 
     fn validate_create_topics(
@@ -2977,8 +3026,149 @@ fn source_connection_plan() -> CheckPlan {
     plan_of(CheckRequest::SourceConnection(
         logweir_core::check_contract::SourceConnectionRequest {
             connection: connection(),
+            capability_checks: Vec::new(),
         },
     ))
+}
+
+/// FX-46: [`source_connection_plan`] listing every capability row a
+/// connection test asks, as this build's controller renders it.
+fn source_connection_plan_with_capabilities() -> CheckPlan {
+    plan_of(CheckRequest::SourceConnection(
+        logweir_core::check_contract::SourceConnectionRequest {
+            connection: connection(),
+            capability_checks: logweir_core::check_contract::capability_checks_for(
+                logweir_core::check_contract::CheckOperation::SourceConnection,
+            )
+            .to_vec(),
+        },
+    ))
+}
+
+/// **FX-46: a connection test says what the endpoint can be used for.** On
+/// Redpanda v26.2.4's measured ranges (Produce v0-v7, ListGroups v0-v4) the
+/// test PASSES (the connection answers), and its rows say "usable as a
+/// source, not as a target": `connection.engineProtocol` ready,
+/// `target.engineProtocol` notReady naming Produce v8, `connection.groupTypes`
+/// notReady, all three ADVISORY, over one observation.
+///
+/// CONTROLS: Apache Kafka 4.3.1's ranges make all three ready; a plan that
+/// lists none (an older controller's) gets none and no observation; a
+/// connection that did not authenticate blocks them, `unknown`.
+///
+/// MUTANTS killed: the rows left blocking (a Redpanda connection test would
+/// FAIL); the rows emitted unlisted (an older controller would refuse the
+/// result); the source and target rows swapped (Redpanda would read
+/// "usable as a target").
+#[test]
+fn a_source_connection_check_says_what_the_endpoint_can_be_used_for() {
+    let redpanda = FakeProbe::new()
+        .with_topics(&[("orders", 6)])
+        .with_cluster_api_versions(&REDPANDA_26_2, 1, false);
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().with_probe(redpanda.clone()),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = [
+        "runner.contract",
+        "connection.authenticated",
+        "connection.engineProtocol",
+        "target.engineProtocol",
+        "connection.groupTypes",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        redpanda.api_versions_calls(),
+        1,
+        "one observation serves all three"
+    );
+    let source = run.row(CheckId::ConnectionEngineProtocol);
+    let target = run.row(CheckId::TargetEngineProtocol);
+    let groups = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(
+        (source.state, source.code, source.gating),
+        (
+            CheckState::Ready,
+            CheckCode::EngineProtocolSupported,
+            Gating::Advisory
+        )
+    );
+    assert_eq!(
+        (target.state, target.code, target.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::EngineProtocolUnsupported,
+            Gating::Advisory
+        )
+    );
+    assert!(
+        target.message.contains("Produce v8") && target.message.contains("Produce v0-v7"),
+        "{}",
+        target.message
+    );
+    assert_eq!(
+        (groups.state, groups.gating),
+        (CheckState::NotReady, Gating::Advisory)
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready,
+        "the connection answers: a test is not failed by what the endpoint cannot be used for"
+    );
+
+    // CONTROL: Apache Kafka 4.3.1.
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().with_probe(
+            FakeProbe::new()
+                .with_topics(&[("orders", 6)])
+                .with_cluster_api_versions(&KAFKA_4_3, 3, false),
+        ),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        assert_eq!(run.row(id).state, CheckState::Ready, "{id}");
+    }
+
+    // CONTROL: unlisted.
+    let unlisted = FakeProbe::new()
+        .with_topics(&[("orders", 6)])
+        .with_cluster_api_versions(&REDPANDA_26_2, 1, false);
+    let run = drive(
+        &mount(&source_connection_plan()),
+        &FakeWiring::default().with_probe(unlisted.clone()),
+    );
+    assert!(!run.has(CheckId::TargetEngineProtocol));
+    assert_eq!(unlisted.api_versions_calls(), 0);
+
+    // CONTROL: no connection.
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().broker_fails(CheckCode::BrokerUnreachable, "connection refused"),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(
+            (row.state, row.code, row.gating),
+            (
+                CheckState::Unknown,
+                CheckCode::BlockedByPrerequisite,
+                Gating::Advisory
+            ),
+            "{id}"
+        );
+    }
 }
 
 #[test]
@@ -3229,6 +3419,160 @@ fn a_readiness_check_reports_every_row_it_owns() {
     assert_eq!(
         auth.expires_at.unwrap() - auth.observed_at.unwrap(),
         chrono::Duration::minutes(15)
+    );
+}
+
+// 4b. FX-45: `connection.topicsReadable`, from the broker's own report of
+// what this principal may do on each selected topic (KIP-430).
+
+fn readable_wiring(probe: FakeProbe) -> FakeWiring {
+    capability_wiring(probe)
+}
+
+/// **A principal the broker says may not READ a selected topic blocks the
+/// Backup Preflight, by name.** The row was execution-only, so such a backup
+/// passed its Preflight and failed in the engine a minute later.
+///
+/// MUTANTS killed: the row left execution-only (it would read `unknown` and
+/// never block); the refusal read as `unknown`; a topic the principal may not
+/// even Describe left out (the measured `acl` case: Read removed, so Describe
+/// is gone too); the remedy not naming READ.
+#[test]
+fn a_topic_the_broker_says_this_principal_may_not_read_blocks_the_backup_by_name() {
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_presence("payments", TopicPresence::Present { partitions: 3 })
+        .with_presence("audit", TopicPresence::Present { partitions: 1 })
+        .with_topic_read("orders", TopicRead::Granted)
+        .with_topic_read(
+            "payments",
+            TopicRead::Denied(ReadDenied::OperationsExcludeRead),
+        )
+        .with_topic_read("audit", TopicRead::Denied(ReadDenied::NotDescribable));
+    let run = drive(
+        &mount(&capability_plan(
+            vec!["orders", "payments", "audit"],
+            Vec::new(),
+        )),
+        &readable_wiring(probe.clone()),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::NotReady,
+            Gating::Blocking,
+            CheckCode::TopicAuthorizationFailed
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .contains("may not READ 2 of 3 selected topic(s)")
+            && row.message.contains("1 of them it may not even Describe"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.starts_with("Grant READ on each named topic"),
+        "{}",
+        row.remedy
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["payments", "audit"])
+    );
+    assert_eq!(probe.topic_read_calls(), 1, "one request for every topic");
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady,
+        "the Backup Preflight is notReady, before any backup runs"
+    );
+}
+
+/// **CONTROLS: what the broker does not refuse stays what it was.** READ
+/// reported on every topic, and READ not known (a broker that computes no
+/// authorized operations), are both the execution-only row, `unknown`,
+/// excluded from the aggregate, with a message saying which. A connection
+/// that did not authenticate asks nothing.
+#[test]
+fn a_topic_the_broker_does_not_refuse_leaves_the_row_execution_only() {
+    let present =
+        || FakeProbe::new().with_presence("orders", TopicPresence::Present { partitions: 6 });
+    for (probe, says) in [
+        (
+            present().with_topic_read("orders", TopicRead::Granted),
+            "the broker reports READ for this principal on all 1 selected topic(s)",
+        ),
+        (
+            present().with_topic_read("orders", TopicRead::Unknown("no set reported".into())),
+            "whether it may READ 1 of 1 selected topic(s) is not known before the run (no set \
+             reported)",
+        ),
+    ] {
+        let run = drive(
+            &mount(&capability_plan(vec!["orders"], Vec::new())),
+            &readable_wiring(probe),
+        );
+        let row = run.row(CheckId::ConnectionTopicsReadable);
+        assert_eq!(
+            (row.state, row.gating, row.code),
+            (
+                CheckState::Unknown,
+                Gating::ExecutionOnly,
+                CheckCode::ReadVerifiedOnlyAtExecution
+            ),
+            "{row:?}"
+        );
+        assert!(row.message.contains(says), "{}", row.message);
+        assert_eq!(
+            logweir_core::check_contract::aggregate(&run.result().checks),
+            logweir_core::check_contract::OverallState::Ready
+        );
+    }
+    // CONTROL (review LOW 1): the read itself failed. Nothing is known, so
+    // the row stays execution-only and says why; it never blocks.
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(
+            present()
+                .with_topic_read("orders", TopicRead::Denied(ReadDenied::NotDescribable))
+                .failing_topic_reads(CheckCode::MetadataTimeout, "DescribeTopics timed out"),
+        ),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("could not be asked") && row.message.contains("timed out"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+    let probe = present().with_topic_read("orders", TopicRead::Denied(ReadDenied::NotDescribable));
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(probe.clone()).broker_fails(CheckCode::BrokerUnreachable, "down"),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating),
+        (CheckState::Unknown, Gating::ExecutionOnly)
+    );
+    assert_eq!(
+        probe.topic_read_calls(),
+        0,
+        "nothing is asked of a broker nobody reached"
     );
 }
 

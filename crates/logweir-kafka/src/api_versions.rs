@@ -376,6 +376,49 @@ impl std::fmt::Display for Partial {
     }
 }
 
+/// **Why an observation gave no whole view of the cluster**: a [`Partial`]
+/// view, or an observation that could not be made or read at all. Its
+/// `Display` is the sentence a row's message carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotObserved {
+    /// The log was read, and what it held is not a whole view.
+    Partial(Partial),
+    /// The observation did not run, or its log could not be read: too
+    /// little budget, a client that could not be built, a queue that
+    /// refused, or a reader that does not observe at all.
+    Other(String),
+}
+
+impl std::fmt::Display for NotObserved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Partial(p) => p.fmt(f),
+            Self::Other(why) => f.write_str(why),
+        }
+    }
+}
+
+impl NotObserved {
+    /// The brokers the cluster LISTS that did not answer, with how many of
+    /// how many did: `Some` only when the log was read whole and some listed
+    /// broker stayed silent. A silent bootstrap address alone is `None` here:
+    /// every broker the cluster says it has answered. This is the one fact a
+    /// liveness probe acts on (FX-46): the bootstrap address answered and an
+    /// advertised broker did not.
+    #[must_use]
+    pub fn silent_brokers(&self) -> Option<(usize, usize, &[Broker])> {
+        match self {
+            Self::Partial(Partial::NotEveryone {
+                answered,
+                listed,
+                silent,
+                ..
+            }) if !silent.is_empty() => Some((*answered, listed.len(), silent)),
+            _ => None,
+        }
+    }
+}
+
 /// A `host:port` as two spellings of one address compare: lower case, no
 /// brackets (an IPv6 literal is written with them in a broker list and
 /// without them in a log name).
@@ -551,20 +594,21 @@ pub type LogRead = (Vec<(String, String)>, bool);
 ///
 /// # Errors
 ///
-/// The reason there is no whole view, as a sentence: [`Partial`]'s, or that
-/// the log could not be read.
+/// The reason there is no whole view ([`NotObserved`]): the [`Partial`]
+/// view, or that the log could not be read.
 pub fn whole_view_within(
     mut read: impl FnMut(std::time::Duration) -> Result<LogRead, String>,
     listed: &[Broker],
     bootstrap: &[String],
     deadline: std::time::Instant,
     quiet: std::time::Duration,
-) -> Result<ApiVersions, String> {
+) -> Result<ApiVersions, NotObserved> {
     let left = || deadline.saturating_duration_since(std::time::Instant::now());
     let mut lines: Vec<(String, String)> = Vec::new();
     loop {
-        let (arrived, went_quiet) = read(left().max(quiet * 2))
-            .map_err(|e| format!("the observing client's log could not be read: {e}"))?;
+        let (arrived, went_quiet) = read(left().max(quiet * 2)).map_err(|e| {
+            NotObserved::Other(format!("the observing client's log could not be read: {e}"))
+        })?;
         lines.extend(arrived);
         let view = full_view(
             &answers(lines.iter().map(|(f, m)| (f.as_str(), m.as_str()))),
@@ -574,7 +618,7 @@ pub fn whole_view_within(
         );
         match view {
             Ok(view) => return Ok(view),
-            Err(partial) if left() < quiet => return Err(partial.to_string()),
+            Err(partial) if left() < quiet => return Err(NotObserved::Partial(partial)),
             Err(_) => {}
         }
     }
@@ -1093,7 +1137,7 @@ mod tests {
         );
         assert_eq!(
             never_quiet,
-            Err(Partial::StillLogging.to_string()),
+            Err(NotObserved::Partial(Partial::StillLogging)),
             "all three answers are in the log, and it was still being written"
         );
         assert!(reads > 1, "it kept reading until its budget was spent");
@@ -1142,10 +1186,14 @@ mod tests {
         )
         .expect_err("broker 2 never answered");
         assert_eq!(reads, 1, "the last read always runs, and only it");
+        let said = spent.to_string();
         assert!(
-            spent.contains("2 of 3 broker(s)") && spent.contains("broker 2 (b2.example:9092)"),
-            "{spent}"
+            said.contains("2 of 3 broker(s)") && said.contains("broker 2 (b2.example:9092)"),
+            "{said}"
         );
+        // ...and the silent broker is a fact a probe can act on.
+        let (answered, of, silent) = spent.silent_brokers().expect("a listed broker was silent");
+        assert_eq!((answered, of, silent.len(), silent[0].id), (2, 3, 1, 2));
 
         // A log that cannot be read.
         let unread = whole_view_within(
@@ -1157,8 +1205,15 @@ mod tests {
         )
         .expect_err("no log, no view");
         assert!(
-            unread.contains("could not be read: the queue refused"),
+            unread
+                .to_string()
+                .contains("could not be read: the queue refused"),
             "{unread}"
+        );
+        assert_eq!(
+            unread.silent_brokers(),
+            None,
+            "nothing was read, so nobody is silent"
         );
     }
 

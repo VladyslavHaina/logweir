@@ -1,6 +1,26 @@
-//! `logweir cluster-probe` — interface **I14**: **exactly two stdout lines**,
-//! `cluster-id=<id>` then `reachable=true|false`, and exit **0** when a broker
-//! answered, **1** when none did.
+//! `logweir cluster-probe` — interface **I14**: two stdout lines,
+//! `cluster-id=<id>` then `reachable=true|false`, then (FX-46) a third,
+//! `brokers-answered=<answered>/<listed>`, whenever the brokers the cluster
+//! advertises were asked; exit **0** when the cluster can be reached, **1**
+//! when it cannot.
+//!
+//! # Reachable means every advertised broker answered (FX-46)
+//!
+//! The bootstrap address naming a cluster id is not enough: a listener that
+//! advertises an address nobody can reach answers the bootstrap connection,
+//! and every backup through it fails a minute later (PROD-01.2's `OFFNET`
+//! row). So once the bootstrap address has named its cluster, the probe asks
+//! EVERY broker that cluster lists, on its advertised address, for its
+//! ApiVersions answer (`logweir_kafka::inventory::observe_broker_view`, the
+//! observation the capability rows read). A listed broker that does not
+//! answer makes the probe `reachable=false`, exit 1, with
+//! `brokers-answered=<answered>/<listed>` and a diagnostic naming the broker
+//! and its address. An observation that could not be made at all (not a
+//! silent broker: a log it could not read) leaves the answer the bootstrap
+//! gave, and says so on stderr.
+//!
+//! An older controller reads the first two lines by key and ignores the
+//! third; this controller reads it into `AdvertisedBrokersUnreachable`.
 //!
 //! # Why `logweir doctor` cannot be this, four ways
 //!
@@ -51,6 +71,7 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use logweir_kafka::api_versions::{ApiVersions, NotObserved, Partial};
 use logweir_kafka::reader::{AuthConfig, ClusterReader, KafkaError};
 
 use crate::exit::ExitCode;
@@ -62,6 +83,28 @@ pub const CLUSTER_ID_LINE: &str = "cluster-id=";
 /// Interface **I14**'s SECOND stdout line, as a prefix. The value is exactly
 /// `true` or exactly `false`.
 pub const REACHABLE_LINE: &str = "reachable=";
+
+/// FX-46's THIRD stdout line, as a prefix: how many of the brokers the
+/// cluster lists answered this probe on their advertised addresses, as
+/// `<answered>/<listed>`, or `0/?` when the bootstrap address named the
+/// cluster and the list of brokers it advertises could not be read at all
+/// (see [`with_brokers`]). Printed only when the brokers were asked and the
+/// answer says something about them; absent on every other arm.
+pub const BROKERS_ANSWERED_LINE: &str = "brokers-answered=";
+
+/// The `<listed>` half of [`BROKERS_ANSWERED_LINE`] when the cluster's broker
+/// list could not be read.
+pub const LISTED_UNKNOWN: &str = "?";
+
+/// How long the probe waits for every broker the cluster lists to answer,
+/// after the bootstrap address named its cluster: the observation's own
+/// ceiling (`logweir_kafka::inventory::API_VERSIONS_BUDGET`). A healthy
+/// cluster answers in one quiet period.
+pub const BROKERS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What the probe waits beyond [`BROKERS_TIMEOUT`] for the observation's own
+/// last read (one quiet period) before it gives up on it.
+const BROKERS_MARGIN: Duration = Duration::from_secs(2);
 
 /// `--auth-mode plaintext`.
 pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
@@ -143,7 +186,9 @@ pub struct ProbeOutcome {
     /// written to stdout by this subcommand.
     pub stdout: String,
     /// The one line written to stderr, when there is something to say. `None`
-    /// on the reachable arm: a probe that worked has no diagnostic. Written
+    /// when every broker answered: a probe that worked has no diagnostic. A
+    /// reachable probe whose brokers' answers were not all established says
+    /// so here ([`with_brokers`]). Written
     /// on ONE line whatever it holds ([`crate::exit::one_line`]): its text
     /// can repeat a broker address or a broker's message.
     pub diagnostic: Option<String>,
@@ -157,12 +202,15 @@ pub struct ProbeOutcome {
     pub code: ExitCode,
 }
 
-/// The two lines and the exit code, as a **pure function of the observation**.
+/// The two lines and the exit code, as a **pure function of the bootstrap
+/// address's answer**, before any broker it advertises was asked.
 ///
-/// This is the whole of interface **I14**'s contract, and it dials nothing:
-/// `Ok(id)` is `cluster-id=<id>` / `reachable=true` / exit **0**, and any `Err`
-/// is `cluster-id=` (EMPTY) / `reachable=false` / exit **1**, with the error's
-/// own text as the diagnostic.
+/// It dials nothing: `Ok(id)` is `cluster-id=<id>` / `reachable=true` / exit
+/// **0**, and any `Err` is `cluster-id=` (EMPTY) / `reachable=false` / exit
+/// **1**, with the error's own text as the diagnostic. The shipped probe
+/// reaches the `Ok` arm only through [`with_brokers`] (FX-46), which asks the
+/// advertised brokers first; this arm is what a cluster id with no broker
+/// observation would print.
 ///
 /// # The order is asserted, not incidental
 ///
@@ -192,6 +240,109 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
             diagnostic: Some(format!("cluster-probe: no cluster id was read: {e}")),
             refusal: None,
             code: ExitCode::Operational,
+        },
+    }
+}
+
+/// **The verdict once the bootstrap address named cluster `id`: what the
+/// brokers it advertises answered** (FX-46). Pure, like [`outcome`].
+///
+/// * Every listed broker answered: `cluster-id=<id>`, `reachable=true`,
+///   `brokers-answered=<n>/<n>`, exit 0, no diagnostic.
+/// * A listed broker did not: `cluster-id=<id>` (it was observed),
+///   `reachable=false`, `brokers-answered=<answered>/<listed>`, exit 1, and a
+///   diagnostic naming each silent broker by id and advertised address, and
+///   the remedy, `advertised.listeners`.
+/// * The bootstrap address answered ApiVersions and the cluster's broker list
+///   could not be read through it within [`BROKERS_TIMEOUT`]
+///   (`Partial::NoBrokerList`): `reachable=false`, `brokers-answered=0/?`,
+///   exit 1. This is the advertised-address failure seen from the other side
+///   of a race: librdkafka retires a bootstrap address as soon as the cluster
+///   has advertised its brokers (`rd_kafka_metadata_decommission_unavailable_
+///   brokers`, `rdkafka_metadata.c:476-535` in rdkafka-sys 4.10.0+2.12.1),
+///   so when its own "connected" refresh is answered first, every later
+///   metadata request goes to the advertised brokers, and none answered
+///   (measured on the `confluent` profile's OFFNET listener).
+/// * Every listed broker answered and a bootstrap address did not: reachable,
+///   with the silent address named on stderr. The cluster says it has those
+///   brokers, and each one answered.
+/// * Any other observation that could not be made or read: the bootstrap's
+///   answer stands (`reachable=true`, two lines), and stderr says the brokers
+///   were not established. Not observed is never "unreachable".
+#[must_use]
+pub fn with_brokers(id: &str, brokers: &Result<ApiVersions, NotObserved>) -> ProbeOutcome {
+    let lines = |reachable: bool, answered: Option<(usize, Option<usize>)>| {
+        let mut out = format!("{CLUSTER_ID_LINE}{id}\n{REACHABLE_LINE}{reachable}\n");
+        if let Some((a, l)) = answered {
+            let l = l.map_or_else(|| LISTED_UNKNOWN.to_string(), |l| l.to_string());
+            out.push_str(&format!("{BROKERS_ANSWERED_LINE}{a}/{l}\n"));
+        }
+        out
+    };
+    let remedy = "Every broker must advertise a host and port this pod can reach: check \
+                  advertised.listeners for the listener this bootstrap address belongs to, or \
+                  use the bootstrap address of a listener meant for this network";
+    let unreachable = |answered: Option<(usize, Option<usize>)>, diagnostic: String| ProbeOutcome {
+        stdout: lines(false, answered),
+        diagnostic: Some(diagnostic),
+        refusal: None,
+        code: ExitCode::Operational,
+    };
+    let reachable =
+        |answered: Option<(usize, Option<usize>)>, diagnostic: Option<String>| ProbeOutcome {
+            stdout: lines(true, answered),
+            diagnostic,
+            refusal: None,
+            code: ExitCode::Ok,
+        };
+    match brokers {
+        Ok(view) => reachable(Some((view.brokers(), Some(view.brokers()))), None),
+        Err(why) => match why {
+            NotObserved::Partial(Partial::NotEveryone {
+                answered,
+                listed,
+                silent,
+                ..
+            }) if !silent.is_empty() => unreachable(
+                Some((*answered, Some(listed.len()))),
+                format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}, and \
+                     {} of the {} broker(s) it advertises did not answer: {why} {remedy}{}",
+                    silent.len(),
+                    listed.len(),
+                    // Others answered (review LOW 2): a hung or partitioned
+                    // broker the cluster still lists reads the same way.
+                    if *answered > 0 {
+                        ", or that broker is down or cut off from this namespace"
+                    } else {
+                        ""
+                    }
+                ),
+            ),
+            NotObserved::Partial(Partial::NoBrokerList) => unreachable(
+                Some((0, None)),
+                format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}, and \
+                     no broker it advertises answered a metadata request within \
+                     {BROKERS_TIMEOUT:?} (a client stops using a bootstrap address once the \
+                     cluster has advertised its brokers). {remedy}"
+                ),
+            ),
+            NotObserved::Partial(Partial::NotEveryone { listed, .. }) => reachable(
+                Some((listed.len(), Some(listed.len()))),
+                Some(format!(
+                    "cluster-probe: every broker cluster {id} advertises answered, and a \
+                     bootstrap address did not: {why}"
+                )),
+            ),
+            _ => reachable(
+                None,
+                Some(format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}; \
+                     whether every broker it advertises can be reached was not established: \
+                     {why}"
+                )),
+            ),
         },
     }
 }
@@ -229,9 +380,11 @@ pub fn refused_by_binding(
 /// output and the exit code are byte-identical with the flag and without it,
 /// over a reader whose topic list is EMPTY.
 ///
-/// **One call, and it is `cluster_id()`.** No `list_topics`, no `end_offsets`,
-/// no `topic_configs`: the probe's question is "did a broker answer", and
-/// every extra call is another way for a healthy cluster to fail a liveness
+/// **Two calls: `cluster_id()`, then, once the bootstrap address named a
+/// cluster, `broker_view()`** (FX-46): every broker the cluster lists, asked on
+/// its advertised address. No `list_topics`, no `end_offsets`, no
+/// `topic_configs`: the probe's question is "can this cluster be reached", and
+/// every other call is another way for a healthy cluster to fail a liveness
 /// check.
 #[must_use]
 pub fn probe(reader: &dyn ClusterReader, marker_topic: Option<&str>) -> ProbeOutcome {
@@ -240,13 +393,16 @@ pub fn probe(reader: &dyn ClusterReader, marker_topic: Option<&str>) -> ProbeOut
     // take it would let the reconciler's unconditional pass-through look like
     // a caller error.
     let _marker_topic = marker_topic;
-    outcome(&reader.cluster_id())
+    match reader.cluster_id() {
+        Ok(id) => with_brokers(&id, &reader.broker_view(BROKERS_TIMEOUT)),
+        Err(e) => outcome(&Err(e)),
+    }
 }
 
 /// Write an outcome to its two streams.
 ///
 /// The writer seam exists so a test can assert the EXACT BYTES on each stream —
-/// `the_probe_prints_exactly_two_stdout_lines` counts the newlines on one and
+/// `the_probe_prints_the_contract_lines_and_nothing_else` counts the newlines on one and
 /// finds the diagnostic on the other — instead of trusting a `println!` nobody
 /// can observe. It is the same arrangement `exit::print_refusal_to` uses
 /// and for the same reason.
@@ -393,7 +549,7 @@ pub fn auth_spec(
 ///
 /// WHY STDERR. Interface **I14**'s two stdout lines are the whole machine
 /// contract; a log line on stdout would be a third line, which
-/// `the_probe_prints_exactly_two_stdout_lines` forbids.
+/// `the_probe_prints_the_contract_lines_and_nothing_else` forbids.
 ///
 /// WHY `warn` BY DEFAULT. At `info` the rdkafka client emits routine broker
 /// bookkeeping, and this process's useful output is two lines long. `RUST_LOG`
@@ -445,12 +601,12 @@ pub fn run(args: &ProbeArgs) -> ExitCode {
 /// the live reader to [`probe`].
 ///
 /// **IT RETURNS A [`ProbeOutcome`] AND NOT A `Result`, SO THERE IS EXACTLY ONE
-/// VERDICT PATH.** The shipped subcommand reaches its two lines through the same
-/// [`probe`] the tests drive over a double — including the `marker_topic`
-/// pass-through — rather than through a second, parallel arm that a test could
-/// never see. Everything a live dial can go wrong at (an unknown mode, a
-/// missing username, a missing password, a refused connect, a deadline) becomes
-/// an `Err` handed to the same [`outcome`].
+/// VERDICT PATH.** The shipped subcommand reaches its lines through the same
+/// pure [`outcome`] and [`with_brokers`] that [`probe`] reaches over a double,
+/// rather than through a second, parallel arm that a test could never see.
+/// Everything a live dial can go wrong at (an unknown mode, a missing
+/// username, a missing password, a refused connect, a deadline) becomes an
+/// `Err` handed to the same [`outcome`].
 fn dial(args: &ProbeArgs) -> ProbeOutcome {
     let servers = bootstrap_servers(&args.bootstrap);
     if servers.is_empty() {
@@ -508,22 +664,51 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         Err(e) => return outcome(&Err(e)),
     };
 
+    // TWO ANSWERS, EACH WITH ITS OWN BOUND: the cluster id within
+    // `DIAL_TIMEOUT`, then what the advertised brokers answered within
+    // `BROKERS_TIMEOUT` (FX-46). One bound over both would either stretch a
+    // wrong password's stall or cut the brokers' observation short. The
+    // verdict is the same pair of pure functions `probe` reaches over a
+    // double: `outcome` for no cluster id, `with_brokers` after one.
+    enum Step {
+        Id(Result<String, KafkaError>),
+        Brokers(Result<ApiVersions, NotObserved>),
+    }
     let (tx, rx) = mpsc::channel();
-    let marker_topic = args.marker_topic.clone();
+    // `--marker-topic` is accepted and never asserted, as `probe` documents.
+    let _marker_topic = args.marker_topic.as_deref();
     // DETACHED ON PURPOSE — the `JoinHandle` is dropped. A `join` would
     // reintroduce exactly the unbounded wait this thread exists to bound, and
     // returning from `main` ends the process, so a thread still inside
     // librdkafka cannot keep the runner alive past its answer.
     std::thread::spawn(move || {
-        let answer = match logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&servers, auth) {
-            Ok(reader) => probe(&reader, marker_topic.as_deref()),
-            Err(e) => outcome(&Err(e)),
+        let reader = match logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&servers, auth) {
+            Ok(reader) => reader,
+            Err(e) => {
+                let _ = tx.send(Step::Id(Err(e)));
+                return;
+            }
         };
+        let id = reader.cluster_id();
+        let named = id.is_ok();
         // A receiver that has already timed out makes this a discarded `Err`,
         // which is correct: nobody is listening any more.
-        let _ = tx.send(answer);
+        if tx.send(Step::Id(id)).is_ok() && named {
+            let _ = tx.send(Step::Brokers(reader.broker_view(BROKERS_TIMEOUT)));
+        }
     });
 
-    rx.recv_timeout(DIAL_TIMEOUT)
-        .unwrap_or_else(|_| outcome(&Err(KafkaError::Timeout(DIAL_TIMEOUT))))
+    let id = match rx.recv_timeout(DIAL_TIMEOUT) {
+        Ok(Step::Id(Ok(id))) => id,
+        Ok(Step::Id(Err(e))) => return outcome(&Err(e)),
+        Ok(Step::Brokers(_)) | Err(_) => return outcome(&Err(KafkaError::Timeout(DIAL_TIMEOUT))),
+    };
+    let brokers = match rx.recv_timeout(BROKERS_TIMEOUT + BROKERS_MARGIN) {
+        Ok(Step::Brokers(view)) => view,
+        Ok(Step::Id(_)) | Err(_) => Err(NotObserved::Other(format!(
+            "the advertised brokers' answers were not read within {:?}",
+            BROKERS_TIMEOUT + BROKERS_MARGIN
+        ))),
+    };
+    with_brokers(&id, &brokers)
 }

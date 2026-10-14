@@ -34,6 +34,8 @@ pub struct TopicData {
 type OnTopic<T> = Box<dyn Fn(&str) -> Answer<T> + Send + Sync>;
 type OnConsume = Box<dyn Fn(&str, i32, i64, usize) -> Answer<Vec<ConsumedRecord>> + Send + Sync>;
 type OnDescribe = Box<dyn Fn(&[String]) -> Answer<Vec<(String, TopicConfigRead)>> + Send + Sync>;
+type BrokerView =
+    Result<logweir_kafka::api_versions::ApiVersions, logweir_kafka::api_versions::NotObserved>;
 
 /// A `ClusterReader` answering from `topics`. A name not in `topics` reads as
 /// `TopicNotFound` when the reader is strict ([`Reader::target`]) and as empty
@@ -51,6 +53,7 @@ pub struct Reader {
     on_broker_configs: Option<Box<dyn Fn() -> Answer<Configs> + Send + Sync>>,
     on_consume_range: Option<OnConsume>,
     on_describe_topic_configs: Option<OnDescribe>,
+    on_broker_view: Option<Box<dyn Fn() -> BrokerView + Send + Sync>>,
 }
 
 impl Reader {
@@ -71,6 +74,7 @@ impl Reader {
             on_broker_configs: None,
             on_consume_range: None,
             on_describe_topic_configs: None,
+            on_broker_view: None,
         }
     }
 
@@ -143,6 +147,13 @@ impl Reader {
         f: impl Fn(&[String]) -> Answer<Vec<(String, TopicConfigRead)>> + Send + Sync + 'static,
     ) -> Self {
         self.on_describe_topic_configs = Some(Box::new(f));
+        self
+    }
+
+    /// What `broker_view` answers: the brokers' ApiVersions, or why there is
+    /// no whole view (FX-46).
+    pub fn on_broker_view(mut self, f: impl Fn() -> BrokerView + Send + Sync + 'static) -> Self {
+        self.on_broker_view = Some(Box::new(f));
         self
     }
 
@@ -243,6 +254,12 @@ impl ClusterReader for Reader {
         match &self.on_describe_topic_configs {
             Some(f) => f(topics),
             None => TraitDefaults.describe_topic_configs(topics),
+        }
+    }
+    fn broker_view(&self, within: std::time::Duration) -> BrokerView {
+        match &self.on_broker_view {
+            Some(f) => f(),
+            None => TraitDefaults.broker_view(within),
         }
     }
 }

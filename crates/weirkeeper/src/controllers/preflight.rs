@@ -563,10 +563,14 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
         }
         // Two rows, without `connection.topicsDescribable`:
         // `kinds::source_connection::run` emits exactly these, and argues the
-        // omission there.
+        // omission there; and (FX-46) every capability row the plan lists,
+        // on every path (blocked when the connection did not authenticate).
         CheckRequest::SourceConnection(_) => {
             out.insert(CheckId::RunnerContract);
             out.insert(CheckId::ConnectionAuthenticated);
+            for id in request.capability_checks() {
+                out.insert(*id);
+            }
         }
         // `kinds::switchover::run` emits exactly these four, on every path
         // (a row it could not ask is `unknown`, blocked, never absent).
@@ -5320,6 +5324,10 @@ pub fn build_job_shape(
             let c = connection.ok_or("the source connection did not resolve")?;
             CheckRequest::SourceConnection(logweir_core::check_contract::SourceConnectionRequest {
                 connection: connection_plan(c),
+                // FX-46: what the endpoint could be used for, so the test
+                // can say "usable as a source, not as a target". The request
+                // carries no skip list.
+                capability_checks: capability_checks(CheckOperation::SourceConnection, &[]),
             })
         }
         PreflightOperation::DestinationAccess => {

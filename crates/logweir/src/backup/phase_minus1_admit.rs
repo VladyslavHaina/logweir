@@ -264,6 +264,139 @@ pub fn network(
     Ok(Admitted { source_cluster_id })
 }
 
+/// The most topic names a refusal names; the rest are counted.
+const NAMED_IN_A_REFUSAL: usize = 10;
+
+/// Step 7 (FX-45): **what this principal and this endpoint can do, asked
+/// before the engine**, through the reader that admitted the run.
+///
+/// 1. **READ on every selected topic.** One DescribeTopics request with the
+///    caller's authorized operations (KIP-430). A topic the broker REPORTS
+///    this principal may not READ (its operations exclude READ, or it refuses
+///    even to describe the topic) is refused here, exit 3, by name and with
+///    the grant, instead of failing in the engine with "kafka-backup backup
+///    exited 1". A topic whose answer says nothing (a broker that computes no
+///    authorized operations, a failed read) is not refused: the engine's own
+///    fetch answers it, as before.
+/// 2. **`connection.engineProtocol`**, PROD-01.2's capability row: an
+///    endpoint SEEN not to serve a request version the engine sends is
+///    refused by the row's name. Not observed is a warning, never a refusal.
+/// 3. **`connection.groupTypes`**, when the run selects a consumer group: a
+///    warning that the receipt will record each group as not captured.
+///
+/// `connection.topicConfigsReadable` is not asked again here: the run reads
+/// every selected topic's configuration itself just before the engine
+/// (`config_coverage::observe`), records a refused read as `captureDenied`
+/// and warns, which is the row's whole question.
+///
+/// Before the execution claim, so a refused run consumes no execution id.
+pub fn source_capabilities(
+    reader: &dyn ClusterReader,
+    spec: &BackupSpec,
+    groups_selected: bool,
+) -> Result<(), BackupError> {
+    use crate::check::kinds::capability;
+    use logweir_core::check_contract::{CheckId, CheckState};
+    use logweir_kafka::access::{ReadDenied, TopicRead};
+
+    let topics = &spec.source.topics;
+    match reader.topic_read_access(topics) {
+        Ok(reads) => {
+            let denied: Vec<&(String, TopicRead)> =
+                reads.iter().filter(|(_, r)| r.is_denied()).collect();
+            if !denied.is_empty() {
+                let hidden = denied
+                    .iter()
+                    .filter(|(_, r)| *r == TopicRead::Denied(ReadDenied::NotDescribable))
+                    .count();
+                let mut named: Vec<String> = denied
+                    .iter()
+                    .take(NAMED_IN_A_REFUSAL)
+                    .map(|(t, _)| format!("`{t}`"))
+                    .collect();
+                if denied.len() > NAMED_IN_A_REFUSAL {
+                    named.push(format!("and {} more", denied.len() - NAMED_IN_A_REFUSAL));
+                }
+                return Err(GuardRefusal(format!(
+                    "the backup principal may not READ {} of {} selected topic(s): {} (the \
+                     broker's DescribeTopics answer lists this principal's operations on each \
+                     topic, and READ is not among them{}), so the engine would fail on its \
+                     first fetch. Grant READ on each named topic to the principal this backup \
+                     authenticates as (READ implies DESCRIBE). NO backup was taken: this is \
+                     refused before the engine is spawned and nothing was written",
+                    denied.len(),
+                    topics.len(),
+                    named.join(", "),
+                    if hidden > 0 {
+                        format!("; {hidden} of them it may not even Describe")
+                    } else {
+                        String::new()
+                    }
+                ))
+                .into());
+            }
+            let unknown = reads
+                .iter()
+                .filter(|(_, r)| matches!(r, TopicRead::Unknown(_)))
+                .count();
+            if unknown == 0 {
+                tracing::info!(
+                    topics = topics.len(),
+                    "the broker reports READ for the backup principal on every selected topic"
+                );
+            } else if let Some((topic, TopicRead::Unknown(why))) = reads
+                .iter()
+                .find(|(_, r)| matches!(r, TopicRead::Unknown(_)))
+            {
+                tracing::info!(
+                    topic = %topic,
+                    unknown,
+                    why = %why,
+                    "whether the backup principal may READ every selected topic is not known \
+                     before the engine; its own fetch will say"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "the broker could not be asked whether the backup principal may READ the selected \
+             topics; the engine's own fetch will say"
+        ),
+    }
+
+    let observed = reader.api_versions(capability::STANDALONE_BUDGET);
+    let now = chrono::Utc::now();
+    let row = capability::engine_protocol(
+        CheckId::ConnectionEngineProtocol,
+        &observed,
+        capability::spec_uses_sasl(&spec.source.auth),
+        now,
+    );
+    if let Some(why) = capability::refusal_of(&row) {
+        return Err(GuardRefusal(format!(
+            "{why} NO backup was taken: this is refused before the engine is spawned and \
+             nothing was written"
+        ))
+        .into());
+    }
+    match row.state {
+        CheckState::Ready => tracing::info!(check = %row.id, "{}", row.message),
+        _ => tracing::warn!(
+            check = %row.id,
+            code = %row.code,
+            "{} (the backup runs; the engine's own requests will say)",
+            row.message
+        ),
+    }
+    if groups_selected {
+        let groups = capability::group_types(&observed, now);
+        if groups.state == CheckState::NotReady {
+            tracing::warn!(check = %groups.id, code = %groups.code, "{}", groups.message);
+        }
+    }
+    Ok(())
+}
+
 /// Local checks first, network second — the whole guard, in the order GC11's
 /// exit-3 contract requires.
 pub fn run(

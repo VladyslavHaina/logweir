@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 
 use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
-    ConnectionPlan, OperationReadinessRequest,
+    ConnectionPlan, Gating, OperationReadinessRequest,
 };
 use logweir_kafka::inventory::{CheckFailure, InventoryProbe, TopicPresence};
 
@@ -264,6 +264,9 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     // The broker half gets half the budget; the destination half gets the
     // rest. Neither can spend the whole check on an unreachable endpoint.
     let broker_budget = deadline.slice(2);
+    // `connection.topicsReadable` of a Backup (FX-45): asked over the same
+    // connection as the rows above, when it authenticated.
+    let mut readable: Option<CheckOutcome> = None;
     match wiring.broker(&req.connection, broker_budget) {
         Err(f) => {
             push(
@@ -319,21 +322,20 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
             ) {
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
+            if req.operation == CheckOperation::Backup
+                && authenticated_ok
+                && !skip.contains(&CheckId::ConnectionTopicsReadable)
+            {
+                readable = Some(topics_readable(probe.as_ref(), &req.topics, deadline, now));
+            }
         }
     }
 
     if req.operation == CheckOperation::Backup {
         push(
-            execution_only(
-                CheckId::ConnectionTopicsReadable,
-                CheckCode::ReadVerifiedOnlyAtExecution,
-                now,
-            )
-            .with_message(
-                "a check reads metadata only; whether this principal may CONSUME each selected \
-                 topic is established by the run",
-            )
-            .with_scope(scope),
+            readable
+                .unwrap_or_else(|| read_verified_at_execution(None, now))
+                .with_scope(scope),
             &skip,
             &mut checks,
         );
@@ -451,6 +453,142 @@ pub fn capability_rows(
             _ => None,
         })
         .collect()
+}
+
+/// `connection.topicsReadable` as it was before FX-45, and as it stays
+/// whenever the broker did not say: execution-only, `unknown`, and why.
+fn read_verified_at_execution(
+    why: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CheckOutcome {
+    let base = "a check reads metadata only; whether this principal may CONSUME each selected \
+                topic is established by the run";
+    execution_only(
+        CheckId::ConnectionTopicsReadable,
+        CheckCode::ReadVerifiedOnlyAtExecution,
+        now,
+    )
+    .with_message(&match why {
+        Some(why) => format!("{base}: {why}"),
+        None => base.to_string(),
+    })
+}
+
+/// The remedy of a `connection.topicsReadable` refusal: the grant, named.
+pub const READ_DENIED_REMEDY: &str =
+    "Grant READ on each named topic to the principal this connection authenticates as (READ \
+     implies DESCRIBE), or remove the topic from the selection. `logweir backup run` refuses \
+     these topics by name before its engine starts.";
+
+/// **`connection.topicsReadable`: whether this principal may READ each
+/// selected topic, as the broker reports it** (FX-45).
+///
+/// One DescribeTopics request with the caller's authorized operations
+/// (KIP-430). The row was execution-only, so a principal without `Read`
+/// passed every Preflight and failed a minute later in the engine with
+/// "kafka-backup backup exited 1". Now:
+///
+/// * the broker REPORTS that READ is missing on a selected topic (its
+///   authorized operations exclude READ, or it refuses to describe the topic
+///   at all): BLOCKING `notReady`, `TopicAuthorizationFailed`, naming the
+///   topics and the grant;
+/// * otherwise the row stays what it was, execution-only `unknown`
+///   (`ReadVerifiedOnlyAtExecution`), and its message says what the broker
+///   reported: READ on every topic, or why it is not known (a broker that
+///   does not compute authorized operations, a read that failed).
+///
+/// **A reported grant does not make the row `ready`.** Only the run consumes,
+/// and no code an older controller reads says "readable"; an older controller
+/// reads every code and gating value this row now emits (FX-47's rule).
+#[must_use]
+pub fn topics_readable(
+    probe: &dyn InventoryProbe,
+    topics: &[String],
+    deadline: Deadline,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CheckOutcome {
+    if topics.is_empty() {
+        return read_verified_at_execution(Some("the operation selects no topic by name"), now);
+    }
+    if !deadline.has_room() {
+        return read_verified_at_execution(
+            Some("the check's budget was spent before the broker could be asked"),
+            now,
+        );
+    }
+    let reads = match probe.topic_read_access(topics) {
+        Ok(reads) => reads,
+        Err(f) => {
+            return read_verified_at_execution(
+                Some(&format!(
+                    "the broker could not be asked for this principal's operations on them ({})",
+                    f.message
+                )),
+                now,
+            )
+        }
+    };
+    let denied: Vec<String> = reads
+        .iter()
+        .filter(|(_, r)| r.is_denied())
+        .map(|(t, _)| t.clone())
+        .collect();
+    if !denied.is_empty() {
+        let hidden = reads
+            .iter()
+            .filter(|(_, r)| {
+                *r == logweir_kafka::access::TopicRead::Denied(
+                    logweir_kafka::access::ReadDenied::NotDescribable,
+                )
+            })
+            .count();
+        let code = CheckCode::TopicAuthorizationFailed;
+        return catalogue::outcome_gated(
+            CheckId::ConnectionTopicsReadable,
+            CheckState::NotReady,
+            code,
+            Gating::Blocking,
+            now,
+        )
+        .with_message(&format!(
+            "the broker reports that this principal may not READ {} of {} selected topic(s){}, \
+             so a backup of them would fail in the engine: grant READ on each",
+            denied.len(),
+            topics.len(),
+            if hidden > 0 {
+                format!(" ({hidden} of them it may not even Describe)")
+            } else {
+                String::new()
+            }
+        ))
+        .with_remedy(READ_DENIED_REMEDY)
+        .with_detail(detail(&denied));
+    }
+    let unknown: Vec<&str> = reads
+        .iter()
+        .filter_map(|(_, r)| match r {
+            logweir_kafka::access::TopicRead::Unknown(why) => Some(why.as_str()),
+            _ => None,
+        })
+        .collect();
+    match unknown.first() {
+        None => read_verified_at_execution(
+            Some(&format!(
+                "the broker reports READ for this principal on all {} selected topic(s)",
+                topics.len()
+            )),
+            now,
+        ),
+        Some(why) => read_verified_at_execution(
+            Some(&format!(
+                "whether it may READ {} of {} selected topic(s) is not known before the run \
+                 ({why})",
+                unknown.len(),
+                topics.len()
+            )),
+            now,
+        ),
+    }
 }
 
 /// The `KafkaCluster` scope a connection row carries.

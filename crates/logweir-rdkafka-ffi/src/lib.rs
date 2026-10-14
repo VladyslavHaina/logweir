@@ -15,6 +15,7 @@
 //! | group description, and the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | [`groups::describe_consumer_groups`] |
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
 //! | topic IDs (KIP-516) of named topics | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
+//! | the caller's authorized operations on named topics (KIP-430) | `rd_kafka_DescribeTopics` | [`topics::describe_topic_access`] |
 //! | the client's own log lines, as events on a private queue (the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
 //! | every log line of a runner's client, to a sink and never to librdkafka's raw stderr logger (FX-43) | `rd_kafka_set_log_queue`, `rd_kafka_queue_poll`, `rd_kafka_event_log` | [`logs::LogPumped`] |
 //!
