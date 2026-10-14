@@ -1020,39 +1020,9 @@ mod tests {
 
     // ---- D1: a store's refusal is never the evidence's verdict ----------
 
-    /// Every read answers `answer(key)`.
-    struct Answering(fn(&str) -> logweir_engine_oso::storage::StoreError);
-
-    impl crate::check::store::ObjectAccess for Answering {
-        fn get(
-            &self,
-            key: &str,
-            _max_bytes: u64,
-        ) -> Result<Vec<u8>, logweir_engine_oso::storage::StoreError> {
-            Err((self.0)(key))
-        }
-        fn list_page(
-            &self,
-            _prefix: &str,
-            _start_after: Option<&str>,
-            _max: usize,
-        ) -> Result<Vec<String>, logweir_engine_oso::storage::StoreError> {
-            Ok(Vec::new())
-        }
-        fn put_create_only(
-            &self,
-            key: &str,
-            _bytes: &[u8],
-        ) -> Result<logweir_engine_oso::storage::PutOutcome, logweir_engine_oso::storage::StoreError>
-        {
-            Err(logweir_engine_oso::storage::StoreError::ReadOnly(
-                key.into(),
-            ))
-        }
-        fn qualify(&self, relative_key: &str) -> String {
-            relative_key.to_string()
-        }
-    }
+    // The evidence double lives outside `check/` (`evidence_read::test_support`):
+    // `check_cli.rs` holds this tree to ONE module naming the one write.
+    use crate::evidence_read::test_support::Answering;
 
     /// The wiring of a review whose evidence handle answers every read with
     /// `answer`; the target is never reached.

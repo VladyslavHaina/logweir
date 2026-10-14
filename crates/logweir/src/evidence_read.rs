@@ -260,6 +260,39 @@ pub fn read_store(
     }
 }
 
+/// Test doubles for the readers of a run's evidence (the `switchoverReadiness`
+/// review's D1 row). Outside `check/` on purpose: `check_cli.rs` holds that
+/// tree to exactly one module naming the one write, and this double's write
+/// only refuses.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use logweir_engine_oso::storage::{PutOutcome, StoreError};
+
+    /// An evidence handle whose every read answers `answer(key)`; it lists
+    /// nothing and writes nothing.
+    pub(crate) struct Answering(pub(crate) fn(&str) -> StoreError);
+
+    impl crate::check::store::ObjectAccess for Answering {
+        fn get(&self, key: &str, _max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+            Err((self.0)(key))
+        }
+        fn list_page(
+            &self,
+            _prefix: &str,
+            _start_after: Option<&str>,
+            _max: usize,
+        ) -> Result<Vec<String>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<PutOutcome, StoreError> {
+            Err(StoreError::ReadOnly(key.into()))
+        }
+        fn qualify(&self, relative_key: &str) -> String {
+            relative_key.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
