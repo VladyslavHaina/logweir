@@ -195,7 +195,8 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
 ];
 
 /// `spec.activeDeadlineSeconds` on a probe Job. Two minutes: the subcommand
-/// bounds the dial at ten seconds and the rest is image start, so a deadline
+/// bounds the cluster-id dial at ten seconds and the advertised brokers'
+/// answers at twelve more (FX-46), and the rest is image start, so a deadline
 /// that fires means the pod never got going.
 pub const PROBE_DEADLINE_SECONDS: i64 = 120;
 
@@ -433,13 +434,20 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
                      list could not even be read"
                 .to_string(),
         };
+        // Some brokers answered (review LOW 2): a hung or partitioned broker
+        // the cluster still lists reads the same way as a bad advertisement.
+        let or_down = if answered > 0 {
+            ", or that broker is down or cut off from this namespace"
+        } else {
+            ""
+        };
         return format!(
             "the bootstrap address answered and named the cluster, and {how_many} (pod exit \
              {exit_code}), so no backup or restore through this connection can reach every \
              partition. Every broker must advertise a host and port the runner pods in this \
              namespace can reach: check advertised.listeners for the listener the bootstrap \
              address belongs to, or use a bootstrap address of a listener meant for this \
-             network. The probe Job's log names each broker that did not answer"
+             network{or_down}. The probe Job's log names each broker that did not answer"
         );
     }
     match v.reachable {

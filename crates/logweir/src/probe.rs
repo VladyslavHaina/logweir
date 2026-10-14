@@ -307,9 +307,16 @@ pub fn with_brokers(id: &str, brokers: &Result<ApiVersions, NotObserved>) -> Pro
                 Some((*answered, Some(listed.len()))),
                 format!(
                     "cluster-probe: the bootstrap address answered and named cluster {id}, and \
-                     {} of the {} broker(s) it advertises did not answer: {why} {remedy}",
+                     {} of the {} broker(s) it advertises did not answer: {why} {remedy}{}",
                     silent.len(),
-                    listed.len()
+                    listed.len(),
+                    // Others answered (review LOW 2): a hung or partitioned
+                    // broker the cluster still lists reads the same way.
+                    if *answered > 0 {
+                        ", or that broker is down or cut off from this namespace"
+                    } else {
+                        ""
+                    }
                 ),
             ),
             NotObserved::Partial(Partial::NoBrokerList) => unreachable(

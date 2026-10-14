@@ -74,16 +74,18 @@ pub enum TopicRead {
     /// The broker refused it, and why.
     Denied(ReadDenied),
     /// Nothing is known, and why: no set reported (a broker that does not
-    /// compute it), the topic not found, another per-topic error, no answer
-    /// for the name, or a reader that does not ask.
+    /// compute it), a set without DESCRIBE (not a computed answer), the topic
+    /// not found, another per-topic error, no answer for the name, or a
+    /// reader that does not ask.
     Unknown(String),
 }
 
 /// Why a principal may not READ a topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadDenied {
-    /// The broker reported the principal's operations on the topic and READ
-    /// is not among them (it may Describe the topic, and not consume it).
+    /// The broker reported the principal's operations on the topic, DESCRIBE
+    /// among them and READ not (it may Describe the topic, and not consume
+    /// it). A set without DESCRIBE is not a computed answer, and is unknown.
     OperationsExcludeRead,
     /// The broker refused even to describe the topic to this principal
     /// (`TOPIC_AUTHORIZATION_FAILED`). READ implies DESCRIBE, so it may not
@@ -123,7 +125,22 @@ pub fn topic_read(answer: &crate::topic_ids::TopicAnswer) -> TopicRead {
         {
             TopicRead::Granted
         }
-        (None, Some(_)) => TopicRead::Denied(ReadDenied::OperationsExcludeRead),
+        // A COMPUTED set for a topic the broker described always holds
+        // DESCRIBE: Kafka answers an error-free entry only to a principal that
+        // may Describe the topic, and authorizes every topic operation to
+        // build the set. So READ is refused only beside DESCRIBE.
+        (None, Some(ops)) if ops.contains(&ACL_OPERATION_DESCRIBE) => {
+            TopicRead::Denied(ReadDenied::OperationsExcludeRead)
+        }
+        // A set without DESCRIBE (empty included) is not a computed answer:
+        // an endpoint that writes 0 where KIP-430 says INT32_MIN ("not
+        // computed") would otherwise have every backup refused for a grant
+        // the principal holds.
+        (None, Some(_)) => TopicRead::Unknown(
+            "the broker described the topic and reported no Describe on it, so its set is not \
+             a computed answer"
+                .to_string(),
+        ),
     }
 }
 
@@ -172,8 +189,9 @@ mod tests {
     /// FX-45's decision, each arm. Mutants killed: reading "not reported" as
     /// a refusal (every backup against a broker that does not compute the set
     /// would be refused) or as a grant; reading DESCRIBE as READ; reading a
-    /// not-describable topic as unknown (the measured `acl` case); reading
-    /// an empty set as unknown; letting a not-found topic read as refused.
+    /// not-describable topic as unknown (the measured `acl` case); reading a
+    /// set without DESCRIBE (an empty one, or `[10]`) as a refusal (review
+    /// M1: not a computed answer); letting a not-found topic read as refused.
     #[test]
     fn read_is_granted_only_when_reported_and_refused_only_when_seen() {
         // The measured sets: no authorizer gives every topic operation;
@@ -190,10 +208,16 @@ mod tests {
             topic_read(&answer("t", None, Some(vec![8, 10]))),
             TopicRead::Denied(ReadDenied::OperationsExcludeRead)
         );
-        assert_eq!(
-            topic_read(&answer("t", None, Some(vec![]))),
-            TopicRead::Denied(ReadDenied::OperationsExcludeRead)
-        );
+        // No DESCRIBE in the set: not a computed answer (review M1).
+        for set in [vec![], vec![10]] {
+            assert!(
+                matches!(
+                    topic_read(&answer("t", None, Some(set.clone()))),
+                    TopicRead::Unknown(m) if m.contains("reported no Describe on it")
+                ),
+                "{set:?}"
+            );
+        }
         assert_eq!(
             topic_read(&answer("t", Some(29), None)),
             TopicRead::Denied(ReadDenied::NotDescribable)

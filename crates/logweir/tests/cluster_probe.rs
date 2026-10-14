@@ -288,7 +288,35 @@ fn a_cluster_whose_advertised_broker_does_not_answer_is_not_reachable() {
         err.contains("the bootstrap address answered and named cluster ALLOWED0000000000000000")
             && err.contains("1 of the 1 broker(s) it advertises did not answer")
             && err.contains("broker 1 (127.0.0.1:1)")
-            && err.contains("advertised.listeners"),
+            && err.contains("advertised.listeners")
+            && !err.contains("down or cut off"),
+        "{err}"
+    );
+
+    // Two of three answered (review LOW 2): the silent one may be a broker
+    // the cluster still lists that is down or cut off, and the diagnostic
+    // says so beside the advertisement.
+    let o = probe(
+        &bootstrap_only(|| {
+            let listed: Vec<Broker> = (1..=3).map(|id| Broker::new(id, "kafka", 9092)).collect();
+            Err(NotObserved::Partial(Partial::NotEveryone {
+                answered: 2,
+                silent: vec![listed[2].clone()],
+                listed,
+                silent_bootstrap: vec![],
+            }))
+        }),
+        None,
+    );
+    let (out, err) = streams(&o);
+    assert!(
+        out.contains(&format!("{BROKERS_ANSWERED_LINE}2/3\n")),
+        "{out}"
+    );
+    assert_eq!(o.code, ExitCode::Operational);
+    assert!(
+        err.contains("advertised.listeners")
+            && err.contains("or that broker is down or cut off from this namespace"),
         "{err}"
     );
 

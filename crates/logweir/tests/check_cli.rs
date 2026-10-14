@@ -536,6 +536,8 @@ struct ProbeState {
     /// topic. A topic not named here gets the trait's own default (unknown).
     topic_reads: BTreeMap<String, TopicRead>,
     topic_read_calls: usize,
+    /// FX-45: the whole DescribeTopics call fails, and how.
+    topic_reads_fault: Option<(CheckCode, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -606,6 +608,12 @@ impl FakeProbe {
 
     fn topic_read_calls(&self) -> usize {
         self.state.lock().unwrap().topic_read_calls
+    }
+
+    /// FX-45: the whole authorized-operations read fails.
+    fn failing_topic_reads(self, code: CheckCode, message: &str) -> Self {
+        self.state.lock().unwrap().topic_reads_fault = Some((code, message.to_string()));
+        self
     }
 
     fn failing_topic_configs(self, topic: &str, code: CheckCode, message: &str) -> Self {
@@ -759,6 +767,9 @@ impl InventoryProbe for FakeProbe {
     ) -> Result<Vec<(String, TopicRead)>, CheckFailure> {
         let mut s = self.state.lock().unwrap();
         s.topic_read_calls += 1;
+        if let Some((c, m)) = &s.topic_reads_fault {
+            return Err(CheckFailure::new(*c, m));
+        }
         Ok(topics
             .iter()
             .map(|t| {
@@ -3411,6 +3422,35 @@ fn a_topic_the_broker_does_not_refuse_leaves_the_row_execution_only() {
             logweir_core::check_contract::OverallState::Ready
         );
     }
+    // CONTROL (review LOW 1): the read itself failed. Nothing is known, so
+    // the row stays execution-only and says why; it never blocks.
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(
+            present()
+                .with_topic_read("orders", TopicRead::Denied(ReadDenied::NotDescribable))
+                .failing_topic_reads(CheckCode::MetadataTimeout, "DescribeTopics timed out"),
+        ),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("could not be asked") && row.message.contains("timed out"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
     let probe = present().with_topic_read("orders", TopicRead::Denied(ReadDenied::NotDescribable));
     let run = drive(
         &mount(&capability_plan(vec!["orders"], Vec::new())),

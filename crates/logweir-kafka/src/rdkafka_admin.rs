@@ -108,6 +108,33 @@ fn observation(d: DescribedGroup) -> DescribedObservation {
     }
 }
 
+/// **Whether the principal of `client` may READ each named topic** (FX-45),
+/// the one implementation [`RdKafkaReader::read_topic_access`] and the check
+/// client (`crate::inventory::KafkaInventory`) share: DescribeTopics with the
+/// caller's authorized operations ([`topics::describe_topic_access`]), at most
+/// [`MAX_DESCRIBE_TOPICS`] names per call, each bounded by `bound`, one
+/// verdict per requested name in order ([`crate::access::topic_read`]).
+///
+/// # Errors
+///
+/// The first whole-call failure, a transport one as
+/// [`KafkaError::Unreachable`] ([`crate::topic_ids::call_failure`]).
+pub(crate) fn read_topic_access_with<C: rdkafka::client::ClientContext>(
+    client: &rdkafka::client::Client<C>,
+    topics: &[String],
+    bound: Duration,
+) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
+    let names = crate::topic_ids::distinct(topics);
+    let mut answers = Vec::with_capacity(names.len());
+    for chunk in names.chunks(MAX_DESCRIBE_TOPICS) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        let described = topics::describe_topic_access(client, &refs, bound)
+            .map_err(|e| topics_call_failure(&e))?;
+        answers.extend(described.into_iter().map(topic_answer));
+    }
+    Ok(crate::access::join_reads(topics, &answers))
+}
+
 impl RdKafkaReader {
     /// Sets the bound of every later admin call (DescribeCluster, the two
     /// group listings, descriptions): librdkafka's request
@@ -180,19 +207,7 @@ impl RdKafkaReader {
         &self,
         topics: &[String],
     ) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
-        let names = crate::topic_ids::distinct(topics);
-        let mut answers = Vec::with_capacity(names.len());
-        for chunk in names.chunks(MAX_DESCRIBE_TOPICS) {
-            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
-            let described = topics::describe_topic_access(
-                self.admin_client().inner(),
-                &refs,
-                self.admin_bound(),
-            )
-            .map_err(|e| topics_call_failure(&e))?;
-            answers.extend(described.into_iter().map(topic_answer));
-        }
-        Ok(crate::access::join_reads(topics, &answers))
+        read_topic_access_with(self.admin_client().inner(), topics, self.admin_bound())
     }
 
     /// **Both group listings and the cluster access, read once**: the input

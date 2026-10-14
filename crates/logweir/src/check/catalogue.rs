@@ -247,14 +247,14 @@ pub fn outcome(
 
 /// The same, with the gating overridden.
 ///
-/// Three callers, each a row whose gating is a function of the plan or of
-/// the answer, which keeps the table static for every other row:
+/// Two callers, each a row whose gating is a function of the plan or of the
+/// answer, which keeps the table static for every other row:
 /// `destination.evidenceWritable`, which D2 §6.3 makes "**B** if
-/// `writeProbe: CreateOnlyMarker`, else **E**"; `connection.topicsReadable`,
-/// execution-only until the broker REPORTS that the principal may not READ a
-/// selected topic, which blocks (FX-45); and the capability rows of a
-/// `sourceConnection` check, which are advisory there (FX-46: a connection
-/// test says what an endpoint can be used for, and is not failed by it).
+/// `writeProbe: CreateOnlyMarker`, else **E**"; and
+/// `connection.topicsReadable`, execution-only until the broker REPORTS that
+/// the principal may not READ a selected topic, which blocks (FX-45). (The
+/// capability rows of a `sourceConnection` check are made advisory by that
+/// kind itself, FX-46.)
 #[must_use]
 pub fn outcome_gated(
     id: CheckId,

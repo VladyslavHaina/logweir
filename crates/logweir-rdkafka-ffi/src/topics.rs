@@ -295,7 +295,7 @@ fn read_descriptions(event: &Event) -> Result<Vec<DescribedTopic>, CallError> {
                 partition_count: partitions,
                 is_internal: rd::rd_kafka_TopicDescription_is_internal(d) != 0,
                 error: raw_error(event, rd::rd_kafka_TopicDescription_error(d)),
-                authorized_operations: (!ops.is_null()).then(|| array(event, ops, n_ops).to_vec()),
+                authorized_operations: crate::raw::operations(event, ops, n_ops),
             }
         };
         out.push(topic);

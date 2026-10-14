@@ -76,6 +76,34 @@ pub(crate) unsafe fn array<O: ?Sized, T>(owner: &O, ptr: *const T, len: usize) -
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
+/// Copies a KIP-430 authorized-operations array librdkafka returned (a
+/// cluster's or a topic's): `None` for NULL, which is librdkafka's "not
+/// requested or not reported" (`rd_kafka_AuthorizedOperations_parse`,
+/// `rdkafka_admin.c:7713-7749`), and the operations as C ints otherwise, an
+/// EMPTY set for a count of 0 (librdkafka's one-byte placeholder is never
+/// read). The two answers must never be confused: the caller decides what
+/// each means.
+///
+/// # Safety
+///
+/// `ops` is NULL, or points to `n` initialised C-`int`-sized enum values
+/// (T12: read as `c_int`) that stay valid and unmodified while `owner` is
+/// borrowed: [`array`]'s contract.
+pub(crate) unsafe fn operations<O: ?Sized>(
+    owner: &O,
+    ops: *const c_int,
+    n: usize,
+) -> Option<Vec<i32>> {
+    if ops.is_null() {
+        return None;
+    }
+    // SAFETY: `ops` is non-NULL here and, by this function's contract,
+    // points to `n` initialised `c_int` that `owner` keeps alive; `array`
+    // returns an empty slice for a zero count and the values are copied
+    // before the borrow ends.
+    Some(unsafe { array(owner, ops, n) }.to_vec())
+}
+
 /// Copies one `rd_kafka_error_t` librdkafka returned inside a result.
 ///
 /// # Safety
@@ -414,6 +442,18 @@ mod tests {
             b'd' as c_char,
         ];
         assert_eq!(errstr_text(&full), "abcd");
+    }
+
+    #[test]
+    fn the_operations_reader_keeps_not_reported_apart_from_none() {
+        let owner = ();
+        // SAFETY: a NULL pointer, which the contract allows; nothing is read.
+        assert_eq!(unsafe { operations(&owner, std::ptr::null(), 3) }, None);
+        let v: [c_int; 2] = [3, 8];
+        // SAFETY: `v` holds two initialised `c_int` that outlive the call.
+        assert_eq!(unsafe { operations(&v, v.as_ptr(), 2) }, Some(vec![3, 8]));
+        // SAFETY: `v` is live and initialised, and a zero count reads nothing.
+        assert_eq!(unsafe { operations(&v, v.as_ptr(), 0) }, Some(vec![]));
     }
 
     #[test]

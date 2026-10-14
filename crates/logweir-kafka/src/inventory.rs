@@ -1408,34 +1408,17 @@ mod client {
             &self,
             topics: &[String],
         ) -> Result<Vec<(String, crate::access::TopicRead)>, CheckFailure> {
-            use logweir_rdkafka_ffi::topics::{describe_topic_access, MAX_DESCRIBE_TOPICS};
-            let names = crate::topic_ids::distinct(topics);
-            let mut answers = Vec::with_capacity(names.len());
-            for chunk in names.chunks(MAX_DESCRIBE_TOPICS) {
-                let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
-                let described =
-                    describe_topic_access(self.admin.inner(), &refs, self.timeouts.metadata)
-                        .map_err(|e| {
-                            self.fail(
-                                CheckCode::MetadataTimeout,
-                                &format!("DescribeTopics with authorized operations: {e}"),
-                            )
-                        })?;
-                answers.extend(
-                    described
-                        .into_iter()
-                        .map(|d| crate::topic_ids::TopicAnswer {
-                            name: match d.name {
-                                logweir_rdkafka_ffi::CText::Utf8(s) => Some(s),
-                                _ => None,
-                            },
-                            halves: None,
-                            error: d.error.map(|e| (e.code, e.message.display())),
-                            operations: d.authorized_operations,
-                        }),
-                );
-            }
-            Ok(crate::access::join_reads(topics, &answers))
+            crate::rdkafka_admin::read_topic_access_with(
+                self.admin.inner(),
+                topics,
+                self.timeouts.metadata,
+            )
+            .map_err(|e| {
+                self.fail(
+                    CheckCode::MetadataTimeout,
+                    &format!("DescribeTopics with authorized operations: {e}"),
+                )
+            })
         }
     }
 

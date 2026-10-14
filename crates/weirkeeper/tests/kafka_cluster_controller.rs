@@ -1413,7 +1413,20 @@ fn a_cluster_whose_advertised_broker_did_not_answer_is_named() {
     let message = verdict_message(&v, 1);
     assert!(
         message.contains("only 0 of the 1 broker(s) the cluster advertises answered")
-            && message.contains("advertised.listeners"),
+            && message.contains("advertised.listeners")
+            && !message.contains("down or cut off"),
+        "{message}"
+    );
+    // Two of three answered (review LOW 2): the silent broker may be down or
+    // cut off, and the message says so beside the advertisement.
+    let partial = verdict(&probe_report(&format!(
+        "{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}false\n{BROKERS_ANSWERED_PREFIX}2/3\n"
+    )));
+    assert_eq!(partial.reason, REASON_ADVERTISED_BROKERS_UNREACHABLE);
+    let message = verdict_message(&partial, 1);
+    assert!(
+        message.contains("only 2 of the 3 broker(s)")
+            && message.contains("or that broker is down or cut off from this namespace"),
         "{message}"
     );
     assert!(PROBE_CONDITION_REASONS.contains(&REASON_ADVERTISED_BROKERS_UNREACHABLE));

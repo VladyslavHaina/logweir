@@ -174,8 +174,9 @@ struct StubReader {
     /// default (not read).
     marks: Option<BTreeMap<String, logweir_kafka::capture::TopicMarks>>,
     /// FX-45: what `topic_read_access` answers; `None` is the trait's
-    /// default (nothing asked, every topic unknown).
-    reads: Option<Vec<(String, TopicRead)>>,
+    /// default (nothing asked, every topic unknown). `Some(Err)` is the
+    /// whole call failing.
+    reads: Option<Result<Vec<(String, TopicRead)>, KafkaError>>,
     /// FX-45: what `broker_view` answers; `None` is the trait's default
     /// (not observed).
     served: Option<Result<ApiVersions, NotObserved>>,
@@ -199,12 +200,15 @@ impl StubReader {
         }
     }
     fn with_reads(mut self, reads: &[(&str, TopicRead)]) -> Self {
-        self.reads = Some(
-            reads
-                .iter()
-                .map(|(t, r)| ((*t).to_string(), r.clone()))
-                .collect(),
-        );
+        self.reads = Some(Ok(reads
+            .iter()
+            .map(|(t, r)| ((*t).to_string(), r.clone()))
+            .collect()));
+        self
+    }
+    /// The whole DescribeTopics call fails.
+    fn failing_reads(mut self, e: KafkaError) -> Self {
+        self.reads = Some(Err(e));
         self
     }
     fn serving(mut self, ranges: &[(i16, i16, i16)]) -> Self {
@@ -280,13 +284,13 @@ impl ClusterReader for StubReader {
         }
     }
     fn topic_read_access(&self, topics: &[String]) -> Result<Vec<(String, TopicRead)>, KafkaError> {
-        Ok(match &self.reads {
+        match &self.reads {
             Some(r) => r.clone(),
-            None => topics
+            None => Ok(topics
                 .iter()
                 .map(|t| (t.clone(), TopicRead::Unknown("not asked".into())))
-                .collect(),
-        })
+                .collect()),
+        }
     }
     fn broker_view(&self, _within: std::time::Duration) -> Result<ApiVersions, NotObserved> {
         self.served
@@ -1402,6 +1406,19 @@ fn a_topic_the_principal_may_not_read_is_refused_before_the_engine_by_name() {
             "a refused plan must never reach the engine"
         );
     }
+    // CONTROL (review LOW 1): the read itself failed. Nothing is known, so
+    // the engine's own fetch answers, as before FX-45.
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .failing_reads(KafkaError::Unreachable("DescribeTopics timed out".into()));
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_for("mvp-demo");
+    assert_eq!(
+        run(&f.args, &reader, &engine, &store),
+        ExitCode::Ok,
+        "a failed read is not a refusal"
+    );
+    assert_eq!(engine.plans.lock().unwrap().len(), 1);
     for read in [
         TopicRead::Granted,
         TopicRead::Unknown("no set reported".into()),

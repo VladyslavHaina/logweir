@@ -353,8 +353,12 @@ third line, `brokers-answered=<answered>/<listed>`, and answers
 advertised address; an older controller reads the first two lines by key and
 records `ProbeReportedUnreachable`, this one records
 `AdvertisedBrokersUnreachable`. A cluster whose advertised addresses this
-namespace cannot reach therefore turns `reachable: false` after the upgrade,
-and admission refuses its runs, as it would have failed them.
+namespace cannot reach therefore turns `reachable: false` after the upgrade:
+a `Restore` against it is refused at admission (terminal,
+`ClusterNotReachable`); backups are not gated on `reachable`. A Test
+connection in flight across the upgrade (a check Job the older controller
+created) reports none of the three capability rows this controller expects,
+so that one `Preflight` reads `unknown`; run the test again.
 `connection.topicsReadable` may now be blocking `notReady`
 (`TopicAuthorizationFailed`), a code and a gating every controller reads.
 `backup run` and `drill run` refuse, by the row's name, what the broker

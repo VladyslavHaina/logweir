@@ -601,7 +601,7 @@ fn execute_with_signer(
         reader,
     )?;
     // FX-45: READ on every selected topic, and the capability rows, before
-    // the signer, the claim and the engine.
+    // the execution claim and the engine.
     phase_minus1_admit::source_capabilities(
         reader,
         &inputs.spec,
