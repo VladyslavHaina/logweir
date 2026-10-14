@@ -222,7 +222,7 @@ function PolicyTable({ policies, now }: { policies: ProtectionPolicy[]; now: num
                   aria-label={`${p.name}: newest recovery point ${age.text}`}
                 />
                 <div className="lw-subtle">
-                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}
+                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · <span className="lw-nowrap">objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}</span>
                 </div>
               </Td>
               <Td dataLabel="Source" className="lw-break">

@@ -180,7 +180,12 @@ function connectionCheckResult(c: Connection, at = Date.now() + 4500): HeldCheck
       reachable
         ? entry("connection.clusterIdentity", "ready", "ClusterIdentityMatched", at, { scope, message: `cluster id ${reachNow(c).reachability.clusterId ?? "recorded"}` })
         : entry("connection.clusterIdentity", "unknown", "NotAttempted", at, { scope, message: "not attempted: the connection did not authenticate" }),
-      entry("runner.image", "ready", "RunnerImagePinned", at, { authority: "controller" }),
+      // The words a real check pod records: one long unbroken token, which a table must wrap (DUI-7).
+      entry("runner.image", "ready", "ImageAvailable", at, {
+        scope: { kind: "Pod", name: `lwc-sc-${c.uid.slice(0, 8)}` },
+        message:
+          "the runner image was present and the container started [imageID=docker-pullable://registry.example/logweir@sha256:6aad79ee4625aed9555fd0de794ec7671f9247f5be590ed1e4b1c0d2f3a4b5c6]",
+      }),
       ...capabilityRows(at, scope, reachable),
     ],
     warnings: [],

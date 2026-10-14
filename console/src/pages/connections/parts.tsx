@@ -1,7 +1,7 @@
 // Pieces the Connections and Destinations pages share: a form field with its
 // error beside it, the outcome of a write in words, a probe's labels, and a
 // readiness check (Preflight) rendered from its own recorded fields.
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import type { z } from "zod";
 import {
   Alert,
@@ -278,6 +278,21 @@ function scopeText(scope: CheckEntry["scope"]): string {
   return kind && name ? `${kind}/${name}` : kind + name;
 }
 
+/** A dotted check id that may break after each dot first, rather than mid-word. */
+function DottedId({ id }: { id: string }) {
+  const parts = id.split(".");
+  return (
+    <code>
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <wbr />}
+          {i < parts.length - 1 ? `${part}.` : part}
+        </Fragment>
+      ))}
+    </code>
+  );
+}
+
 function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
   const narrow = useNarrow();
   if (narrow) {
@@ -298,17 +313,18 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
     <Table aria-label={label} variant="compact" gridBreakPoint="grid-md">
       <Thead>
         <Tr>
-          <Th>Check</Th>
-          <Th>Verdict</Th>
+          {/* The check id keeps a quarter of the width, so a long finding wraps and the id does not break mid-word. */}
+          <Th width={25}>Check</Th>
+          <Th modifier="fitContent">Verdict</Th>
           <Th>Finding</Th>
-          <Th modifier="nowrap">When</Th>
+          <Th modifier="fitContent">When</Th>
         </Tr>
       </Thead>
       <Tbody>
         {checks.map((c) => (
           <Tr key={c.id}>
             <Td dataLabel="Check" className="lw-break">
-              <code>{c.id}</code>
+              <DottedId id={c.id} />
               <div className="lw-subtle lw-small">{c.code ?? "Not recorded"}</div>
             </Td>
             <Td dataLabel="Verdict">

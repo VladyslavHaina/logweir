@@ -881,3 +881,11 @@ body {
     white-space: nowrap;
   }
 }
+/* A dialog's title wraps rather than ending in an ellipsis: at 390 px "Your session
+   ended: sign in again in a new tab, then continue here" was cut, and so was a long
+   object name in "Rotate access for …". */
+.pf-v6-c-modal-box__title,
+.pf-v6-c-modal-box__title-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
