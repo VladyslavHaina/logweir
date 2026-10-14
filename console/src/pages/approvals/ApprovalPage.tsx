@@ -205,7 +205,13 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
           <DescriptionList isCompact columnModifier={{ default: "1Col", lg: "2Col" }} className="lw-gap-top lw-approval-facts">
             <Term term="Requested by">
               <span id="request-requester">
-                <Requester id={request.requester} email={request.requesterEmail} name={request.requesterName} grant={grant} />
+                <Requester
+                  id={request.requester}
+                  email={request.requesterEmail}
+                  name={request.requesterName}
+                  detailsNotVerified={request.requesterDetailsNotVerified === true}
+                  grant={grant}
+                />
               </span>
             </Term>
             <Term term="Plan hash">

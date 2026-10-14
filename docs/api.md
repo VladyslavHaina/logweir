@@ -411,12 +411,15 @@ Beside the signed `requester` it serves `requesterEmail`, the requester's email
 when the identity provider marked it verified (`email_verified: true`), and
 `requesterName`, only when `oidc.displayNameClaim` is configured: self-asserted at
 most identity providers, so shown as unverified and never in place of the
-identifier. Neither is part of the signed request. Both are recorded on the
-request object (annotations `logweir.dev/requester-email` and
-`logweir.dev/requester-name`; at most 128 characters, control and invisible
-formatting characters removed) and served only when the object's requester
-annotation is the verified `requester`. A request made before they existed has
-neither.
+identifier. Neither is part of the signed request: both travel in a display
+document the console signs with its confirmation key (its own payload type) and
+binds to the request's approval name, `requester` and plan hash, stored in the
+annotations `logweir.dev/requester-display` and `-display-signature`. They are
+served only when that signature verifies for this request; otherwise neither is,
+and `requesterDetailsNotVerified: true` says so. An email is shown only exactly
+as received (printable ASCII, `local@domain`, at most 254 bytes), never
+normalised or cut; the name is cleaned and capped at 128 characters. A request
+made before the document existed has neither and no flag.
 `POST …/console-approval` takes `{"confirmationSha256": "sha256:<64 hex>"}` and
 nothing else: `201` with the `Approval`, or `200 replayed: true` for the same
 approver's second click. Checked in order:

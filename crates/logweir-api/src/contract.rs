@@ -4374,11 +4374,13 @@ pub struct ApprovalRequestView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
     /// DUI-21: the requester's email, verified by the identity provider
-    /// (`email_verified: true`) when the request was made; not part of the
-    /// signed request. Show it with `requester`, never instead of it. ABSENT
-    /// when the provider vouched for no email, on a request made before it was
-    /// recorded, and whenever the stored object's requester is not the
-    /// verified one.
+    /// (`email_verified: true`) when the request was made, exactly as
+    /// received (printable ASCII, `local@domain`, at most 254 bytes), and
+    /// served only when this console's own signature over the document that
+    /// carries it verifies and binds this request (its approval name,
+    /// `requester` and plan hash). Not part of the signed request. Show it
+    /// with `requester`, never instead of it. ABSENT when the provider vouched
+    /// for no such address and on a request made before it was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_email: Option<String>,
     /// DUI-21: the requester's name from the claim the install opted into
@@ -4389,6 +4391,12 @@ pub struct ApprovalRequestView {
     /// invisible formatting characters, at most 128 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_name: Option<String>,
+    /// DUI-21: `true` when the request carries requester details that this
+    /// console's signature does not verify for this request (changed after it
+    /// was made, or copied from another): neither `requesterEmail` nor
+    /// `requesterName` is served. ABSENT otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_details_not_verified: Option<bool>,
     /// The plan hash the request names — the Restore's own, recomputed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
@@ -4660,6 +4668,9 @@ pub struct SwitchoverApprovalRequestView {
     /// part of the signed request (as `ApprovalRequestView.requesterName`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_name: Option<String>,
+    /// DUI-21: as `ApprovalRequestView.requesterDetailsNotVerified`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_details_not_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
     /// Whether `scope` is everything a second person approves, in full.

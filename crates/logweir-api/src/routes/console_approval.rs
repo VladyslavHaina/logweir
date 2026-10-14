@@ -133,11 +133,11 @@ async fn console_policy(
 /// What a stored request turned out to be.
 enum Loaded {
     /// This console's own request for this Restore, this plan and this
-    /// policy, inside its window, with what the object shows of its
-    /// requester ([`shown_requester`]).
-    Pending(VerifiedRequest, ShownRequester),
+    /// policy, inside its window, with what the object may show of its
+    /// requester ([`approval::verified_display`]).
+    Pending(VerifiedRequest, approval::DisplayCheck),
     /// The same, with its window closed.
-    Expired(VerifiedRequest, ShownRequester),
+    Expired(VerifiedRequest, approval::DisplayCheck),
     /// Not this console's confirmation of this Restore under this policy. The
     /// sentence is for the page; the reason is for the audit record.
     NotConfirmed {
@@ -158,8 +158,8 @@ enum Loaded {
 /// `spec.planHash` and `spec.subjectRef` are whatever the last writer with
 /// `create approvals` in the namespace put there, and nothing below decides
 /// on them. The one exception is shown, not decided on: the requester's
-/// display name (DUI-21), taken apart here and served only beside the
-/// requester the signature verifies ([`shown_requester`]).
+/// display document (DUI-21), served only when this console's own signature
+/// over it verifies and it binds this request ([`approval::verified_display`]).
 ///
 /// # Errors
 ///
@@ -243,7 +243,15 @@ async fn load_request(
                 )))
             }
         });
-    let name = shown_requester(&annotations, &doc.requester.principal_id());
+    // DUI-21: who asked, beyond the signed principal, only from a display
+    // document this console signed for THIS request (`approval::verified_display`).
+    let name = approval::verified_display(
+        key,
+        &annotations,
+        &doc.requester.principal_id(),
+        &subject.approval_name,
+        &doc.plan_hash,
+    );
     match binding {
         Ok(()) => Ok(Loaded::Pending(verified, name)),
         Err(AuthorizationRefusal::Expired(_)) => Ok(Loaded::Expired(verified, name)),
@@ -268,38 +276,6 @@ async fn load_request(
                 ),
             })
         }
-    }
-}
-
-/// What a request object shows of its requester beside the signed principal
-/// (DUI-21): the provider-verified email, and a name from an opted-in claim.
-#[derive(Debug, Default)]
-struct ShownRequester {
-    email: Option<String>,
-    name: Option<String>,
-}
-
-/// DUI-21: what a request object shows of the verified requester
-/// `principal`. The annotations are unsigned and anyone who may write
-/// Approvals in the namespace can change them, so they are served only when
-/// the object's requester annotation names that same principal, cleaned again
-/// here, and always beside the signed principal: never the only identity
-/// shown. A request made before they were recorded shows neither.
-fn shown_requester(
-    annotations: &std::collections::BTreeMap<String, String>,
-    principal: &str,
-) -> ShownRequester {
-    if annotations
-        .get(approval::REQUESTER_ANNOTATION)
-        .map(String::as_str)
-        != Some(principal)
-    {
-        return ShownRequester::default();
-    }
-    let shown = |key: &str| annotations.get(key).and_then(|v| approval::shown_name(v));
-    ShownRequester {
-        email: shown(approval::REQUESTER_EMAIL_ANNOTATION),
-        name: shown(approval::REQUESTER_NAME_ANNOTATION),
     }
 }
 
@@ -584,6 +560,7 @@ async fn request_for(
         requester: None,
         requester_email: None,
         requester_name: None,
+        requester_details_not_verified: None,
         plan_hash: None,
         approval_subject: None,
         scope_complete: false,
@@ -614,8 +591,17 @@ async fn request_for(
     };
     let doc = &verified.document;
     view.requester = Some(doc.requester.principal_id());
-    view.requester_email = shown_requester.email;
-    view.requester_name = shown_requester.name;
+    match shown_requester {
+        approval::DisplayCheck::Absent => {}
+        approval::DisplayCheck::Verified { email, name } => {
+            view.requester_email = email;
+            view.requester_name = name;
+        }
+        approval::DisplayCheck::NotVerified => {
+            actor.audit.note("requesterDisplay", "not_verified");
+            view.requester_details_not_verified = Some(true);
+        }
+    }
     view.plan_hash = Some(doc.plan_hash.clone());
     let approval_subject =
         logweir_core::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref());
@@ -762,6 +748,7 @@ pub async fn switchover_request(
                 requester: view.requester,
                 requester_email: view.requester_email,
                 requester_name: view.requester_name,
+                requester_details_not_verified: view.requester_details_not_verified,
                 plan_hash: view.plan_hash,
                 scope_complete: view.scope_complete && scope.is_some(),
                 scope_incomplete: view.scope_incomplete,

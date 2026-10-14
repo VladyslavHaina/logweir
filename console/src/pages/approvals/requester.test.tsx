@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import type { ApprovalGrant } from "../../api/approvals";
-import { Requester, UNVERIFIED_NAME, principalText } from "./parts";
+import { DETAILS_NOT_VERIFIED, Requester, UNVERIFIED_NAME, principalText } from "./parts";
 
 afterEach(cleanup);
 
@@ -51,5 +51,21 @@ describe("who asked", () => {
   it("lists a principal in full", () => {
     expect(principalText(DEX, bob)).toBe(DEX);
     expect(principalText(bob.actorId, bob)).toBe(`you (Bob) · ${bob.actorId}`);
+  });
+});
+
+describe("DUI-21, second review: details the API could not verify", () => {
+  it("leads with the signed principal in full and says the details are not shown", () => {
+    // The API served no email or name, and flagged them: a tampered or copied display document.
+    const { container } = render(<Requester id={DEX} detailsNotVerified grant={bob} />);
+    expect(container.querySelector("[data-verified-identifier]")?.textContent).toBe(DEX);
+    expect((container.textContent ?? "").indexOf(DEX)).toBe(0);
+    expect(container.querySelector("[data-details-not-verified]")?.textContent).toBe(DETAILS_NOT_VERIFIED);
+  });
+
+  it("leads with the email only when the API served it as verified (the control)", () => {
+    const { container } = render(<Requester id={DEX} email="alice@example.com" grant={bob} />);
+    expect(container.querySelector("[data-verified-identifier]")?.textContent).toBe("alice@example.com");
+    expect(container.querySelector("[data-details-not-verified]")).toBeNull();
   });
 });

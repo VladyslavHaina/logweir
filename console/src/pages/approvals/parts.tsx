@@ -103,6 +103,7 @@ export function Principal({ id, grant }: { id: string | null | undefined; grant:
 }
 
 export const UNVERIFIED_NAME = "(name as given to the identity provider, not verified)";
+export const DETAILS_NOT_VERIFIED = "The requester details on this request could not be verified and are not shown.";
 
 /**
  * DUI-21, after its security review: who asked, the VERIFIED identifier first. That
@@ -112,9 +113,28 @@ export const UNVERIFIED_NAME = "(name as given to the identity provider, not ver
  * it, so it is never bold and never in place of the identifier. The signed principal
  * stays visible. "you" is decided on the signed principal alone.
  */
-export function Requester({ id, email, name, grant }: { id: string | null | undefined; email?: string | null; name?: string | null; grant: ApprovalGrant }) {
+export function Requester({
+  id,
+  email,
+  name,
+  detailsNotVerified = false,
+  grant,
+}: {
+  id: string | null | undefined;
+  /** Served by the API only when its own signature over it verifies for this request. */
+  email?: string | null;
+  name?: string | null;
+  /** The request carried requester details the API could not verify, so none is shown. */
+  detailsNotVerified?: boolean;
+  grant: ApprovalGrant;
+}) {
   if (!id) return <NotRecorded />;
   const you = youOf(id, grant);
+  const refused = detailsNotVerified ? (
+    <span className="lw-small lw-block lw-tone-warning" data-details-not-verified>
+      {DETAILS_NOT_VERIFIED}
+    </span>
+  ) : null;
   const unverified = name ? (
     <span className="lw-subtle lw-small lw-block" data-unverified-name>
       {name} {UNVERIFIED_NAME}
@@ -142,6 +162,7 @@ export function Requester({ id, email, name, grant }: { id: string | null | unde
           {unverified}
         </>
       )}
+      {refused}
     </span>
   );
 }

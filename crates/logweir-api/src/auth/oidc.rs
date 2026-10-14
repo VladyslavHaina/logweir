@@ -796,9 +796,11 @@ impl Provider {
 }
 
 /// The `email` claim, only when the provider says it verified the address
-/// (`email_verified` is the JSON boolean `true`). An unverified address is
-/// whatever the person typed, so it identifies nobody (DUI-21 security
-/// review). Bounded to 254 bytes, the longest address.
+/// (`email_verified` is the JSON boolean `true`), and only EXACTLY AS
+/// RECEIVED with an identifier's shape (`crate::approval::email_shape_ok`):
+/// never trimmed, normalised or cut, so two different addresses never read
+/// alike. Anything else is no email, and the subject identifies the person
+/// (DUI-21 security reviews).
 fn verified_email_of(claims: &BTreeMap<String, serde_json::Value>) -> Option<String> {
     if claims.get("email_verified") != Some(&serde_json::Value::Bool(true)) {
         return None;
@@ -806,9 +808,8 @@ fn verified_email_of(claims: &BTreeMap<String, serde_json::Value>) -> Option<Str
     claims
         .get("email")
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| crate::validate::bounded(s, 254))
+        .filter(|s| crate::approval::email_shape_ok(s))
+        .map(str::to_string)
 }
 
 /// The name a page greets someone by: the CONFIGURED claim when the install
@@ -1450,6 +1451,17 @@ mod tests {
     fn an_email_identifies_only_when_the_provider_verified_it() {
         let verified = claims_of(r#"{"email":"ada@x.test","email_verified":true}"#);
         assert_eq!(verified_email_of(&verified).as_deref(), Some("ada@x.test"));
+        // Verified, and still not an identifier: a zero-width space, a space, over 254 bytes.
+        for shape in [
+            "{\"email\":\"ada@x.test\\u200b\",\"email_verified\":true}".to_string(),
+            r#"{"email":" ada@x.test","email_verified":true}"#.to_string(),
+            format!(
+                r#"{{"email":"{}@x.test","email_verified":true}}"#,
+                "a".repeat(250)
+            ),
+        ] {
+            assert_eq!(verified_email_of(&claims_of(&shape)), None, "{shape}");
+        }
         // Unverified, absent or merely a string "true": not an identifier, so the subject is shown.
         for unverified in [
             r#"{"email":"ceo@x.test","email_verified":false}"#,

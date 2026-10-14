@@ -1243,7 +1243,9 @@ export interface components {
             policyDigest: string;
             /** @description Who asked, `<issuer>#<subject>`, as the console attested them. */
             requester?: string | null;
-            /** @description DUI-21: the requester's email, verified by the identity provider (`email_verified: true`) when the request was made; not part of the signed request. Show it with `requester`, never instead of it. ABSENT when the provider vouched for no email, on a request made before it was recorded, and whenever the stored object's requester is not the verified one. */
+            /** @description DUI-21: `true` when the request carries requester details that this console's signature does not verify for this request (changed after it was made, or copied from another): neither `requesterEmail` nor `requesterName` is served. ABSENT otherwise. */
+            requesterDetailsNotVerified?: boolean | null;
+            /** @description DUI-21: the requester's email, verified by the identity provider (`email_verified: true`) when the request was made, exactly as received (printable ASCII, `local@domain`, at most 254 bytes), and served only when this console's own signature over the document that carries it verifies and binds this request (its approval name, `requester` and plan hash). Not part of the signed request. Show it with `requester`, never instead of it. ABSENT when the provider vouched for no such address and on a request made before it was recorded. */
             requesterEmail?: string | null;
             /** @description DUI-21: the requester's name from the claim the install opted into (`oidc.displayNameClaim`); not part of the signed request. Self-asserted at most identity providers: show it as unverified, after the identifier, never in its place. ABSENT unless a name claim is configured, and as `requesterEmail` is. Cleaned of control and invisible formatting characters, at most 128 characters. */
             requesterName?: string | null;
@@ -5140,6 +5142,8 @@ export interface components {
             policy: string;
             policyDigest: string;
             requester?: string | null;
+            /** @description DUI-21: as `ApprovalRequestView.requesterDetailsNotVerified`. */
+            requesterDetailsNotVerified?: boolean | null;
             /** @description DUI-21: the requester's provider-verified email; not part of the signed request (as `ApprovalRequestView.requesterEmail`). */
             requesterEmail?: string | null;
             /** @description DUI-21: the requester's name from an opted-in claim, unverified; not part of the signed request (as `ApprovalRequestView.requesterName`). */

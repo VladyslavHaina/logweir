@@ -46,7 +46,13 @@ export function SwitchoverApprovalPage() {
                   {/* DUI-21: the second person sees who asked, as on a restore's request. */}
                   {request.state !== "notConfirmed" && request.requester && (
                     <Content component="p" id="switchover-requester">
-                      Requested by <Requester id={request.requester} email={request.requesterEmail} name={request.requesterName} grant={grant} />
+                      Requested by <Requester
+                        id={request.requester}
+                        email={request.requesterEmail}
+                        name={request.requesterName}
+                        detailsNotVerified={request.requesterDetailsNotVerified === true}
+                        grant={grant}
+                      />
                     </Content>
                   )}
                   <SwitchoverApprovalSummary request={request} />
