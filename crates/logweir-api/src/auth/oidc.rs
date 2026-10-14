@@ -753,11 +753,7 @@ impl Provider {
             .filter(|s| !s.is_empty())
             .ok_or(OidcError::NoSubject)?;
 
-        let display_name = claims
-            .get(&self.settings.display_name_claim)
-            .and_then(|v| v.as_str())
-            .map(|s| crate::validate::bounded(s, 128))
-            .unwrap_or_else(|| crate::validate::bounded(subject, 128));
+        let display_name = display_name_of(&claims, &self.settings.display_name_claim, subject);
 
         let mut groups: Vec<String> = match claims.get(&self.settings.groups_claim) {
             Some(serde_json::Value::Array(items)) => items
@@ -783,6 +779,28 @@ impl Provider {
             auth_time,
         })
     }
+}
+
+/// The name a page greets someone by, and a second person sees on their
+/// request (DUI-21): the configured claim (`name` by default), else `email`,
+/// else the subject. An empty claim counts as absent. Bounded to 128 bytes.
+fn display_name_of(
+    claims: &BTreeMap<String, serde_json::Value>,
+    configured: &str,
+    subject: &str,
+) -> String {
+    let claim = |key: &str| {
+        claims
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    };
+    crate::validate::bounded(
+        claim(configured)
+            .or_else(|| claim("email"))
+            .unwrap_or(subject),
+        128,
+    )
 }
 
 /// The most group strings this module will read out of one ID token.
@@ -1397,6 +1415,34 @@ impl HttpClient for HyperHttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_display_name_is_the_name_claim_else_the_email_else_the_subject() {
+        let claims =
+            |json: &str| serde_json::from_str::<BTreeMap<String, serde_json::Value>>(json).unwrap();
+        assert_eq!(
+            display_name_of(
+                &claims(r#"{"name":"Ada Lovelace","email":"ada@x.test"}"#),
+                "name",
+                "u-ada"
+            ),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            display_name_of(
+                &claims(r#"{"name":"  ","email":"ada@x.test"}"#),
+                "name",
+                "u-ada"
+            ),
+            "ada@x.test"
+        );
+        assert_eq!(
+            display_name_of(&claims(r#"{"email":"ada@x.test"}"#), "name", "u-ada"),
+            "ada@x.test"
+        );
+        // The control: neither claim, the subject.
+        assert_eq!(display_name_of(&claims("{}"), "name", "u-ada"), "u-ada");
+    }
 
     #[test]
     fn the_pkce_challenge_is_the_rfc_7636_appendix_b_vector() {

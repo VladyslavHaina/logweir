@@ -447,6 +447,8 @@ async function requestOf(d: Demo): Promise<ApprovalRequest> {
     policy: "prod-pair",
     policyDigest: DIGEST(502),
     requester: d.requester,
+    // The name the identity provider gave the requester (DUI-21): unsigned, shown beside the subject.
+    requesterName: d.requester === ALICE ? session.actor.displayName : "Bob Novak",
     restore: r.name,
     restoreUid: r.uid,
     ticket: d.ticket ?? null,

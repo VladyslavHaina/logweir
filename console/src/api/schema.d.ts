@@ -1204,7 +1204,7 @@ export interface components {
         };
         /** @description Where a two-person request stands. */
         ApprovalRequestState: "pending" | "approved" | "expired" | "notConfirmed";
-        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata. */
+        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterName`, which says so and decides nothing. */
         ApprovalRequestView: {
             /** @description The Approval the Restore references (`spec.approvalRef.name`), which a click creates. */
             approvalName: string;
@@ -1243,6 +1243,8 @@ export interface components {
             policyDigest: string;
             /** @description Who asked, `<issuer>#<subject>`, as the console attested them. */
             requester?: string | null;
+            /** @description DUI-21: the requester's display name, as the identity provider named them; not part of the signed request. Recorded when the request was made (the `name` claim, else `email`, else the subject), cleaned of control and invisible formatting characters and at most 128 characters. ABSENT on a request made before it was recorded, and whenever the stored object's requester is not the verified one. Presentation only: `requester` is who asked. */
+            requesterName?: string | null;
             /** @description The Restore the request is for. */
             restore: string;
             /** @description That Restore's UID, now. */
@@ -5136,6 +5138,8 @@ export interface components {
             policy: string;
             policyDigest: string;
             requester?: string | null;
+            /** @description DUI-21: the requester's display name, as the identity provider named them; not part of the signed request (as `ApprovalRequestView.requesterName`). */
+            requesterName?: string | null;
             /** @description Present exactly when `scopeComplete`. */
             scope?: components["schemas"]["SwitchoverScopeView"];
             /** @description Whether `scope` is everything a second person approves, in full. */

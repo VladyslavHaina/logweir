@@ -4,19 +4,20 @@
 // files, the Switchover's own page gives the CLI commands.
 import { Link, useParams } from "@tanstack/react-router";
 import { Alert, Breadcrumb, BreadcrumbItem, Button, Card, CardBody, CardHeader, CardTitle, Content, PageSection, Stack, StackItem } from "@patternfly/react-core";
-import { outcomeOf, UNKNOWN_OUTCOME_SENTENCE } from "../../api/approvals";
+import { outcomeOf, UNKNOWN_OUTCOME_SENTENCE, useApprovalGrant } from "../../api/approvals";
 import { useApproveSwitchover, useSwitchoverApprovalRequest } from "../../api/switchovers";
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { SwitchoverApprovalSummary } from "../cutover/SwitchoverApprovalSummary";
 import { REFUSAL_TITLE } from "./ApprovalPage";
-import { Refusal, RequestStatus } from "./parts";
+import { Refusal, RequestStatus, Requester } from "./parts";
 import "./approvals.css";
 import { ErrorText, Prose } from "../../components/Prose";
 
 export function SwitchoverApprovalPage() {
   const { ns, name } = useParams({ from: "/$ns/approvals/switchover/$name" });
   const requestQ = useSwitchoverApprovalRequest(ns, name);
+  const grant = useApprovalGrant(ns);
   const approve = useApproveSwitchover(ns, name);
   const request = requestQ.data;
   const breadcrumb = (
@@ -42,6 +43,12 @@ export function SwitchoverApprovalPage() {
                 </CardHeader>
                 <CardBody>
                   <Content component="p" className="lw-subtle"><Prose text={request.stateSentence} /></Content>
+                  {/* DUI-21: the second person sees who asked, as on a restore's request. */}
+                  {request.state !== "notConfirmed" && request.requester && (
+                    <Content component="p" id="switchover-requester">
+                      Requested by <Requester id={request.requester} name={request.requesterName} grant={grant} />
+                    </Content>
+                  )}
                   <SwitchoverApprovalSummary request={request} />
                 </CardBody>
               </Card>

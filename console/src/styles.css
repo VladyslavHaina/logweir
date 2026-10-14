@@ -244,6 +244,9 @@ body {
 .lw-prose code {
   overflow-wrap: anywhere;
 }
+.lw-block {
+  display: block;
+}
 .lw-min0 {
   min-width: 0;
 }

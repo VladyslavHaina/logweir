@@ -570,6 +570,7 @@ async function approvalRequest(k: Kept): Promise<S["SwitchoverApprovalRequestVie
     policyDigest: policyFor(k.ns).digest ?? "",
     planHash: k.item.planHash,
     requester: "https://dex.logweir.local#alice",
+    requesterName: "Alice Martin",
     issuedAt: iso(k.createdMs),
     expiresAt: iso(k.createdMs + HOUR),
     ticket: k.ticket ?? null,

@@ -5707,7 +5707,7 @@
         ]
       },
       "ApprovalRequestView": {
-        "description": "PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata.",
+        "description": "PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterName`, which says so and decides nothing.",
         "type": "object",
         "required": [
           "approvalName",
@@ -5787,6 +5787,11 @@
           },
           "requester": {
             "description": "Who asked, `<issuer>#<subject>`, as the console attested them.",
+            "type": "string",
+            "nullable": true
+          },
+          "requesterName": {
+            "description": "DUI-21: the requester's display name, as the identity provider named them; not part of the signed request. Recorded when the request was made (the `name` claim, else `email`, else the subject), cleaned of control and invisible formatting characters and at most 128 characters. ABSENT on a request made before it was recorded, and whenever the stored object's requester is not the verified one. Presentation only: `requester` is who asked.",
             "type": "string",
             "nullable": true
           },
@@ -14674,6 +14679,11 @@
             "type": "string"
           },
           "requester": {
+            "type": "string",
+            "nullable": true
+          },
+          "requesterName": {
+            "description": "DUI-21: the requester's display name, as the identity provider named them; not part of the signed request (as `ApprovalRequestView.requesterName`).",
             "type": "string",
             "nullable": true
           },

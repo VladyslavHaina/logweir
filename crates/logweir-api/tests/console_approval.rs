@@ -152,11 +152,30 @@ struct Session {
 }
 
 fn session_as(app: &SharedApp, sid: &str, issuer: &str, subject: &str, groups: &[&str]) -> Session {
+    named_session(
+        app,
+        sid,
+        issuer,
+        subject,
+        &format!("{subject} display"),
+        groups,
+    )
+}
+
+/// A session whose identity provider named the person `display`.
+fn named_session(
+    app: &SharedApp,
+    sid: &str,
+    issuer: &str,
+    subject: &str,
+    display: &str,
+    groups: &[&str],
+) -> Session {
     let now = app.app.clock.now();
     let identity = Identity {
         issuer: issuer.to_string(),
         subject: subject.to_string(),
-        display_name: format!("{subject} display"),
+        display_name: display.to_string(),
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         auth_time: now,
     };
@@ -2701,4 +2720,76 @@ async fn a_two_person_request_is_made_only_with_a_ticket_its_scope_can_show() {
     )
     .await;
     assert_eq!(created.status, 201, "{}", created.text());
+}
+
+/// **DUI-21: an approver sees who asked.** The request object carries the
+/// requester's display name as an annotation, cleaned and capped, beside the
+/// signed bytes and never in them; the request view serves it as
+/// `requesterName` beside the signed `requester`. Controls: a request made
+/// before the annotation existed serves no name, and a name beside another
+/// principal's requester annotation is not served.
+#[tokio::test]
+async fn the_request_shows_who_asked_by_name_and_signs_none_of_it() {
+    let (app, _console) = pair_app();
+    let hostile = format!("Alice \u{202E}Martin\u{200B}\u{0007}\n{}", "x".repeat(300));
+    let alice = named_session(&app, "sid-alice-named", ISSUER, "alice", &hostile, &["ops"]);
+    let created = request_as(&app, &alice, "named", restore_request("approval-named")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
+    let confirmation = "approval-named-confirmation";
+
+    // Written beside the signed bytes, cleaned and capped, and not signed.
+    let stored = app
+        .app
+        .fake
+        .object("approvals", NS_A, confirmation)
+        .expect("the request");
+    let written = stored["metadata"]["annotations"]["logweir.dev/requester-name"]
+        .as_str()
+        .expect("the requester's name is recorded")
+        .to_string();
+    assert!(written.starts_with("Alice Martin x"), "{written}");
+    assert_eq!(
+        written.chars().count(),
+        logweir_api::approval::MAX_SHOWN_NAME_CHARS
+    );
+    assert!(
+        !written.contains('\u{202E}')
+            && !written.contains('\u{200B}')
+            && !written.contains('\u{0007}')
+    );
+    let bytes = stored["spec"]["approvalBytes"].as_str().expect("bytes");
+    assert!(
+        !bytes.contains("Alice"),
+        "the name is not in the signed request: {bytes}"
+    );
+
+    // Served to the second person beside the signed requester.
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    let seen = view(&app, &bob, &restore).await.json()["item"].clone();
+    assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+    assert_eq!(seen["requesterName"], written.as_str(), "{seen}");
+
+    // Control 1: a request made before the name was recorded serves none.
+    let mut older = stored.clone();
+    older["metadata"]["annotations"]
+        .as_object_mut()
+        .expect("annotations")
+        .remove("logweir.dev/requester-name");
+    app.app.fake.seed("approvals", NS_A, older);
+    let seen = view(&app, &bob, &restore).await.json()["item"].clone();
+    assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+    assert!(seen.get("requesterName").is_none(), "{seen}");
+
+    // Control 2: a name planted beside another principal is not shown as the requester's.
+    let mut planted = stored.clone();
+    planted["metadata"]["annotations"]["logweir.dev/requester"] = json!(format!("{ISSUER}#carol"));
+    planted["metadata"]["annotations"]["logweir.dev/requester-name"] = json!("Carol");
+    app.app.fake.seed("approvals", NS_A, planted);
+    let seen = view(&app, &bob, &restore).await.json()["item"].clone();
+    assert!(seen.get("requesterName").is_none(), "{seen}");
+    assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
 }

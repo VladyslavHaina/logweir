@@ -4346,7 +4346,8 @@ pub struct ApproveOfferView {
 /// PROD-16.2: a two-person request as the approver is shown it. Every field
 /// from `requester` to `confirmationSha256` comes from the request's signed
 /// bytes, AFTER the console verified its own signature on them; none is read
-/// from the stored object's metadata.
+/// from the stored object's metadata — except `requesterName`, which says
+/// so and decides nothing.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestView {
@@ -4372,6 +4373,15 @@ pub struct ApprovalRequestView {
     /// Who asked, `<issuer>#<subject>`, as the console attested them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// DUI-21: the requester's display name, as the identity provider named
+    /// them; not part of the signed request. Recorded when the request was
+    /// made (the `name` claim, else `email`, else the subject), cleaned of
+    /// control and invisible formatting characters and at most 128
+    /// characters. ABSENT on a request made before it was recorded, and
+    /// whenever the stored object's requester is not the verified one.
+    /// Presentation only: `requester` is who asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_name: Option<String>,
     /// The plan hash the request names — the Restore's own, recomputed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
@@ -4635,6 +4645,10 @@ pub struct SwitchoverApprovalRequestView {
     pub state_sentence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// DUI-21: the requester's display name, as the identity provider named
+    /// them; not part of the signed request (as `ApprovalRequestView.requesterName`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
     /// Whether `scope` is everything a second person approves, in full.

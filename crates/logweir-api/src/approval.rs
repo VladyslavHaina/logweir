@@ -109,6 +109,73 @@ pub fn confirmation_name(approval_name: &str) -> String {
     format!("{approval_name}{CONFIRMATION_SUFFIX}")
 }
 
+/// The annotation on a request object naming who signed in when it was made:
+/// `<issuer>#<subject>`. Written beside the signed bytes, never read for a
+/// decision.
+pub const REQUESTER_ANNOTATION: &str = "logweir.dev/requester";
+
+/// DUI-21: the annotation carrying the requester's display name, so a second
+/// person can see who asked. **Presentation only and NOT part of the signed
+/// request**: the identity provider's name for them at request time, cleaned
+/// by [`shown_name`]. The request view serves it only beside the requester
+/// the console's signature verifies, and only when [`REQUESTER_ANNOTATION`]
+/// names that same principal.
+pub const REQUESTER_NAME_ANNOTATION: &str = "logweir.dev/requester-name";
+
+/// The most characters a shown name keeps.
+pub const MAX_SHOWN_NAME_CHARS: usize = 128;
+
+/// A character that changes how text around it is displayed without being
+/// visible itself: the bidirectional controls and isolates, the zero-width
+/// characters, the byte-order mark, the Arabic letter mark and the soft
+/// hyphen. A name shown to another person must not reorder or hide what sits
+/// beside it.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// **A name as it may be shown to another person** (DUI-21): control and
+/// invisible formatting characters removed, any run of whitespace one space,
+/// the ends trimmed, and at most [`MAX_SHOWN_NAME_CHARS`] characters (a cut
+/// name ends with `…`). `None` when nothing printable is left.
+#[must_use]
+pub fn shown_name(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut space = false;
+    for c in raw.chars() {
+        if is_invisible_format(c) {
+            continue;
+        }
+        if c.is_whitespace() || c.is_control() {
+            space = !out.is_empty();
+            continue;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    if out.chars().count() > MAX_SHOWN_NAME_CHARS {
+        let cut: String = out.chars().take(MAX_SHOWN_NAME_CHARS - 1).collect();
+        return Some(format!("{}…", cut.trim_end()));
+    }
+    Some(out)
+}
+
 /// The console's `ConsoleConfirmation` signing key.
 pub struct ConfirmationKey {
     key: SigningKey,
@@ -712,6 +779,37 @@ mod tests {
         assert!(merge_countersignature(&confirmation, &confirmation).is_err());
         let other_type = sign_detached(&approver, "application/other", doc).expect("sign");
         assert!(merge_countersignature(&confirmation, &other_type).is_err());
+    }
+}
+
+#[cfg(test)]
+mod shown_name_tests {
+    use super::{shown_name, MAX_SHOWN_NAME_CHARS};
+
+    #[test]
+    fn a_name_keeps_its_letters_and_loses_what_would_hide_or_reorder_text() {
+        assert_eq!(shown_name("Alice Martin").as_deref(), Some("Alice Martin"));
+        // Letters of any script stay: a name is not an identifier.
+        assert_eq!(shown_name("José Ñúñez").as_deref(), Some("José Ñúñez"));
+        // A right-to-left override, an isolate, a zero-width joiner, a BOM and a bell go;
+        // a newline and a tab are a space; the ends are trimmed.
+        assert_eq!(
+            shown_name("  \u{202E}Mallory\u{2066}\u{200D}\u{FEFF}\u{0007}\n\tadmin  ").as_deref(),
+            Some("Mallory admin")
+        );
+        // Nothing printable left is no name, never an empty one.
+        assert_eq!(shown_name("\u{202E}\u{200B} \n"), None);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_to_the_cap() {
+        let long = "x".repeat(MAX_SHOWN_NAME_CHARS * 4);
+        let shown = shown_name(&long).expect("a name");
+        assert_eq!(shown.chars().count(), MAX_SHOWN_NAME_CHARS);
+        assert!(shown.ends_with('…'));
+        // The control: a name at the cap is kept whole.
+        let at_cap = "y".repeat(MAX_SHOWN_NAME_CHARS);
+        assert_eq!(shown_name(&at_cap).as_deref(), Some(at_cap.as_str()));
     }
 }
 

@@ -133,10 +133,11 @@ async fn console_policy(
 /// What a stored request turned out to be.
 enum Loaded {
     /// This console's own request for this Restore, this plan and this
-    /// policy, inside its window.
-    Pending(VerifiedRequest),
+    /// policy, inside its window, with the name the object shows for its
+    /// requester ([`shown_requester`]).
+    Pending(VerifiedRequest, Option<String>),
     /// The same, with its window closed.
-    Expired(VerifiedRequest),
+    Expired(VerifiedRequest, Option<String>),
     /// Not this console's confirmation of this Restore under this policy. The
     /// sentence is for the page; the reason is for the audit record.
     NotConfirmed {
@@ -155,8 +156,10 @@ enum Loaded {
 /// THE STORED OBJECT IS REDUCED TO TWO STRINGS BEFORE ANYTHING IS DECIDED:
 /// `spec.approvalBytes` and `spec.sidecarBytes`. Its annotations, labels,
 /// `spec.planHash` and `spec.subjectRef` are whatever the last writer with
-/// `create approvals` in the namespace put there, and nothing below can read
-/// them.
+/// `create approvals` in the namespace put there, and nothing below decides
+/// on them. The one exception is shown, not decided on: the requester's
+/// display name (DUI-21), taken apart here and served only beside the
+/// requester the signature verifies ([`shown_requester`]).
 ///
 /// # Errors
 ///
@@ -180,9 +183,13 @@ async fn load_request(
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     };
     let confirmation_name = approval::confirmation_name(&subject.approval_name);
-    let (approval_bytes, sidecar_bytes) =
+    let (approval_bytes, sidecar_bytes, annotations) =
         match state.kube().get::<Approval>(ns, &confirmation_name).await {
-            Ok(object) => (object.spec.approval_bytes, object.spec.sidecar_bytes),
+            Ok(object) => (
+                object.spec.approval_bytes,
+                object.spec.sidecar_bytes,
+                object.metadata.annotations.unwrap_or_default(),
+            ),
             Err(KubeFailure::NotFound) => {
                 return Ok(Loaded::NotConfirmed {
                     code: "confirmation_absent",
@@ -236,9 +243,10 @@ async fn load_request(
                 )))
             }
         });
+    let name = shown_requester(&annotations, &doc.requester.principal_id());
     match binding {
-        Ok(()) => Ok(Loaded::Pending(verified)),
-        Err(AuthorizationRefusal::Expired(_)) => Ok(Loaded::Expired(verified)),
+        Ok(()) => Ok(Loaded::Pending(verified, name)),
+        Err(AuthorizationRefusal::Expired(_)) => Ok(Loaded::Expired(verified, name)),
         Err(refusal) => {
             tracing::warn!(
                 namespace = %ns,
@@ -261,6 +269,26 @@ async fn load_request(
             })
         }
     }
+}
+
+/// DUI-21: the requester's display name a request object shows, for the
+/// verified requester `principal` only. The annotation is unsigned and anyone
+/// who may write Approvals in the namespace can change it, so it is served
+/// only when the object's requester annotation names that same principal,
+/// cleaned again here, and labelled as the identity provider's name, never
+/// as who asked. A request made before it was recorded shows none.
+fn shown_requester(
+    annotations: &std::collections::BTreeMap<String, String>,
+    principal: &str,
+) -> Option<String> {
+    if annotations
+        .get(approval::REQUESTER_ANNOTATION)
+        .map(String::as_str)
+        != Some(principal)
+    {
+        return None;
+    }
+    approval::shown_name(annotations.get(approval::REQUESTER_NAME_ANNOTATION)?)
 }
 
 /// The approval already stored under the object's `approvalRef`, when this
@@ -542,6 +570,7 @@ async fn request_for(
         state: ApprovalRequestState::NotConfirmed,
         state_sentence: String::new(),
         requester: None,
+        requester_name: None,
         plan_hash: None,
         approval_subject: None,
         scope_complete: false,
@@ -561,17 +590,18 @@ async fn request_for(
         },
     };
     let loaded = load_request(state, &subject, &bound).await?;
-    let (verified, expired) = match loaded {
+    let (verified, expired, requester_name) = match loaded {
         Loaded::NotConfirmed { code, sentence } => {
             actor.audit.note("approvalRequest", code);
             view.state_sentence = sentence;
             return Ok((view, None));
         }
-        Loaded::Pending(verified) => (verified, false),
-        Loaded::Expired(verified) => (verified, true),
+        Loaded::Pending(verified, name) => (verified, false, name),
+        Loaded::Expired(verified, name) => (verified, true, name),
     };
     let doc = &verified.document;
     view.requester = Some(doc.requester.principal_id());
+    view.requester_name = requester_name;
     view.plan_hash = Some(doc.plan_hash.clone());
     let approval_subject =
         logweir_core::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref());
@@ -716,6 +746,7 @@ pub async fn switchover_request(
                 state: view.state,
                 state_sentence: view.state_sentence,
                 requester: view.requester,
+                requester_name: view.requester_name,
                 plan_hash: view.plan_hash,
                 scope_complete: view.scope_complete && scope.is_some(),
                 scope_incomplete: view.scope_incomplete,
@@ -871,8 +902,8 @@ async fn approve_for(
     let bound = console_policy(state, actor, ns).await?;
     // ---- 3 / 4. the console's own signature, then the binding --------------
     let verified = match load_request(state, &subject, &bound).await? {
-        Loaded::Pending(verified) => verified,
-        Loaded::Expired(verified) => {
+        Loaded::Pending(verified, _) => verified,
+        Loaded::Expired(verified, _) => {
             actor
                 .audit
                 .note("requester", &verified.document.requester.principal_id());

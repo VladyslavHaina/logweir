@@ -72,7 +72,7 @@ import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { StatusLabel } from "../../components/Status";
 import { ApprovalFilesForm, CountersignForm } from "./forms";
-import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, ScopeCard, Term } from "./parts";
+import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, Requester, ScopeCard, Term } from "./parts";
 import "./approvals.css";
 import { ErrorText, Prose } from "../../components/Prose";
 
@@ -205,7 +205,7 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
           <DescriptionList isCompact columnModifier={{ default: "1Col", lg: "2Col" }} className="lw-gap-top lw-approval-facts">
             <Term term="Requested by">
               <span id="request-requester">
-                <Principal id={request.requester} grant={grant} />
+                <Requester id={request.requester} name={request.requesterName} grant={grant} />
               </span>
             </Term>
             <Term term="Plan hash">

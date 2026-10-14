@@ -1184,6 +1184,10 @@ pub(crate) async fn authorize_submission(
     let sidecar = key
         .sign(&bytes)
         .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?;
+    // DUI-21: who asked, by the name the identity provider gave them, so a
+    // second person can see it. Beside the signed bytes, never in them.
+    let requester_name = approval::shown_name(&actor.display_name)
+        .map(|name| (approval::REQUESTER_NAME_ANNOTATION.to_string(), name));
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(target.clone()),
@@ -1198,9 +1202,10 @@ pub(crate) async fn authorize_submission(
                         "logweir.dev/approval-policy".to_string(),
                         policy.name.clone(),
                     ),
-                    ("logweir.dev/requester".to_string(), actor.id()),
+                    (approval::REQUESTER_ANNOTATION.to_string(), actor.id()),
                 ]
                 .into_iter()
+                .chain(requester_name)
                 .collect(),
             ),
             ..Default::default()
