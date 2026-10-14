@@ -988,11 +988,15 @@ fn a_bound_restore_reads_only_its_own_sets_receipt_and_answers_once() {
         );
         assert!(!harness::topic_exists(&target), "{name}: nothing created");
         assert_eq!(r.scorecard, Value::Null, "{name}: nothing signed");
-        let refusal = t
+        // The refusal's own text, out of whichever line carries it (the log
+        // line also carries its instant and run id).
+        let line = t
             .lines()
             .find(|l| l.contains("PointBindingMismatch. "))
-            .unwrap_or_else(|| panic!("{name}: no PointBindingMismatch line:\n{t}"))
-            .to_string();
+            .unwrap_or_else(|| panic!("{name}: no PointBindingMismatch line:\n{t}"));
+        let from = &line[line.find("PointBindingMismatch. ").expect("found")..];
+        let end = "no data operation was started.";
+        let refusal = from[..from.find(end).map_or(from.len(), |i| i + end.len())].to_string();
         if name == "outside" {
             assert!(refusal.contains("it was not read"), "{refusal}");
         } else {
