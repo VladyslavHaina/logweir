@@ -575,10 +575,22 @@ pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverS
             .find_map(|l| l.strip_prefix(key))
             .map(str::to_string)
     };
-    let groups: Vec<SwitchoverGroupStatus> = lines
+    let group_lines: Vec<&str> = lines
         .iter()
         .filter_map(|l| l.strip_prefix(crate_line::GROUP))
+        .collect();
+    let parsed: Vec<serde_json::Value> = group_lines
+        .iter()
         .filter_map(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .collect();
+    // FX-38: a group line not shown is said, so the list never reads as
+    // every group.
+    let unreadable = group_lines.len() - parsed.len();
+    let past_bound = parsed
+        .len()
+        .saturating_sub(crate::crds::switchover::MAX_STATUS_GROUPS);
+    let groups: Vec<SwitchoverGroupStatus> = parsed
+        .into_iter()
         .take(crate::crds::switchover::MAX_STATUS_GROUPS)
         .map(|v| SwitchoverGroupStatus {
             source: v["source"].as_str().unwrap_or_default().to_string(),
@@ -611,21 +623,31 @@ pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverS
         (3, _) => so::RUN_REFUSED,
         _ => so::RUN_FAILED,
     };
+    // The runner's own sentence for a whole-run refusal or failure (D1:
+    // `EvidenceUnreadable` names the key and the grant), cleaned and
+    // bounded as every relayed message is.
+    let mut message = match last(crate_line::DETAIL) {
+        Some(detail) => format!(
+            "the switchover Job exited {exit_code}: {phase}: {}",
+            logweir_core::refusal_detail::clean_message(&detail)
+        ),
+        None => format!("the switchover Job exited {exit_code}: {phase}"),
+    };
+    if unreadable + past_bound > 0 {
+        message.push_str(&format!(
+            "; {} group line(s) are not listed here ({unreadable} unreadable, {past_bound} past \
+             the {}-group bound), so the groups and counts are partial: the signed switchover \
+             record names every group",
+            unreadable + past_bound,
+            crate::crds::switchover::MAX_STATUS_GROUPS
+        ));
+    }
     SwitchoverStatus {
         phase: Some(phase.to_string()),
         exit_code: Some(exit_code),
         exit_reason: reason_word.clone(),
         reason: Some(reason_word.unwrap_or_else(|| phase.to_string())),
-        // The runner's own sentence for a whole-run refusal or failure (D1:
-        // `EvidenceUnreadable` names the key and the grant), cleaned and
-        // bounded as every relayed message is.
-        message: Some(match last(crate_line::DETAIL) {
-            Some(detail) => format!(
-                "the switchover Job exited {exit_code}: {phase}: {}",
-                logweir_core::refusal_detail::clean_message(&detail)
-            ),
-            None => format!("the switchover Job exited {exit_code}: {phase}"),
-        }),
+        message: Some(message),
         job_ref: Some(job_name.to_string()),
         groups,
         counts: Some(counts),
@@ -634,6 +656,22 @@ pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverS
         }),
         conditions: None,
     }
+}
+
+/// The status of a run whose log tail was past the bound: the phase its exit
+/// code gives, and no group and no count, because none was read (FX-38): zero
+/// counts would read as "nothing was applied".
+#[must_use]
+pub fn status_from_unread_log(exit_code: i32, job_name: &str) -> SwitchoverStatus {
+    let mut status = status_from_run(exit_code, "", job_name);
+    status.counts = None;
+    status.message = Some(format!(
+        "{}; its log tail was past the {}-byte bound and was not read, so which groups were \
+         applied is not known here: the signed switchover record names them",
+        status.message.unwrap_or_default(),
+        crate::runner_log::TERMINAL_LOG_LIMIT_BYTES
+    ));
+    status
 }
 
 /// The runner's line keys (`logweir::switchover`'s, which this crate does
@@ -730,7 +768,7 @@ pub async fn reconcile(
                     crate::runner_log::Terminal::Lines(lines) => {
                         status_from_run(code, lines.text(), &name)
                     }
-                    crate::runner_log::Terminal::OverBound => status_from_run(code, "", &name),
+                    crate::runner_log::Terminal::OverBound => status_from_unread_log(code, &name),
                     crate::runner_log::Terminal::RunnerOlder => SwitchoverStatus {
                         phase: Some(so::RUN_FAILED.into()),
                         exit_code: Some(code),
@@ -1287,6 +1325,35 @@ mod tests {
             status_from_run(0, "", "sw").phase.as_deref(),
             Some(so::SUCCEEDED)
         );
+    }
+
+    /// FX-38: a group line the controller cannot read, and a log it did not
+    /// read at all, never read as every group. CONTROL: the lines above,
+    /// whole, say nothing of the kind.
+    #[test]
+    fn a_partial_or_unread_log_says_its_groups_are_partial() {
+        let log = "switchover-group={\"source\":\"a\",\"target\":\"a\",\"outcome\":\"applied\",\"partitions\":[{}]}\n\
+             switchover-group={\"source\":\"b\"\n\
+             switchover-outcome=PartiallyApplied\n";
+        let st = status_from_run(2, log, "sw");
+        assert_eq!(st.groups.len(), 1);
+        let message = st.message.unwrap_or_default();
+        assert!(
+            message.contains("1 group line(s) are not listed here (1 unreadable, 0 past"),
+            "{message}"
+        );
+        let unread = status_from_unread_log(0, "sw");
+        assert_eq!(unread.phase.as_deref(), Some(so::SUCCEEDED));
+        assert!(unread.counts.is_none(), "no zero counts for a log not read");
+        assert!(unread.message.unwrap_or_default().contains("was not read"));
+        // CONTROL.
+        let whole = status_from_run(
+            2,
+            &log.replace("switchover-group={\"source\":\"b\"\n", ""),
+            "sw",
+        );
+        assert!(!whole.message.unwrap_or_default().contains("not listed"));
+        assert!(whole.counts.is_some());
     }
 
     /// **D1: a store that refused the evidence is `Failed`, named, and the

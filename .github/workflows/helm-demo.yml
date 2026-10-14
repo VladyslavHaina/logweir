@@ -78,6 +78,11 @@ jobs:
       # TrustPolicy, which would supersede that roster, is turned off.
       - name: helm install (author-only images; NOT evidence for §16 clause 1)
         run: helm install logweir charts/logweir -n logweir-system --kube-context kind-logweir -f charts/logweir/examples/demo.values.yaml -f charts/logweir/examples/author-only.values.yaml --set identity.installationTrust.enabled=false --wait --timeout 10m
+      # Step 6 renders the Restore's plan with the console's own renderer
+      # (console/scripts/emit-restore-body.mjs), which node runs with its
+      # TypeScript types stripped: Node 22.6 or later.
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
       - name: "The walk — scripts/helm-demo.sh, every step, on the kind cluster the job created"
         env:
           LOGWEIR_KUBE_CONTEXT: kind-logweir

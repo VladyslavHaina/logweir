@@ -14,12 +14,9 @@ lint:
     python3 scripts/test_k8s_scram_seed.py
     python3 scripts/test_plat06_case_e_rows.py
     python3 scripts/test_bind_credential_rows.py
-    python3 scripts/test_console_steps.py
     python3 scripts/test_no_duplicate_definitions.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
-    ./scripts/check-ui-offline.sh
-    ./scripts/check-ui-behaviour.sh
     ./scripts/check-unverified-labels.sh
     ./scripts/check-unsafe-scope.sh
 
@@ -401,7 +398,7 @@ engine:
 # http/https are never fetched (Global Constraint 17); this is a repository
 # integrity check, not a network check.
 links:
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/README.md e2e/fixtures/ ui/ charts/ deploy/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/README.md e2e/fixtures/ console/README.md console/fixtures/ charts/ deploy/
 
 # Task 22. The v0.1.0 definition of done, as far as it is mechanically
 # checkable without GitHub Actions or a live stack. Prints what it could NOT
@@ -777,7 +774,22 @@ helm-demo:
 gate:
     bash scripts/ci-check.sh
 
-# THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the twenty-two page files.
+# THE REBUILT CONSOLE (PROD-18.1), `console/`. CI's `console` job is this recipe,
+# run only when console/ or schemas/logweir-api-v1.openapi.json changed, so it is
+# not part of `gate`. Needs Node 22 or 24 and the npm registry.
+# The console's gates: lockfile install, API types, tsc, ESLint, Vitest, build, audit, licences.
+console:
+    cd console && npm ci
+    cd console && npm run check:api
+    cd console && npx tsc --noEmit
+    cd console && npm run lint
+    cd console && npm test
+    cd console && npx vite build
+    cd console && npm run check:dist
+    cd console && npm audit --audit-level=high
+    cd console && npm run check:licences
+
+# THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the console build it serves at /ui/.
 #
 # `Dockerfile.console` COMPILES, so this recipe behaves like
 # `image-weirkeeper`: the platform is
@@ -791,6 +803,8 @@ gate:
 image-console:
     docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.console -t logweir-console:check .
 
-# Build the console image and assert it. Requires Docker.
+# Build the console image and assert it. Requires Docker. The check holds the
+# image's /ui to this tree's console build, so that is built first.
 smoke-console: image-console
+    cd console && npm ci && npx vite build
     bash scripts/check-image-api.sh logweir-console:check

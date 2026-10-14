@@ -26,10 +26,10 @@
 //!
 //! Both readers accept the receipt and print the same `schema_dependency`
 //! lines; the catalog point copies each topic's entry; and the console's own
-//! render (`ui/tests/emit-schema-dependency.js`), over the point the catalog
-//! sync lists for that record, names the schema-dependent topics with the
-//! live ids under "Registry not captured: applications may not read these
-//! records after restore." The evidence is written to
+//! text (`console/scripts/emit-schema-dependency.mjs`, the Recovery catalog's
+//! functions), over the point the catalog sync lists for that record, names the
+//! schema-dependent topics with the live ids under "Registry not captured:
+//! applications may not read these records after restore." The evidence is written to
 //! `schema-dependency/live.json` under the stack's scratch directory.
 //!
 //! ```text
@@ -777,9 +777,7 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
         })
         .collect();
     // The members `PointView` REQUIRES travel with the point, from the record
-    // itself: the console's render decodes the point with the console's own
-    // decoder before any page function sees it (FX-48), and that decoder
-    // refuses a point without its identity and its receipt binding.
+    // itself, as the API publishes them.
     let point = json!({
         "pointId": record["point_id"], "backupId": record["backup_id"],
         "runId": record["run_id"], "receiptKey": record["receipt"]["key"],
@@ -792,9 +790,9 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
     let point_file = dir.join("point.json");
     std::fs::write(&point_file, serde_json::to_vec_pretty(&point).unwrap()).unwrap();
     let mut node = Command::new("node");
-    node.arg(root().join("ui/tests/emit-schema-dependency.js"))
-        .arg(&point_file)
-        .arg(topics.join(","));
+    node.arg("--experimental-strip-types")
+        .arg(root().join("console/scripts/emit-schema-dependency.mjs"))
+        .arg(&point_file);
     let console = output_within(node, 60);
     assert!(
         console.status.success(),
@@ -802,18 +800,19 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
         text(&console)
     );
     let shown = String::from_utf8_lossy(&console.stdout).into_owned();
-    let review = shown
-        .split("== review ==")
+    let catalog = shown
+        .split("== catalog ==")
         .nth(1)
-        .expect("the review block");
+        .expect("the catalog block");
+    assert!(catalog.contains("Schema-dependent topics"), "{shown}");
     assert!(
-        review.contains(
+        catalog.contains(
             "Registry not captured: applications may not read these records after restore."
         ),
         "{shown}"
     );
     assert!(
-        review.contains(&format!(
+        catalog.contains(&format!(
             "{} (key and value: schema ids {}, {}; complete)",
             t("avro-kv"),
             avro_key_id.min(avro_value_id),
@@ -822,28 +821,21 @@ fn a_backup_flags_the_schema_dependent_topics_from_their_bytes() {
         "{shown}"
     );
     assert!(
-        review.contains(&format!(
+        catalog.contains(&format!(
             "{} (value: schema ids {json_id}; complete)",
             t("json")
         )),
         "{shown}"
     );
-    assert!(
-        review.contains(&format!("Not assessed: {}.", t("empty"))),
-        "{shown}"
-    );
-    assert!(
-        !review.contains(&format!("{} (", t("plain"))),
-        "a control is never named: {shown}"
-    );
-    let catalog = shown
-        .split("== catalog ==")
-        .nth(1)
-        .unwrap()
-        .split("== recovery point ==")
-        .next()
-        .unwrap();
-    assert!(catalog.contains("Schema-dependent topics"), "{shown}");
+    // The controls are never named: plain JSON, zero-led binary, and a topic
+    // the backup could not assess (no records), which the page leaves unnamed
+    // rather than calling it free of a registry.
+    for control in ["plain", "zeros", "empty"] {
+        assert!(
+            !catalog.contains(&format!("{} (", t(control))),
+            "{control} is never named: {shown}"
+        );
+    }
 
     std::fs::write(
         dir.join("live.json"),

@@ -1,9 +1,11 @@
 //! `logweir doctor` — preflight checks, run before `logweir drill run` is
 //! attempted.
 //!
-//! Seven checks, each with its own gate: engine binary present, engine
+//! Eight checks, each with its own gate: engine binary present, engine
 //! version pinned, drill spec parses, allowed-clusters parses, approver key
-//! loads, source storage reachable, target cluster reachable/allowed/marked.
+//! loads, source storage reachable, target cluster reachable/allowed/marked,
+//! and the target serves every request version the engine's restore sends
+//! (PROD-01.2's `target.engineProtocol`, FX-45).
 //! The list short-circuits on the first FAILURE (a reviewer sees all seven
 //! checks in one place and the first hard stop wins), but a check that
 //! genuinely could not be exercised (no live broker, no live bucket) reports
@@ -48,6 +50,9 @@ impl From<Result<String, String>> for CheckResult {
 pub type Check<'a> = (&'static str, Box<dyn Fn() -> CheckResult + 'a>);
 
 pub fn run(args: &DoctorArgs) -> ExitCode {
+    // Check 8 is answered over check 7's one dial (`check_target`), so the
+    // target is dialled once; check 7's closure leaves check 8's answer here.
+    let engine: std::cell::RefCell<Option<CheckResult>> = std::cell::RefCell::new(None);
     let checks: Vec<Check> = vec![
         ("engine binary", Box::new(|| check_engine_present().into())),
         ("engine version", Box::new(|| check_engine_version().into())),
@@ -63,7 +68,19 @@ pub fn run(args: &DoctorArgs) -> ExitCode {
         ("storage", Box::new(|| check_storage(&args.spec))),
         (
             "target",
-            Box::new(|| check_target(&args.spec, &args.allowed_clusters)),
+            Box::new(|| {
+                let (target, target_engine) = check_target(&args.spec, &args.allowed_clusters);
+                *engine.borrow_mut() = target_engine;
+                target
+            }),
+        ),
+        (
+            "target engine",
+            Box::new(|| {
+                engine.borrow_mut().take().unwrap_or_else(|| {
+                    CheckResult::Skipped("check 7 did not reach the target".to_string())
+                })
+            }),
         ),
     ];
     let mut skipped = 0usize;
@@ -408,18 +425,29 @@ fn with_prefix(base: String, prefix: &str) -> String {
 ///    facts phase 0 refuses on, checked before a drill is attempted. Always a
 ///    FAILURE, never a skip: an adopter with a firewall problem must read a
 ///    NAMED `target` failure, not "doctor failed" and nothing else.
-fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResult {
+///
+/// 8. `target.engineProtocol` (FX-45), over the SAME dial, once check 7
+///    passed: the target's own ApiVersions answer against every request the
+///    engine's restore sends at its one fixed version, the row a `Restore`
+///    Preflight and phase 0 answer ([`evaluate_target_engine`]). `None` when
+///    check 7 did not pass, so check 8 is never answered about a target check
+///    7 refused.
+fn check_target(
+    spec: &std::path::Path,
+    allowed: &std::path::Path,
+) -> (CheckResult, Option<CheckResult>) {
+    let failed = |why: String| (CheckResult::Failed(why), None);
     let sp = match parse_spec(spec) {
         Ok(sp) => sp,
-        Err(e) => return CheckResult::Failed(e),
+        Err(e) => return failed(e),
     };
     let t = match std::fs::read_to_string(allowed) {
         Ok(t) => t,
-        Err(e) => return CheckResult::Failed(e.to_string()),
+        Err(e) => return failed(e.to_string()),
     };
     let al: logweir_core::spec::AllowedClusters = match serde_json::from_str(&t) {
         Ok(al) => al,
-        Err(e) => return CheckResult::Failed(e.to_string()),
+        Err(e) => return failed(e.to_string()),
     };
     // Interface I1: dial the target the way `drill run` will, or a SCRAM
     // cluster that requires authentication reads as "target unreachable".
@@ -432,23 +460,23 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
     let target_tls_ca =
         match crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR) {
             Ok(ca) => ca,
-            Err(e) => return CheckResult::Failed(e),
+            Err(e) => return failed(e),
         };
     // The binding `drill run` will check.
     if let Err(e) = crate::credential_binding::check_side(crate::tls_ca::Side::Target) {
-        return CheckResult::Failed(e.to_string());
+        return failed(e.to_string());
     }
     // The `mtls` pair, as `drill run` will present it.
     let target_client_certificate =
         match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target) {
             Ok(files) => files,
-            Err(e) => return CheckResult::Failed(e),
+            Err(e) => return failed(e),
         };
     let auth = match AuthConfig::from_spec(
         &sp.target.auth,
         match crate::drill::validated_password(crate::drill::TARGET_PASSWORD_VAR) {
             Ok(p) => p,
-            Err(refusal) => return CheckResult::Failed(refusal.to_string()),
+            Err(refusal) => return failed(refusal.to_string()),
         },
     )
     .and_then(|auth| auth.with_tls_ca_file(target_tls_ca))
@@ -456,7 +484,7 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
     {
         Ok(a) => a,
         Err(e) => {
-            return CheckResult::Failed(
+            return failed(
                 crate::drill::naming_the_password_var(e, crate::drill::TARGET_PASSWORD_VAR)
                     .to_string(),
             )
@@ -468,13 +496,42 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
     ) {
         Ok(r) => r,
         Err(e) => {
-            return CheckResult::Failed(format!(
+            return failed(format!(
                 "target unreachable at {:?}: {e}",
                 sp.target.bootstrap_servers
             ))
         }
     };
-    evaluate_target(&sp, &al, &r)
+    let target = evaluate_target(&sp, &al, &r);
+    let engine = matches!(target, CheckResult::Passed(_)).then(|| evaluate_target_engine(&sp, &r));
+    (target, engine)
+}
+
+/// The verdict of check 8 over any `ClusterReader`, so a double can drive it:
+/// an endpoint SEEN not to serve a request the restore sends is a named
+/// FAILURE; an answer that could not be observed is a SKIP, never `ok`.
+fn evaluate_target_engine(
+    sp: &logweir_core::spec::DrillSpec,
+    r: &dyn ClusterReader,
+) -> CheckResult {
+    use crate::check::kinds::capability;
+    use logweir_core::check_contract::{CheckId, CheckState};
+    let row = capability::engine_protocol(
+        CheckId::TargetEngineProtocol,
+        &r.api_versions(capability::STANDALONE_BUDGET),
+        capability::spec_uses_sasl(&sp.target.auth),
+        chrono::Utc::now(),
+    );
+    if let Some(why) = capability::refusal_of(&row) {
+        return CheckResult::Failed(why);
+    }
+    match row.state {
+        CheckState::Ready => CheckResult::Passed(row.message),
+        _ => CheckResult::Skipped(format!(
+            "{} was not observed ({}): {}",
+            row.id, row.code, row.message
+        )),
+    }
 }
 
 /// The reachability/allow-list/marker-topic evaluation, factored out of
@@ -680,6 +737,79 @@ mod tests {
             _max: usize,
         ) -> Result<Vec<ConsumedRecord>, KafkaError> {
             Ok(vec![])
+        }
+    }
+
+    /// A target answering ApiVersions, for check 8.
+    struct Serving(
+        Result<logweir_kafka::api_versions::ApiVersions, logweir_kafka::api_versions::NotObserved>,
+    );
+
+    impl ClusterReader for Serving {
+        fn cluster_id(&self) -> Result<String, KafkaError> {
+            Ok("ALLOWED0000000000000000".into())
+        }
+        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+            Ok(vec![])
+        }
+        fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+            Ok(vec![])
+        }
+        fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+            Ok(BTreeMap::new())
+        }
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            Ok(BTreeMap::new())
+        }
+        fn consume_range(
+            &self,
+            _topic: &str,
+            _partition: i32,
+            _from: i64,
+            _max: usize,
+        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+            Ok(vec![])
+        }
+        fn broker_view(
+            &self,
+            _within: std::time::Duration,
+        ) -> Result<
+            logweir_kafka::api_versions::ApiVersions,
+            logweir_kafka::api_versions::NotObserved,
+        > {
+            self.0.clone()
+        }
+    }
+
+    /// **Check 8 (FX-45): `doctor` names a target the engine cannot restore
+    /// into.** Redpanda v26.2.4's ranges (Produce v0-v7) are a FAILURE naming
+    /// the row and the request; Apache Kafka 4.3.1's pass; an answer that was
+    /// not observed is a SKIP (never `ok`, and `--strict` fails on it).
+    #[test]
+    fn check_8_names_a_target_the_engine_cannot_restore_into() {
+        use logweir_kafka::api_versions::{ApiVersions, NotObserved};
+        let sp = spec_with_marker_topic("logweir.scratch");
+        match evaluate_target_engine(&sp, &Serving(Ok(ApiVersions::of(&[(0, 0, 7), (3, 0, 12)])))) {
+            CheckResult::Failed(why) => assert!(
+                why.starts_with("target.engineProtocol is notReady (EngineProtocolUnsupported)")
+                    && why.contains("Produce v8"),
+                "{why}"
+            ),
+            other => panic!("expected Failed, got {}", describe(&other)),
+        }
+        match evaluate_target_engine(
+            &sp,
+            &Serving(Ok(ApiVersions::of(&[(0, 0, 13), (3, 0, 13)]))),
+        ) {
+            CheckResult::Passed(d) => assert!(d.contains("Produce v8"), "{d}"),
+            other => panic!("expected Passed, got {}", describe(&other)),
+        }
+        match evaluate_target_engine(&sp, &Serving(Err(NotObserved::Other("no answer".into())))) {
+            CheckResult::Skipped(why) => assert!(
+                why.contains("target.engineProtocol was not observed") && why.contains("no answer"),
+                "{why}"
+            ),
+            other => panic!("expected Skipped, got {}", describe(&other)),
         }
     }
 

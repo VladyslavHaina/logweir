@@ -10,11 +10,11 @@
 
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{
-    advisory_warnings, aggregate, aggregate_expires_at, apply_rules, frames, inputs_digest,
-    is_object_key_shaped, redact, redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256,
-    visibility, ApprovalRef, Attestation, Authority, BindingInputs, CaBundleRef, CheckCode,
-    CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest,
-    CheckResult, CheckResultError, CheckState, ConnectionPlan, CredentialMode,
+    advisory_warnings, aggregate, aggregate_expires_at, apply_rules, capability_checks_for, frames,
+    inputs_digest, is_object_key_shaped, redact, redaction_rules, stale_reasons, topic_tsv,
+    topic_tsv_sha256, visibility, ApprovalRef, Attestation, Authority, BindingInputs, CaBundleRef,
+    CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind,
+    CheckRequest, CheckResult, CheckResultError, CheckState, ConnectionPlan, CredentialMode,
     DestinationAccessRequest, DestinationPlan, EndFrame, EvidenceFetchRequest,
     EvidenceObjectRequest, ExpectedSummary, FrameExpectations, Gating, GrantCredentials, GrantRef,
     OperationReadinessRequest, OverallState, Referent, RosterRef, SourceConnectionRequest,
@@ -862,7 +862,14 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
             "target.engineProtocol",
         ]
     );
-    assert!(capability_checks_for(CheckOperation::SourceConnection).is_empty());
+    assert_eq!(
+        capability_checks_for(CheckOperation::SourceConnection),
+        [
+            CheckId::ConnectionEngineProtocol,
+            CheckId::TargetEngineProtocol,
+            CheckId::ConnectionGroupTypes
+        ]
+    );
     assert!(capability_checks_for(CheckOperation::DestinationAccess).is_empty());
 
     // The readiness kind.
@@ -945,11 +952,24 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
     )
     .validate()
     .expect("skipped and not listed");
-    // The operations that dial no engine list none.
-    for operation in [
+    // A connection test (FX-46) lists its own rows, and never a topic row.
+    readiness(
         CheckOperation::SourceConnection,
-        CheckOperation::DestinationAccess,
-    ] {
+        capability_checks_for(CheckOperation::SourceConnection).to_vec(),
+        Vec::new(),
+    )
+    .validate()
+    .expect("a connection test's own rows");
+    readiness(
+        CheckOperation::SourceConnection,
+        vec![CheckId::ConnectionTopicConfigsReadable],
+        Vec::new(),
+    )
+    .validate()
+    .expect_err("a connection test names no topic");
+    // The operation that dials no engine lists none.
+    {
+        let operation = CheckOperation::DestinationAccess;
         readiness(operation, Vec::new(), Vec::new())
             .validate()
             .unwrap_or_else(|e| panic!("{operation:?} with no list is a valid plan: {e}"));
@@ -1028,10 +1048,41 @@ fn a_source_connection_plan_carries_a_connection_and_nothing_else() {
         policy_digest: None,
         request: CheckRequest::SourceConnection(SourceConnectionRequest {
             connection: connection(),
+            capability_checks: Vec::new(),
         }),
     };
     assert!(plan.validate().is_ok());
     assert_eq!(plan.kind(), CheckPlanKind::SourceConnection);
+    // Absent when empty: byte-identical to a plan from before FX-46.
+    assert!(!String::from_utf8(plan_bytes(&plan))
+        .unwrap()
+        .contains("capabilityChecks"));
+    // FX-46: a connection test lists its own three rows, once each, and
+    // never a row that reads a topic.
+    let with = |listed: Vec<CheckId>| CheckPlan {
+        request: CheckRequest::SourceConnection(SourceConnectionRequest {
+            connection: connection(),
+            capability_checks: listed,
+        }),
+        ..plan.clone()
+    };
+    with(capability_checks_for(CheckOperation::SourceConnection).to_vec())
+        .validate()
+        .expect("its own three rows");
+    let err = with(vec![CheckId::ConnectionTopicConfigsReadable])
+        .validate()
+        .expect_err("a topic-reading row on a test that names no topic");
+    assert!(
+        err.to_string()
+            .contains("request.sourceConnection.capabilityChecks[0]"),
+        "{err}"
+    );
+    with(vec![
+        CheckId::TargetEngineProtocol,
+        CheckId::TargetEngineProtocol,
+    ])
+    .validate()
+    .expect_err("listed twice");
 
     let bytes = plan_bytes(&plan);
     let round: CheckPlan =
@@ -2426,7 +2477,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
     }
 }
 
-/// **The fixture both sides read.** `ui/tests/fixtures/set-ids.json`
+/// **The fixture both sides read.** `console/fixtures/set-ids.json`
 /// lists the set ids the controller mints and near misses it never mints; the
 /// console's `isMintedSetId` (`ui/tests/restore-catalog.spec.js`) reads the
 /// same file. Here: every minted id survives the redactor bare and as the
@@ -2436,7 +2487,7 @@ fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
     const RUN: &str = "01M3BNHJFZCV0D4BRZ0EM0RESH";
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../ui/tests/fixtures/set-ids.json"
+        "/../../console/fixtures/set-ids.json"
     );
     let text = std::fs::read_to_string(path).expect("the shared fixture is readable");
     let doc: serde_json::Value = serde_json::from_str(&text).expect("the fixture is JSON");

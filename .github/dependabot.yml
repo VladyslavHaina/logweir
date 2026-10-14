@@ -1,0 +1,39 @@
+# Dependency updates for the rebuilt console (PROD-18.1, console/), as its decision
+# record says (docs/to-do/decisions/PROD-18.1-console.md, section 3.3): weekly, grouped,
+# and a version only once it is 14 days old. Security updates are not held back: the
+# cooldown applies to version updates only. A React major waits until PatternFly
+# supports it, so its pull requests are not opened.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /console
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      patternfly:
+        patterns: ["@patternfly/*"]
+      tanstack:
+        patterns: ["@tanstack/*"]
+      build-tools:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "jsdom"
+          - "@testing-library/*"
+          - "typescript"
+          - "typescript-eslint"
+          - "eslint"
+          - "@eslint/*"
+          - "openapi-typescript"
+    ignore:
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]

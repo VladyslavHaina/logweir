@@ -1,24 +1,20 @@
-//! The static UI, served byte for byte from an allowlist built at startup.
+//! The console, served byte for byte from an allowlist built at startup.
 //!
-//! THE SAME SELECTION `Dockerfile.console` COPIES, AND NOTHING ELSE. The top-level
-//! `*.html`, `*.js` and `*.css` files of the configured directory and the same
-//! three extensions directly inside `pages/`. `README.md`, `tests/` (which
-//! carries a throwaway keypair and fixtures), any other subdirectory, any
-//! other extension, dotfiles and symbolic links are never in the allowlist, so
-//! no request path can reach them: a request path is looked up EXACTLY, with
-//! no decoding, normalisation or directory index, and anything not in the map
-//! is 404.
+//! THE BUILT CONSOLE AND NOTHING ELSE (PROD-18.1). The configured directory is
+//! `console/dist` as `Dockerfile.console` copies it: the top-level `*.html`, `*.js`
+//! and `*.css` files and, one level deeper, the build's hashed files in `assets/`
+//! (scripts, styles and the design system's `woff2` fonts and `svg` images). Any
+//! other subdirectory, any other extension, dotfiles (`.vite/`) and symbolic links
+//! are never in the allowlist, so no request path can reach them: a request path
+//! is looked up EXACTLY, with no decoding, normalisation or directory index, and
+//! anything not in the map is 404. `/ui/` is `index.html`, served `no-cache`; a
+//! hashed file is `immutable`, because its name changes whenever its bytes do.
 //!
-//! ONE ENTRY IS NOT A FILE: the page icon, [`ICON_PATH`]. `ui/index.html`
-//! names it (`<link rel="icon" href="./favicon.svg">`), and it is compiled in
-//! here rather than shipped under `ui/` because every shipped UI file is held
-//! to plain ASCII text with no URL scheme on any line
-//! (`scripts/check-ui-offline.sh`), and a standalone SVG cannot render without
-//! its XML namespace URI. A `data:,` icon would be refused by this server's
-//! Content-Security-Policy (`img-src` falls back to `default-src 'self'`) and
-//! log a CSP violation on every page load; served from `'self'`, the icon
-//! needs no widening of the policy. A `.svg` FILE under `ui/` is still never
-//! selected: the extension list below is `Dockerfile.console`'s.
+//! ONE ENTRY IS NOT A FILE: the page icon, [`ICON_PATH`], compiled in so that no
+//! file can shadow it (`.svg` is selected only under `assets/`). A `data:,` icon
+//! would be refused by this server's Content-Security-Policy (`img-src` falls back
+//! to `default-src 'self'`); served from `'self'`, the icon needs no widening of
+//! the policy.
 //!
 //! READ ONCE, INTO MEMORY. The bytes a browser receives are the bytes this
 //! process read at startup; nothing on disk can swap a file under a running
@@ -35,15 +31,20 @@ use http::header::{self, HeaderValue};
 use crate::app::AppState;
 use crate::problem::ApiError;
 
+/// The build's hashed output: the one place fonts, images and `immutable` caching are allowed.
+pub const ASSETS_DIR: &str = "assets/";
+
+/// `Cache-Control` for a hashed file: its name changes whenever its bytes do.
+pub const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
 /// The largest single asset accepted, 8 MiB.
 pub const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
 
-/// The page icon's path under `/ui/` — what `ui/index.html`'s
-/// `<link rel="icon">` names, relative to the page.
+/// The page icon's path under `/ui/`: what the console's `<link rel="icon">`
+/// names, relative to the page.
 pub const ICON_PATH: &str = "favicon.svg";
 
-/// The page icon: the masthead's brand mark (`ui/index.html`'s inline
-/// `.brand-mark`), in the light theme's `--accent` / `--on-accent`. Colours are
+/// The page icon: the masthead's brand mark, in Logweir's accent. Colours are
 /// presentation attributes, not a `<style>` element, so nothing in it is an
 /// inline style the policy would have to allow; it carries no script and no
 /// reference to anything.
@@ -52,29 +53,6 @@ pub const ICON_SVG: &str = concat!(
     r##"<rect x="1" y="1" width="30" height="30" rx="8" fill="#0b5cad"/>"##,
     r##"<path fill="#ffffff" d="M6 8h20v3.2H6zM12 14.4h14v3.2H12zM18 20.8h8v3.2h-8z"/>"##,
     "</svg>\n"
-);
-
-/// The path of the console's own `runtime.js` under `/ui/`: the one script
-/// `ui/index.html` loads before `app.js`.
-pub const CONSOLE_RUNTIME_PATH: &str = "runtime.js";
-
-/// THE CONSOLE'S `runtime.js`, compiled in and served IN PLACE OF the file.
-///
-/// It marks the page as served by this process (`window.LOGWEIR_CONSOLE`),
-/// so the page treats every failed session probe as an outage.
-///
-/// It carries no credential and no per-request value: the namespace context is
-/// the file's empty one, because in console mode the grants come from
-/// `/session`.
-pub const CONSOLE_RUNTIME_JS: &str = concat!(
-    "// runtime.js -- served by logweir-api (crates/logweir-api/src/assets.rs):
-",
-    "// this page is the Logweir console. Compiled into the service, never a file.
-",
-    "window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({ allowed: [], selected: \"\" });
-",
-    "window.LOGWEIR_CONSOLE = Object.freeze({ servedBy: \"logweir-api\" });
-",
 );
 
 /// One served file.
@@ -102,6 +80,22 @@ fn content_type_for(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The build's hashed files: scripts, styles and the design system's fonts and
+/// images. No page: the one page is `index.html`.
+fn hashed_content_type_for(name: &str) -> Option<&'static str> {
+    let extension = name.rsplit_once('.').map(|(_, e)| e)?;
+    match extension {
+        "js" | "css" => content_type_for(name),
+        "woff2" => Some("font/woff2"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn is_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
 fn safe_name(name: &str) -> bool {
     !name.starts_with('.')
         && name
@@ -118,11 +112,13 @@ impl StaticAssets {
     /// selected file exceeds [`MAX_ASSET_BYTES`].
     pub fn load(dir: &Path) -> Result<StaticAssets, String> {
         let mut files = BTreeMap::new();
-        collect(dir, "", &mut files)?;
-        let pages = dir.join("pages");
-        match std::fs::symlink_metadata(&pages) {
-            Ok(meta) if meta.file_type().is_dir() => collect(&pages, "pages/", &mut files)?,
-            _ => {}
+        collect(dir, "", content_type_for, &mut files)?;
+        // Joined WITHOUT the key's trailing slash: `assets/` would make the
+        // operating system resolve a symbolic link named `assets` before
+        // `symlink_metadata` could refuse it.
+        let hashed = dir.join(ASSETS_DIR.trim_end_matches('/'));
+        if is_dir(&hashed) {
+            collect(&hashed, ASSETS_DIR, hashed_content_type_for, &mut files)?;
         }
         if !files.contains_key("index.html") {
             return Err(format!(
@@ -130,16 +126,7 @@ impl StaticAssets {
                 dir.display()
             ));
         }
-        // THE CONSOLE'S OWN runtime.js REPLACES THE FILE: the marker that tells the
-        // page it is behind this service.
-        files.insert(
-            CONSOLE_RUNTIME_PATH.to_string(),
-            Asset {
-                bytes: Bytes::from_static(CONSOLE_RUNTIME_JS.as_bytes()),
-                content_type: "text/javascript; charset=utf-8",
-            },
-        );
-        // No file can collide with it: `.svg` is not a selected extension.
+        // No file can collide with it: `.svg` is selected only under `assets/`.
         files.insert(
             ICON_PATH.to_string(),
             Asset {
@@ -163,7 +150,12 @@ impl StaticAssets {
     }
 }
 
-fn collect(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Asset>) -> Result<(), String> {
+fn collect(
+    dir: &Path,
+    prefix: &str,
+    content_type_for: fn(&str) -> Option<&'static str>,
+    files: &mut BTreeMap<String, Asset>,
+) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -225,7 +217,12 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static(asset.content_type),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    let cache = if key.starts_with(ASSETS_DIR) {
+        IMMUTABLE
+    } else {
+        "no-cache"
+    };
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     response
 }
 
@@ -244,9 +241,16 @@ mod tests {
         assert_eq!(content_type_for("noext"), None);
         assert!(!safe_name(".hidden.js"));
         assert!(!safe_name("sp ace.js"));
-        assert!(safe_name("restore-wizard.js"));
+        assert!(safe_name("index-AbC_1-x.js"));
         // The icon is compiled in, and a file of its extension is never
-        // selected — so no `ui/` file can shadow it.
+        // selected at the top level, so no file can shadow it.
         assert_eq!(content_type_for(ICON_PATH), None);
+        // Fonts and images only among the hashed files, and no page there.
+        assert_eq!(content_type_for("a.woff2"), None);
+        assert_eq!(hashed_content_type_for("a.woff2"), Some("font/woff2"));
+        assert_eq!(hashed_content_type_for("a.svg"), Some("image/svg+xml"));
+        assert_eq!(hashed_content_type_for("a.html"), None);
+        assert_eq!(hashed_content_type_for("a.js.map"), None);
+        assert_eq!(hashed_content_type_for("a.woff"), None);
     }
 }

@@ -481,13 +481,11 @@ fn verified_scorecard(
 ) -> Result<(Vec<u8>, Scorecard), DrillError> {
     let refuse = |why: String| -> DrillError { GuardRefusal(why).into() };
     let run_id = inputs.run_id;
-    if run_id.is_empty()
-        || !run_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    // FX-36: the run id names the only key read here, so it is one run-id
+    // segment, refused by name before any read.
+    if !logweir_core::ids::is_run_id_segment(run_id) {
         return Err(refuse(format!(
-            "--run-id {run_id:?} is not a run id; nothing was deleted"
+            "--run-id {run_id:?} is not a run id; nothing was read and nothing was deleted"
         )));
     }
     let key = format!("logweir/drills/{run_id}.json");

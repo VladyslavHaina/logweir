@@ -37,10 +37,16 @@ fn all_workflows_parse_and_default_to_read_only() {
 fn main_publication_requires_quality_and_integration_success() {
     let ci = workflow("ci.yml");
     let publish = &ci["jobs"]["publish"];
-    assert_eq!(dependencies(publish), ["check", "e2e"]);
+    assert_eq!(dependencies(publish), ["check", "e2e", "console"]);
+    // The console job's gates hold the image as well; its skip (no console
+    // change) passes, a skipped check or e2e does not, and a failure never does.
     assert_eq!(
         publish["if"].as_str(),
-        Some("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+        Some(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() \
+             && needs.check.result == 'success' && needs.e2e.result == 'success' \
+             && needs.console.result != 'failure'"
+        )
     );
     assert_eq!(
         publish["uses"].as_str(),
@@ -69,6 +75,27 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
         .position(|s| s["run"] == "bash scripts/ci-images.sh candidates")
         .unwrap();
     assert!(check < login && login < push);
+    // NO npm CODE WHERE THE CREDENTIALS ARE (PROD-18.1 review M1). The console
+    // build the image check compares with runs in `console-dist`, which holds no
+    // secret and pushes nothing; `build`, which logs in and pushes, takes only
+    // its files.
+    assert_eq!(dependencies(&images["jobs"]["build"]), ["console-dist"]);
+    for step in steps {
+        let run = step["run"].as_str().unwrap_or("");
+        let uses = step["uses"].as_str().unwrap_or("");
+        assert!(
+            !run.contains("npm") && !run.contains("npx") && !uses.starts_with("actions/setup-node"),
+            "images.yml `build` runs npm code beside the registry credentials: {step:?}"
+        );
+    }
+    let dist = serde_yaml::to_string(&images["jobs"]["console-dist"]).unwrap();
+    assert!(dist.contains("npm ci && npx vite build"));
+    assert!(
+        !dist.contains("secrets.")
+            && !dist.contains("login-action")
+            && dist.contains("persist-credentials: false"),
+        "console-dist must hold no credential: {dist}"
+    );
     let mut builds = 0;
     for (index, step) in steps.iter().enumerate() {
         if step["uses"]
@@ -540,10 +567,13 @@ fn the_release_tests_call_can_never_reach_ci_publish() {
             other => panic!("{name} has invalid permissions: {other:?}"),
         };
         if write_scope || !job["secrets"].is_null() {
-            assert_eq!(
-                job["if"].as_str(),
-                Some(MAIN_PUSH),
-                "ci.yml's {name} asks for a write scope or secrets, so it must run only on a push to main"
+            // The push-to-main test, alone or ANDed with more conditions (publish
+            // also waits on its gates); an `||` anywhere could reopen it.
+            let condition = job["if"].as_str().unwrap_or("");
+            let rest = condition.strip_prefix(MAIN_PUSH);
+            assert!(
+                rest.is_some_and(|r| (r.is_empty() || r.starts_with(" && ")) && !r.contains("||")),
+                "ci.yml's {name} asks for a write scope or secrets, so it must run only on a push to main: {condition}"
             );
             credentialed.push(name.to_string());
         }
@@ -967,6 +997,67 @@ fn ci_changes_classifies_docs_only_diffs() {
     assert_eq!(classify(dir, "", &lookalike), "code=true");
     assert_eq!(classify(dir, &"0".repeat(40), &lookalike), "code=true");
     assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
+}
+
+/// PROD-18.1: the `console` job runs `just console` only when the diff touches
+/// `console/` or the API schema its types are generated from, and whenever the
+/// classifier cannot tell. Each `false` has a `true` twin one path away.
+#[test]
+fn the_console_job_runs_when_the_console_or_its_schema_changed() {
+    let ci = workflow("ci.yml");
+    let job = &ci["jobs"]["console"];
+    assert_eq!(dependencies(job), ["changes"]);
+    assert_eq!(
+        job["if"].as_str(),
+        Some("needs.changes.outputs.console == 'true'")
+    );
+    assert!(job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|s| s["run"] == "just console"));
+    assert_eq!(
+        ci["jobs"]["changes"]["outputs"]["console"].as_str(),
+        Some("${{ steps.classify.outputs.console }}")
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    let base = commit(dir, "crates/a.rs");
+    let console = |a: &str, b: &str| {
+        let out = std::process::Command::new("bash")
+            .arg(root().join("scripts/ci-changes.sh"))
+            .args([a, b, "console"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let docs = commit(dir, "docs/api.md");
+    assert_eq!(console(&base, &docs), "console=false");
+    let page = commit(dir, "console/src/main.tsx");
+    assert_eq!(console(&docs, &page), "console=true");
+    let rust = commit(dir, "crates/b.rs");
+    assert_eq!(console(&page, &rust), "console=false");
+    let schema = commit(dir, "schemas/logweir-api-v1.openapi.json");
+    assert_eq!(console(&rust, &schema), "console=true");
+    // The recorded documents the console tests import live under console/.
+    let fixture = commit(dir, "console/fixtures/console/session.json");
+    assert_eq!(console(&schema, &fixture), "console=true");
+    let other_fixture = commit(
+        dir,
+        "crates/logweir-api/tests/fixtures/backup-succeeded-verified.json",
+    );
+    assert_eq!(console(&fixture, &other_fixture), "console=false");
+    let other_schema = commit(dir, "schemas/logweir-receipt.json");
+    assert_eq!(console(&other_fixture, &other_schema), "console=false");
+    let lookalike = commit(dir, "console-notes/x.md");
+    assert_eq!(console(&other_schema, &lookalike), "console=false");
+    assert_eq!(console("", &lookalike), "console=true");
+    // The default question is unchanged.
+    assert_eq!(classify(dir, &base, &docs), "code=false");
 }
 
 /// EVERY IMAGE BASE IS PINNED BY DIGEST. `images.yml` pulls Docker Hub bases

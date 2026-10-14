@@ -635,7 +635,7 @@ fn fx20c_the_binding_row_is_blocking_and_expires() {
     assert_eq!(expiry, Some(logweir::check::catalogue::EXPIRY_DEFAULT));
 }
 
-/// **The console fixture is this row.** `ui/tests/fixtures/console/
+/// **The console fixture is this row.** `console/fixtures/console/
 /// preflight-binding-mismatch.json` is what the product API sends for the
 /// thief and what the console renders; its `destination.credentialBound`
 /// entry is THIS runner's row for that destination, as the controller folds
@@ -644,7 +644,7 @@ fn fx20c_the_binding_row_is_blocking_and_expires() {
 #[test]
 fn fx20c_the_console_fixture_is_the_runners_row() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+        .join("../../console/fixtures/console/preflight-binding-mismatch.json");
     let fixture: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
     let entry = fixture["item"]["checks"]

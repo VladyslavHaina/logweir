@@ -1155,7 +1155,7 @@ impl Default for Options {
             authenticator: None,
             authorizer: None,
             deadline: Duration::from_secs(10),
-            ui_dir: repo_root().join("ui"),
+            ui_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ui"),
             cursor_key: vec![0x5a; 32],
             public_origin: ORIGIN.to_string(),
             allowed_hosts: vec![
@@ -1394,7 +1394,7 @@ pub fn schedule_body() -> Value {
 }
 
 pub fn golden_plan() -> String {
-    std::fs::read_to_string(repo_root().join("ui/tests/fixtures/plan.golden.yaml"))
+    std::fs::read_to_string(repo_root().join("console/fixtures/plan.golden.yaml"))
         .expect("the plan golden exists")
 }
 
@@ -1412,7 +1412,7 @@ pub fn restore_body(plan: &str) -> Value {
 }
 
 pub fn fixture(name: &str) -> Value {
-    let path = repo_root().join("ui/tests/fixtures").join(name);
+    let path = repo_root().join("console/fixtures").join(name);
     serde_json::from_str(
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
     )

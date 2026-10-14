@@ -20,13 +20,16 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.classify.outputs.code }}
+      console: ${{ steps.classify.outputs.console }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - id: classify
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+          bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" console | tee -a "$GITHUB_OUTPUT"
   check:
     runs-on: ubuntu-24.04
     # ci-check.sh takes 18-24 minutes; at 25 the job on main 4bfc8b4a was
@@ -60,6 +63,22 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
+  # PROD-18.1: the rebuilt console (console/), only when it or the API schema its
+  # types come from changed. `just console` is the whole job: the lockfile
+  # install, the API types, tsc, ESLint, Vitest, the build and its shape, npm
+  # audit and the licence allowlist.
+  console:
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: taiki-e/install-action@v2
+        with: { tool: just }
+      - run: just console
   # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's fifth), each on its own
   # runner with its own stack, engine build and logweir build (the Rust cache
   # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
@@ -131,6 +150,10 @@ jobs:
           df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
+      # The console rows (record_semantics, schema_dependency) run the
+      # console's own TypeScript with node's types stripped: Node 22.6 or later.
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - uses: taiki-e/install-action@v2
         with: { tool: just }
@@ -169,8 +192,11 @@ jobs:
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, e2e]
+    # The console job's gates (audit, licences, ESLint, Vitest) hold the image
+    # too. It is skipped when neither console/ nor its inputs changed, and a
+    # skip passes here; a skipped check or e2e still skips publication.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.check.result == 'success' && needs.e2e.result == 'success' && needs.console.result != 'failure'
+    needs: [check, e2e, console]
     # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
     # workflow's jobs get no more than this job grants.
     permissions:

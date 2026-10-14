@@ -7,11 +7,14 @@
 #   0. `--no-exec` only: the image is the AArch64 variant and its binary is an
 #      AArch64 ELF. Every other check here is architecture-independent, so this
 #      one runs first or a wrong-variant image passes for the wrong reason.
-#   1. /ui is the twenty-six shipped files, sha256 for sha256, and NOTHING else,
-#      against the one `ui/` directory in this tree.
+#   1. /ui is this tree's console build, `console/dist` without its `.vite/`,
+#      sha256 for sha256, and NOTHING else (PROD-18.1; build it first:
+#      `just console`).
 #   2. The three licences are present, non-empty and at the path both compiling
 #      images use; `THIRD_PARTY_NOTICES.md` is REQUIRED here (this image ships a
-#      statically linked Rust binary).
+#      statically linked Rust binary). So is `console-third-party.md`, the
+#      licences of the npm packages bundled into /ui, and
+#      `console-fonts-OFL-1.1.txt`, the licence of the fonts bundled there.
 #   3. The absences: no kafka-backup MIT notice, no org-root anchor, no engine.
 #   4. The entrypoint is `/usr/local/bin/logweir-api` and there is no CMD: the
 #      console's MODE comes from the chart's ConfigMap and from nowhere else.
@@ -90,10 +93,13 @@ if ! command -v shasum >/dev/null 2>&1; then
 fi
 
 # THE EXPECTED VALUES MUST EXIST ON DISK BEFORE THE IMAGE IS ASKED FOR ANYTHING.
-if [ ! -d ui ]; then
-  fail "check-image-api: there is no ui/ directory in $(pwd)." \
-       "  Check 1 compares the image's /ui against the tree's ui/; without it" \
-       "  this gate would be comparing the image against nothing."
+# The console build is reproducible across hosts (same hashed names on macOS and
+# Linux), so the tree's own build is the reference for the image's /ui.
+if [ ! -s console/dist/index.html ] || [ ! -s console/dist/.vite/license.md ]; then
+  fail "check-image-api: there is no console/dist/index.html or .vite/license.md in $(pwd)." \
+       "  Check 1 compares the image's /ui with this tree's console build;" \
+       "  without it this gate would be comparing the image against nothing." \
+       "  Build it first: \`just console\` (or \`cd console && npm ci && npx vite build\`)."
 fi
 if [ ! -s LICENSE ] || [ ! -s NOTICE ] || [ ! -s THIRD_PARTY_NOTICES.md ]; then
   fail "check-image-api: LICENSE, NOTICE or THIRD_PARTY_NOTICES.md is missing or" \
@@ -210,11 +216,11 @@ fi
 # =========================================================================
 # CHECK 1 — THE SERVED FILES. `assets.rs` reads this directory once at startup.
 # =========================================================================
-echo "-- check 1 (the page): /ui is the twenty-six shipped files, sha256 for sha256, and nothing else"
+echo "-- check 1 (the page): /ui is this tree's console/dist, sha256 for sha256, and nothing else"
 if ! cp_out /ui "$work/ui"; then
   fail "check 1 (the page): $ref carries no /ui directory." \
-       "  \`Dockerfile.console\` COPYs the twenty-six shipped files there and the" \
-       "  chart's ConfigMap names it as \`uiDirectory: /ui\`;" \
+       "  \`Dockerfile.console\` COPYs the console build there and the chart's" \
+       "  ConfigMap names it as \`uiDirectory: /ui\`;" \
        "  \`logweir_api::assets::StaticAssets::load\` refuses to start without an" \
        "  index.html in it."
 fi
@@ -234,49 +240,33 @@ tree_list="$work/tree.sha256"
 image_list="$work/image.sha256"
 : > "$tree_list"
 : > "$image_list"
-
 tree_count=0
 while IFS= read -r f; do
   sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
-  printf '%s  %s\n' "${f#ui/}" "$sum" >> "$tree_list"
+  printf '%s  %s\n' "${f#console/dist/}" "$sum" >> "$tree_list"
   tree_count=$((tree_count + 1))
-done < <(find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort)
-
-image_count=0
+done < <(find console/dist -type f ! -path 'console/dist/.vite/*' | LC_ALL=C sort)
 while IFS= read -r f; do
   sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
   printf '%s  %s\n' "${f#"$work"/ui/}" "$sum" >> "$image_list"
-  image_count=$((image_count + 1))
 done < <(find "$work/ui" -type f | LC_ALL=C sort)
-
-# TWENTY-SIX, NAMED. A gate whose expected count came from the tree alone would
-# stay green if someone deleted seven files from both sides at once.
-if [ "$tree_count" -ne 26 ]; then
-  fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty-six." \
-       "  The shipped page is ui/*.html, ui/*.js, ui/*.css and ui/pages/* — the same" \
-       "  set \`check-ui-offline.sh\` scans and shipped_ui_files() asserts in" \
-       "  crates/logweir/tests/chart_lint.rs. Fix the tree, never this number."
+# A build is index.html and its hashed files under assets/: a script, a
+# stylesheet and the fonts. Fewer means the reference itself is broken.
+if [ "$tree_count" -lt 3 ] || ! grep -q '^index.html  ' "$tree_list"; then
+  fail "check 1 (the page): console/dist holds $tree_count file(s) outside .vite/; a" \
+       "  build is index.html and its hashed files under assets/."
 fi
-if [ "$image_count" -ne 26 ]; then
-  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty-six." \
-       "  It must hold the twenty-six shipped files and NOTHING else: no README.md," \
-       "  no tests/ (a throwaway keypair and fixtures naming a developer's compose" \
-       "  stack), no key material of any kind (Global Constraint 28)." \
-       "  What is in the image:" \
-       "$(cut -d' ' -f1 "$image_list")"
-fi
-
 rc=0
 diff -u "$tree_list" "$image_list" > "$work/ui.diff" 2>&1 || rc=$?
 if [ "$rc" -ne 0 ]; then
   cat "$work/ui.diff" >&2
-  fail "check 1 (the page): the files $ref serves are NOT the tree's ui/." \
-       "  The diff above is the tree's \`<path>  <sha256>\` list (-) against the" \
-       "  image's (+)." \
-       "  Rebuild the image (\`just image-console\`) — never edit ui/ to match a" \
-       "  stale one."
+  fail "check 1 (the page): $ref's /ui is NOT this tree's console build." \
+       "  The diff above is console/dist's \`<path>  <sha256>\` list (-) against the" \
+       "  image's /ui (+). It must hold the build and NOTHING else: no .vite/, no" \
+       "  README.md, no fixtures, no key material of any kind (Global Constraint 28)." \
+       "  Rebuild both from this tree: \`just console\`, then \`just image-console\`."
 fi
-echo "   ok: twenty-six files, sha256 for sha256, and nothing else under /ui"
+echo "   ok: $tree_count files, sha256 for sha256, and nothing else under /ui"
 
 # =========================================================================
 # CHECK 2 — THE LICENCES: three present, three byte-identical.
@@ -302,6 +292,33 @@ for f in LICENSE NOTICE THIRD_PARTY_NOTICES.md; do
   fi
 done
 echo "   ok: three licence files, byte-identical to the tree's"
+# The npm packages bundled into /ui (PROD-18.1) carry their own notices,
+# which the console build writes and Dockerfile.console moves here.
+if ! cp_out /usr/share/licenses/logweir/console-third-party.md "$work/console-third-party.md"; then
+  fail "check 2 (licence): $ref is missing /usr/share/licenses/logweir/console-third-party.md," \
+       "  the licences of the npm packages bundled into /ui (MIT requires them)."
+fi
+rc=0
+diff -u console/dist/.vite/license.md "$work/console-third-party.md" > "$work/lic-console.diff" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$work/lic-console.diff" >&2
+  fail "check 2 (licence): $ref's console-third-party.md is not this tree's console" \
+       "  build's .vite/license.md. Rebuild both: \`just console\`, then \`just image-console\`."
+fi
+echo "   ok: the console's bundled-package licences, byte-identical to the tree's build"
+# The fonts bundled into /ui are OFL-1.1: the notice and the licence travel with them.
+if ! cp_out /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt "$work/console-fonts-OFL.txt"; then
+  fail "check 2 (licence): $ref is missing /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt," \
+       "  the OFL-1.1 notice and licence of the Red Hat fonts bundled into /ui."
+fi
+rc=0
+diff -u console/licenses/RedHatFont-OFL-1.1.txt "$work/console-fonts-OFL.txt" > "$work/lic-fonts.diff" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$work/lic-fonts.diff" >&2
+  fail "check 2 (licence): $ref's console-fonts-OFL-1.1.txt is not this tree's" \
+       "  console/licenses/RedHatFont-OFL-1.1.txt. Rebuild with \`just image-console\`."
+fi
+echo "   ok: the console fonts' OFL-1.1 text, byte-identical to the tree's"
 
 # =========================================================================
 # CHECK 3 — THE ABSENCES. Each one is a claim this image must not make.
@@ -403,8 +420,7 @@ if [ -n "$suspicious" ]; then
        "  serves it. The console's session key, cursor key and OIDC client secret" \
        "  are MOUNTED from Secrets at paths the chart's ConfigMap names" \
        "  (charts/logweir/templates/ui/api-config.yaml); none of the three is ever" \
-       "  built into a layer. \`ui/tests/\` in particular carries a throwaway" \
-       "  keypair and must never be COPYed."
+       "  built into a layer."
 fi
 bundle="$(grep -c -E '^etc/ssl/certs/.*\.pem$' "$work/paths.txt" || true)"
 if [ "${bundle:-0}" -lt 50 ]; then
@@ -424,8 +440,8 @@ echo "   ok: $bundle public roots in the trust store, and no key-shaped path any
 # =========================================================================
 if [ "$no_exec" -eq 1 ]; then
   echo
-  echo "ok: --no-exec — an AArch64 image, the twenty-six shipped files byte for byte, three"
-  echo "    licences, three absences, the entrypoint and USER, and no key-shaped path in $ref."
+  echo "ok: --no-exec — an AArch64 image, the console build byte for byte at /ui, five"
+  echo "    licence files, three absences, the entrypoint and USER, and no key-shaped path in $ref."
   echo "    NOTHING was executed from the image, so \`logweir-api --version\` is NOT asserted"
   echo "    here; a native runner asserts that."
   exit 0
@@ -464,7 +480,8 @@ if [ "${bin_version#logweir-api }" != "$want_version" ]; then
 fi
 
 echo
-echo "ok: the twenty-six shipped files byte for byte at /ui and nothing else, three licences,"
+echo "ok: the console build byte for byte at /ui and nothing else, five licence files"
+echo "    (the npm packages' and the fonts' OFL-1.1 among them),"
 echo "    no MIT notice, no org-root anchor and no engine, the entrypoint logweir-api with no"
 echo "    CMD and USER 65532, no key-shaped path anywhere, and the binary runs by bare name"
 echo "    reporting $bin_version — in $ref"

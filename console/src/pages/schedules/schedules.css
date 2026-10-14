@@ -1,0 +1,45 @@
+/* Layout for the schedule and protection pages (PROD-18.1 R3). Colours,
+   surfaces and status styles come from styles.css; nothing here sets a colour
+   that is not one of its tokens. */
+.lw-schedule-form {
+  max-width: 60rem;
+}
+.lw-param {
+  min-width: 9rem;
+  max-width: 13rem;
+}
+.lw-preview {
+  padding: var(--pf-t--global--spacer--md);
+  background: var(--lw-inset);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--medium);
+  min-width: 0;
+}
+.lw-preview .pf-v6-c-table {
+  --pf-v6-c-table--BackgroundColor: transparent;
+}
+.lw-preview > .pf-v6-c-title {
+  margin-bottom: var(--pf-t--global--spacer--sm);
+}
+.lw-form-grid {
+  display: grid;
+  gap: var(--pf-t--global--spacer--md);
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: var(--pf-t--global--spacer--md);
+}
+@media (min-width: 768px) {
+  .lw-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.lw-condition + .lw-condition {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
+.lw-nowrap {
+  white-space: nowrap;
+}
+/* The topic offer wraps to two rows once a discovery lists more than a row:
+   room between them for each label's 24 px target (WCAG 2.2, 2.5.8). */
+.pf-v6-c-label-group.lw-topic-offer {
+  --pf-v6-c-label-group__list--RowGap: var(--pf-t--global--spacer--sm);
+}

@@ -377,7 +377,9 @@ every archived segment and every restored record of every restored partition,
 each mapped back by `x-original-offset`, with expected, restored, matching,
 missing, unexpected, duplicate, out-of-order and different counts per partition
 and in total. Read `complete.covered` first: `false` means a bound stopped it or
-a partition could not be compared (`incomplete_reason`), and is never a `pass`.
+a partition could not be compared (`incomplete_reason`; a segment past the
+per-segment caps is one cause, and the reason names the caps), and is never a
+`pass`.
 A document without the block covered a sample. Complete coverage still compares
 with the archive and validates no application
 ([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).

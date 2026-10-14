@@ -1956,7 +1956,7 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     // that writes under a prefix is not one (its scope is incomplete).
     let plan = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../ui/tests/fixtures/plan-original-name.golden.yaml"),
+            .join("../../console/fixtures/plan-original-name.golden.yaml"),
     )
     .expect("the original-name plan golden");
     body["planBytes"] = json!(plan);

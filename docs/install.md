@@ -604,8 +604,8 @@ write on `trustpolicies`. `bash scripts/check-chart.sh` checks
 
 ### 5e. Running the console in the cluster (`api.console.enabled`)
 
-`logweir-console` is the `logweir-api` binary and the page of `ui/`
-(`scripts/check-image-api.sh` compares them). It needs `api.enabled`, and
+`logweir-console` is the `logweir-api` binary and the console it serves at
+`/ui/`, built from `console/` (`scripts/check-image-api.sh` compares them). It needs `api.enabled`, and
 `api.console.mode` has no default. **Create the key Secret first; the chart
 does not generate it.** `localAdmin` needs `cursor.key` (32 raw bytes):
 

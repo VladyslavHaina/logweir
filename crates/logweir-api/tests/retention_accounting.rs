@@ -9,12 +9,12 @@
 //!
 //! THREE SIDES READ ONE CHAIN OF FIXTURES.
 //!
-//! * `ui/tests/fixtures/retention-held-back.json` is two `RetentionPolicy`
+//! * `console/fixtures/retention-held-back.json` is two `RetentionPolicy`
 //!   objects as the reconciler leaves them —
 //!   `weirkeeper/tests/retention_policy_controller.rs`
 //!   `fx22_the_shared_fixture_is_what_the_controller_writes` fails when the
 //!   file is not that.
-//! * `ui/tests/fixtures/console/retention-policies-held-back.json` is this
+//! * `console/fixtures/console/retention-policies-held-back.json` is this
 //!   crate's answer for those two objects, served through the real router
 //!   (below).
 //! * `ui/tests/d3.spec.js` decodes and renders the console fixture, and
@@ -30,7 +30,7 @@ use support::{repo_root, FakeKube, Options, TestApp, NS_A};
 use weirkeeper::crds::retention_policy::RetentionPolicy;
 
 /// The console's copy of this crate's answer.
-const CONSOLE_FIXTURE: &str = "ui/tests/fixtures/console/retention-policies-held-back.json";
+const CONSOLE_FIXTURE: &str = "console/fixtures/console/retention-policies-held-back.json";
 
 /// A fixed request id for the checked-in answer; the router mints a new one
 /// on every request.
@@ -202,7 +202,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     assert_eq!(
         got, want,
         "{CONSOLE_FIXTURE} has drifted from this crate's answer for \
-         ui/tests/fixtures/retention-held-back.json. Regenerate it with LOGWEIR_WRITE_FIXTURES=1 \
+         console/fixtures/retention-held-back.json. Regenerate it with LOGWEIR_WRITE_FIXTURES=1 \
          cargo test --locked -p logweir-api --test retention_accounting"
     );
     app.fake.assert_strict();

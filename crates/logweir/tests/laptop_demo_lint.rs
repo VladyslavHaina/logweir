@@ -2,7 +2,7 @@
 //!
 //! `scripts/laptop-demo.sh`, its steps and its transcript were withdrawn with
 //! the static install file (release-notes item 76). One check here is not
-//! about that walk and stays: the page's own body emitter, which
+//! about that walk and stays: the console's own body emitter, which
 //! `scripts/helm-demo.sh` still runs. (The parent spec's `kubectl proxy`
 //! serving-command row went with that page, release-notes item 75.)
 
@@ -29,47 +29,44 @@ fn read(rel: &str) -> String {
 // THE BODY EMITTER
 // ---------------------------------------------------------------------------
 
-/// **The create body is the PAGE's, byte for byte.**
+/// The emitter `scripts/helm-demo.sh` runs (the console's, since PROD-18.1 R8).
+const EMITTER: &str = "console/scripts/emit-restore-body.mjs";
+
+/// **The plan bytes are the CONSOLE's, byte for byte.**
 ///
-/// KILLS: replacing `emit-restore-body.js`'s call to `renderPlanBytes` with a
+/// KILLS: replacing the emitter's call to `renderPlanBytes` with a
 /// hand-written YAML string. That mutant is invisible everywhere else on the
 /// walk (the `Restore` is created, `logweir drill approve` hashes it, the
-/// approval checks pass) and surfaces only at step 12, when the runner cannot
-/// parse the document.
-/// `render_plan_bytes_emits_a_document_the_runner_parses` is the guard that
-/// exists to catch it three slots earlier; this is the arm that keeps the
-/// demo inside that guard's reach.
+/// approval checks pass) and surfaces only when the runner cannot parse the
+/// document. `console_plan.rs` is the guard that parses the console's goldens
+/// into `RestoreSpec`; this is the arm that keeps the demo inside its reach.
 #[test]
-fn the_body_emitter_renders_the_plan_with_the_pages_own_renderer() {
-    let src = read("ui/tests/emit-restore-body.js");
+fn the_body_emitter_renders_the_plan_with_the_consoles_own_renderer() {
+    let src = read(EMITTER);
 
     assert!(
-        src.contains("from \"../plan.js\""),
-        "ui/tests/emit-restore-body.js must import from `../plan.js` — the wizard's own renderer \
-         (interface register I19/I20) and not a copy of it"
+        src.contains("from \"../src/pages/restores/plan.ts\""),
+        "{EMITTER} must import from the console's own renderer, \
+         console/src/pages/restores/plan.ts, and not a copy of it"
     );
-    for name in ["renderPlanBytes", "planHash", "mintNames"] {
-        assert!(
-            src.contains(name),
-            "ui/tests/emit-restore-body.js must use `{name}` from ../plan.js"
-        );
-    }
     assert!(
         src.contains("renderPlanBytes(") && src.contains("planHash(") && src.contains("mintNames("),
-        "ui/tests/emit-restore-body.js must CALL all three, not merely import them"
+        "{EMITTER} must CALL renderPlanBytes, planHash and mintNames, not merely import them"
     );
     assert!(
-        src.contains("restoreBody("),
-        "ui/tests/emit-restore-body.js builds the create body with the wizard's own \
-         `restoreBody` — a second body builder here is a second thing to keep in step with \
-         `ArchiveRef`, and the field it would be easiest to forget is `spec.sourceArchive.\
-         secretRef.name` (plan erratum E24g)"
+        src.contains("secretRef"),
+        "{EMITTER} names the archive credential: without `spec.sourceArchive.secretRef.name` the \
+         controller injects no object-store credential into the runner Job (plan erratum E24g)"
+    );
+    let helm_demo = read("scripts/helm-demo.sh");
+    assert!(
+        helm_demo.contains(&format!("node --experimental-strip-types {EMITTER}")),
+        "scripts/helm-demo.sh runs {EMITTER}"
     );
 
     // NO YAML LITERAL. Every key below is part of the restore document's
-    // grammar and appears NOWHERE in this tree except `ui/plan.js`'s renderer
-    // and the documents it produces; an emitter that wrote the document by
-    // hand has to spell them.
+    // grammar and appears only in the console's renderer and the documents it
+    // produces; an emitter that wrote the document by hand has to spell them.
     for key in [
         "bootstrap_servers",
         "point_in_time",
@@ -89,10 +86,9 @@ fn the_body_emitter_renders_the_plan_with_the_pages_own_renderer() {
     ] {
         assert!(
             !src.contains(key),
-            "ui/tests/emit-restore-body.js contains the plan document's own key `{key}`, so it \
-             is writing YAML instead of asking `renderPlanBytes` for it. The bytes the approver \
-             signs and the bytes the runner parses are the page's or they are two documents \
-             with one hash"
+            "{EMITTER} contains the plan document's own key `{key}`, so it is writing YAML \
+             instead of asking `renderPlanBytes` for it. The bytes the approver signs and the \
+             bytes the runner parses are the console's or they are two documents with one hash"
         );
     }
 }

@@ -107,6 +107,12 @@ impl PartitionProbe {
 /// group. A document that cannot be read or does not verify is `None` with a
 /// warning: the restore is unaffected, no mapping is written, and a
 /// `Switchover` over it is refused `NoPositionsMapping`.
+///
+/// **Both keys are confined before they are read (FX-36).** The receipt key
+/// by the binding's own rule (`binding::confine_receipt_key`: a receipt of the
+/// plan's own set), and the document key to the one beside that receipt
+/// (`consumer_positions::document_key` of the receipt's set and run, arm 32's
+/// rule, held here before the read rather than after it).
 #[must_use]
 pub fn fetch(
     plan: &logweir_core::spec::DrillSpec,
@@ -117,6 +123,10 @@ pub fn fetch(
     let warn = |why: String| {
         tracing::warn!(point_id = %point.point_id, "consumer positions not mapped: {why}");
     };
+    if let Err(e) = crate::drill::binding::confine_receipt_key(plan, point) {
+        warn(format!("the receipt key is not read: {e}"));
+        return None;
+    }
     let receipt_bytes = match archive.get_capped(&point.receipt_key, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => bytes,
         Err(e) => {
@@ -137,6 +147,16 @@ pub fn fetch(
             }
         };
     let cp = receipt.consumer_positions.clone()?;
+    let beside =
+        logweir_core::consumer_positions::document_key(&receipt.backup_id, &receipt.run_id);
+    if cp.document.key != beside {
+        warn(format!(
+            "the receipt names the positions document {:?}, which is not the one beside it \
+             ({beside}); it is not read",
+            cp.document.key
+        ));
+        return None;
+    }
     let doc_bytes = match archive.get_capped(&cp.document.key, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => bytes,
         Err(e) => {
@@ -164,4 +184,110 @@ pub fn fetch(
         receipt: cp,
         document,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! FX-36's rows for the second read of the bound receipt and the read of
+    //! the positions document it names: nothing outside the plan's own set,
+    //! and nothing but the document beside the receipt, is read.
+    use super::*;
+    use crate::drill::binding::tests::{plan_with, receipt};
+    use logweir_core::consumer_positions::{ConsumerPositions, DocumentRef};
+    use logweir_core::execution_contract::PointBinding;
+    use logweir_engine_oso::storage::Store;
+
+    const RECEIPT_KEY: &str = "logweir/backups/nightly-7/run-1.receipt.json";
+    const BESIDE: &str = "logweir/backups/nightly-7/run-1.consumer-positions.json";
+
+    /// A receipt of `nightly-7` run `run-1` whose consumer-positions block
+    /// names `document_key`, stored at [`RECEIPT_KEY`], with an object at
+    /// `document_key` and at [`BESIDE`] (bytes that are not a document: the
+    /// rows are about which keys are READ, and a read document that does not
+    /// verify is `None` too), and the plan's binding to it.
+    fn archive(document_key: &str) -> (Store, PointBinding) {
+        let store = Store::in_memory("logweir");
+        let mut r = receipt("logweir/nightly-7/manifest.json", "sha256:00");
+        let at = chrono::DateTime::<chrono::Utc>::from_timestamp(1_800_000_000, 0).expect("t");
+        r.consumer_positions = Some(ConsumerPositions {
+            observed_from: at,
+            observed_to: at,
+            listing: "complete".into(),
+            document: DocumentRef {
+                key: document_key.into(),
+                sha256: format!("sha256:{}", "a".repeat(64)),
+                bytes: 2,
+            },
+            groups: Default::default(),
+        });
+        let bytes = serde_json::to_vec(&r).expect("serialises");
+        store.put_create_only(RECEIPT_KEY, &bytes).expect("written");
+        for key in [document_key, BESIDE] {
+            let _ = store.put_create_only(key, b"{}");
+        }
+        let binding = PointBinding {
+            point_id: crate::catalog::record::point_id(&bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&bytes),
+            manifest_sha256: "sha256:00".into(),
+        };
+        (store, binding)
+    }
+
+    /// **The receipt key is confined before the second read, as the binding
+    /// confines it before the first.** A plan whose key is not a receipt of
+    /// its own set reads nothing here; the CONTROL, the writer's key, reads
+    /// the receipt and then the document beside it.
+    ///
+    /// KILLS: the `confine_receipt_key` call removed from `fetch` (the
+    /// planted copy is read).
+    #[test]
+    fn a_receipt_key_outside_the_plans_own_set_is_not_read_again() {
+        let (store, binding) = archive(BESIDE);
+        let elsewhere = "logweir/elsewhere/run-1.receipt.json";
+        let bytes = store
+            .get_capped(
+                RECEIPT_KEY,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .expect("the receipt")
+            .0;
+        store.put_create_only(elsewhere, &bytes).expect("a copy");
+        let (logged, log) = store.logging_reads();
+        let mut outside = binding.clone();
+        outside.receipt_key = elsewhere.into();
+        assert!(fetch(&plan_with(Some(outside)), &logged).is_none());
+        assert!(log.reads().is_empty(), "{:?}", log.reads());
+
+        // CONTROL: the writer's key is read, and so is the document beside it.
+        assert!(fetch(&plan_with(Some(binding)), &logged).is_none());
+        assert_eq!(
+            log.reads(),
+            [format!("get {RECEIPT_KEY}"), format!("get {BESIDE}")]
+        );
+    }
+
+    /// **The positions document is read only at the key beside its
+    /// receipt.** A receipt (whose bytes are the bound ones) naming any other
+    /// key — another set's document, another prefix, a scorecard — has that
+    /// key left unread, and no mapping is made.
+    ///
+    /// KILLS: the `document_key` comparison removed (the named key is read).
+    #[test]
+    fn a_positions_document_not_beside_its_receipt_is_not_read() {
+        for named in [
+            "logweir/backups/nightly-8/run-1.consumer-positions.json",
+            "logweir/backups/nightly-7/run-2.consumer-positions.json",
+            "logweir/tenant-b/backups/nightly-7/run-1.consumer-positions.json",
+            "logweir/drills/run-1.json",
+        ] {
+            let (store, binding) = archive(named);
+            let (logged, log) = store.logging_reads();
+            assert!(
+                fetch(&plan_with(Some(binding)), &logged).is_none(),
+                "{named}"
+            );
+            assert_eq!(log.reads(), [format!("get {RECEIPT_KEY}")], "{named}");
+        }
+    }
 }

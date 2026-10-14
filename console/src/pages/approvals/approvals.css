@@ -1,0 +1,67 @@
+/* Approvals: the topic list scrolls inside its card and a long name wraps (never
+   clipped); refusals read as refusals, in the neutral tone. */
+.lw-approval-topics {
+  max-height: 24rem;
+  overflow-y: auto;
+  margin-top: var(--pf-t--global--spacer--sm);
+  border: 1px solid var(--pf-t--global--border--color--default);
+  border-radius: var(--pf-t--global--border--radius--small);
+}
+.lw-approval-topics:focus-visible {
+  outline: 2px solid var(--pf-t--global--color--brand--default);
+  outline-offset: 2px;
+}
+.lw-approval-topics td,
+.lw-approval-facts dd {
+  overflow-wrap: anywhere;
+}
+.lw-approval-topics__head {
+  font-size: var(--pf-t--global--font--size--md);
+}
+.lw-original-name {
+  white-space: nowrap;
+}
+.lw-principal code {
+  overflow-wrap: anywhere;
+}
+.lw-refusal {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
+.lw-steps {
+  margin: 0;
+  padding-inline-start: var(--pf-t--global--spacer--lg);
+}
+.lw-steps > li + li {
+  margin-top: var(--pf-t--global--spacer--md);
+}
+.lw-copy + .lw-copy {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
+.lw-copy .pf-v6-c-clipboard-copy__expandable-content {
+  max-height: 12rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.lw-inset.lw-owner-statement {
+  margin: var(--pf-t--global--spacer--sm) 0 0;
+  padding: var(--pf-t--global--spacer--md);
+}
+.lw-choose-file {
+  margin-top: var(--pf-t--global--spacer--xs);
+}
+.lw-decision {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--md);
+  margin-top: var(--pf-t--global--spacer--md);
+}
+/* Key ids, UIDs and hashes run on without a break; they wrap rather than widen a card. */
+.lw-approval-page .pf-v6-c-content--p,
+.lw-approval-page .pf-v6-c-alert__description,
+.lw-approval-page .pf-v6-c-alert__title,
+.lw-approval-page .pf-v6-c-helper-text__item-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

@@ -738,12 +738,13 @@ fn the_readme_states_its_threat_model_residuals() {
          position instead"
     );
 
-    // The release-notes note about the UI bundle.
+    // The release-notes note about the console's bytes.
     assert!(
-        readme.contains("listed by\ndigest in the release notes")
-            || readme.contains("listed by digest in the release notes"),
-        "README.md must record that the `ui/` bundle's contents are listed by digest \
-         in the release notes, so which bytes the page is has to be checkable"
+        readme.contains("list the console image by digest")
+            && readme.contains("`scripts/check-image-api.sh` holds the image's `/ui`"),
+        "README.md must record that the release notes list the console image by digest and \
+         that the image's /ui is held to the tree's build, so which bytes the page is has to \
+         be checkable"
     );
 }
 
@@ -945,7 +946,7 @@ fn ui_section_pointers_name_the_heading_that_exists() {
 
     let mut sources: Vec<PathBuf> = docs_markdown();
     sources.push(repo_root().join("README.md"));
-    sources.push(repo_root().join("ui").join("README.md"));
+    sources.push(repo_root().join("console").join("README.md"));
 
     let mut sites: Vec<String> = Vec::new();
     for path in &sources {
@@ -1770,13 +1771,6 @@ fn the_release_notes_carry_every_owed_operator_action() {
         "*Required operator actions* must keep its six numbered steps, in order"
     );
 
-    // The UI bundle digest listing README.md promises, with the gate's own
-    // selection of shipped files.
-    assert!(
-        notes.contains("find ui -type f ! -name '*.md' ! -path 'ui/tests/*'"),
-        "docs/release-notes.md must give the command that lists the shipped ui/ files \
-         by digest — README.md says the release notes carry that list"
-    );
     for heading in [
         "### Required operator actions",
         "### Verification scope",
@@ -2247,6 +2241,29 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // Item 101 (D6): an older runner's pod rows; the row that says it ran.
         ("an older runner's pod rows say the pod ran", "`runner.pod`"),
+        // PROD-18.1 (item 102): the rebuilt console and its addresses.
+        ("the console is rebuilt", "`/ui/#/<namespace>/<page>`"),
+        // FX-30 (item 103): a capped segment is not compared, never a pass.
+        (
+            "a complete verification reads under caps",
+            "`covered: false`",
+        ),
+        // FX-38 (item 104): a cut Backup listing is Unknown, by name.
+        ("a partial read says partial", "`BackupHistoryTooLarge`"),
+        // FX-36 (item 105): one answer for a receipt not held.
+        (
+            "a bound restore reads only its own receipt",
+            "`PointBindingMismatch`",
+        ),
+        // FX-12 (item 106): one instant per reconcile pass.
+        ("evidence judged at the pass's instant", "`verifiedAt`"),
+        // FX-45 (item 107): a missing READ named before the engine.
+        ("a missing READ is named", "`TopicAuthorizationFailed`"),
+        // FX-46 (item 108): the probe's third line.
+        (
+            "the probe asks every advertised broker",
+            "`brokers-answered=<answered>/<listed>`",
+        ),
     ];
     assert_eq!(
         items.len(),

@@ -6530,7 +6530,7 @@
         ]
       },
       "CadencePreset": {
-        "description": "One of the five preset cadences (D1 §4.2), with its parameters.\n\nA PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.",
+        "description": "One of the five preset cadences (D1 §4.2), with its parameters.\n\nA PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `console/fixtures/cadence-presets.json` is the same catalogue as data.",
         "oneOf": [
           {
             "description": "Every hour at `minute`.",
@@ -7211,7 +7211,7 @@
             "nullable": true
           },
           "truncated": {
-            "description": "Whether the archive holds more points than the view carries.",
+            "description": "Whether the archive holds more points than the view carries, or may: `true` also when the catalog has not said (no view published yet, or a status written before the field existed). A view not known to be whole is never published as whole (FX-38).",
             "type": "boolean"
           },
           "uid": {
@@ -10977,7 +10977,7 @@
             "nullable": true
           },
           "incomplete": {
-            "description": "Whether a ConfigMap page named by this view disappeared while it was being read. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent.",
+            "description": "Whether a ConfigMap page named by this view disappeared while it was being read, or a line on a page could not be read as a view entry (FX-38): the list is then partial. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent.",
             "type": "boolean",
             "nullable": true
           },
@@ -10997,7 +10997,7 @@
             "type": "string"
           },
           "truncated": {
-            "description": "Whether the archive holds more points than the view carries.",
+            "description": "Whether the archive holds more points than the view carries, or may: `true` also when the catalog has not said (FX-38).",
             "type": "boolean"
           },
           "viewExpired": {
@@ -15044,6 +15044,11 @@
               "$ref": "#/components/schemas/SwitchoverGroupView"
             }
           },
+          "message": {
+            "description": "The sentence beside `reason`. It says when `groups` is partial: a group line the controller could not read, or a run log it did not read at all (FX-38). Then the signed record names every group.",
+            "type": "string",
+            "nullable": true
+          },
           "name": {
             "type": "string"
           },
@@ -15133,15 +15138,21 @@
             }
           },
           "deletedTruncated": {
-            "description": "Whether `deleted` was cut short by this projection's row bound.",
+            "description": "Whether `deleted` is not every topic removed: cut short by this projection's row bound, or the status counts more (FX-38).",
             "type": "boolean"
           },
           "failed": {
-            "description": "The ones that could not be removed.",
+            "description": "The ones that could not be removed: at most 256 of them.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TeardownFailureView"
             }
+          },
+          "failedCount": {
+            "description": "How many topics could not be removed, when the status says (FX-38); more than `failed` lists means the list is cut. Absent on a status written before the field: then a list of 256 may be cut.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
           }
         }
       },

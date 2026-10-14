@@ -201,7 +201,7 @@ fn the_gate_names_every_shipped_surface_it_walks() {
         "docs/architecture.md",
         "config/logweir.yaml",
         "examples/demo.md",
-        "ui/index.html",
+        "console/src/main.tsx",
         ".github/workflows/ci.yml",
         "scripts/check-no-oso.sh",
         "crates/weirkeeper/src/main.rs",

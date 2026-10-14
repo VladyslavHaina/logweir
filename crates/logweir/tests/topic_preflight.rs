@@ -728,6 +728,40 @@ fn a_timestamp_bound_that_excludes_the_window_end_is_a_guard_refusal() {
     );
 }
 
+/// **FX-12: the bound is judged at the caller's instant, never at a clock
+/// read of phase 0's own.** A window ending 2001-01-01T00:00Z under a one-hour
+/// bound is admitted at 00:30 that day and refused two days later. Phase 0
+/// that read the wall clock would refuse both.
+///
+/// KILLS: `target_topic_preflight` computing the floor from `Utc::now()`.
+#[test]
+fn the_timestamp_bound_is_judged_at_the_callers_instant() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("an instant")
+            .with_timezone(&chrono::Utc)
+    };
+    let spec = spec_with_window_end(at("2001-01-01T00:00:00Z"));
+    let configs: &[(&str, &str)] = &[
+        ("log.message.timestamp.type", "CreateTime"),
+        ("log.message.timestamp.before.max.ms", "3600000"),
+    ];
+    let admit = |now| {
+        phase0_admit::run_at(
+            &spec,
+            "restore: {}\n",
+            &allowed(),
+            &BrokerDouble::new(configs),
+            &RecordingCreator::default(),
+            &RecordingDeleter::default(),
+            now,
+        )
+    };
+    admit(at("2001-01-01T00:30:00Z")).expect("inside the bound at that instant");
+    let msg = guard_message(admit(at("2001-01-03T00:00:00Z")).expect_err("outside it"));
+    assert!(msg.starts_with("TargetTopicConfigRefused: "), "{msg}");
+}
+
 /// **The bound is checked against the window end THIS restore asks for.**
 ///
 /// `RestorePlan.time_window.1` is `restore.point_in_time` when the spec states

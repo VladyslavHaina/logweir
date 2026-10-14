@@ -388,20 +388,14 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
             None
         }
         Ok(handle) => {
-            let read = |key: &str, max_bytes: u64| {
-                handle.get(key, max_bytes).map_err(|e| match e {
-                    logweir_engine_oso::storage::StoreError::NotFound(_) => {
-                        format!("{key} is not in the evidence store")
-                    }
-                    other => format!("{key} could not be read: {other}"),
-                })
-            };
+            let read = |key: &str, max_bytes: u64| handle.get(key, max_bytes);
             match crate::switchover::restore_evidence(
                 &read,
                 &req.keyring,
                 &req.scorecard_key,
                 &req.restore_plan_sha256,
                 None,
+                now,
             ) {
                 Ok(ev) => {
                     checks.push(

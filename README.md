@@ -178,10 +178,11 @@ vulnerability report.
 (A fourth, "RBAC bounds the viewer, not the page", went with the legacy
 `kubectl proxy` page in v1, release-notes item 75.)
 
-**[Release notes](docs/release-notes.md) list the `ui/` bundle by digest.** What is in the bundle
-matters: there is no telemetry in it, nothing in it is fetched from anywhere else, and its contents are listed by
-digest in the release notes so that the bytes a browser executed can be
-compared against the bytes that were released.
+**[Release notes](docs/release-notes.md) list the console image by digest.** What is in the
+console matters: there is no telemetry in it and nothing in it is fetched from anywhere else.
+It is built from `console/` at the tagged commit with the committed lockfile, and
+`scripts/check-image-api.sh` holds the image's `/ui` to that build file by file, so the
+bytes a browser executed can be compared against the bytes that were released.
 
 ## Documentation
 
@@ -195,7 +196,7 @@ package and fixture READMEs stay beside the files they describe.
 | Run the demos (with or without Rust), a drill, or the standalone CLI | [Quickstart](docs/quickstart.md) |
 | Operate controllers, jobs, approvals and retention | [Kubernetes](docs/kubernetes.md) |
 | Look up an exit code, a status reason or a runner output line | [Reference](docs/reference.md) |
-| Use or develop the static UI | [UI guide](ui/README.md) |
+| Use or develop the console | [Console guide](console/README.md) |
 | Use the bounded product API (`logweir-api`) | [Product API](docs/api.md) |
 | Verify signed evidence | [Auditor guide](docs/verify-a-scorecard.md) |
 | Generate, pin and rotate keys | [Signing keys](docs/keys.md) |

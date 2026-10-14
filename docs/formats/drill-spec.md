@@ -67,7 +67,11 @@ to.
 **What the runner does with it, before any data-plane work.** Before a broker
 client is constructed and before anything is written, the runner:
 
-1. reads `receipt_key` from `source.storage` through a **read-only** handle;
+1. checks `receipt_key` is exactly the key `backup run` writes this plan's
+   own set's receipt at, `logweir/backups/<source.backup>/<run id>.receipt.json`
+   with each id one plain path segment, and refuses any other key **before
+   anything is read** (FX-36); then reads it from `source.storage` through a
+   **read-only** handle;
 2. checks `sha256(receipt bytes) == receipt_sha256`;
 3. re-derives the point identity from those bytes — `lwp1-` plus the first 32
    lowercase hex characters of the same digest — and checks it equals
@@ -102,15 +106,20 @@ set alone.
 
 A digest or identity mismatch is **exit 3**, with `PointBindingMismatch` at the
 start of the refusal message — the tampered-bundle case, moved to the archive.
-A plan or a restored set that is not the point's set is **exit 3** with
-`PointBindingSetMismatch`, before any target topic of the restore exists.
-A signature fault is **exit 3** with `PointUntrusted`: no keyring, a keyring
-holding no key, a receipt with no sidecar, a sidecar that does not parse, a
-signature no key in the keyring verifies, or a key the keyring's lifecycle
-refuses for this receipt. A receipt or manifest that is **missing or
-unreadable** is **exit 1**: the archive did not answer, and that may be a
-rotated credential or a briefly unavailable bucket, so telling an operator to
-change an approved document would be the wrong repair. See
+A receipt key outside the plan's own set is the same refusal, with nothing
+read; a receipt that is **absent, has other bytes, or is over the 64 MiB read
+cap** gets one answer, `PointBindingMismatch`, which does not say which
+(FX-36), so a plan cannot use the runner to learn whether an object exists or
+what it hashes to. A plan or a restored set that is not the point's set is
+**exit 3** with `PointBindingSetMismatch`, before any target topic of the
+restore exists. A signature fault is **exit 3** with `PointUntrusted`: no
+keyring, a keyring holding no key, a receipt with no sidecar, a sidecar that
+does not parse, a signature no key in the keyring verifies, or a key the
+keyring's lifecycle refuses for this receipt. A receipt or manifest the store
+**could not read** (a denial, a timeout), and a manifest that is missing, is
+**exit 1**: the archive did not answer, and that may be a rotated credential or
+a briefly unavailable bucket, so telling an operator to change an approved
+document would be the wrong repair. See
 [reference.md](../reference.md#exit-codes) for the whole stdout and exit
 contract.
 
@@ -264,6 +273,18 @@ partition would take the total past the bound, that partition and every later
 one are NOT compared, and the signed block says `covered: false` with the
 reason; the verdict is then never `pass`. **Complete coverage is never
 silently replaced by sampling.** Absent means no bound.
+
+**Per-segment caps** (FX-30). Each archived segment is streamed, each record
+hashed as it is decoded and never held whole. The pass that reads every
+segment of the selected partitions before the restore stops the run first:
+exit 1 for a segment over 1 GiB stored, and exit 3 for a segment the restore
+reads whose body decompresses past 1 GiB. The complete verification's own caps
+(the same 1 GiB each) cover what that pass lets through: a segment outside the
+restore window whose body decompresses past the cap (a corrupt segment, or a
+decompression bomb), and an object that grew past the stored cap between the
+two reads. Its partition is then not compared, the segment counts as
+unverified, and `covered: false` names both caps. It is never a crash, and
+never a `pass`.
 
 **Refused at phase 0** (exit 3, before anything runs), because each asks for
 two verifications at once:

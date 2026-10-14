@@ -3,9 +3,9 @@
 //! restore as a restore of everything.
 //!
 //! BOTH SIDES READ ONE FIXTURE, as `complete_coverage.rs` does:
-//! `ui/tests/fixtures/console/restore-subset-pass.json` and
+//! `console/fixtures/console/restore-subset-pass.json` and
 //! `.../operation-restore-subset-pass.json` are this crate's projections of the
-//! custom resource `ui/tests/fixtures/restore-subset-pass.json` (`orders`
+//! custom resource `console/fixtures/restore-subset-pass.json` (`orders`
 //! narrowed to partitions 0 and 2, `payments` restored whole, two engine
 //! runs, a covered complete pass), and `ui/tests/replay-selection.spec.js`
 //! renders the same files. Set `LOGWEIR_WRITE_SELECTION_FIXTURES=1` to
@@ -28,7 +28,7 @@ fn cr(value: &Value) -> RestoreCr {
 
 fn golden(name: &str, projected: &Value) -> Value {
     let path = support::repo_root()
-        .join("ui/tests/fixtures/console")
+        .join("console/fixtures/console")
         .join(name);
     if std::env::var_os("LOGWEIR_WRITE_SELECTION_FIXTURES").is_some() {
         let doc = json!({"requestId": "req-selection-0001", "item": projected});

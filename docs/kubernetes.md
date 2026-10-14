@@ -786,7 +786,13 @@ controller that understands the object clears them with no edit; for a `Backup`
 or `Restore` that references it, every refusal is terminal.
 
 **Reachability.** The probe Job's verdict sets `Reachable` and
-`status.reachable`. A probe that crashed, could not be read
+`status.reachable`. Reachable means the bootstrap address named the cluster
+AND every broker the cluster advertises answered the probe on its advertised
+address (FX-46). When the bootstrap answers and an advertised broker does not
+(an `advertised.listeners` entry this namespace cannot reach), the reason is
+`AdvertisedBrokersUnreachable` (`Reachable=False`), the message gives how many
+of how many answered, and the probe Job's log names each silent broker. A
+probe that crashed, could not be read
 (`ProbeOutputUnreadable`), was refused at creation (`PodCreationForbidden`) or is
 older than 630 s (`ProbeStale`) clears `reachable`, keeps `clusterId` and
 `observedAt`, and is probed again on the 315 s cadence. A `Restore` admits a
@@ -1327,7 +1333,7 @@ after `status.cursor.rescanStartAfter`.
 
 | Bound | Value |
 |---|---|
-| `spec.sync.viewLimit` | 100–5000, default 2000: how many newest points are materialised. The rest are counted, and `status.truncated` says the view is a window. |
+| `spec.sync.viewLimit` | 100–5000, default 2000: how many newest points are materialised. The rest are counted, and `status.truncated` says the view is a window. `truncated` is also set for entries that did not fit the view's pages or one page, which a larger `viewLimit` does not cure; the `Synced` message names each cause. The product API publishes an absent `truncated` as `true`. |
 | `spec.sync.maxObjectsPerRun` | 1000–1000000, default 100000: the object budget of one sync Job; a walk that does not finish persists its cursor (`ScanIncomplete`, `catalogStoppedFor: objectBudget`) |
 | `status.pages[]` | at most 8 immutable `ConfigMap`s, entries one JSON per line under `entries.jsonl`, each with its `sha256` |
 | `status.indexConfigMap` | one fence-pointer `ConfigMap`: per page, the point-id and recovery-point ranges |
@@ -1388,6 +1394,10 @@ an ordinary restore only when it is `Available` and `Verified` or
 - A point whose record gave no facts is listed by its point id alone and is
   never selectable. A walk that never started relays nothing; the controller
   reads that as `ResultUnreadable` and keeps the previous view.
+- A record is read for keys only where a receipt can be: its receipt key must
+  be `logweir/backups/<set>/<run>.receipt.json` (each id one plain path
+  segment) and its sidecar key the `.receipt.sig` beside it. Any other record
+  is `Unreadable` (`unreadableMalformed`) and neither key is read (FX-36).
 - `deepCheck: ManifestDigest` is the default. `deepCheck: None` makes a point
   `Available` once its record and receipt read. `deepCheck: SegmentSample` is
   honoured as `ManifestDigest` (`catalogSegmentSample: notImplemented`).
@@ -1433,14 +1443,14 @@ storage. This path reads no `Backup`, `BackupSchedule` or source `KafkaCluster`.
    trust does not list is `UntrustedSigner` and never offered. Compare the key id
    out of band ([keys.md](keys.md)), add the key to the `TrustPolicy` with
    `kubectl apply`, then set `spec.syncRequest`.
-4. **Choose a point.** The wizard (`#/restore?ns=<ns>&catalog=<name>&point=<pointId>`)
+4. **Choose a point.** The wizard (`#/<ns>/restores/new?catalog=<name>&point=<pointId>`)
    re-reads the row from the API and offers it only when it is `selectable`, the
    verdict join is complete and the row names its set id, receipt key and both
    digests. A catalog synced by a runner up to v0.2.0-rc.1 redacted scheduled
    runs' set ids; upgrade the runner and sync again. The view lists each topic's
-   partitions and replication factor, and its schema dependency: the wizard
-   names schema-dependent topics under "Registry not captured: applications may
-   not read these records after restore."
+   partitions and replication factor, and its schema dependency: the catalog
+   page names schema-dependent topics under "Registry not captured: applications
+   may not read these records after restore."
 5. **The plan is bound to the point**: `source.backup: <backupId>` and
    `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`. The
    point in time defaults to `coveredTo − 1 ms` and must be in
@@ -1451,6 +1461,10 @@ storage. This path reads no `Backup`, `BackupSchedule` or source `KafkaCluster`.
    receipt, re-derives the point id, compares both digests, verifies the
    signature against the evidence keyring in the approval bundle
    (`evidence-keys.json`) and reads the manifest back.
+   - A receipt key that is not `logweir/backups/<source.backup>/<run id>.receipt.json`
+     is exit 3 `PointBindingMismatch` with nothing read. An absent receipt,
+     other bytes or one over the 64 MiB cap are one answer, exit 3
+     `PointBindingMismatch` (FX-36).
    - A digest mismatch, or a pinned version this bucket holds that is no longer
      current, is exit 3 `PointBindingMismatch`. A pinned version this bucket
      does not hold is logged `PointPinUnchecked` and the digest decides.
@@ -1524,7 +1538,11 @@ Each row in `status.result.checks[]` carries a code, a message, a remedy, an
 uid}`, `gating` (`blocking`, `advisory` or `executionOnly`) and its own
 `expiresAt`. An `executionOnly` row (`connection.topicsReadable`,
 `destination.archivePrefixWritable`, `target.logAppendTime`,
-`configuration.egress`) is `unknown` forever. Non-secret facts are rendered into
+`configuration.egress`) is `unknown` forever, with one exception:
+`connection.topicsReadable` turns blocking `notReady`
+(`TopicAuthorizationFailed`) when the broker's authorized operations (KIP-430)
+say the principal may not READ a named topic, naming the topic and the grant
+(FX-45). Non-secret facts are rendered into
 the message as `[key=value; …]`; long lists go to the immutable `ConfigMap`
 `status.result.detailsRef`. Messages pass the redaction chokepoint: a credential
 value is removed under a key name at any length, and unkeyed at 40 characters
@@ -1591,7 +1609,16 @@ which keeps the verdict `unknown`. A `Preflight` over a draft plan has no
   every bootstrap address answered within 10 s (`brokersAnswered: 3 of 3`), else
   `unknown`, `ApiVersionsNotObserved`. A bootstrap that answers while advertised
   listeners do not is `notReady`, `BrokerUnreachable`: check
-  `advertised.listeners`.
+  `advertised.listeners`. A `SourceConnection` Preflight (Test connection)
+  answers `connection.engineProtocol`, `target.engineProtocol` and
+  `connection.groupTypes` ADVISORY (FX-46): the test passes when the connection
+  answers, and the rows say whether the endpoint is usable as a backup source,
+  as a restore target, and whether its groups can be typed. The standalone
+  commands run the same rows (FX-45): `backup run` refuses a source
+  `connection.engineProtocol` is `notReady` for, and a topic the principal may
+  not READ, before the engine (exit 3); `drill run` refuses a target
+  `target.engineProtocol` is `notReady` for at phase 0, before anything is
+  created; `doctor` reports it as check 8, `target engine`.
 - **`recoveryPoint.state`** compares the point's frozen `locationDigest`
   (`Backup.status.destination`) with the source destination's: equal is `ready`,
   `RecoveryPointSucceeded`; different is `notReady`,
@@ -1601,7 +1628,10 @@ which keeps the verdict `unknown`. A `Preflight` over a draft plan has no
   `RecoveryPointNotFound`, `CatalogPointViewUnavailable`,
   `CatalogPointRefusedByController`, `CatalogPointNotSelectable`,
   `CatalogPointSignerUntrusted`, `CatalogPointSignerUnknown`,
-  `CatalogPointBindingMismatch` or `CatalogPointSelectable`.
+  `CatalogPointBindingMismatch` or `CatalogPointSelectable`. A view that does
+  not list the point and holds a line the check cannot read is
+  `CatalogPointViewUnavailable`, never `RecoveryPointNotFound`: the line may be
+  the point.
 - **A point-bound plan's archive** is judged as the runner will judge it.
   Nothing is read unless the binding is well formed, `source.backup` is the set
   the check reads (never `latestCompleted`), and the receipt key is exactly
@@ -2323,18 +2353,19 @@ authorised for the session's own identity and namespace grants. The legacy
 (release-notes item 75); the chart refuses `ui.*` by name. The console's
 `shared` mode is the one component that may have an Ingress.
 
+The console is at `/ui/`; every page's address is `#/<namespace>/<page>`
+([console/README.md](../console/README.md), *Routes*). The navigation shows
+only what the session's role may read in the namespace.
+
 | Page | What it does |
 |---|---|
-| `#/destinations` | Create and edit destinations, test them (`:test`), see their usage. Enter an access key once; the console creates a bound Secret and never shows it again |
-| `#/clusters` | Saved connections and their topic discoveries |
-| `#/schedules` | Schedules, the future-policy panel, next-run previews, "Back up now" |
-| `#/backups`, `#/history` | Runs, their exit, records and verification |
-| `#/restore` | The restore wizard and its readiness check |
-| `#/operations?ns=&kind=&name=&uid=` | One run, live over a server-sent-event stream; cancels nothing |
-| `#/catalog` | Connected archives and their points; connect an existing archive |
-| `#/protection` | Protection health, read-only |
-| `#/keys` | Trust policies and keys (Administrator only) |
-| approvals | Confirm, approve, or record an out-of-band approval |
+| Overview (`#/<ns>`) | Policies against their objective, the newest point's age, the last 24 hours' runs and what needs attention, with Restore and Back up now |
+| Backups, Schedules, Protection | Runs, their exit, records and verification, and "Restore this point"; schedules with the guided create, the future-policy edit, next-run previews, suspend, "Back up now" and the retention panel; protection health, read-only |
+| Restores | Restores, each followed live over a server-sent-event stream (it cancels nothing); the five-step wizard (recovery point, topics and time, target, readiness check, review and create); *Retry to a fresh target* |
+| Switchovers | Review a verified restore's consumer positions, confirm, and follow the `Switchover`; its rollback steps are shown, never started |
+| Approvals | Confirm, approve a two-person request, or record an out-of-band approval |
+| Recovery catalog, Trust | Connected archives and their points, and connecting an existing archive; trust policies and keys (Administrator only) |
+| Connections, Destinations | Saved connections, their checks and topic discoveries; destinations, their access tests, rotation and usage. A credential is typed once; the console creates a bound Secret and never shows it again |
 
 What the console will and will not say:
 
@@ -2352,13 +2383,10 @@ What the console will and will not say:
 - **The browser evaluates no cron.** `GET /api/v1/cadence-previews` compiles a
   preset against the controller's own time-zone database. The page reads
   staleness from `nextRuns[0].at` in the past.
-- **A manual run is one run per intent.** The intent key is
-  `logweir-ui.manual.` plus 32 random hex characters, held in the form's draft:
-  a double click or a retry returns the same run (`replayed: true`); a reload
-  loses the draft, so a click after it is a new run. "Back up again" mints a new
-  intent. A suspended schedule or a `notReady` preflight needs a second
-  confirmation; confirming a red verdict is recorded as the annotation
-  `logweir.dev/readiness-ack`.
+- **A manual run is one run per intent.** "Back up now" holds one
+  idempotency key per click (`logweir-console.manual.` plus 32 random hex
+  characters): a double click or a retry returns the same run
+  (`replayed: true`), and "Back up again" sends a new key.
 - **Protection health and schedule health are two columns**, never collapsed.
 - **The catalog keeps availability and verification apart.** Whether a point may
   be restored is the API's `selectable`, read and never recomputed. **There is no
@@ -2382,10 +2410,11 @@ What the console will and will not say:
 - The API publishes no Job, pod or `ConfigMap` names and no frozen
   `locationDigest` on a catalog point; open vocabularies are rendered verbatim.
 
-`just lint` runs `scripts/check-ui-offline.sh`, which fails on any external
-resource, credential, browser-storage write or non-relative module specifier
-under `ui/`. The page ships inside the console image (`Dockerfile.console`);
-`just smoke-console` compares its served assets with `ui/`.
+The console's lint refuses markup from data, browser storage and any request
+outside its one client, and `console/scripts/check-dist.mjs` refuses a build
+that carries the mock or names a file outside `./assets/`. The page ships inside
+the console image (`Dockerfile.console`); `just smoke-console` compares its
+served files with this tree's `console/dist`.
 
 ### Recording an out-of-band approval (strict, v1)
 
@@ -2706,11 +2735,16 @@ is its newest record.
   way. With no catalog or no row, `Protected=Unknown`, reason
   `PointFactsUnread`, and an open `Staleness` entry stays open.
 - An entry whose axes are empty is `CatalogUnreadable`, so `Unknown`. A deleted
-  page reads the same, never a pass.
+  page, or a page line the controller cannot parse, reads the same, never a
+  pass.
 - Bounds: 16 ledger entries (8 recoveries), 16 schedules, 64 topics on
   `lastAvailablePoint` (`topicsTruncated: true` beyond), and the newest 50 runs
-  over at most 5 API pages of 200.
-- The console's `#/protection` page shows this read-only.
+  over at most 5 API pages of 200. The API server lists `Backup`s by name, so
+  past 1,000 in the namespace the newest runs may be the ones not read: the
+  verdict is then `Unknown`, reason `BackupHistoryTooLarge`, never a verdict
+  over the runs it saw. Delete old terminal `Backup` objects (the archive keeps
+  their points) and the policy evaluates again.
+- The console's Protection page shows this read-only.
 
 ## The installation policy and roles
 

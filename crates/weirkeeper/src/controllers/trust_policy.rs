@@ -759,10 +759,22 @@ pub async fn reconcile_policy(
     policy: &TrustPolicy,
     client: &kube::Client,
 ) -> Result<PolicyVerdict, ReconcileError> {
+    reconcile_policy_at(policy, client, Utc::now()).await
+}
+
+/// [`reconcile_policy`] at `now`, the caller's one clock read, so a key's
+/// expiry and the condition reporting it cannot straddle two instants, and a
+/// row can judge a policy at a fixed instant (FX-12, Global Constraint 1).
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn reconcile_policy_at(
+    policy: &TrustPolicy,
+    client: &kube::Client,
+    now: chrono::DateTime<Utc>,
+) -> Result<PolicyVerdict, ReconcileError> {
     let name = policy.name_any();
-    // One clock read, so a key's expiry and the condition reporting it cannot
-    // straddle two instants.
-    let now = Utc::now();
 
     // Cluster-scoped, the whole set (the conflict rule needs it), from a LIST
     // rather than the watch cache, because the finalizer's release must see
@@ -1082,7 +1094,10 @@ pub fn with_precondition(
 
 /// The `kube::runtime` reconcile entry point.
 async fn reconcile(policy: Arc<TrustPolicy>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    let verdict = reconcile_policy(&policy, &ctx.client).await?;
+    // The pass's one clock read: the verdict and the requeue below are judged
+    // at the same instant.
+    let now = Utc::now();
+    let verdict = reconcile_policy_at(&policy, &ctx.client, now).await?;
     // A held deletion is released by another object's event, which does not
     // wake this one, so it is looked at again on a short, bounded timer.
     if finalizer_action(&policy, &verdict.guard) == FinalizerAction::Hold {
@@ -1092,7 +1107,6 @@ async fn reconcile(policy: Arc<TrustPolicy>, ctx: Arc<Context>) -> Result<Action
     // whose `notAfter` passes at 03:00 becomes `Expired` with nobody editing
     // the object. The heartbeat keeps `evaluatedAt` moving for D3 §7.7's
     // staleness rule, and the deadline makes the boundary itself exact.
-    let now = Utc::now();
     // The policy's own keys, from the object this pass reconciled: no second
     // API call, and the translation `reconcile_policy` used.
     let deadline = next_clock_change(&crate::trust::from_policy(&policy).keys, now);

@@ -683,10 +683,10 @@ echo "    rc=$rc  (kubectl patch backupschedule helm spec.suspend=true — the O
 
 # ---------------------------------------------------------------------------
 # 6/10 THE Restore — from the most recent Backup, its planBytes rendered by the
-#      PAGE's own emitter (ui/tests/emit-restore-body.js), a SCRATCH restore
+#      console's own renderer (console/scripts/emit-restore-body.mjs), a SCRATCH restore
 #      onto the chart's target broker, whose marker topic the seed created.
 # ---------------------------------------------------------------------------
-step "6/10 the Restore: the page's own emitter renders the plan bytes; kubectl create -f the body"
+step "6/10 the Restore: the console's own renderer renders the plan bytes; kubectl create -f the body"
 PIT_RFC3339=$("$PYTHON" -c 'import datetime as d
 print((d.datetime.now(d.timezone.utc).replace(microsecond=0) + d.timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
 SAMPLE_START_RFC3339=$("$PYTHON" -c 'import datetime as d
@@ -745,10 +745,10 @@ cat > "$OUT/plan-fields.json" <<JSON
 }
 JSON
 set +e
-node ui/tests/emit-restore-body.js --out "$OUT/" > "$OUT/emit.out" 2> "$OUT/emit.err"
+node --experimental-strip-types console/scripts/emit-restore-body.mjs --out "$OUT/" > "$OUT/emit.out" 2> "$OUT/emit.err"
 rc=$?
 set -e
-echo "    rc=$rc  (node ui/tests/emit-restore-body.js --out $OUT/)"
+echo "    rc=$rc  (node --experimental-strip-types console/scripts/emit-restore-body.mjs --out $OUT/)"
 cat "$OUT/emit.out"
 [ "$rc" -eq 0 ] || { cat "$OUT/emit.err"; die "the body emitter exited $rc"; }
 PLAN_HASH=$(sed -n 's/^plan-hash=//p' "$OUT/emit.out")
@@ -912,16 +912,20 @@ echo "    WHOSE AUTHORITY: the console in localAdmin mode binds loopback in its 
 echo "    port-forward to deploy/${REL}-api acts as its one administrator. The page holds no credential."
 echo
 expect_http "$CONSOLE_BASE/ui/" "200" "the page itself"
-expect_http "$CONSOLE_BASE/ui/app.js" "200" "the router"
-served_sha=$(shasum -a 256 "$OUT/http-body.txt" | awk '{print $1}')
-tree_sha=$(shasum -a 256 ui/app.js | awk '{print $1}')
-# What the browser receives is compared with the tree, through the network.
-# `scripts/check-image-api.sh` makes the same comparison over every file
-# against the image's filesystem; this line makes it over the router, against
-# the HTTP response.
-echo "    served ui/app.js sha256 $served_sha"
-echo "    tree   ui/app.js sha256 $tree_sha"
-[ "$served_sha" = "$tree_sha" ] || die "the page served from the logweir-console image is not the tree's ui/app.js"
+# The page names its one script under assets/; that file is served, cached as
+# immutable (its name carries its hash). `scripts/check-image-api.sh` compares
+# every file of the image's /ui with the tree's console build.
+script_path=$(sed -n 's/.*<script[^>]* src="\.\/\(assets\/index-[A-Za-z0-9_-]*\.js\)".*/\1/p' "$OUT/http-body.txt" | head -1)
+[ -n "$script_path" ] || die "the page served at /ui/ names no ./assets/index-*.js script"
+expect_http "$CONSOLE_BASE/ui/$script_path" "200" "the console's script"
+set +e
+curl -sS -I "$CONSOLE_BASE/ui/$script_path" > "$OUT/script-headers.txt" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || die "curl -I exited $rc for the console's script"
+grep -qi '^cache-control: public, max-age=31536000, immutable' "$OUT/script-headers.txt" \
+  || die "the console's script is not served as immutable; see $OUT/script-headers.txt"
+echo "    ui/$script_path is served immutable"
 expect_http "$CONSOLE_BASE/api/v1/session" "200" "the session"
 grep -q '"authenticationMode": *"localAdmin"' "$OUT/http-body.txt" || die "the session does not say localAdmin"
 echo "    the session is the console's one administrator (localAdmin)"

@@ -510,6 +510,64 @@ fn an_unreadable_id_alone_is_retried() {
     assert_eq!(finish(RUN, Ok(cleaned), &mut out) as u8, 1);
 }
 
+/// **FX-36: the clone cleanup reads only its own run's scorecard.** The
+/// scorecard key is built from `--run-id`, so a run id that is not one run-id
+/// segment (a path, a relative step, another document's stem) is refused by
+/// name with the evidence store untouched and nothing deleted. CONTROL: the
+/// run's own id reads exactly the scorecard and its sidecar.
+///
+/// KILLS: the run-id check removed (`logweir/drills/<id>.json` is read for
+/// each id below).
+#[test]
+fn a_run_id_that_is_not_one_segment_reads_nothing() {
+    let plan = plan_text("clone-", "{ttl_seconds: 300}");
+    let store = store_with(&plan, &[("clone-orders", Some(A))], |d| {
+        d["target"]["topic_mapping_prefix"] = "clone-".into();
+    });
+    let (logged, log) = store.logging_reads();
+    let cluster = Cluster::new(&[("clone-orders", TopicIdRead::Id(A.into()))]);
+    let spec: DrillSpec = serde_yaml::from_str(&plan).unwrap();
+    let signer = signer();
+    let trusted = [signer.verifying_key()];
+    let attempt = |run_id: &str| {
+        clean(
+            &Inputs {
+                spec: &spec,
+                plan_bytes: plan.as_bytes(),
+                run_id,
+                attempt: 1,
+                trusted: &trusted,
+            },
+            &cluster,
+            &cluster,
+            &logged,
+            &signer,
+        )
+    };
+    for run_id in [
+        String::new(),
+        "../backups/nightly-7/run-1.receipt".into(),
+        "a/b".into(),
+        format!("{RUN}.offsets"),
+        format!("{RUN} "),
+    ] {
+        let why = refusal(attempt(&run_id));
+        assert!(why.contains("nothing was read"), "{run_id:?}: {why}");
+        assert!(log.reads().is_empty(), "{run_id:?}: {:?}", log.reads());
+    }
+    assert!(cluster.asked().is_empty());
+
+    // CONTROL: the run's own id reads its scorecard and sidecar, and cleans.
+    attempt(RUN).expect("the cleanup runs");
+    assert_eq!(
+        log.reads(),
+        [
+            format!("get logweir/drills/{RUN}.json"),
+            format!("get logweir/drills/{RUN}.sig"),
+        ]
+    );
+}
+
 /// **MEDIUM-1 of the fix round's review: the cleanup cleans its own error
 /// before it prints it.** An attestation PUT refused by S3 carries the error
 /// body, which on AWS names the access key id; the `clone-cleanup=` line

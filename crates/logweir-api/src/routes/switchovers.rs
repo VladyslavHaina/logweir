@@ -75,6 +75,9 @@ pub fn view(s: &Switchover, with_plan: bool) -> SwitchoverView {
         phase: st.and_then(|s| s.phase.clone()),
         reason: st.and_then(|s| s.reason.clone()),
         exit_code: st.and_then(|s| s.exit_code),
+        message: st
+            .and_then(|s| s.message.as_deref())
+            .map(|m| crate::validate::bounded(m, 2048)),
         groups: st
             .map(|s| {
                 s.groups

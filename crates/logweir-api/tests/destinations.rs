@@ -1437,7 +1437,7 @@ async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
 /// preflight read carries that row unchanged under `checks` and the verdict
 /// `notReady`; the destination read's `lastTest` says `notReady`.
 ///
-/// BOTH SIDES READ ONE FIXTURE: `ui/tests/fixtures/console/
+/// BOTH SIDES READ ONE FIXTURE: `console/fixtures/console/
 /// preflight-binding-mismatch.json` is what `ui/tests/credential-binding.spec.js`
 /// renders, and the runner's own row (`crates/logweir/tests/
 /// check_grant_binding.rs`) is held to its message. The status is seeded from
@@ -1446,7 +1446,7 @@ async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
 #[tokio::test]
 async fn fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+        .join("../../console/fixtures/console/preflight-binding-mismatch.json");
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
     let item = &fixture["item"];

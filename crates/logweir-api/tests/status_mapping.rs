@@ -8,7 +8,7 @@
 //! `approval_bundle_hold_patch` — and the verification second patch built the
 //! way the reconcilers build it (`backup_badge`/`restore_badge`,
 //! `verified_condition`, `second_patch`), applies them as merge patches, and
-//! maps the result. The UI fixtures under `ui/tests/fixtures` are mapped too.
+//! maps the result. The UI fixtures under `console/fixtures` are mapped too.
 //!
 //! THE INVARIANT CHECKED ON EVERY ROW: `verifiedSuccess` is true exactly when
 //! the controller's own badge is green AND the state is `succeeded`, and never
@@ -888,7 +888,7 @@ fn the_ui_fixtures_map_as_their_names_say() {
 
 #[test]
 fn every_preview_fixture_object_satisfies_the_invariant() {
-    let root = support::repo_root().join("ui/tests/fixtures/preview/namespaces/default");
+    let root = support::repo_root().join("console/fixtures/preview/namespaces/default");
     let backups: Value =
         serde_json::from_str(&std::fs::read_to_string(root.join("backups.json")).unwrap()).unwrap();
     let restores: Value =

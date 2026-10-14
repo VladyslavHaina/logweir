@@ -65,6 +65,7 @@ fn topic_answer(d: DescribedTopic) -> TopicAnswer {
             .topic_id
             .map(|u| (u.most_significant_bits, u.least_significant_bits)),
         error: d.error.map(|e| (e.code, e.message.display())),
+        operations: d.authorized_operations,
     }
 }
 
@@ -105,6 +106,33 @@ fn observation(d: DescribedGroup) -> DescribedObservation {
         members,
         unreadable_topics,
     }
+}
+
+/// **Whether the principal of `client` may READ each named topic** (FX-45),
+/// the one implementation [`RdKafkaReader::read_topic_access`] and the check
+/// client (`crate::inventory::KafkaInventory`) share: DescribeTopics with the
+/// caller's authorized operations ([`topics::describe_topic_access`]), at most
+/// [`MAX_DESCRIBE_TOPICS`] names per call, each bounded by `bound`, one
+/// verdict per requested name in order ([`crate::access::topic_read`]).
+///
+/// # Errors
+///
+/// The first whole-call failure, a transport one as
+/// [`KafkaError::Unreachable`] ([`crate::topic_ids::call_failure`]).
+pub(crate) fn read_topic_access_with<C: rdkafka::client::ClientContext>(
+    client: &rdkafka::client::Client<C>,
+    topics: &[String],
+    bound: Duration,
+) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
+    let names = crate::topic_ids::distinct(topics);
+    let mut answers = Vec::with_capacity(names.len());
+    for chunk in names.chunks(MAX_DESCRIBE_TOPICS) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        let described = topics::describe_topic_access(client, &refs, bound)
+            .map_err(|e| topics_call_failure(&e))?;
+        answers.extend(described.into_iter().map(topic_answer));
+    }
+    Ok(crate::access::join_reads(topics, &answers))
 }
 
 impl RdKafkaReader {
@@ -163,6 +191,23 @@ impl RdKafkaReader {
             answers.extend(described.into_iter().map(topic_answer));
         }
         Ok(crate::topic_ids::join(topics, &answers))
+    }
+
+    /// **Whether this principal may READ each named topic** (FX-45):
+    /// DescribeTopics with the caller's authorized operations (KIP-430,
+    /// [`topics::describe_topic_access`]), at most [`MAX_DESCRIBE_TOPICS`]
+    /// names per call, each bounded by the admin bound. One verdict per
+    /// requested name, in order ([`crate::access::topic_read`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_topic_ids`]: the first whole-call failure, a transport
+    /// one as [`KafkaError::Unreachable`].
+    pub fn read_topic_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
+        read_topic_access_with(self.admin_client().inner(), topics, self.admin_bound())
     }
 
     /// **Both group listings and the cluster access, read once**: the input

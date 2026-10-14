@@ -710,6 +710,61 @@ pub trait ClusterReader: Send + Sync {
             .map(|t| (t.clone(), crate::topic_ids::TopicIdRead::NotRead))
             .collect())
     }
+    /// Per named topic, whether this principal may READ it, from
+    /// DescribeTopics with the caller's authorized operations (KIP-430;
+    /// [`crate::access::topic_read`]). One verdict per name, in the order
+    /// given. The outer `Err` is the call itself failing.
+    ///
+    /// The DEFAULT asks nothing: every name is
+    /// [`crate::access::TopicRead::Unknown`], so a reader that does not
+    /// implement it (every test double) can never refuse a topic, and never
+    /// vouch for one.
+    fn topic_read_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
+        Ok(topics
+            .iter()
+            .map(|t| {
+                (
+                    t.clone(),
+                    crate::access::TopicRead::Unknown(
+                        "this reader does not ask the broker for authorized operations".into(),
+                    ),
+                )
+            })
+            .collect())
+    }
+    /// What EVERY broker this cluster lists answered ApiVersions, or why that
+    /// is not known ([`crate::api_versions::NotObserved`]): which listed
+    /// broker stayed silent, or that nothing could be observed. `within` is
+    /// the budget; the observation does not start with too little of it.
+    ///
+    /// The DEFAULT observes nothing and says so, so a reader that does not
+    /// implement it (every test double) can neither refuse an endpoint nor
+    /// call a broker silent.
+    fn broker_view(
+        &self,
+        within: std::time::Duration,
+    ) -> Result<crate::api_versions::ApiVersions, crate::api_versions::NotObserved> {
+        let _ = within;
+        Err(crate::api_versions::NotObserved::Other(
+            "this reader does not observe the endpoint's ApiVersions answer".to_string(),
+        ))
+    }
+    /// [`Self::broker_view`] as a capability row reads it: the reason there
+    /// is no whole view is `ApiVersionsNotObserved` with its sentence.
+    fn api_versions(
+        &self,
+        within: std::time::Duration,
+    ) -> Result<crate::api_versions::ApiVersions, crate::inventory::CheckFailure> {
+        self.broker_view(within).map_err(|why| {
+            crate::inventory::CheckFailure::new(
+                logweir_core::check_contract::CheckCode::ApiVersionsNotObserved,
+                why.to_string(),
+            )
+        })
+    }
     /// Wait, at most `within`, until `topic` — which the caller has
     /// just CREATED with `partitions` partitions — is SERVED: its metadata
     /// lists every partition with a leader, and every leader answers a

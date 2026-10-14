@@ -475,7 +475,7 @@ fn a_fresh_verification_passes_only_as_valid() {
 
 // The fixture both sides read
 
-/// `ui/tests/fixtures/d3/backup-valid-basis-none.json`: a `Valid` whose
+/// `console/fixtures/d3/backup-valid-basis-none.json`: a `Valid` whose
 /// `trust` block is PRESENT with `basis: "None"`, which a legacy-mode console
 /// could paint green. `ui/tests/trust-basis-class.spec.js` and
 /// `ui/tests/d3.spec.js` read this same file and say not green; here every
@@ -484,7 +484,7 @@ fn a_fresh_verification_passes_only_as_valid() {
 fn the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../ui/tests/fixtures/d3/backup-valid-basis-none.json"
+        "/../../console/fixtures/d3/backup-valid-basis-none.json"
     );
     let object: Value = serde_json::from_str(
         &std::fs::read_to_string(path).expect("the console fixture is readable"),

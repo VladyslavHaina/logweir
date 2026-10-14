@@ -531,7 +531,7 @@ async fn a_failed_attempt_never_hides_the_last_successful_inventory() {
 /// name and with the value the console's shared fixture carries -- and a result
 /// that recorded none publishes NO count, never a zero.
 ///
-/// BOTH SIDES READ ONE FIXTURE. `ui/tests/fixtures/console/
+/// BOTH SIDES READ ONE FIXTURE. `console/fixtures/console/
 /// discovery-target-latest.json` is what `ui/tests/replication-factor.spec.js`
 /// hands the restore wizard as the target connection's latest discovery, and
 /// the wizard caps its default replication factor at `brokerCount`. This row
@@ -599,7 +599,7 @@ async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
     for key in fixture["lastSuccessful"].as_object().unwrap().keys() {
         assert!(
             sent.contains_key(key),
-            "ui/tests/fixtures/console/discovery-target-latest.json carries `{key}`, which the \
+            "console/fixtures/console/discovery-target-latest.json carries `{key}`, which the \
              product API does not send: {v}"
         );
     }

@@ -347,11 +347,22 @@ impl VerificationResult {
     /// (unreadable trust, a panicked blocking task).
     #[must_use]
     pub fn not_attempted(payload_type: &str, detail: impl Into<String>) -> Self {
+        Self::not_attempted_at(payload_type, detail, Utc::now())
+    }
+
+    /// [`Self::not_attempted`] reached at `now`, the caller's one clock read:
+    /// every verification path decides at the instant it was handed (FX-12).
+    #[must_use]
+    pub fn not_attempted_at(
+        payload_type: &str,
+        detail: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
             result: VerificationVerdict::NotAttempted,
             matched_key_id: None,
             payload_type: payload_type.to_string(),
-            verified_at: Utc::now(),
+            verified_at: now,
             detail: Some(detail.into()),
             trust: None,
         }
@@ -396,11 +407,17 @@ impl VerificationResult {
     /// An `Invalid` carrying `detail`.
     #[must_use]
     pub fn invalid(payload_type: &str, detail: impl Into<String>) -> Self {
+        Self::invalid_at(payload_type, detail, Utc::now())
+    }
+
+    /// [`Self::invalid`] reached at `now` (FX-12).
+    #[must_use]
+    pub fn invalid_at(payload_type: &str, detail: impl Into<String>, now: DateTime<Utc>) -> Self {
         Self {
             result: VerificationVerdict::Invalid,
             matched_key_id: None,
             payload_type: payload_type.to_string(),
-            verified_at: Utc::now(),
+            verified_at: now,
             detail: Some(detail.into()),
             trust: None,
         }
@@ -416,8 +433,15 @@ impl VerificationResult {
     /// `Untrusted`, so it can refine `basis` and `reason` but never flip
     /// `Valid` and `Untrusted`. `the_observation_only_moves_the_basis` asserts
     /// that over the whole table.
-    fn signed(payload_type: &str, matched_key_id: String, projection: TrustProjection) -> Self {
-        let now = Utc::now();
+    ///
+    /// The key's window is judged at `now`, the caller's one clock read, and
+    /// never at a read of its own (FX-12, Global Constraint 1).
+    fn signed(
+        payload_type: &str,
+        matched_key_id: String,
+        projection: TrustProjection,
+        now: DateTime<Utc>,
+    ) -> Self {
         let verdict = projection.verdict(&IndependentObservation::none(), now);
         Self {
             result: match verdict.result {
@@ -668,6 +692,10 @@ fn untrusted_detail(
 /// disagrees with its material is already `Loaded=False/KeyIdMismatch`.
 ///
 /// Synchronous: the body of a `spawn_blocking` closure (interface I13).
+///
+/// Every verdict is reached at `now`, the reconcile pass's one clock read: the
+/// trust window is judged at it and `verifiedAt` is it (FX-12). Nothing here
+/// reads a clock.
 #[must_use]
 pub fn verify_evidence(
     store: Option<&Store>,
@@ -676,10 +704,11 @@ pub fn verify_evidence(
     payload_sha256: &str,
     sidecar_key: &str,
     payload_type: &str,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     // STEP 1. No credential is not a bad document.
     let Some(store) = store else {
-        return VerificationResult::not_attempted(payload_type, NO_CREDENTIAL_DETAIL);
+        return VerificationResult::not_attempted_at(payload_type, NO_CREDENTIAL_DETAIL, now);
     };
 
     // STEP 2. Both objects, through the read-only handle; every StoreError is
@@ -699,11 +728,11 @@ pub fn verify_evidence(
         .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES);
     let payload = match store.get_capped(payload_key, controller_cap_for(payload_type)) {
         Ok((bytes, _version)) => bytes,
-        Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
+        Err(e) => return VerificationResult::not_attempted_at(payload_type, store_detail(&e), now),
     };
     let sidecar_bytes = match store.get_capped(sidecar_key, caps::SIDECAR) {
         Ok((bytes, _version)) => bytes,
-        Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
+        Err(e) => return VerificationResult::not_attempted_at(payload_type, store_detail(&e), now),
     };
     verify_fetched(
         &payload,
@@ -713,6 +742,7 @@ pub fn verify_evidence(
         payload_sha256,
         sidecar_key,
         payload_type,
+        now,
     )
 }
 
@@ -726,8 +756,10 @@ pub fn verify_evidence(
 /// `payload_sha256`, which the caller takes from the runner's own report,
 /// never from the relay.
 ///
-/// Pure and synchronous: no store, no clock beyond the verdict's instant.
+/// Pure and synchronous: no store and no clock. The verdict is reached at
+/// `now`, the caller's (FX-12).
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn verify_fetched(
     payload: &[u8],
     sidecar_bytes: &[u8],
@@ -736,6 +768,7 @@ pub fn verify_fetched(
     payload_sha256: &str,
     sidecar_key: &str,
     payload_type: &str,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     // The verifier enforces its own document cap: both callers stop at it, but
     // bytes over the cap of their payload type are not hashed, copied or read
@@ -744,23 +777,25 @@ pub fn verify_fetched(
     // read that could make a claim.
     let cap = controller_cap_for(payload_type);
     if payload.len() as u64 > cap {
-        return VerificationResult::not_attempted(
+        return VerificationResult::not_attempted_at(
             payload_type,
             over_read_cap_detail(
                 payload_key,
                 cap,
                 &logweir_store::OverCap::Reported(payload.len() as u64),
             ),
+            now,
         );
     }
     if sidecar_bytes.len() as u64 > caps::SIDECAR {
-        return VerificationResult::not_attempted(
+        return VerificationResult::not_attempted_at(
             payload_type,
             over_read_cap_detail(
                 sidecar_key,
                 caps::SIDECAR,
                 &logweir_store::OverCap::Reported(sidecar_bytes.len() as u64),
             ),
+            now,
         );
     }
 
@@ -768,12 +803,13 @@ pub fn verify_fetched(
     // A mismatch is `Invalid`.
     let computed = sha256_prefixed(payload);
     if computed != payload_sha256 {
-        return VerificationResult::invalid(
+        return VerificationResult::invalid_at(
             payload_type,
             format!(
                 "digest mismatch at {payload_key}: the status records {payload_sha256} and the \
                  bytes in the archive are {computed}"
             ),
+            now,
         );
     }
 
@@ -782,9 +818,10 @@ pub fn verify_fetched(
     let sidecar: Sidecar = match serde_json::from_slice(sidecar_bytes) {
         Ok(s) => s,
         Err(e) => {
-            return VerificationResult::invalid(
+            return VerificationResult::invalid_at(
                 payload_type,
                 format!("{sidecar_key} is not a DSSE sidecar: {e}"),
+                now,
             )
         }
     };
@@ -794,7 +831,7 @@ pub fn verify_fetched(
     // policy's "a partially loaded roster is not a roster") is also
     // `NotAttempted`: a fact about the trust object, not this document.
     if let Some(blocked) = trust.blocked_for(KeyUsage::EvidenceSigning) {
-        return VerificationResult::not_attempted(payload_type, blocked);
+        return VerificationResult::not_attempted_at(payload_type, blocked, now);
     }
     let declared: Vec<&crate::trust::ResolvedKey> = trust
         .keys
@@ -802,13 +839,14 @@ pub fn verify_fetched(
         .filter(|k| k.trust.has_usage(KeyUsage::EvidenceSigning))
         .collect();
     if declared.is_empty() {
-        return VerificationResult::not_attempted(
+        return VerificationResult::not_attempted_at(
             payload_type,
             if trust.source.is_legacy() {
                 NO_SIGNING_KEYS_DETAIL
             } else {
                 NO_POLICY_KEYS_DETAIL
             },
+            now,
         );
     }
     let mut last_error: Option<String> = None;
@@ -840,16 +878,18 @@ pub fn verify_fetched(
                         policy: policy_ref(&trust.source),
                         compromise_recorded_by: entry.compromise_inherited_from.clone(),
                     },
+                    now,
                 );
             }
             Err(e) => last_error = Some(format!("{}: {e}", entry.trust.key_id)),
         }
     }
-    VerificationResult::invalid(
+    VerificationResult::invalid_at(
         payload_type,
         last_error.unwrap_or_else(|| {
             "no signing key on the TrustRoster verified this sidecar".to_string()
         }),
+        now,
     )
 }
 
@@ -918,6 +958,8 @@ fn claim_of(payload_type: &str, payload: &[u8]) -> EvidenceClaim {
 ///   blame a signer for an administrators' disagreement.
 /// * [`Resolution::Unconfigured`]: no policy and no roster, carrying
 ///   [`NO_SIGNING_KEYS_DETAIL`] verbatim, as an unmigrated cluster always has.
+///
+/// At `now`, the caller's one clock read (FX-12).
 #[must_use]
 pub fn verify_resolved(
     store: Option<&Store>,
@@ -926,6 +968,7 @@ pub fn verify_resolved(
     payload_sha256: &str,
     sidecar_key: &str,
     payload_type: &str,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     match resolution {
         Resolution::Trust(trust) => verify_evidence(
@@ -935,23 +978,26 @@ pub fn verify_resolved(
             payload_sha256,
             sidecar_key,
             payload_type,
+            now,
         ),
         Resolution::Conflict {
             namespace,
             policies,
-        } => VerificationResult::not_attempted(
+        } => VerificationResult::not_attempted_at(
             payload_type,
             trust_policy_conflict_detail(namespace, policies),
+            now,
         ),
         Resolution::Unconfigured => {
-            VerificationResult::not_attempted(payload_type, NO_SIGNING_KEYS_DETAIL)
+            VerificationResult::not_attempted_at(payload_type, NO_SIGNING_KEYS_DETAIL, now)
         }
     }
 }
 
 /// [`verify_resolved`] over bytes that were already fetched: the same three
-/// resolutions, the same [`verify_fetched`].
+/// resolutions, the same [`verify_fetched`], at the same caller's `now`.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn verify_fetched_resolved(
     payload: &[u8],
     sidecar: &[u8],
@@ -960,6 +1006,7 @@ pub fn verify_fetched_resolved(
     payload_sha256: &str,
     sidecar_key: &str,
     payload_type: &str,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     match resolution {
         Resolution::Trust(trust) => verify_fetched(
@@ -970,16 +1017,18 @@ pub fn verify_fetched_resolved(
             payload_sha256,
             sidecar_key,
             payload_type,
+            now,
         ),
         Resolution::Conflict {
             namespace,
             policies,
-        } => VerificationResult::not_attempted(
+        } => VerificationResult::not_attempted_at(
             payload_type,
             trust_policy_conflict_detail(namespace, policies),
+            now,
         ),
         Resolution::Unconfigured => {
-            VerificationResult::not_attempted(payload_type, NO_SIGNING_KEYS_DETAIL)
+            VerificationResult::not_attempted_at(payload_type, NO_SIGNING_KEYS_DETAIL, now)
         }
     }
 }
@@ -991,11 +1040,13 @@ pub fn verify_fetched_resolved(
 /// resolves it (`crate::trust::resolve`), and an unreadable resolution is the
 /// same `NotAttempted` with [`ROSTER_UNREADABLE_DETAIL`]. There is no store
 /// here, so nothing needs `spawn_blocking`: the bytes are already in memory.
+/// The verdict is reached at `now`, the reconcile pass's (FX-12).
 pub async fn verify_relayed(
     client: &kube::Client,
     r: &EvidenceRef,
     payload: &[u8],
     sidecar: &[u8],
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     let resolution = match crate::trust::resolve(client, &r.namespace).await {
         Ok(resolution) => resolution,
@@ -1006,7 +1057,11 @@ pub async fn verify_relayed(
                 "this namespace's trust could not be resolved; this verification is \
                  NotAttempted rather than Invalid"
             );
-            return VerificationResult::not_attempted(r.payload_type, ROSTER_UNREADABLE_DETAIL);
+            return VerificationResult::not_attempted_at(
+                r.payload_type,
+                ROSTER_UNREADABLE_DETAIL,
+                now,
+            );
         }
     };
     verify_fetched_resolved(
@@ -1017,6 +1072,7 @@ pub async fn verify_relayed(
         &r.payload_sha256,
         &r.sidecar_key,
         r.payload_type,
+        now,
     )
 }
 
@@ -1612,9 +1668,14 @@ pub const ROSTER_UNREADABLE_DETAIL: &str =
 /// Three ways reach `NotAttempted` before the document is fetched: no archive
 /// handle, unreadable trust, and a blocking task that did not come back. None
 /// is `Invalid`: each is a fact about this controller.
+///
+/// Built once per reconcile pass with that pass's `now`, and every verdict it
+/// returns is reached at it: a pass judges a key's window, and stamps
+/// `verifiedAt`, with ONE clock read (FX-12).
 pub fn verify_oracle(
     archive: Option<std::sync::Arc<Store>>,
     client: kube::Client,
+    now: DateTime<Utc>,
 ) -> impl Fn(EvidenceRef) -> futures::future::BoxFuture<'static, VerificationResult>
        + Send
        + Sync
@@ -1624,7 +1685,11 @@ pub fn verify_oracle(
         let client = client.clone();
         Box::pin(async move {
             let Some(handle) = handle else {
-                return unverified_evidence(r).await;
+                return VerificationResult::not_attempted_at(
+                    r.payload_type,
+                    NO_CREDENTIAL_DETAIL,
+                    now,
+                );
             };
             // The namespace's trust, not one cluster-scoped roster: `resolve`
             // lists every `TrustPolicy` and falls back to the synthesised
@@ -1640,9 +1705,10 @@ pub fn verify_oracle(
                         "this namespace's trust could not be resolved; this verification is \
                          NotAttempted rather than Invalid"
                     );
-                    return VerificationResult::not_attempted(
+                    return VerificationResult::not_attempted_at(
                         r.payload_type,
                         ROSTER_UNREADABLE_DETAIL,
+                        now,
                     );
                 }
             };
@@ -1656,14 +1722,16 @@ pub fn verify_oracle(
                     &r.payload_sha256,
                     &r.sidecar_key,
                     r.payload_type,
+                    now,
                 )
             })
             .await
             {
                 Ok(result) => result,
-                Err(e) => VerificationResult::not_attempted(
+                Err(e) => VerificationResult::not_attempted_at(
                     payload_type,
                     format!("{VERIFICATION_TASK_INCOMPLETE_PREFIX}{e}"),
+                    now,
                 ),
             }
         })

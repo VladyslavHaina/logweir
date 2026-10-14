@@ -53,6 +53,9 @@ pub const MAX_TOPICS: usize = 64;
 /// `logweir.dev/schedule-uid`". The cap is on what is CONSIDERED, so a
 /// namespace with ten thousand runs costs one bounded list per schedule.
 pub const MAX_BACKUPS_SCANNED: usize = 50;
+/// The most `Backup` objects one evaluation lists (the controller's page
+/// bound); past it the verdict is [`FreshnessReason::BackupHistoryTooLarge`].
+pub const MAX_BACKUPS_LISTED: usize = 1_000;
 
 /// The most `RecoveryCompleted` entries the ledger carries, leaving room inside
 /// [`MAX_ALERTS`] for the four policy-keyed kinds twice over. A recovery entry
@@ -153,6 +156,12 @@ wire_enum! {
         /// `Available`/`Verified`; "evaluation impossible" is
         /// [`Health::Unknown`].
         PointFactsUnread => "PointFactsUnread",
+        /// The namespace holds more `Backup` objects than one evaluation reads
+        /// (FX-38), and the API server lists them by name, so the newest runs
+        /// may be among those not read: neither the newest point nor the
+        /// failure streak is known. Pruning the history (the archive keeps its
+        /// points) lets the policy evaluate again.
+        BackupHistoryTooLarge => "BackupHistoryTooLarge",
         /// The object carries no namespace or no UID, so nothing was read and
         /// no verdict was computed. Unreachable for an object that came from
         /// the API server; named rather than borrowed from another reason,
@@ -690,6 +699,11 @@ pub struct Inputs<'a> {
     /// caller's list order.
     pub slots: &'a [SlotRun],
     pub rehearsal: &'a RehearsalFacts,
+    /// Whether `candidates` and `slots` come from every `Backup` in the
+    /// namespace. `false` makes the verdict
+    /// [`FreshnessReason::BackupHistoryTooLarge`]: a cut listing proves
+    /// nothing about the runs it did not read.
+    pub backups_complete: bool,
     pub now: Time,
 }
 
@@ -728,8 +742,10 @@ pub struct Verdict {
     pub point: Option<AvailablePointFacts>,
     /// The most recent run, whatever became of it.
     pub last_attempt: Option<LastAttempt>,
-    /// Consecutive failed **slots** — a retry chain is one.
-    pub consecutive_failed_runs: i64,
+    /// Consecutive failed **slots** — a retry chain is one. `None` when the
+    /// runs were not all read ([`FreshnessReason::BackupHistoryTooLarge`]):
+    /// a streak over the runs read is not the policy's streak.
+    pub consecutive_failed_runs: Option<i64>,
     /// Missed-slot facts.
     pub missed: MissedSummary,
     /// The schedules, as this policy sees them.
@@ -1004,6 +1020,8 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         && input.schedules.iter().all(|s| !s.exists)
     {
         Some(FreshnessReason::ScheduleMissing)
+    } else if !input.backups_complete {
+        Some(FreshnessReason::BackupHistoryTooLarge)
     } else if let CatalogAnswer::Stale(reason) = catalog {
         Some(*reason)
     } else if catalog.blank_axis() {
@@ -1054,7 +1072,21 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         Freshness::Stale => Health::Unprotected,
     };
 
-    let open_kinds = open_alert_kinds(input, health, consecutive_failed_runs, newest, catalog);
+    let mut open_kinds = open_alert_kinds(input, health, consecutive_failed_runs, newest, catalog);
+    // FX-38 (4): a cut listing proves nothing about the runs it did not read,
+    // so its point, last attempt and streak are not published and open no
+    // alert. One already open stays open: `Unknown` resolves nothing.
+    let (point, last_attempt, streak) = if input.backups_complete {
+        (point, last_attempt, Some(consecutive_failed_runs))
+    } else {
+        open_kinds.retain(|k| {
+            !matches!(
+                k,
+                PolicyAlertKind::BackupFailure | PolicyAlertKind::ArchiveUnavailable
+            )
+        });
+        (None, None, None)
+    };
     let summary = summarize(
         spec,
         health,
@@ -1079,7 +1111,7 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         basis,
         point,
         last_attempt,
-        consecutive_failed_runs,
+        consecutive_failed_runs: streak,
         missed,
         schedules,
         rehearsal: rehearsal_summary(input.rehearsal),
@@ -1327,6 +1359,14 @@ pub fn summarize(
              time, and an age cannot be compared to the objective of {}. This is not a pass \
              and not a failure",
             humanize(objective)
+        ),
+        Health::Unknown if reason == FreshnessReason::BackupHistoryTooLarge => format!(
+            "the namespace holds more than {} Backup objects, the most one evaluation reads, \
+             and they are listed by name, so the newest runs may be among those not read; \
+             protection could not be evaluated, and this is not a pass and not a failure. \
+             Delete old terminal Backup objects (the archive keeps their points) and the \
+             policy evaluates again",
+            MAX_BACKUPS_LISTED
         ),
         Health::Unknown => format!(
             "protection could not be evaluated ({}); this is not a pass and not a failure",

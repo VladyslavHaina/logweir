@@ -360,6 +360,7 @@ fn an_empty_signing_key_list_names_itself() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -384,6 +385,7 @@ fn an_empty_signing_key_list_names_itself() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -411,6 +413,7 @@ fn an_empty_signing_key_list_names_itself() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(r.result, VerificationVerdict::Valid);
     assert_eq!(r.matched_key_id.as_deref(), Some("nightly-runner-2026"));
@@ -425,6 +428,7 @@ fn an_empty_signing_key_list_names_itself() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -459,6 +463,7 @@ fn a_storage_failure_is_not_invalid() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -486,6 +491,7 @@ fn a_storage_failure_is_not_invalid() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     tree.chmod(PAYLOAD_KEY, 0o600);
     assert_eq!(
@@ -513,6 +519,7 @@ fn a_storage_failure_is_not_invalid() {
         &digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(r.result, VerificationVerdict::NotAttempted);
     assert_eq!(r.detail.as_deref(), Some(NO_CREDENTIAL_DETAIL));
@@ -551,6 +558,7 @@ fn a_digest_mismatch_is_invalid() {
         &recorded,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -1492,6 +1500,13 @@ fn evidence_key() -> SpecKey {
     policy_key(FIXTURE_KEY_ID, vec![SpecUsage::EvidenceSigning])
 }
 
+/// FX-12: the instant every verification in this file is judged at — after
+/// the scorecard fixture's signing time and inside every fixture key's
+/// window — handed in, so no row depends on the year it runs in.
+fn verified_at() -> chrono::DateTime<Utc> {
+    at("2026-10-01T00:00:00Z")
+}
+
 fn at(s: &str) -> chrono::DateTime<Utc> {
     chrono::DateTime::parse_from_rfc3339(s)
         .expect("a fixture instant")
@@ -1527,6 +1542,11 @@ impl Signed {
 
     /// `verify_evidence` over this tree, against `trust`.
     fn verify(&self, trust: &ResolvedTrust) -> VerificationResult {
+        self.verify_at(trust, verified_at())
+    }
+
+    /// [`Self::verify`] judged at `now`.
+    fn verify_at(&self, trust: &ResolvedTrust, now: chrono::DateTime<Utc>) -> VerificationResult {
         let store = self.tree.handle();
         verify_evidence(
             Some(&store),
@@ -1535,7 +1555,239 @@ impl Signed {
             &self.digest,
             SIDECAR_KEY,
             logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            now,
         )
+    }
+}
+
+/// An API server that answers the cluster's `TrustPolicy` list with
+/// `policies`, and 500 for everything else; with `None`, 500 for everything,
+/// so trust cannot be resolved.
+fn trust_api(policies: Option<Vec<TrustPolicy>>) -> kube::Client {
+    kube::Client::new(
+        service_fn(move |req: Request<Body>| {
+            let policies = policies.clone();
+            async move {
+                let (status, body) = match policies {
+                    Some(items) if req.uri().path().ends_with("/trustpolicies") => (
+                        200,
+                        json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList",
+                               "metadata": {}, "items": items})
+                        .to_string(),
+                    ),
+                    _ => (
+                        500,
+                        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":500}"#
+                            .to_string(),
+                    ),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.into_bytes()))
+                        .expect("a response builds"),
+                )
+            }
+        }),
+        "default",
+    )
+}
+
+/// **FX-12: every verification path is judged at the instant it is
+/// handed, and reads no clock of its own.** The scorecard fixture claims a
+/// signing time of 2026-09-03 under a key open from 2026 to 2099.
+///
+/// * Judged at 2001 that claim is in the future and the signature is
+///   `Untrusted`; judged at 2026-10 it is `Valid`. A verifier that read the
+///   wall clock would answer `Valid` at "2001": this is the row that fails.
+/// * At 2001 and at 2999 every verdict of every path — no credential, a
+///   digest mismatch, a signature, fetched bytes, each of the three
+///   resolutions, the oracle (no handle, unreadable trust, a governed
+///   namespace) and the relay — carries exactly that instant as
+///   `verifiedAt`.
+///
+/// KILLS: `VerificationResult::signed` deciding at `Utc::now()`; any
+/// `verify_*` path, the oracle or the relay constructing its verdict with the
+/// wall clock; the oracle built without the pass's instant.
+#[test]
+fn every_verification_path_is_judged_at_the_instant_it_is_handed() {
+    let signed = Signed::scorecard("fx12-instant");
+    let org = policy("org", &[], vec![evidence_key()]);
+    let trust = resolved(&org);
+    let before = at("2001-01-01T00:00:00Z");
+    let far = at("2999-01-01T00:00:00Z");
+    let payload = read("e2e/fixtures/signed/scorecard.json").into_bytes();
+    let sidecar = read("e2e/fixtures/signed/scorecard.sig").into_bytes();
+    let scorecard = logweir_verify::PAYLOAD_TYPE_SCORECARD;
+
+    // The window, judged at the instant handed in.
+    let early = signed.verify_at(&trust, before);
+    assert_eq!(early.result, VerificationVerdict::Untrusted, "{early:?}");
+    assert!(!early.is_pass());
+    let late = signed.verify_at(&trust, verified_at());
+    assert_eq!(late.result, VerificationVerdict::Valid, "{late:?}");
+    assert!(late.is_pass());
+
+    // Every synchronous path stamps the instant handed in.
+    let store = signed.tree.handle();
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    for now in [before, far] {
+        let conflict = Resolution::Conflict {
+            namespace: "team-a".into(),
+            policies: vec!["one".into(), "two".into()],
+        };
+        let trusted = Resolution::Trust(Box::new(trust.clone()));
+        for (path, r) in [
+            (
+                "no credential",
+                verify_evidence(
+                    None,
+                    &trust,
+                    PAYLOAD_KEY,
+                    &signed.digest,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+            ("a signature", signed.verify_at(&trust, now)),
+            (
+                "a digest mismatch",
+                verify_evidence(
+                    Some(&store),
+                    &trust,
+                    PAYLOAD_KEY,
+                    &wrong,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+            (
+                "fetched bytes",
+                weirkeeper::verification::verify_fetched(
+                    &payload,
+                    &sidecar,
+                    &trust,
+                    PAYLOAD_KEY,
+                    &signed.digest,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+            (
+                "a contested namespace",
+                weirkeeper::verification::verify_resolved(
+                    Some(&store),
+                    &conflict,
+                    PAYLOAD_KEY,
+                    &signed.digest,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+            (
+                "no trust configured",
+                weirkeeper::verification::verify_fetched_resolved(
+                    &payload,
+                    &sidecar,
+                    &Resolution::Unconfigured,
+                    PAYLOAD_KEY,
+                    &signed.digest,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+            (
+                "a governed namespace",
+                weirkeeper::verification::verify_fetched_resolved(
+                    &payload,
+                    &sidecar,
+                    &trusted,
+                    PAYLOAD_KEY,
+                    &signed.digest,
+                    SIDECAR_KEY,
+                    scorecard,
+                    now,
+                ),
+            ),
+        ] {
+            assert_eq!(r.verified_at, now, "{path}: {r:?}");
+        }
+    }
+
+    // The oracle and the relay, at the instant they were handed. On a
+    // runtime of their own: the store above blocks, and the oracle's reads go
+    // through `spawn_blocking` as in the controller.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let reference = EvidenceRef {
+        namespace: "team-a".into(),
+        payload_key: PAYLOAD_KEY.into(),
+        payload_sha256: signed.digest.clone(),
+        sidecar_key: SIDECAR_KEY.into(),
+        payload_type: scorecard,
+    };
+    let handle = Arc::new(signed.tree.handle());
+    for (now, verdict) in [
+        (before, VerificationVerdict::Untrusted),
+        (verified_at(), VerificationVerdict::Valid),
+    ] {
+        let (none, unreadable, governed, relayed, relayed_unreadable) = rt.block_on(async {
+            let none = weirkeeper::verification::verify_oracle(None, trust_api(None), now)(
+                reference.clone(),
+            )
+            .await;
+            let unreadable = weirkeeper::verification::verify_oracle(
+                Some(Arc::clone(&handle)),
+                trust_api(None),
+                now,
+            )(reference.clone())
+            .await;
+            let governed = weirkeeper::verification::verify_oracle(
+                Some(Arc::clone(&handle)),
+                trust_api(Some(vec![org.clone()])),
+                now,
+            )(reference.clone())
+            .await;
+            let relayed = weirkeeper::verification::verify_relayed(
+                &trust_api(Some(vec![org.clone()])),
+                &reference,
+                &payload,
+                &sidecar,
+                now,
+            )
+            .await;
+            let relayed_unreadable = weirkeeper::verification::verify_relayed(
+                &trust_api(None),
+                &reference,
+                &payload,
+                &sidecar,
+                now,
+            )
+            .await;
+            (none, unreadable, governed, relayed, relayed_unreadable)
+        });
+        for (path, r) in [
+            ("oracle, no handle", &none),
+            ("oracle, unreadable trust", &unreadable),
+            ("oracle, governed", &governed),
+            ("relay, governed", &relayed),
+            ("relay, unreadable trust", &relayed_unreadable),
+        ] {
+            assert_eq!(r.verified_at, now, "{path}: {r:?}");
+        }
+        assert_eq!(none.result, VerificationVerdict::NotAttempted);
+        assert_eq!(unreadable.result, VerificationVerdict::NotAttempted);
+        assert_eq!(relayed_unreadable.result, VerificationVerdict::NotAttempted);
+        assert_eq!(governed.result, verdict, "{governed:?}");
+        assert_eq!(relayed.result, verdict, "{relayed:?}");
     }
 }
 
@@ -2058,6 +2310,7 @@ fn a_contested_namespace_verifies_nothing() {
         &signed.digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(
         r.result,
@@ -2082,6 +2335,7 @@ fn a_contested_namespace_verifies_nothing() {
         &signed.digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        verified_at(),
     );
     assert_eq!(r.result, VerificationVerdict::NotAttempted);
     assert_eq!(r.detail.as_deref(), Some(NO_SIGNING_KEYS_DETAIL));
@@ -5086,6 +5340,7 @@ mod p12_not_attempted_classes {
                 &digest,
                 SIDECAR_KEY,
                 logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                verified_at(),
             )
         };
 

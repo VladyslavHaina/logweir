@@ -864,6 +864,12 @@ pub const TEARDOWN_KEY_PREFIX: &str = "teardown-key=";
 /// signs nothing. The controller copies it to `Restore.status.teardown.failed`.
 pub const TEARDOWN_FAILED_PREFIX: &str = "teardown-failed=";
 
+/// `teardown-failed-count=<n>`: how many topics the teardown left, printed
+/// with the `teardown-failed=` line, whose list carries at most
+/// [`TEARDOWN_FAILED_MAX_TOPICS`] of them (FX-38). The controller writes it to
+/// `Restore.status.teardown.failedCount`, so a cut list never reads as whole.
+pub const TEARDOWN_FAILED_COUNT_PREFIX: &str = "teardown-failed-count=";
+
 /// The most topics, and the most characters of one error, the line carries:
 /// the bounds the Restore CRD puts on `status.teardown.failed`.
 pub const TEARDOWN_FAILED_MAX_TOPICS: usize = 256;
@@ -911,6 +917,20 @@ pub fn teardown_failed_line(failed: &[(String, String)]) -> Option<String> {
         "{TEARDOWN_FAILED_PREFIX}{}",
         serde_json::to_string(&entries).ok()?
     ))
+}
+
+/// The `teardown-failed=` line and the `teardown-failed-count=` line for
+/// `failed`, or nothing when nothing was left.
+#[must_use]
+pub fn teardown_failed_lines(failed: &[(String, String)]) -> Vec<String> {
+    let Some(list) = teardown_failed_line(failed) else {
+        return Vec::new();
+    };
+    let count = failed
+        .iter()
+        .filter_map(|(topic, error)| TeardownFailed::bounded(topic, error))
+        .count();
+    vec![list, format!("{TEARDOWN_FAILED_COUNT_PREFIX}{count}")]
 }
 
 /// What a reader keeps of a `teardown-failed=` value: `None` unless it is a
@@ -2182,5 +2202,26 @@ mod tests {
             parse_teardown_failed(value).unwrap().len(),
             TEARDOWN_FAILED_MAX_TOPICS
         );
+    }
+
+    /// FX-38 (8): past the CRD's 256 names the `teardown-failed=` list is cut
+    /// and its `teardown-failed-count=` line says how many were left; an
+    /// illegal name is in neither. CONTROL: one topic is a list of one and a
+    /// count of one; nothing left prints nothing.
+    #[test]
+    fn a_cut_teardown_list_carries_its_count() {
+        let left: Vec<(String, String)> = (0..300)
+            .map(|i| (format!("drill-t{i}"), "x".to_string()))
+            .chain(std::iter::once(("bad name".to_string(), "x".to_string())))
+            .collect();
+        let lines = teardown_failed_lines(&left);
+        assert_eq!(lines.len(), 2);
+        let listed =
+            parse_teardown_failed(lines[0].strip_prefix(TEARDOWN_FAILED_PREFIX).unwrap()).unwrap();
+        assert_eq!(listed.len(), TEARDOWN_FAILED_MAX_TOPICS);
+        assert_eq!(lines[1], format!("{TEARDOWN_FAILED_COUNT_PREFIX}300"));
+        let one = teardown_failed_lines(&left[..1]);
+        assert_eq!(one[1], format!("{TEARDOWN_FAILED_COUNT_PREFIX}1"));
+        assert!(teardown_failed_lines(&[]).is_empty());
     }
 }

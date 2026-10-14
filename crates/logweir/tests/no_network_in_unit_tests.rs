@@ -86,7 +86,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 38] = [
+const ALLOWED: [(&str, &str); 39] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -319,6 +319,12 @@ const ALLOWED: [(&str, &str); 38] = [
         "crates/weirkeeper/tests/verification.rs",
         "read-only handles over a filesystem evidence tree in a scratch directory — no endpoint, \
          no network",
+    ),
+    (
+        "crates/logweir/tests/complete_verify_memory.rs",
+        "FX-30: one read-only handle over a filesystem archive in a scratch directory holding a \
+         SPARSE segment of 1 GiB + 1 byte, for the child-process peak-RSS row's oversized case, \
+         as `read_caps.rs` does for FX-31 — no endpoint, no network",
     ),
     (
         "crates/weirkeeper/tests/read_caps.rs",

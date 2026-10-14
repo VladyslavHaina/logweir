@@ -4948,6 +4948,7 @@ fn runner_readiness_request() -> CheckRequest {
 fn runner_source_connection_request() -> CheckRequest {
     CheckRequest::SourceConnection(logweir_core::check_contract::SourceConnectionRequest {
         connection: fixture_connection_plan(),
+        capability_checks: Vec::new(),
     })
 }
 
@@ -5180,7 +5181,15 @@ fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
     assert!(
         pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]).is_empty()
     );
-    assert!(pf::capability_checks(CheckOperation::SourceConnection, &[]).is_empty());
+    // FX-46: a connection test asks what the endpoint could be used for.
+    assert_eq!(
+        pf::capability_checks(CheckOperation::SourceConnection, &[]),
+        vec![
+            CheckId::ConnectionEngineProtocol,
+            CheckId::TargetEngineProtocol,
+            CheckId::ConnectionGroupTypes
+        ]
+    );
     assert!(pf::capability_checks(CheckOperation::DestinationAccess, &[]).is_empty());
 }
 
@@ -5384,6 +5393,18 @@ fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
         panic!("a sourceConnection plan, got {:?}", shape.plan.kind())
     };
     assert_eq!(r.connection.principal, "User:backup");
+    // FX-46: the test asks what the endpoint could be used for, and the
+    // rows the result must hold include them.
+    assert_eq!(
+        r.capability_checks,
+        logweir_core::check_contract::capability_checks_for(
+            logweir_core::check_contract::CheckOperation::SourceConnection
+        )
+    );
+    let expected = job_rows(&shape.plan.request, false);
+    for id in &r.capability_checks {
+        assert!(expected.contains(id), "{id} is a row the result must hold");
+    }
     // THE NAME, NEVER THE VALUE — the same rule every rendered plan keeps.
     assert!(r.connection.password_env.is_some());
     let rendered = String::from_utf8(shape.documents.check_plan.clone()).expect("utf-8");
@@ -8898,7 +8919,7 @@ fn the_expected_rows_include_the_binding_row_when_a_grant_is_listed() {
 #[test]
 fn fx20c_the_console_fixture_is_the_status_entry_entry_of_writes() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/tests/fixtures/console/preflight-binding-mismatch.json");
+        .join("../../console/fixtures/console/preflight-binding-mismatch.json");
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the fixture")).expect("json");
     let want = fixture["item"]["checks"]

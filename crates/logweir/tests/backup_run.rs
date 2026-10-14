@@ -22,6 +22,8 @@ use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::engine::*;
 use logweir_engine_oso::storage::Store;
 use logweir_evidence::keys::SigningKey;
+use logweir_kafka::access::{ReadDenied, TopicRead};
+use logweir_kafka::api_versions::{ApiVersions, NotObserved};
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -171,6 +173,13 @@ struct StubReader {
     /// What `partition_marks` answers; `None` is the trait's
     /// default (not read).
     marks: Option<BTreeMap<String, logweir_kafka::capture::TopicMarks>>,
+    /// FX-45: what `topic_read_access` answers; `None` is the trait's
+    /// default (nothing asked, every topic unknown). `Some(Err)` is the
+    /// whole call failing.
+    reads: Option<Result<Vec<(String, TopicRead)>, KafkaError>>,
+    /// FX-45: what `broker_view` answers; `None` is the trait's default
+    /// (not observed).
+    served: Option<Result<ApiVersions, NotObserved>>,
 }
 
 impl StubReader {
@@ -178,13 +187,33 @@ impl StubReader {
         Self {
             cluster_id: Ok(id.to_string()),
             marks: None,
+            reads: None,
+            served: None,
         }
     }
     fn unreachable() -> Self {
         Self {
             cluster_id: Err(KafkaError::Unreachable("no broker answered".into())),
             marks: None,
+            reads: None,
+            served: None,
         }
+    }
+    fn with_reads(mut self, reads: &[(&str, TopicRead)]) -> Self {
+        self.reads = Some(Ok(reads
+            .iter()
+            .map(|(t, r)| ((*t).to_string(), r.clone()))
+            .collect()));
+        self
+    }
+    /// The whole DescribeTopics call fails.
+    fn failing_reads(mut self, e: KafkaError) -> Self {
+        self.reads = Some(Err(e));
+        self
+    }
+    fn serving(mut self, ranges: &[(i16, i16, i16)]) -> Self {
+        self.served = Some(Ok(ApiVersions::of(ranges)));
+        self
     }
     /// Each named topic's partitions as `(low, high)` pairs.
     fn with_marks(mut self, topics: &[(&str, &[(i64, i64)])]) -> Self {
@@ -253,6 +282,20 @@ impl ClusterReader for StubReader {
                 .map(|t| (t.clone(), Err("not read".to_string())))
                 .collect(),
         }
+    }
+    fn topic_read_access(&self, topics: &[String]) -> Result<Vec<(String, TopicRead)>, KafkaError> {
+        match &self.reads {
+            Some(r) => r.clone(),
+            None => Ok(topics
+                .iter()
+                .map(|t| (t.clone(), TopicRead::Unknown("not asked".into())))
+                .collect()),
+        }
+    }
+    fn broker_view(&self, _within: std::time::Duration) -> Result<ApiVersions, NotObserved> {
+        self.served
+            .clone()
+            .unwrap_or_else(|| Err(NotObserved::Other("not observed".into())))
     }
 }
 
@@ -1317,6 +1360,124 @@ fn backup_ed25519_receipt_is_independently_verified() {
         public,
         logweir_evidence::keys::VerifyingKey::Ed25519(_)
     ));
+}
+
+// FX-45: what the principal and the endpoint can do, asked before the engine.
+
+/// **A topic the broker says this principal may not READ is refused before
+/// the engine, by name and with the grant** (FX-45). It used to reach the
+/// engine and fail there with "kafka-backup backup exited 1". Both ways the
+/// broker can say it are refused: its operations on the topic exclude READ
+/// (a principal with Describe alone), and it will not even describe the
+/// topic (the measured `acl` row: Read removed takes Describe with it).
+///
+/// CONTROLS: READ reported, and READ not known (a broker that computes no
+/// authorized operations), both reach the engine and back up, exit 0.
+#[test]
+fn a_topic_the_principal_may_not_read_is_refused_before_the_engine_by_name() {
+    for (denied, also) in [
+        (ReadDenied::OperationsExcludeRead, ""),
+        (
+            ReadDenied::NotDescribable,
+            "1 of them it may not even Describe",
+        ),
+    ] {
+        let f = ok_fixture("mvp-demo");
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+            .with_reads(&[("orders", TopicRead::Denied(denied))]);
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_for("mvp-demo");
+        assert_eq!(
+            run(&f.args, &reader, &engine, &store),
+            ExitCode::GuardRefused,
+            "{denied:?}"
+        );
+        let msg =
+            guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+        assert!(
+            msg.contains("may not READ 1 of 1 selected topic(s): `orders`")
+                && msg.contains("Grant READ on each named topic")
+                && msg.contains("refused before the engine is spawned")
+                && msg.contains(also),
+            "{denied:?}: {msg}"
+        );
+        assert!(
+            engine.plans.lock().unwrap().is_empty(),
+            "a refused plan must never reach the engine"
+        );
+    }
+    // CONTROL (review LOW 1): the read itself failed. Nothing is known, so
+    // the engine's own fetch answers, as before FX-45.
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .failing_reads(KafkaError::Unreachable("DescribeTopics timed out".into()));
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_for("mvp-demo");
+    assert_eq!(
+        run(&f.args, &reader, &engine, &store),
+        ExitCode::Ok,
+        "a failed read is not a refusal"
+    );
+    assert_eq!(engine.plans.lock().unwrap().len(), 1);
+    for read in [
+        TopicRead::Granted,
+        TopicRead::Unknown("no set reported".into()),
+    ] {
+        let f = ok_fixture("mvp-demo");
+        let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+            .with_reads(&[("orders", read.clone())]);
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_for("mvp-demo");
+        assert_eq!(
+            run(&f.args, &reader, &engine, &store),
+            ExitCode::Ok,
+            "{read:?} is not a refusal"
+        );
+        assert_eq!(engine.plans.lock().unwrap().len(), 1, "{read:?}");
+    }
+}
+
+/// **`connection.engineProtocol` before the engine** (FX-45, PROD-01.2's
+/// capability row): an endpoint SEEN not to serve a request version the
+/// engine's capture sends is refused by the row's name, exit 3, before the
+/// engine. No compose endpoint lacks one (Redpanda serves them all), so this
+/// row is the refusal's proof; `e2e/tests/compat_contract.rs` runs the ready
+/// half on Redpanda.
+///
+/// CONTROLS: an endpoint that serves every one (Apache Kafka 4.3.1's ranges),
+/// and one whose answer was not observed, both back up.
+#[test]
+fn an_endpoint_the_engine_cannot_back_up_from_is_refused_by_the_rows_name() {
+    // Fetch v4 and up only: the engine's Fetch v11 is served, its ListOffsets
+    // v5 is not.
+    let no_list_offsets_v5 = [(0, 0, 13), (1, 4, 18), (2, 0, 4), (3, 0, 13), (32, 1, 4)];
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001").serving(&no_list_offsets_v5);
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_for("mvp-demo");
+    assert_eq!(
+        run(&f.args, &reader, &engine, &store),
+        ExitCode::GuardRefused
+    );
+    let msg = guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+    assert!(
+        msg.starts_with("connection.engineProtocol is notReady (EngineProtocolUnsupported): ")
+            && msg.contains("ListOffsets v5")
+            && msg.contains("NO backup was taken"),
+        "{msg}"
+    );
+    assert!(engine.plans.lock().unwrap().is_empty());
+
+    let kafka = [(0, 0, 13), (1, 4, 18), (2, 1, 11), (3, 0, 13), (32, 1, 4)];
+    for reader in [
+        StubReader::answering("SOURCE-CLUSTER-00000001").serving(&kafka),
+        StubReader::answering("SOURCE-CLUSTER-00000001"),
+    ] {
+        let f = ok_fixture("mvp-demo");
+        let engine = RecordingEngine::one_topic();
+        let (store, _k, _b) = archive_for("mvp-demo");
+        assert_eq!(run(&f.args, &reader, &engine, &store), ExitCode::Ok);
+    }
 }
 
 /// **I6's local half.** `--receipt-out <path>` leaves the receipt at `<path>`

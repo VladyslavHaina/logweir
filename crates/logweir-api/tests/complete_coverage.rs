@@ -2,9 +2,9 @@
 //! says sampled or complete — with a complete verification's exact counts and
 //! `covered` — on the way out.
 //!
-//! BOTH SIDES READ ONE FIXTURE. `ui/tests/fixtures/console/restore-complete-uncovered.json`
+//! BOTH SIDES READ ONE FIXTURE. `console/fixtures/console/restore-complete-uncovered.json`
 //! and `.../operation-restore-complete-uncovered.json` are this crate's
-//! projections of the custom resource `ui/tests/fixtures/restore-complete-uncovered.json`;
+//! projections of the custom resource `console/fixtures/restore-complete-uncovered.json`;
 //! `ui/tests/complete-coverage.spec.js` decodes and renders the same files, so
 //! the field names cannot drift between the API and the console. Set
 //! `LOGWEIR_WRITE_COVERAGE_FIXTURES=1` to rewrite them from the projection.
@@ -33,7 +33,7 @@ fn cr(value: &Value) -> RestoreCr {
 /// it when `LOGWEIR_WRITE_COVERAGE_FIXTURES` is set.
 fn golden(name: &str, projected: &Value) -> Value {
     let path = support::repo_root()
-        .join("ui/tests/fixtures/console")
+        .join("console/fixtures/console")
         .join(name);
     if std::env::var_os("LOGWEIR_WRITE_COVERAGE_FIXTURES").is_some() {
         let doc = json!({"requestId": "req-coverage-0001", "item": projected});

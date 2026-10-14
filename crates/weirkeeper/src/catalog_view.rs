@@ -2126,6 +2126,12 @@ pub struct View {
     /// page at all; counted, rather than a `ConfigMap` the API server rejects
     /// at create, which would be a requeue loop and not a verdict.
     pub dropped_oversized: usize,
+    /// Whether the walk counted points the view does not hold for a reason
+    /// other than page space or size: the newest `viewLimit` kept, or a walk
+    /// that relayed fewer points than it counted. The one cause of
+    /// `truncated` the `Synced` message calls a window, and the one a larger
+    /// `viewLimit` can cure (FX-38).
+    pub beyond_window: bool,
     /// How many of the materialised entries are `Revoked`, and how many
     /// `VerifiedHistorical`: the two states `status.counts` has no field for.
     pub window: WindowStates,
@@ -2243,6 +2249,8 @@ pub fn materialise(
             || dropped_oversized > 0,
         dropped_for_space,
         dropped_oversized,
+        beyond_window: merged_len > limits.view_limit
+            || total > i64::try_from(merged_len).unwrap_or(i64::MAX),
         window: states,
     }
 }

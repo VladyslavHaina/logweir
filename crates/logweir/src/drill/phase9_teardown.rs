@@ -360,26 +360,27 @@ pub fn left_reasons(failed: &[(String, String)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Print the `teardown-failed=` line for `failed`, or nothing when nothing
-/// was left. The controller copies it to `Restore.status.teardown.failed`.
+/// Print the `teardown-failed=` line for `failed` and its
+/// `teardown-failed-count=` line, or nothing when nothing was left. The
+/// controller copies them to `Restore.status.teardown.failed` and
+/// `failedCount`.
 pub fn print_left(failed: &[(String, String)]) {
     // Sealed with the Job's token under FX-43's flag (`crate::exit::print_lines`).
-    if let Some(line) =
-        logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed))
-    {
-        crate::exit::print_lines(&[line]);
+    let lines = logweir_core::execution_contract::teardown_failed_lines(&left_reasons(failed));
+    if !lines.is_empty() {
+        crate::exit::print_lines(&lines);
     }
 }
 
-/// [`print_left`]'s plain line through a writer seam, so the line is testable.
+/// [`print_left`]'s plain lines through a writer seam, so they are testable.
 pub fn print_left_to(
     out: &mut dyn std::io::Write,
     failed: &[(String, String)],
 ) -> std::io::Result<()> {
-    match logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed)) {
-        Some(line) => writeln!(out, "{line}"),
-        None => Ok(()),
+    for line in logweir_core::execution_contract::teardown_failed_lines(&left_reasons(failed)) {
+        writeln!(out, "{line}")?;
     }
+    Ok(())
 }
 
 /// The notes phase 9 writes onto its own `PhaseRecord`, one per failed topic.

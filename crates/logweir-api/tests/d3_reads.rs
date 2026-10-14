@@ -1810,14 +1810,14 @@ async fn the_point_view_publishes_the_consumer_position_summary_and_its_freshnes
 /// **The point view publishes each topic's schema dependency** --
 /// the verdict, the basis or reason, the sides that need a registry and the
 /// ids they name — exactly as the shared fixture
-/// `ui/tests/fixtures/console/catalog-point-schema-dependency.json` says: its
+/// `console/fixtures/console/catalog-point-schema-dependency.json` says: its
 /// `entryTopics` are seeded as the runner lists them, and the API must answer
 /// its `pointTopics`, which the console's spec renders. An entry without the
 /// field publishes none (NOT ASSESSED, never "not schema-dependent").
 #[tokio::test]
 async fn the_point_view_publishes_each_topics_schema_dependency() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../ui/tests/fixtures/console/catalog-point-schema-dependency.json");
+        .join("../../console/fixtures/console/catalog-point-schema-dependency.json");
     let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let (listed, _) = listed_with_topics(fixture["entryTopics"].clone(), None).await;
     assert_eq!(listed["topics"], fixture["pointTopics"], "{listed}");
@@ -1831,5 +1831,86 @@ async fn the_point_view_publishes_each_topics_schema_dependency() {
     let (listed, _) = listed_with_topics(Value::Array(bare), None).await;
     for t in listed["topics"].as_array().unwrap() {
         assert!(t.get("schemaDependency").is_none(), "{t}");
+    }
+}
+
+/// **FX-38 (6): a view line the route cannot read makes the page partial.**
+/// The page's digest matches (the controller wrote the line), and the line is
+/// still not rendered as a point, but the response now says the list is
+/// incomplete instead of presenting the rest as the whole view.
+/// CONTROL: the same page without the line is not incomplete.
+#[tokio::test]
+async fn fx38_an_unreadable_view_line_marks_the_points_page_incomplete() {
+    let fake = seeded();
+    let mut lines = entry_lines();
+    let good = lines.len();
+    lines.insert(1, "{\"pointId\": 7".to_string());
+    let digest = seed_page(&fake, "primary-g1-p0", &lines);
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"]["pages"] = json!([{
+        "configMapName": "primary-g1-p0", "index": 0, "count": lines.len(), "sha256": digest,
+    }]);
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert_eq!(v["items"].as_array().unwrap().len(), good);
+    assert_eq!(v["incomplete"], true);
+
+    let (normal, _) = catalog_with_page(None);
+    let v = normal
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert!(v.get("incomplete").is_none(), "CONTROL");
+}
+
+/// **FX-38 (6): an absent `status.truncated` is never published as `false`.**
+/// A catalog that has not said whether its view is a window is published as
+/// one (`true`, "not known to be whole"), on the catalog and on its points
+/// page. CONTROL: a catalog that said `false` publishes `false`.
+#[tokio::test]
+async fn fx38_an_absent_truncated_is_not_published_as_false() {
+    for (said, published) in [(None, Some(true)), (Some(false), Some(false))] {
+        let fake = seeded();
+        let lines = entry_lines();
+        let digest = seed_page(&fake, "primary-g1-p0", &lines);
+        let mut catalog = fixture("recovery-catalog.json");
+        catalog["status"]["pages"] = json!([{
+            "configMapName": "primary-g1-p0", "index": 0, "count": lines.len(),
+            "sha256": digest,
+        }]);
+        let status = catalog["status"].as_object_mut().unwrap();
+        match said {
+            None => {
+                status.remove("truncated");
+            }
+            Some(t) => {
+                status.insert("truncated".into(), json!(t));
+            }
+        }
+        fake.seed("recoverycatalogs", NS_A, catalog);
+        let app = TestApp::with(fake, Options::default());
+        let item = app
+            .get("/api/v1/namespaces/team-a/catalogs/primary")
+            .await
+            .json()["item"]
+            .clone();
+        assert_eq!(
+            item.get("truncated").and_then(Value::as_bool),
+            published,
+            "{said:?}"
+        );
+        let page = app
+            .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+            .await
+            .json();
+        assert_eq!(
+            page.get("truncated").and_then(Value::as_bool),
+            published,
+            "{said:?}"
+        );
     }
 }

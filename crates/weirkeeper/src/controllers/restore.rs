@@ -3004,17 +3004,32 @@ pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 /// `status.teardown.failed` from the runner's last `teardown-failed=` line,
 /// held to this Restore's mapped target names: a topic its plan does not map
 /// is not this run's to name. `None` when there is no line or nothing in it
-/// survives.
+/// survives. `failedCount` from its `teardown-failed-count=` line (FX-38): the
+/// list carries at most 256 names, and the count says how many were left,
+/// held between the names kept and the names the plan maps.
 #[must_use]
 pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
-    use logweir_core::execution_contract::{parse_teardown_failed, TEARDOWN_FAILED_PREFIX};
+    use logweir_core::execution_contract::{
+        parse_teardown_failed, TEARDOWN_FAILED_COUNT_PREFIX, TEARDOWN_FAILED_PREFIX,
+    };
     let raw = runner_log::key_values(log, TEARDOWN_FAILED_PREFIX).pop()?;
     let kept: Vec<Value> = parse_teardown_failed(raw)?
         .into_iter()
         .filter(|f| mapped.iter().any(|m| m == &f.topic))
         .map(|f| json!({"topic": f.topic, "error": f.error}))
         .collect();
-    (!kept.is_empty()).then(|| json!({ "failed": kept }))
+    if kept.is_empty() {
+        return None;
+    }
+    let mut teardown = json!({ "failed": kept });
+    if let Some(count) = runner_log::key_values(log, TEARDOWN_FAILED_COUNT_PREFIX)
+        .pop()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        let count = count.min(mapped.len()).max(kept.len());
+        teardown["failedCount"] = json!(count);
+    }
+    Some(teardown)
 }
 
 /// **PROD-05.2.** `status.topicConfiguration` from the runner's last
@@ -3795,7 +3810,7 @@ async fn evidence_fetch_pass(
                                 payload_type,
                             };
                             let result = crate::verification::verify_relayed(
-                                client, &reference, &payload, &sidecar,
+                                client, &reference, &payload, &sidecar, now,
                             )
                             .await;
                             if let Some(o) = scorecard_observation(&payload) {
@@ -4043,11 +4058,14 @@ async fn read_verdict(
     reference: EvidenceRef,
     verify: VerifyOracle<'_>,
     client: &kube::Client,
+    now: DateTime<Utc>,
 ) -> crate::verification::VerificationResult {
     match source {
         backup::EvidenceSource::Destination(store) => {
-            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
-                .await
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone(), now)(
+                reference,
+            )
+            .await
         }
         _ => verify(reference).await,
     }
@@ -4260,6 +4278,7 @@ async fn controller_read_pass(
                 },
                 reads.verify,
                 client,
+                now,
             )
             .await
         }
@@ -7043,7 +7062,7 @@ async fn reconcile_restore_inner(
         }
         (_, TerminalEvidence::Record(result)) => Some(*result),
         (_, TerminalEvidence::Verify(reference)) => {
-            Some(read_verdict(&evidence_from, reference, verify, client).await)
+            Some(read_verdict(&evidence_from, reference, verify, client, now).await)
         }
         (_, TerminalEvidence::Nothing) => None,
     };
@@ -7288,7 +7307,7 @@ pub async fn reconcile_in_context_pooled(
                 .flatten()
         })
     };
-    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
+    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone(), now);
     // The handle's own location, read beside the handle: `Store` exposes no
     // accessor for the URL it was built from.
     let archive_url =
@@ -7366,6 +7385,10 @@ async fn reconcile_with_trust(
         let status = value.as_ref().and_then(|v| v.get("status"));
         if crate::verification::has_trust_verdict(status) {
             if let Some(namespace) = restore.namespace() {
+                // The hook's one clock read: the signing-time plan, the
+                // destination read and the re-derived verdict are judged at
+                // one instant (FX-12).
+                let now = Utc::now();
                 let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
                     policies.state().into_iter().map(|p| (*p).clone()).collect();
                 let resolution =
@@ -7376,8 +7399,7 @@ async fn reconcile_with_trust(
                 // goes through the same evidence path as the original verdict,
                 // so a destination-backed run reads its own bucket, and one
                 // whose grant only a pod may hold reads nothing and says so.
-                let signing_time = match crate::verification::signing_time_need(status, Utc::now())
-                {
+                let signing_time = match crate::verification::signing_time_need(status, now) {
                     crate::verification::ReadPlan::None => {
                         crate::verification::SigningTime::NotNeeded
                     }
@@ -7394,7 +7416,7 @@ async fn reconcile_with_trust(
                             restore.spec.evidence_destination_ref.as_ref(),
                             &ctx.client,
                             &namespace,
-                            Utc::now(),
+                            now,
                         )
                         .await
                         {
@@ -7427,7 +7449,7 @@ async fn reconcile_with_trust(
                     &*restore,
                     &resolution,
                     crate::verification::restore_badge,
-                    Utc::now(),
+                    now,
                     &signing_time,
                 )
                 .await?;

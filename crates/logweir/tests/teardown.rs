@@ -683,7 +683,7 @@ fn a_failed_run_prints_what_it_left_for_the_controller() {
         String::from_utf8(out).unwrap(),
         "teardown-failed=[{\"topic\":\"drill-orders\",\"error\":\"the restore principal lacks \
          `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization \
-         failed)\"}]\n"
+         failed)\"}]\nteardown-failed-count=1\n"
     );
 }
 

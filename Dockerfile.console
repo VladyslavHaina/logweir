@@ -13,10 +13,10 @@
 #
 # THE PAGE. `crates/logweir-api/src/assets.rs` reads the configured
 # `uiDirectory` ONCE at startup into memory and serves an allowlist keyed by
-# exact path (`ui/*.html`, `ui/*.js`, `ui/*.css` and `ui/pages/`), with
-# `README.md`, `tests/` and its throwaway keypair excluded. There is ONE copy in
-# the repository, `ui/`; `scripts/check-image-api.sh` check 1 hashes what this
-# image will serve against it.
+# exact path: the console build's `index.html` and its hashed files under
+# `assets/` (PROD-18.1). The console stage below builds `console/`;
+# `scripts/check-image-api.sh` check 1 hashes what this image will serve against
+# this tree's `console/dist`.
 #
 # NAMING, STATED ONCE HERE BECAUSE TWO NAMES ARE IN USE.
 # `docs/to-do/decisions/D0-product-api-and-identity.md` calls the deliverable the
@@ -56,8 +56,7 @@
 # NO KEY MATERIAL OF ANY KIND (Global Constraint 28). The session key, the
 # cursor MAC key and the OIDC client secret are mounted from Secrets at paths
 # the configuration names. `scripts/check-image-api.sh` check 1 asserts `/ui`
-# holds exactly the twenty-six shipped files — so `ui/tests/`, which carries a
-# throwaway keypair, is a red — and check 5 asserts the image carries no
+# holds exactly the console build, and check 5 asserts the image carries no
 # `*.pem`, `*.key` or kubeconfig anywhere a `COPY` could have put one.
 #
 # NO `third_party/org-root.fingerprint`. The runner and the controller each
@@ -133,6 +132,30 @@ RUN set -eux; \
     cp "target/$triple/release/logweir-api" /out/logweir-api
 
 # ---------------------------------------------------------------------------
+# THE CONSOLE STAGE (PROD-18.1 R1)
+# ---------------------------------------------------------------------------
+# The console (`console/`), served at `/ui/`
+# (`docs/to-do/decisions/PROD-18.1-console.md`).
+# Its output is JavaScript, CSS, fonts and images, the same bytes on every
+# platform, so the stage runs natively on `$BUILDPLATFORM`: no emulation
+# (STANDING RULE 10). The Node image is pinned by its index digest and moves
+# with the Rust bases.
+#
+# `npm ci` installs exactly the committed lockfile, with install scripts off
+# (`console/.npmrc`). `check:api` fails when the committed API types have
+# drifted from `schemas/logweir-api-v1.openapi.json`; `check-dist.mjs` fails
+# when the output is not the shape `assets.rs` serves, or carries the mock.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS console
+WORKDIR /src/console
+COPY console/package.json console/package-lock.json console/.npmrc ./
+RUN npm ci
+COPY schemas/logweir-api-v1.openapi.json /src/schemas/
+COPY console/ ./
+RUN npm run check:api && npx vite build && node scripts/check-dist.mjs
+# The bundled packages' licences go with the licences below, not into /ui.
+RUN mkdir /licenses && mv dist/.vite/license.md /licenses/console-third-party.md && rmdir dist/.vite
+
+# ---------------------------------------------------------------------------
 # THE RUNTIME STAGE
 # ---------------------------------------------------------------------------
 # `debian:bookworm-slim`, Global Constraint 10 — the same base the runner and
@@ -165,24 +188,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 LABEL org.opencontainers.image.base.name="debian:bookworm-slim"
 LABEL org.opencontainers.image.title="logweir-console"
-LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the twenty-six static page files it serves at /ui/. Not a Kubernetes proxy."
+LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the console it serves at /ui/. Not a Kubernetes proxy."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api
 
-# ---------------------------------------------------------------------------
-# THE TWENTY-TWO FILES, AND NOTHING ELSE
-# ---------------------------------------------------------------------------
-# TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`. A whole-directory copy would take
-# `ui/README.md` and `ui/tests/` with it — the second of which carries a
-# throwaway keypair — and would keep taking whatever lands under `ui/` next.
-#
-# Docker's `*` does not cross a `/`, so `ui/*.js` is the eleven top-level
-# scripts and never `ui/tests/*.js`.
-#
-# The chart's ConfigMap names the directory as `uiDirectory: /ui`.
-COPY ui/*.html ui/*.js ui/*.css /ui/
-COPY ui/pages /ui/pages
+# THE CONSOLE BUILD, AND NOTHING ELSE: `index.html` and its hashed files under
+# `assets/` (the stage above moved `.vite/` out). The chart's ConfigMap names the
+# directory as `uiDirectory: /ui`.
+COPY --from=console /src/console/dist /ui
 
 # ---------------------------------------------------------------------------
 # THE LICENCES — Global Constraint 15, spec §16 clause 5
@@ -195,6 +209,12 @@ COPY ui/pages /ui/pages
 # by `scripts/gen-third-party-notices.sh`.
 
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
+# The licences of the npm packages bundled into the console at /ui (Vite's
+# `build.license`), generated from the same build.
+COPY --from=console /licenses/console-third-party.md /usr/share/licenses/logweir/
+# The fonts the console bundles (Red Hat's, from PatternFly) are OFL-1.1, whose
+# condition 2 wants the notice and the licence with every copy.
+COPY console/licenses/RedHatFont-OFL-1.1.txt /usr/share/licenses/logweir/console-fonts-OFL-1.1.txt
 
 # THE SAME NON-ROOT UID AS BOTH OTHER IMAGES AND AS the chart's PodSpec
 # (`runAsUser: 65532`, `runAsNonRoot: true`). The kubelet enforces

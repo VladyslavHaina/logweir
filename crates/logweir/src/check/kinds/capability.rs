@@ -97,6 +97,42 @@ pub fn engine_uses_sasl(plan: &ConnectionPlan) -> bool {
     )
 }
 
+/// [`engine_uses_sasl`] for a spec's `auth:` block, which is what the
+/// standalone commands hold.
+#[must_use]
+pub fn spec_uses_sasl(auth: &logweir_core::spec::AuthSpec) -> bool {
+    !matches!(
+        auth,
+        logweir_core::spec::AuthSpec::Plaintext | logweir_core::spec::AuthSpec::Mtls { .. }
+    )
+}
+
+/// How long a standalone command (`backup run`, `drill run`, `doctor`) gives
+/// the endpoint's ApiVersions observation before its operation starts
+/// (FX-45): the observation's own ceiling. It ends as soon as every broker
+/// answered, so a healthy cluster costs one quiet period.
+pub const STANDALONE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// **FX-45: a standalone command refuses on a capability the endpoint was
+/// SEEN not to have.** `Some(sentence)` for a `notReady` row, naming the row,
+/// what is missing and the fallback; `None` for `ready`, and for `unknown`:
+/// not observed is never a refusal, so a command run where the observation
+/// cannot be made works as it did before.
+#[must_use]
+pub fn refusal_of(row: &CheckOutcome) -> Option<String> {
+    (row.state == CheckState::NotReady).then(|| {
+        let remedy = if row.remedy.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", row.remedy)
+        };
+        format!(
+            "{} is notReady ({}): {}{remedy}",
+            row.id, row.code, row.message
+        )
+    })
+}
+
 /// The requests the engine sends for the operation `id` is about, and the
 /// word for that operation in a message.
 fn engine_requests(id: CheckId, sasl: bool) -> (Vec<EngineRequest>, &'static str) {

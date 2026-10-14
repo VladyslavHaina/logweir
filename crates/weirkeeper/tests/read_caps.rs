@@ -82,6 +82,7 @@ fn verify(store: &Store, digest: &str) -> weirkeeper::verification::Verification
         digest,
         SIDECAR_KEY,
         logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        chrono::Utc::now(),
     )
 }
 

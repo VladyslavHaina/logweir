@@ -234,65 +234,34 @@ fn repository_of(reference: &str) -> String {
 /// Constraint 7).
 const LOGWEIR_TAG: &str = "latest";
 
-/// The twenty-six shipped UI files: everything under `ui/` except `*.md` and
-/// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.
-///
-/// The NUMBER is asserted rather than taken from the tree: a count read from
-/// the same directory the image was built from stays green when files are
-/// deleted from both sides at once.
-fn shipped_ui_files() -> Vec<String> {
-    let files: Vec<String> = files_under("ui")
-        .into_iter()
-        .filter(|p| !p.ends_with(".md") && !p.starts_with("ui/tests/"))
-        .collect();
-    assert_eq!(
-        26,
-        files.len(),
-        "the shipped UI is twenty-six files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found \
-         {files:?}"
-    );
-    files
-}
-
+/// **The console image serves the console build and nothing else** (PROD-18.1
+/// R8): `Dockerfile.console` copies the console stage's `dist/` to `/ui` and no
+/// file of the tree, and `scripts/check-image-api.sh` check 1 holds the image's
+/// `/ui` to this tree's `console/dist`, without its `.vite/`.
 #[test]
-fn the_ui_bearing_image_gate_pins_the_current_shipped_file_count() {
-    let expected = shipped_ui_files().len();
-    let script = "scripts/check-image-api.sh";
-    let source = read(script);
-    for counter in ["tree_count", "image_count"] {
-        let guard = format!("[ \"${counter}\" -ne {expected} ]");
+fn the_ui_bearing_image_gate_holds_ui_to_the_console_build() {
+    let dockerfile = read("Dockerfile.console");
+    assert!(
+        dockerfile.contains("COPY --from=console /src/console/dist /ui\n"),
+        "Dockerfile.console copies the console build to /ui"
+    );
+    assert!(
+        !dockerfile.lines().any(|l| l.starts_with("COPY ui")),
+        "Dockerfile.console copies no file of a ui/ directory"
+    );
+    let script = read("scripts/check-image-api.sh");
+    for needle in [
+        "find console/dist -type f ! -path 'console/dist/.vite/*'",
+        "find \"$work/ui\" -type f",
+        "diff -u \"$tree_list\" \"$image_list\"",
+        "console-fonts-OFL-1.1.txt",
+        "console-third-party.md",
+    ] {
         assert!(
-            source.contains(&guard),
-            "{script} must pin {counter} to the same {expected}-file UI set as the tree; \
-             missing `{guard}`"
+            script.contains(needle),
+            "scripts/check-image-api.sh lacks `{needle}`"
         );
     }
-    assert!(
-        !source.contains("twenty-two"),
-        "{script} still documents the pre-operation-pages UI count"
-    );
-}
-
-/// Every chart, workflow and Dockerfile sentence that counts the shipped page
-/// files counts twenty-six.
-#[test]
-fn no_chart_workflow_or_dockerfile_counts_the_old_page_set() {
-    assert_eq!(shipped_ui_files().len(), 26, "update the prose rule below");
-    let mut paths: Vec<String> = files_under("charts/logweir")
-        .into_iter()
-        .filter(|p| !p.starts_with("charts/logweir/rendered/"))
-        .collect();
-    paths.extend(files_under(".github/workflows"));
-    paths.extend(["Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper"].map(String::from));
-    let stale: Vec<String> = paths
-        .iter()
-        .filter(|p| read(p).contains("twenty-two"))
-        .cloned()
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "these files still count twenty-two shipped page files (there are twenty-six): {stale:?}"
-    );
 }
 
 /// **The controller has a liveness and a readiness probe, in
@@ -368,14 +337,10 @@ fn logweir_repository(name: &str) -> String {
 
 /// **The chart carries NO copy of the UI.** The page ships inside the console
 /// image, and `scripts/check-image-api.sh` check 1 hashes what that image
-/// serves against `ui/`. A copy under the chart would be a second source of the
-/// serves against `ui/`. A copy under the chart would be a second source of the
-/// page that nothing hashes.
+/// serves against the tree's console build. A copy under the chart would be a
+/// second source of the page that nothing hashes.
 #[test]
 fn chart_lint_the_chart_carries_no_ui_copy() {
-    let shipped = shipped_ui_files();
-    assert_eq!(26, shipped.len());
-
     let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()
         .filter(|p| p.starts_with("charts/logweir/ui/"))
@@ -384,8 +349,8 @@ fn chart_lint_the_chart_carries_no_ui_copy() {
         under_chart.is_empty(),
         "charts/logweir/ui/ is back: {under_chart:?}. The page is delivered by \
          `api.console.image` (Dockerfile.console), and scripts/check-image-api.sh hashes what the \
-         image serves against ui/. A copy under the chart is a second source of the page that \
-         nothing hashes."
+         image serves against console/dist. A copy under the chart is a second source of the \
+         page that nothing hashes."
     );
     // And no render carries a page ConfigMap for it.
     for render in ["default", "demo", "msk"] {
@@ -2815,8 +2780,7 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
         assert_eq!(
             Some("/ui"),
             config["uiDirectory"].as_str(),
-            "{render}.yaml: /ui is the path Dockerfile.console COPYs the twenty-six shipped files \
-             to"
+            "{render}.yaml: /ui is the path Dockerfile.console COPYs the console build to"
         );
         assert_eq!(
             Some(mode),
@@ -4181,7 +4145,7 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
 fn chart_lint_the_gate_script_carries_every_arm() {
     let script = read("scripts/check-chart.sh");
     for needle in [
-        // Arm 2 asserts the chart's copy of `ui/` has not come back, and names
+        // Arm 2 asserts the chart has no copy of the page, and names
         // the gate that hashes the page the console image serves.
         "scripts/check-image-api.sh",
         "if [ -e \"$CHART/ui\" ]; then",
@@ -4288,8 +4252,8 @@ fn chart_lint_helm_demo_names_its_context_on_every_kubectl_line() {
         "no executed line of the walk spells the CI cluster; the workflow sets it"
     );
     assert!(
-        script.contains("node ui/tests/emit-restore-body.js"),
-        "the Restore's planBytes come from the page's own emitter"
+        script.contains("node --experimental-strip-types console/scripts/emit-restore-body.mjs"),
+        "the Restore's planBytes come from the console's own renderer"
     );
     assert!(
         script.contains("logweir drill approve"),

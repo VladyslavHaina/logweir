@@ -39,3 +39,10 @@
 # nothing else — and stops an edit to ITS comments invalidating the cargo layer
 # of the other two compiling builds.
 /Dockerfile.console
+
+# PROD-18.1: the console's local install and build output never enter a build
+# context. The console stage of Dockerfile.console runs its own `npm ci`.
+/console/node_modules
+/console/dist
+/console/dist-single
+/console/e2e-results

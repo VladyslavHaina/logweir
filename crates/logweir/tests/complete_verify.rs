@@ -1005,6 +1005,26 @@ fn a_manifest_count_that_disagrees_with_the_decoded_segment_fails() {
         .unwrap();
     assert_eq!(v.integrity.result, IntegrityResult::Fail);
     assert!(all_findings(&v).contains("decodes to 3 records, the manifest says 4"));
+
+    // FX-30: the stream keeps no more records than the manifest lists, and a
+    // segment holding more fails, never verified on the ones it kept.
+    // KILLS: stopping at the manifest's count without failing.
+    let case = healthy();
+    let Built {
+        bucket: _bucket,
+        store,
+        mut facts,
+    } = case.archive.build();
+    facts.topics[0].partitions[0].segments[0].record_count -= 1;
+    let v = case
+        .verify_with(&store, &facts, Coverage::Complete, None)
+        .unwrap();
+    assert_eq!(v.integrity.result, IntegrityResult::Fail);
+    assert!(
+        all_findings(&v).contains("decodes to more than 2 records, the manifest says 2"),
+        "{}",
+        all_findings(&v)
+    );
 }
 
 /// The lineage is the LAST `x-original-offset`:

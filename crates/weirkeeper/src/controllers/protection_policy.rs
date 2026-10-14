@@ -68,9 +68,11 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 pub const BACKUP_PAGE_LIMIT: u32 = 200;
 /// How many pages of that listing one evaluation walks.
 ///
-/// `200 × 5` objects, at most once per `evaluationIntervalSeconds` (60 s
-/// floor). The cap is what makes the read bounded; `status.lastAvailablePoint`
-/// is a projection of the newest run, not a census.
+/// `200 × 5` objects ([`p::MAX_BACKUPS_LISTED`]), at most once per
+/// `evaluationIntervalSeconds` (60 s floor). The cap is what makes the read
+/// bounded; past it the verdict is `Unknown`
+/// (`p::FreshnessReason::BackupHistoryTooLarge`, FX-38), because the API
+/// server lists by name and the runs not read may be the newest.
 pub const MAX_BACKUP_PAGES: usize = 5;
 /// How many catalog page `ConfigMap`s one evaluation reads — the CRD's
 /// `status.pages` `maxItems`.
@@ -165,7 +167,7 @@ pub async fn reconcile_policy(
     let schedule_facts: Vec<p::ScheduleFacts> =
         schedule_objects.iter().map(schedule_facts).collect();
 
-    let backups = list_backups(&ctx.client, &namespace).await?;
+    let (backups, backups_complete) = list_backups(&ctx.client, &namespace).await?;
     let members: Vec<&Backup> = backups
         .iter()
         .filter(|b| is_member(b, spec, &schedule_objects))
@@ -203,6 +205,7 @@ pub async fn reconcile_policy(
         schedules: &schedule_facts,
         slots: &slots,
         rehearsal: &rehearsal,
+        backups_complete,
         now,
     });
 
@@ -248,7 +251,8 @@ fn idle() -> Outcome {
 }
 
 /// Every `Backup` in the namespace, bounded by [`MAX_BACKUP_PAGES`] pages of
-/// [`BACKUP_PAGE_LIMIT`].
+/// [`BACKUP_PAGE_LIMIT`], and whether that was every one: `false` when the
+/// bound cut the listing.
 ///
 /// Not narrowed by `logweir.dev/schedule-uid`: D3 §3.2 names that label the
 /// index and `spec.scheduleRef.uid` the authority, and a manual run of a
@@ -258,7 +262,7 @@ fn idle() -> Outcome {
 async fn list_backups(
     client: &kube::Client,
     namespace: &str,
-) -> Result<Vec<Backup>, ReconcileError> {
+) -> Result<(Vec<Backup>, bool), ReconcileError> {
     let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
     let mut out: Vec<Backup> = Vec::new();
     let mut token: Option<String> = None;
@@ -278,11 +282,11 @@ async fn list_backups(
         debug!(
             namespace = %namespace,
             pages = MAX_BACKUP_PAGES,
-            "the Backup listing hit its page bound; the protection verdict is a projection of \
-             the runs it saw and says so"
+            "the Backup listing hit its page bound; the verdict is Unknown \
+             (BackupHistoryTooLarge)"
         );
     }
-    Ok(out)
+    Ok((out, token.is_none()))
 }
 
 /// Whether this `Backup` counts towards this policy's objective.
@@ -708,14 +712,20 @@ async fn read_catalog(
         for line in body.lines().filter(|l| !l.trim().is_empty()) {
             match serde_json::from_str::<p::CatalogEntry>(line) {
                 Ok(entry) => entries.push(entry),
+                // A line this build cannot read may be the point the verdict
+                // is about, so the view cannot answer (FX-38): skipping it
+                // would read as "the point is gone".
                 Err(e) => {
-                    debug!(
+                    warn!(
                         namespace = %namespace,
                         catalog = %reference.name,
                         page = %page,
                         error = %e,
-                        "a catalog page line did not parse as a view entry; it is skipped"
+                        "a catalog page line did not parse as a view entry; the view is unreadable"
                     );
+                    return Ok(p::CatalogAnswer::Stale(
+                        p::FreshnessReason::CatalogUnreadable,
+                    ));
                 }
             }
         }
@@ -803,7 +813,7 @@ pub fn build_status(
         availability_basis: Some(verdict.basis.as_str().to_string()),
         last_available_point: verdict.point.as_ref().map(p::available_point_status),
         last_attempt: verdict.last_attempt.clone(),
-        consecutive_failed_runs: Some(verdict.consecutive_failed_runs),
+        consecutive_failed_runs: verdict.consecutive_failed_runs,
         missed: (verdict.missed.last_missed_slot.is_some()
             || verdict.missed.since_last_fire.is_some())
         .then(|| verdict.missed.clone()),

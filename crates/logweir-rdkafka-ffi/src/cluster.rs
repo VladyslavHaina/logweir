@@ -89,15 +89,10 @@ pub fn describe_cluster<C: ClientContext>(
                 // accessor reads its id.
                 .map(|&n| unsafe { rd::rd_kafka_Node_id(n) })
                 .collect();
-            let authorized_operations = if ops.is_null() {
-                None
-            } else {
-                // SAFETY: `ops` is non-NULL: an array of `n_ops` C enums
-                // (4-byte, read as `c_int`) owned by `event`. With `n_ops` 0
-                // it is librdkafka's one-byte placeholder, which `array` never
-                // reads (an empty slice is returned for a zero length).
-                Some(unsafe { array(event, ops, n_ops) }.to_vec())
-            };
+            // SAFETY: `ops` is NULL or an array of `n_ops` C enums (4-byte,
+            // read as `c_int`) owned by `event`. With `n_ops` 0 it is
+            // librdkafka's one-byte placeholder, which is never read.
+            let authorized_operations = unsafe { crate::raw::operations(event, ops, n_ops) };
             Ok(ClusterDescription {
                 cluster_id,
                 controller,

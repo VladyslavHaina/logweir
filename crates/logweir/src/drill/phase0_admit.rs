@@ -221,6 +221,33 @@ pub fn run(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
 ) -> Result<Admitted, DrillError> {
+    run_at(
+        spec,
+        spec_text,
+        allowed,
+        reader,
+        creator,
+        deleter,
+        chrono::Utc::now(),
+    )
+}
+
+/// [`run`] at `now`, the caller's one clock read: the target's timestamp
+/// bound (guard G-TS) is judged at it, so a row can admit a plan at a fixed
+/// instant (FX-12, Global Constraint 1).
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_at(
+    spec: &DrillSpec,
+    spec_text: &str,
+    allowed: &AllowedClusters,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Admitted, DrillError> {
     run_with_original_name(
         spec,
         spec_text,
@@ -229,6 +256,7 @@ pub fn run(
         creator,
         deleter,
         &OriginalNameInputs::default(),
+        now,
     )
 }
 
@@ -238,6 +266,7 @@ pub fn run(
 /// an original-name plan "nothing known" refuses (`OriginalNameOwnerNotChecked`
 /// unless the plan states its owners; the cluster condition then needs
 /// auto-creation proven disabled).
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_original_name(
     spec: &DrillSpec,
     spec_text: &str,
@@ -246,6 +275,7 @@ pub fn run_with_original_name(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
     original: &OriginalNameInputs,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Admitted, DrillError> {
     // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
     // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
@@ -629,6 +659,15 @@ pub fn run_with_original_name(
         .into());
     }
 
+    // FX-45: PROD-01.2's `target.engineProtocol`, before phase 0 creates
+    // anything (G-TS's `LogAppendTime` arm and the original-name probe below
+    // are its only writes). An endpoint SEEN not to serve a request version
+    // the engine sends (Redpanda: Produce v0-v7, the engine sends v8) is
+    // refused by the row's name, exit 3, instead of failing in the engine
+    // with "early eof" after a scratch topic exists. Not observed is a
+    // warning, never a refusal.
+    refuse_a_target_the_engine_cannot_restore_into(spec, reader, now)?;
+
     // Original-name conditions 3 and 4, after the absence refusal above
     // (condition 2, the same refusal every restore gets) and BEFORE G-TS,
     // whose `LogAppendTime` arm is the one write phase 0 makes. Every refusal
@@ -679,6 +718,7 @@ pub fn run_with_original_name(
         reader,
         creator,
         deleter,
+        now,
     )?;
 
     Ok(Admitted {
@@ -688,6 +728,41 @@ pub fn run_with_original_name(
         topic_preflight,
         original_name: original_name_admission,
     })
+}
+
+/// FX-45: `target.engineProtocol` over the target's own ApiVersions answer
+/// ([`crate::check::kinds::capability::engine_protocol`], the row a
+/// `Restore` Preflight answers), through the reader phase 0 already holds.
+fn refuse_a_target_the_engine_cannot_restore_into(
+    spec: &DrillSpec,
+    reader: &dyn ClusterReader,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DrillError> {
+    use crate::check::kinds::capability;
+    use logweir_core::check_contract::{CheckId, CheckState};
+    let row = capability::engine_protocol(
+        CheckId::TargetEngineProtocol,
+        &reader.api_versions(capability::STANDALONE_BUDGET),
+        capability::spec_uses_sasl(&spec.target.auth),
+        now,
+    );
+    if let Some(why) = capability::refusal_of(&row) {
+        return Err(GuardRefusal(format!(
+            "{why} Refused at phase 0: nothing was created on the target and no record was \
+             restored"
+        ))
+        .into());
+    }
+    match row.state {
+        CheckState::Ready => tracing::info!(check = %row.id, "{}", row.message),
+        _ => tracing::warn!(
+            check = %row.id,
+            code = %row.code,
+            "{} (the restore runs; the engine's own requests will say)",
+            row.message
+        ),
+    }
+    Ok(())
 }
 
 /// Original-name conditions 3 and 4, for a plan that passed condition 1 and
@@ -786,6 +861,7 @@ fn target_topic_preflight(
     reader: &dyn ClusterReader,
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<TopicPreflight, DrillError> {
     // 1 — read the BROKER's defaults.
     let broker = reader.broker_configs()?;
@@ -847,7 +923,7 @@ fn target_topic_preflight(
             None => ("sample.window_end", spec.sample.window_end),
         };
         let window_end_ms = window_end.timestamp_millis();
-        let oldest_accepted_ms = chrono::Utc::now().timestamp_millis().saturating_sub(bound);
+        let oldest_accepted_ms = now.timestamp_millis().saturating_sub(bound);
         if window_end_ms < oldest_accepted_ms {
             return Err(target_topic_refusal(format!(
                 "the target broker bounds how far in the past a CreateTime record may be \
@@ -1840,6 +1916,97 @@ mod tests {
             admitted.topic_mapping.get("orders"),
             Some(&"drill-orders".to_string())
         );
+    }
+
+    /// [`healthy_reader`], answering ApiVersions with `served`.
+    struct Serving(StubReader, logweir_kafka::api_versions::ApiVersions);
+
+    impl ClusterReader for Serving {
+        fn cluster_id(&self) -> Result<String, KafkaError> {
+            self.0.cluster_id()
+        }
+        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+            self.0.list_topics()
+        }
+        fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+            self.0.end_offsets(topic)
+        }
+        fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+            self.0.topic_configs(topic)
+        }
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            self.0.broker_configs()
+        }
+        fn consume_range(
+            &self,
+            topic: &str,
+            partition: i32,
+            from: i64,
+            max: usize,
+        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+            self.0.consume_range(topic, partition, from, max)
+        }
+        fn broker_view(
+            &self,
+            _within: std::time::Duration,
+        ) -> Result<
+            logweir_kafka::api_versions::ApiVersions,
+            logweir_kafka::api_versions::NotObserved,
+        > {
+            Ok(self.1.clone())
+        }
+    }
+
+    /// **FX-45: a target SEEN not to serve the engine's Produce v8 is refused
+    /// at phase 0, by `target.engineProtocol`'s name, before anything is
+    /// created.** Redpanda v26.2.4's measured ranges (Produce v0-v7). The
+    /// restore used to get past phase 0, create its scratch topic and fail in
+    /// the engine with "early eof". `NoopCreator` panics on any create, so a
+    /// refusal that came after a write fails this row.
+    ///
+    /// CONTROL: Apache Kafka 4.3.1's ranges are admitted; and the healthy
+    /// reader of every other row here, which observes nothing, is admitted
+    /// (`a_healthy_target_is_admitted`): not observed is never a refusal.
+    #[test]
+    fn a_target_the_engine_cannot_restore_into_is_refused_by_the_rows_name() {
+        use logweir_kafka::api_versions::ApiVersions;
+        let spec = spec_with(&["orders"], "drill-");
+        let redpanda = Serving(
+            healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic),
+            ApiVersions::of(&[(0, 0, 7), (1, 4, 13), (3, 0, 12)]),
+        );
+        let err = run(
+            &spec,
+            "restore: {}\n",
+            &allowed(&["ALLOWED0000000000000000"], None),
+            &redpanda,
+            &NoopCreator,
+            &NoopDeleter,
+        )
+        .unwrap_err();
+        let DrillError::Guard(GuardRefusal(msg)) = err else {
+            panic!("a refusal (exit 3), got {err:?}")
+        };
+        assert!(
+            msg.starts_with("target.engineProtocol is notReady (EngineProtocolUnsupported): ")
+                && msg.contains("Produce v8")
+                && msg.contains("Produce v0-v7")
+                && msg.contains("nothing was created on the target"),
+            "{msg}"
+        );
+        let kafka = Serving(
+            healthy_reader("ALLOWED0000000000000000", &spec.target.marker_topic),
+            ApiVersions::of(&[(0, 0, 13), (1, 4, 18), (3, 0, 13)]),
+        );
+        run(
+            &spec,
+            "restore: {}\n",
+            &allowed(&["ALLOWED0000000000000000"], None),
+            &kafka,
+            &NoopCreator,
+            &NoopDeleter,
+        )
+        .expect("a target that serves Produce v8 and Metadata v9 is admitted");
     }
 
     #[test]

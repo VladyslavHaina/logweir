@@ -71,6 +71,17 @@ pub fn record_sidecar_key(run_id: &str) -> String {
     format!("logweir/switchovers/{run_id}.record.sig")
 }
 
+/// The run id a record key names: `Some(id)` for exactly [`record_key`] of
+/// one run-id segment (`crate::ids::is_run_id_segment`), `None` for every
+/// other key (FX-36: a rollback plan names the record it reverses, and
+/// nothing else is read on its word).
+#[must_use]
+pub fn record_run_id(key: &str) -> Option<&str> {
+    key.strip_prefix("logweir/switchovers/")
+        .and_then(|rest| rest.strip_suffix(".record.json"))
+        .filter(|id| crate::ids::is_run_id_segment(id))
+}
+
 // Refusals and outcomes (design §6). A refusal of the whole run names one of
 // the first group; a group's own outcome reason one of the second.
 pub const RESTORE_NOT_SUCCEEDED: &str = "RestoreNotSucceeded";
@@ -294,6 +305,20 @@ pub fn validate(plan: &SwitchoverPlan) -> Result<(), String> {
     ] {
         if !crate::check_contract::is_sha256_prefixed(v) {
             return Err(format!("{what} is not sha256:<64 lowercase hex>"));
+        }
+    }
+    if let Some(r) = &plan.rollback_of {
+        // FX-36: the record a rollback plan names is read on the plan's word,
+        // so its key is held to the writer's before anything reads it.
+        if record_run_id(&r.key).is_none() {
+            return Err(format!(
+                "rollback_of.key {:?} is not a switchover record key \
+                 (logweir/switchovers/<run id>.record.json)",
+                r.key
+            ));
+        }
+        if !crate::check_contract::is_sha256_prefixed(&r.sha256) {
+            return Err("rollback_of.sha256 is not sha256:<64 lowercase hex>".to_string());
         }
     }
     if plan.groups.is_empty() || plan.groups.len() > MAX_GROUPS {
@@ -1449,5 +1474,55 @@ mod tests {
             serde_json::to_string(&AppliedState::Known(true)).unwrap(),
             "true"
         );
+    }
+
+    /// **FX-36: a rollback plan names only a switchover record.** Its
+    /// `rollback_of.key` is read by `switchover run` on the plan's word, so
+    /// `validate` (and so `parse`, the API and the controller) refuses every
+    /// key that is not exactly `record_key(<run id>)`, before anything reads
+    /// it. CONTROL: the key `rollback-plan` writes is accepted.
+    ///
+    /// KILLS: the `record_run_id` check removed from `validate` (every key
+    /// below is accepted); `is_run_id_segment` admitting `.` or `/`.
+    #[test]
+    fn a_rollback_plan_names_only_a_switchover_record_key() {
+        let (plan, _) = rollback_plan(&record(), record_key_ref()).expect("the control");
+        validate(&plan).expect("the writer's key");
+        for key in [
+            "logweir/drills/S1.json",
+            "logweir/backups/nightly-7/run-1.receipt.json",
+            "tenant-b/logweir/switchovers/S1.record.json",
+            "/logweir/switchovers/S1.record.json",
+            "logweir/switchovers/../drills/S1.record.json",
+            "logweir/switchovers/a/S1.record.json",
+            "logweir/switchovers/S1.record.sig",
+            "logweir/switchovers/.record.json",
+            "logweir/switchovers/S 1.record.json",
+            "",
+        ] {
+            let mut hostile = plan.clone();
+            hostile.rollback_of.as_mut().expect("a rollback").key = key.to_string();
+            let why = validate(&hostile).expect_err(key);
+            assert!(why.contains("rollback_of.key"), "{key}: {why}");
+        }
+        let mut digest = plan.clone();
+        digest.rollback_of.as_mut().expect("a rollback").sha256 = "sha256:short".into();
+        assert!(validate(&digest)
+            .unwrap_err()
+            .contains("rollback_of.sha256"));
+        assert_eq!(record_run_id(&record_key("01J0ABC")), Some("01J0ABC"));
+        assert_eq!(
+            crate::ids::scorecard_run_id("logweir/drills/R1.json"),
+            Some("R1")
+        );
+        for not_a_scorecard in [
+            "logweir/drills/R1.offsets.json",
+            "logweir/drills/R1.positions-mapping.json",
+            "logweir/drills/../backups/x.json",
+            "logweir/drills/.json",
+            "tenant-b/logweir/drills/R1.json",
+        ] {
+            assert_eq!(crate::ids::scorecard_run_id(not_a_scorecard), None);
+        }
     }
 }

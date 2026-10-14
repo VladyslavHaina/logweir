@@ -85,7 +85,7 @@ condition's reason.
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
 | `RunnerOlderThanController` | Exit 0 to 4 with no sealed `runner-exit=` line: the runner image is older than the controller ([sealed lines](#sealed-lines-fx-43)) |
 | `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
-| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point whose receipt or manifest is missing or unreadable is exit 1 |
+| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point's receipt key outside the plan's own set, and a receipt that is absent, has other bytes or is over the cap, are one exit-3 `PointBindingMismatch` (FX-36); a receipt or manifest the store could not read, and a missing manifest, are exit 1 |
 
 Plus the no-exit-code states of the `Backup` table, `PodOwnershipContested`,
 `JobNameConflict` and `PlanConfigMapConflict`. `Admitted` is its own condition
@@ -166,6 +166,7 @@ it holds (`logweir_core::runner_line::one_line`).
 | `progress-contract=<n>` then `progress-phase=<0..9>:<name>` | While running; optional | `status.progress.runnerPhase` |
 | `topic-preflight=<json>` | Exit 0 only: phase 0's observation of the target: `timestampType`, `retentionMs`, `timestampBound` | `status.topicPreflight` |
 | `teardown-failed=[{"topic":…,"error":…}]` | When a teardown left a topic; at most 256 entries | `status.teardown.failed` |
+| `teardown-failed-count=<n>` | With `teardown-failed=`: how many topics it left, of which the list carries at most 256 | `status.teardown.failedCount` |
 | `teardown-key=logweir/drills/<run_id>.teardown.json` | When phase 9's signed teardown attestation was written | `status.teardown` |
 | `scorecard-key=logweir/drills/<run_id>.json` | Exit 0 and exit 2 | `status.evidence` |
 | `sidecar-key=logweir/drills/<run_id>.sig` | Exit 0 and exit 2 | `status.evidence` |
@@ -177,7 +178,7 @@ it holds (`logweir_core::runner_line::one_line`).
 
 | Line | When | Read into |
 |---|---|---|
-| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). An attempt that could not do its job (the evidence store or the cluster did not answer, exit 1; the attestation not persisted, exit 4) prints it with only `"error":"<sentence>"`, for example `EvidenceUnreadable: could not read logweir/drills/<run_id>.json with grant <grant>: AccessDenied` | `status.teardown` (`deleted`, `failed`, `attestationKey`) when it names a topic, and `status.clone` (`reason` carries `error`) |
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). An attempt that could not do its job (the evidence store or the cluster did not answer, exit 1; the attestation not persisted, exit 4) prints it with only `"error":"<sentence>"`, for example `EvidenceUnreadable: could not read logweir/drills/<run_id>.json with grant <grant>: AccessDenied` | `status.teardown` (`deleted`, `failed`, `attestationKey`, and `deletedCount` and `failedCount`, which count past the lists' 256) when it names a topic, and `status.clone` (`reason` carries `error`) |
 | `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
 
 The evidence keys (interface I8) are the final lines of a run that signed a
@@ -545,6 +546,11 @@ A run or check over a destination can also meet `DestinationRoleNotConfigured`
 ### `KafkaCluster`
 
 `Reachable`: `Reachable` (True); `ProbeReportedUnreachable` (False);
+`AdvertisedBrokersUnreachable` (False: the bootstrap address answered and a
+broker the cluster advertises did not answer the probe on its advertised
+address, FX-46; the probe prints `brokers-answered=<answered>/<listed>`, or
+`0/?` when not even the broker list could be read through the bootstrap
+address, and names each silent broker in its log);
 `ProbeOutputUnreadable`, `ProbeRunning`, `ProbeStale`, `PodCreationForbidden`,
 `NoExitCode` and the crash states (Unknown); and the configuration refusals
 `ConnectionConfigInvalid`, `CredentialNotRenderable`, `PlainWithoutTls`,
@@ -601,7 +607,8 @@ point `Unreadable`, `UnsupportedFormat`, `Conflict` or `AlreadyDeleted`.
 `status.health`: `Healthy`, `AtRisk`, `Stale`, `Unprotected`, `Unknown`.
 `Protected`'s reason: `WithinObjective`, `PointOlderThanObjective`,
 `NoAvailablePoint`, `CatalogStale`, `CatalogUnreadable`, `SourceMissing`,
-`DestinationMissing`, `ScheduleMissing`, `PointFactsUnread`.
+`DestinationMissing`, `ScheduleMissing`, `PointFactsUnread`,
+`BackupHistoryTooLarge`.
 `status.availabilityBasis`: `KubernetesStatus`, `Catalog`, `CatalogStale`.
 `Ready`: `Evaluated`, `NotEvaluated`. `NotificationsDelivered`:
 `NotificationsWithdrawn`. Ledger kinds include `Staleness`, `ArchiveUnavailable`
@@ -631,8 +638,8 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `connection.authenticated` | blocking | The broker accepted the credential |
 | `connection.clusterIdentity` | blocking | The broker's cluster id is the recorded one; a backup source is not an allowlisted target |
 | `connection.topicsDescribable` | blocking | Every named topic exists and may be described |
-| `connection.topicsReadable` | execution-only | Proved only by the run |
-| `connection.engineProtocol` | blocking | The source serves the request versions the engine sends |
+| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); otherwise `unknown`, proved only by the run, with what the broker reported |
+| `connection.engineProtocol` | blocking; advisory on a `SourceConnection` | The source serves the request versions the engine's backup sends |
 | `connection.topicConfigsReadable` | advisory | DescribeConfigs on the named topics |
 | `connection.groupTypes` | advisory | The group listing names group types (ListGroups v5) |
 | `destination.resolved` | blocking | The destination and its grants resolve for one pod |
@@ -653,7 +660,7 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `target.topicCreate` | blocking | A validate-only create of every mapped topic succeeds |
 | `target.timestampBound` | blocking | The broker's record-timestamp bound admits the archive |
 | `target.logAppendTime` | execution-only | Phase 0's override probe |
-| `target.engineProtocol` | blocking | The target serves the engine's request versions |
+| `target.engineProtocol` | blocking; advisory on a `SourceConnection` | The target serves the engine's restore request versions |
 | `plan.parse` | blocking | The plan parses |
 | `plan.bindings` | blocking | The plan names the request's referents and locations |
 | `plan.names` | blocking | Every mapped name is legal and not the identity mapping (unless original names were asked for) |
@@ -667,6 +674,12 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word). A store that refuses the read answers in its own code (`AccessDenied`, …), the message opening `EvidenceUnreadable` and naming the grant |
 | `switchover.target` | blocking | The target answers the restore's cluster id and each restored topic its recorded ID (`TargetNotTheRestores`) |
 | `switchover.groups` | blocking | Each requested target group admits a commit and holds no other committed position (`GroupNotAdmissible`); every position is in the details |
+
+A `SourceConnection` Preflight (the console's Test connection) answers
+`connection.authenticated` and, advisory, `connection.engineProtocol` (usable
+as a backup source), `target.engineProtocol` (usable as a restore target) and
+`connection.groupTypes` (FX-46): its verdict is whether the connection answers,
+and the three rows say what the endpoint can be used for.
 
 A row expires after 15 minutes, except `connection.topicsDescribable` and
 `connection.topicConfigsReadable` (10 minutes), the `archive.*` rows (30
@@ -847,6 +860,7 @@ An object over its cap is never a crash and never a pass:
 | An evidence relay | The Job reports the object `present` and `truncated` and relays no bytes: `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`. Final. |
 | `Preflight` `archive.backupSet` | Not ready: `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | `Preflight` `archive.backupSet`, a point-bound plan's receipt | `PointBindingMismatch`: `…it is absent, its bytes do not hash to the bound digest, or it is larger than the 67108864-byte read cap for a receipt`. |
+| `restore run`, a point-bound plan's receipt | exit 3 `PointBindingMismatch`: `…it is absent, its bytes do not hash to the bound <digest>, or it is larger than the 67108864-byte read cap for a receipt; no data operation was started.` (FX-36) |
 | Drill, `backup run`, `catalog sync` | exit 1, or an `Unreadable` point, naming the cap. |
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).

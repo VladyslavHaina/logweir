@@ -54,7 +54,6 @@ class Release(unittest.TestCase):
         for rel in COPIED:
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / rel, self.repo / rel)
-        shutil.copytree(ROOT / "ui", self.repo / "ui")
         shutil.copytree(ROOT / "charts/logweir", self.repo / "charts/logweir",
                         ignore=shutil.ignore_patterns("rendered"))
         self.bin = self.base / "bin"
@@ -530,7 +529,7 @@ class Assemble(Release):
         names = sorted(p.name for p in out.iterdir())
         expected = sorted([f"logweir-{t}.tar.xz" for t in TARGETS] + [f"logweir-{t}.tar.xz.sha256" for t in TARGETS]
                           + ["verify_scorecard.py", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
-                             "kafka-backup-LICENSE", "logweir-chart-0.2.0-rc.1.tgz", "ui-files.sha256",
+                             "kafka-backup-LICENSE", "logweir-chart-0.2.0-rc.1.tgz",
                              "release.json", "SHA256SUMS"])
         self.assertEqual(names, expected)
         self.assertEqual((out / "kafka-backup-LICENSE").read_bytes(), (self.repo / "third_party/LICENSE-MIT").read_bytes())
@@ -555,9 +554,6 @@ class Assemble(Release):
         self.assertNotIn(":latest", values)
         self.assertEqual(release["images"]["bootstrap"], self.images["bootstrap"])
         self.assertIn(f"bootstrapImage: {self.bootstrap_pin()}", values)
-        ui = (out / "ui-files.sha256").read_text().splitlines()
-        self.assertTrue(ui and all("  ui/" in line for line in ui))
-        self.assertFalse(any("ui/tests/" in line or line.endswith(".md") for line in ui))
         notes = (self.base / "notes.md").read_text()
         for needle in (f"--version 0.2.0-rc.1", "(pre-release)", f"sha-{self.head}", "drill countersign",
                        "sha256sum -c SHA256SUMS", "kafka-backup-LICENSE", "glibc: 2.34 or newer",

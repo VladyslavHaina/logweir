@@ -2569,7 +2569,7 @@ fn the_preset_catalogue_fixture_matches_the_rust_catalogue() {
         serde_json::to_string_pretty(&fixture).expect("the catalogue serialises")
     );
 
-    let path = workspace_root().join("ui/tests/fixtures/cadence-presets.json");
+    let path = workspace_root().join("console/fixtures/cadence-presets.json");
     if std::env::var_os("LOGWEIR_WRITE_FIXTURES").is_some() {
         std::fs::write(&path, &want).expect("the fixture is writable");
     }
@@ -2581,7 +2581,7 @@ fn the_preset_catalogue_fixture_matches_the_rust_catalogue() {
     });
     assert_eq!(
         got, want,
-        "ui/tests/fixtures/cadence-presets.json has drifted from weirkeeper::cadence::presets. \
+        "console/fixtures/cadence-presets.json has drifted from weirkeeper::cadence::presets. \
          Regenerate it with LOGWEIR_WRITE_FIXTURES=1 cargo test --locked -p weirkeeper --test \
          cadence the_preset_catalogue_fixture_matches_the_rust_catalogue"
     );

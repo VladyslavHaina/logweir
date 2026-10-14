@@ -347,6 +347,30 @@ Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
 subset), carrying `target.creation`; older readers accept it and ignore the
 block.
 
+### A connection test asks more, and the probe asks every advertised broker (FX-45, FX-46)
+
+A `SourceConnection` check plan now lists `capabilityChecks`; a runner from
+before FX-46 refuses it (`CheckContractMismatch`, naming the field), so keep
+the runner at least as new as the controller. A newer runner under an older
+controller gets no list and emits no capability row. `cluster-probe` prints a
+third line, `brokers-answered=<answered>/<listed>`, and answers
+`reachable=false` when a broker the cluster lists does not answer on its
+advertised address; an older controller reads the first two lines by key and
+records `ProbeReportedUnreachable`, this one records
+`AdvertisedBrokersUnreachable`. A cluster whose advertised addresses this
+namespace cannot reach therefore turns `reachable: false` after the upgrade:
+a `Restore` against it is refused at admission (terminal,
+`ClusterNotReachable`); backups are not gated on `reachable`. A Test
+connection in flight across the upgrade (a check Job the older controller
+created) reports none of the three capability rows this controller expects,
+so that one `Preflight` reads `unknown`; run the test again.
+`connection.topicsReadable` may now be blocking `notReady`
+(`TopicAuthorizationFailed`), a code and a gating every controller reads.
+`backup run` and `drill run` refuse, by the row's name, what the broker
+reports the principal may not READ and what the endpoint was seen not to
+serve, before the engine; not observed is never a refusal. No signed document
+changes.
+
 ### Values an older build cannot list (theme A): delete them before a rollback
 
 An older controller and console decode every kind as a closed Rust type, so a
@@ -704,13 +728,12 @@ an Apple M4), with harnesses that re-run:
 cargo test --release -p logweir-api  --test scale -- --ignored --nocapture --test-threads=1
 cargo test --release -p weirkeeper   --test scale -- --ignored --nocapture --test-threads=1
 cargo test --release -p logweir-kafka --test scale -- --ignored --nocapture --test-threads=1
-MEASURE_ROWS=5000 MEASURE_TOPICS=5000 node scripts/plat18-2-measure.mjs
 ```
 
 At the largest sizes the product pages, nothing was near a budget: discovery
 steps took at most 18 ms for 50,000 topics against a 300-second Job deadline,
-API pages stayed in tens of milliseconds, and the console rendered 5,000 rows
-in under 30 ms. A catalog point page re-reads its view from the first page
+and API pages stayed in tens of milliseconds. (The console's 5,000-row render
+was measured on the console PROD-18.1 replaced, and is not re-measured.) A catalog point page re-reads its view from the first page
 (the cursor is a row offset), bounded at eight pages a request. Live on
 docker-desktop (2026-09-24, 258 real points), a `Full` catalog sync took 58.5 s;
 on that build a hundred accepted "Back up now" requests became a hundred runner
@@ -802,8 +825,8 @@ word in its text (versitygw's `404 XAdminUserNotFound` is a refused credential,
 `InvalidCredentials`). A marker topic the restore identity may not Describe is
 refused as before (exit 3), and the message says it does not exist or is not
 describable and names the grant; `connection.authenticated` says when a
-cluster's advertised brokers cannot be reached (`logweir cluster-probe` still
-reads only the cluster id). An older runner refuses a plan that lists the new rows,
+cluster's advertised brokers cannot be reached (`logweir cluster-probe` read
+only the cluster id then; since FX-46 it asks every advertised broker). An older runner refuses a plan that lists the new rows,
 so the runner image moves with the controller. No signed document changes.
 
 ### `RetentionPolicy` in `Enforce` is where the deletion boundary moves, and it is an installation decision

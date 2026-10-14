@@ -440,6 +440,34 @@ pub trait InventoryProbe {
             "this probe does not observe the endpoint's ApiVersions answer",
         ))
     }
+
+    /// Per named topic, whether this principal may READ it: DescribeTopics
+    /// with the caller's authorized operations (KIP-430,
+    /// [`crate::access::topic_read`]), one verdict per name in order.
+    ///
+    /// The DEFAULT asks nothing and says so: every name is
+    /// [`crate::access::TopicRead::Unknown`], so a probe that does not
+    /// implement it (a test double) can neither refuse a topic nor vouch for
+    /// one.
+    ///
+    /// # Errors
+    /// [`CheckFailure`] when the call as a whole failed.
+    fn topic_read_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::access::TopicRead)>, CheckFailure> {
+        Ok(topics
+            .iter()
+            .map(|t| {
+                (
+                    t.clone(),
+                    crate::access::TopicRead::Unknown(
+                        "this probe does not ask the broker for authorized operations".into(),
+                    ),
+                )
+            })
+            .collect())
+    }
 }
 
 /// The per-call timeout for a targeted metadata request: one name at a
@@ -1375,6 +1403,23 @@ mod client {
         ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
             observe_api_versions(&self.config, within)
         }
+
+        fn topic_read_access(
+            &self,
+            topics: &[String],
+        ) -> Result<Vec<(String, crate::access::TopicRead)>, CheckFailure> {
+            crate::rdkafka_admin::read_topic_access_with(
+                self.admin.inner(),
+                topics,
+                self.timeouts.metadata,
+            )
+            .map_err(|e| {
+                self.fail(
+                    CheckCode::MetadataTimeout,
+                    &format!("DescribeTopics with authorized operations: {e}"),
+                )
+            })
+        }
     }
 
     /// How long the observing client's log must stay empty before its
@@ -1452,10 +1497,26 @@ mod client {
         base: &ClientConfig,
         budget: Duration,
     ) -> Result<crate::api_versions::ApiVersions, CheckFailure> {
-        use crate::api_versions::{bootstrap_addresses, whole_view_within, Broker};
+        observe_broker_view(base, budget).map_err(|why| not_observed(why.to_string()))
+    }
+
+    /// [`observe_api_versions`], with the reason there is no whole view
+    /// kept as a value ([`crate::api_versions::NotObserved`]) rather than
+    /// flattened into a row's message: `logweir cluster-probe` reads which
+    /// LISTED broker stayed silent from it (FX-46), and the check rows read
+    /// its sentence.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::api_versions::NotObserved`], with the reason.
+    pub fn observe_broker_view(
+        base: &ClientConfig,
+        budget: Duration,
+    ) -> Result<crate::api_versions::ApiVersions, crate::api_versions::NotObserved> {
+        use crate::api_versions::{bootstrap_addresses, whole_view_within, Broker, NotObserved};
         let budget = budget.min(API_VERSIONS_BUDGET);
         if budget < API_VERSIONS_MIN_BUDGET {
-            return Err(not_observed(format!(
+            return Err(NotObserved::Other(format!(
                 "{budget:?} is left of the check's budget, which is less than the \
                  {API_VERSIONS_MIN_BUDGET:?} an ApiVersions observation needs: the endpoint was \
                  not dialled for it"
@@ -1468,9 +1529,10 @@ mod client {
             .set("debug", "feature")
             .set("enable.sparse.connections", "false")
             .set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        let observer: rdkafka::admin::AdminClient<rdkafka::client::DefaultClientContext> = cfg
-            .create()
-            .map_err(|e| not_observed(format!("the observing client could not be built: {e}")))?;
+        let observer: rdkafka::admin::AdminClient<rdkafka::client::DefaultClientContext> =
+            cfg.create().map_err(|e| {
+                NotObserved::Other(format!("the observing client could not be built: {e}"))
+            })?;
         let client = observer.inner();
         // THE BROKER LIST: whom to expect an answer from. All-topics, as the
         // inventory's own metadata read is: a request for one topic by name
@@ -1510,7 +1572,6 @@ mod client {
             Ok((lines, drained.quiet))
         };
         whole_view_within(read, &listed, &bootstrap, deadline, API_VERSIONS_QUIET)
-            .map_err(not_observed)
     }
 
     /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so
@@ -1574,7 +1635,7 @@ mod client {
 #[cfg(feature = "client")]
 pub use client::{
     classification_codes, classify_create_code, classify_error_code, flatten_config_answer,
-    is_certificate_trust_reason, observe_api_versions, CapturingContext, ClientConfig,
-    ConnectionSettings, KafkaInventory, RDKafkaErrorCode, API_VERSIONS_BUDGET, API_VERSIONS_QUIET,
-    CHECK_CLIENT_ID, CHECK_GROUP_ID,
+    is_certificate_trust_reason, observe_api_versions, observe_broker_view, CapturingContext,
+    ClientConfig, ConnectionSettings, KafkaInventory, RDKafkaErrorCode, API_VERSIONS_BUDGET,
+    API_VERSIONS_QUIET, CHECK_CLIENT_ID, CHECK_GROUP_ID,
 };

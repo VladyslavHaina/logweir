@@ -422,9 +422,11 @@ pub struct KafkaClusterStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<Time>,
     /// **Why `reachable` says what it says** — `Reachable`,
-    /// `ProbeReportedUnreachable`, `ProbeOutputUnreadable`, `ProbeRunning`,
-    /// `NoExitCode`, `PodUnschedulable`, `DisruptedMidDrill` or `NameTooLong`:
-    /// the `Reachable` condition's own `reason`, promoted to a scalar. Added by
+    /// `ProbeReportedUnreachable`, `AdvertisedBrokersUnreachable` (the
+    /// bootstrap address answered and a broker the cluster advertises did
+    /// not, FX-46), `ProbeOutputUnreadable`, `ProbeRunning`, `NoExitCode`,
+    /// `PodUnschedulable`, `DisruptedMidDrill` or `NameTooLong`: the
+    /// `Reachable` condition's own `reason`, promoted to a scalar. Added by
     /// Task 15c.
     ///
     /// WHY A SCALAR BESIDE THE CONDITION. `reachable` is a tri-state in

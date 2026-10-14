@@ -811,3 +811,56 @@ fn a_row_the_catalog_already_refused_keeps_its_own_code() {
         "catalog refusal first",
     );
 }
+
+/// **FX-38 (7): a view line the check cannot read is no answer, never
+/// `NotInView`.** The page's digest matches (the catalog wrote the line), and
+/// the line may be the point asked for, so a view that does not list the point
+/// and holds such a line is `unknown CatalogPointViewUnavailable`, naming the
+/// page. CONTROLS: the same page listing the point after the line is `ready`
+/// (a listed point is an answer); without the line it is `NotInView`.
+#[test]
+fn fx38_an_unreadable_view_line_is_no_answer_never_not_in_view() {
+    let raw = |lines: Vec<String>| -> (String, ConfigMap, String) {
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let digest = weirkeeper::catalog_view::page_digest(&refs);
+        let map: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "archive-g1-p0", "namespace": "lw-p152"},
+            "immutable": true,
+            "data": {(weirkeeper::catalog_view::PAGE_DATA_KEY): lines.join("\n") + "\n"},
+        }))
+        .expect("a ConfigMap");
+        ("archive-g1-p0".to_string(), map, format!("sha256:{digest}"))
+    };
+    let with = |lines: Vec<String>| {
+        let mut f = Fixture::healthy();
+        let p = raw(lines);
+        f.catalog = Some(catalog(
+            std::slice::from_ref(&p),
+            now() + Duration::hours(1),
+        ));
+        f.pages = vec![(p.0, Some(p.1))];
+        f.row()
+    };
+    let garbled = "{\"pointId\": 7".to_string();
+    let row = with(vec![entry(OTHER_POINT, true).to_string(), garbled.clone()]);
+    assert_row(
+        &row,
+        CheckState::Unknown,
+        CheckCode::CatalogPointViewUnavailable,
+        "an unreadable line",
+    );
+    assert!(row.message.contains("archive-g1-p0"), "{}", row.message);
+    // CONTROL: the point listed after the line is found.
+    assert_eq!(
+        with(vec![garbled, entry(POINT, true).to_string()]).state,
+        CheckState::Ready
+    );
+    // CONTROL: without the line, the view's answer is NotInView.
+    assert_row(
+        &with(vec![entry(OTHER_POINT, true).to_string()]),
+        CheckState::NotReady,
+        CheckCode::RecoveryPointNotFound,
+        "unlisted",
+    );
+}

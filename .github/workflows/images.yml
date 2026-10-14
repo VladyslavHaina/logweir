@@ -25,7 +25,30 @@ on:
 permissions:
   contents: read
 jobs:
+  # The console build the image check compares with (PROD-18.1). npm and the
+  # build tools run here, apart from any secret and any docker daemon that
+  # later pushes: a build dependency that misbehaves can touch only this job.
+  console-dist:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Build the console the image check compares
+        run: cd console && npm ci && npx vite build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-dist
+          path: console/dist
+          # .vite/license.md is check 2's reference for the image's licence file.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
   build:
+    needs: console-dist
     strategy:
       fail-fast: false
       matrix:
@@ -152,7 +175,7 @@ jobs:
       #
       # THE FULL ASSERTION IS `scripts/check-image-api.sh`, which the next step
       # runs on this same tag and `… candidates` runs again on the digest the
-      # registry returns: the twenty-six page files hashed against ui/, the three
+      # registry returns: the console build hashed against console/dist, the five
       # licences, the three absences, USER 65532, no key-shaped path anywhere,
       # and the version held to the workspace's. This step earns its place by
       # failing in seconds and by naming the defect.
@@ -167,6 +190,15 @@ jobs:
               exit 1
               ;;
           esac
+      # check-image-api.sh holds the console image's /ui (PROD-18.1) to this
+      # tree's console build, which is the same bytes on every platform. It is
+      # built in `console-dist`, a job with no secret that pushes nothing; this
+      # job, which logs in and pushes, runs no npm code and takes only the
+      # files, which the check compares by sha256.
+      - uses: actions/download-artifact@v4
+        with:
+          name: console-dist
+          path: console/dist
       - name: Test local images
         run: bash scripts/ci-images.sh check
       - uses: docker/login-action@v3
