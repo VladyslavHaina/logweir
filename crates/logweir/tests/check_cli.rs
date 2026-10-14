@@ -3490,6 +3490,85 @@ fn a_topic_the_broker_says_this_principal_may_not_read_blocks_the_backup_by_name
     );
 }
 
+/// **DUI-5: a selected topic the source does not hold blocks the Backup
+/// Preflight's `connection.topicsReadable`, by name**, ahead of a READ
+/// denial on another topic: a plan that cannot run at all. CONTROL: the same
+/// topic answered "not held" by a principal not seen to Describe the cluster
+/// is unknown, and the row stays execution-only.
+///
+/// KILLS: absence left unknown (the row would never block); a denial ranked
+/// before absence; the topic not named.
+#[test]
+fn dui5_a_selected_topic_the_source_does_not_hold_blocks_the_backup_by_name() {
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_presence("payments", TopicPresence::Present { partitions: 3 })
+        .with_topic_read("orders", TopicRead::Granted)
+        .with_topic_read("dui1-nosuch", TopicRead::Absent)
+        .with_topic_read(
+            "payments",
+            TopicRead::Denied(ReadDenied::OperationsExcludeRead),
+        );
+    let run = drive(
+        &mount(&capability_plan(
+            vec!["orders", "dui1-nosuch", "payments"],
+            Vec::new(),
+        )),
+        &readable_wiring(probe),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::NotReady,
+            Gating::Blocking,
+            CheckCode::TopicNotFound
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .starts_with("topic `dui1-nosuch` does not exist on the source"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["dui1-nosuch"])
+    );
+    assert!(row.remedy.contains("Correct the name"), "{}", row.remedy);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+
+    // CONTROL: "not held" without the cluster's Describe is not absence.
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_topic_read(
+            "orders",
+            TopicRead::Unknown(
+                "the broker does not hold the topic, and whether this principal may Describe \
+                 the cluster was not reported"
+                    .into(),
+            ),
+        );
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(probe),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{row:?}"
+    );
+}
+
 /// **CONTROLS: what the broker does not refuse stays what it was.** READ
 /// reported on every topic, and READ not known (a broker that computes no
 /// authorized operations), are both the execution-only row, `unknown`,

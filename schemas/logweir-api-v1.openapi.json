@@ -15161,7 +15161,7 @@
         "type": "object",
         "properties": {
           "roles": {
-            "description": "The roles to exercise, 1 to 4. Absent means every configured role.",
+            "description": "The roles to exercise, 1 to 4. Absent means every role a run uses this destination's credentials for: `archiveWrite`, `archiveRead` and `evidenceWrite` (unset, the last two use the archive-write credential), and `evidenceRead` when it is configured.",
             "default": null,
             "type": "array",
             "items": {

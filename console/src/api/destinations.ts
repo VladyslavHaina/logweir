@@ -499,7 +499,7 @@ export function useRotateAccess(ns: string, name: string) {
   });
 }
 
-/** "Test access": one DestinationAccess Preflight per click; no roles means every configured role. */
+/** "Test access": one DestinationAccess Preflight per click; no roles means every role a run uses (the API fills in the fallbacks to archive-write). */
 export function useTestDestination(ns: string, name: string) {
   return useMutation({
     mutationFn: async ({ key, roles }: { key: string; roles: GrantRole[] }) =>

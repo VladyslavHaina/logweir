@@ -270,6 +270,11 @@ const NAMED_IN_A_REFUSAL: usize = 10;
 /// Step 7 (FX-45): **what this principal and this endpoint can do, asked
 /// before the engine**, through the reader that admitted the run.
 ///
+/// 0. **Every selected topic exists** (DUI-5). A name DescribeTopics answers
+///    `UNKNOWN_TOPIC_OR_PART` for, from a principal DescribeCluster reports
+///    Describe on the cluster for ([`logweir_kafka::access::TopicRead::Absent`]),
+///    is refused here, exit 3: "topic `x` does not exist on the source".
+///    Without the cluster's Describe it stays unknown and the engine answers.
 /// 1. **READ on every selected topic.** One DescribeTopics request with the
 ///    caller's authorized operations (KIP-430). A topic the broker REPORTS
 ///    this principal may not READ (its operations exclude READ, or it refuses
@@ -302,6 +307,17 @@ pub fn source_capabilities(
     let topics = &spec.source.topics;
     match reader.topic_read_access(topics) {
         Ok(reads) => {
+            // DUI-5: a NAMED topic the source does not hold, refused by name
+            // before the denials: a plan that cannot run at all. It used to
+            // reach the engine and fail "exited 1 (operational)" with no cause.
+            let absent: Vec<String> = reads
+                .iter()
+                .filter(|(_, r)| r.is_absent())
+                .map(|(t, _)| t.clone())
+                .collect();
+            if !absent.is_empty() {
+                return Err(GuardRefusal(absent_refusal(&absent, topics.len())).into());
+            }
             let denied: Vec<&(String, TopicRead)> =
                 reads.iter().filter(|(_, r)| r.is_denied()).collect();
             if !denied.is_empty() {
@@ -395,6 +411,37 @@ pub fn source_capabilities(
         }
     }
     Ok(())
+}
+
+/// The refusal of selected topics the source does not hold (DUI-5): "topic
+/// `x` does not exist on the source", each named (at most
+/// [`NAMED_IN_A_REFUSAL`], the rest counted), with the remedy.
+#[must_use]
+pub fn absent_refusal(absent: &[String], selected: usize) -> String {
+    let mut named: Vec<String> = absent
+        .iter()
+        .take(NAMED_IN_A_REFUSAL)
+        .map(|t| format!("`{t}`"))
+        .collect();
+    if absent.len() > NAMED_IN_A_REFUSAL {
+        named.push(format!("and {} more", absent.len() - NAMED_IN_A_REFUSAL));
+    }
+    let which = if absent.len() == 1 {
+        format!("topic {} does not exist on the source", named.join(", "))
+    } else {
+        format!(
+            "{} of {selected} selected topics do not exist on the source: {}",
+            absent.len(),
+            named.join(", ")
+        )
+    };
+    let each = if absent.len() == 1 { "it" } else { "each" };
+    format!(
+        "{which} (the broker answered UNKNOWN_TOPIC_OR_PARTITION for {each}, and this principal \
+         may Describe the cluster). Correct the topic name in the selection, or create the topic \
+         before the run. NO backup was taken: this is refused before the engine is spawned and \
+         nothing was written"
+    )
 }
 
 /// Local checks first, network second — the whole guard, in the order GC11's

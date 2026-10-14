@@ -132,7 +132,22 @@ pub(crate) fn read_topic_access_with<C: rdkafka::client::ClientContext>(
             .map_err(|e| topics_call_failure(&e))?;
         answers.extend(described.into_iter().map(topic_answer));
     }
-    Ok(crate::access::join_reads(topics, &answers))
+    // DUI-5: a name the broker does not hold is the topic's absence only for
+    // a principal DescribeCluster reports Describe on the cluster for; asked
+    // only when a name answered so. A failed DescribeCluster is "not known".
+    let describes_cluster = if crate::access::needs_cluster_describe(&answers) {
+        match cluster::describe_cluster(client, bound) {
+            Ok(d) => ClusterAccess::from_operations(d.authorized_operations).describe(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    Ok(crate::access::join_reads(
+        topics,
+        &answers,
+        describes_cluster,
+    ))
 }
 
 impl RdKafkaReader {
