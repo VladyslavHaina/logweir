@@ -80,13 +80,13 @@ export function protectedWords(p: ProtectionPolicy): { tone: "success" | "danger
   return { tone: "danger", text: "Objective not met", title };
 }
 
-/** The failure streak; an absent one is not known, never 0 (FX-38). */
 /** A last attempt's phase and reason; "Not recorded" only when it carries neither. */
 export function attemptWords(a: { phase?: string | null; reason?: string | null }): string {
   if (a.phase && a.reason) return `${a.phase} (${a.reason})`;
   return a.phase || a.reason || "Not recorded";
 }
 
+/** The failure streak; an absent one is not known, never 0 (FX-38). */
 export function failedWords(p: ProtectionPolicy): string {
   const streak = typeof p.consecutiveFailedRuns === "number" ? String(p.consecutiveFailedRuns) : "Not known";
   return `${streak} (${p.objectives.maxConsecutiveFailedRuns} allowed)`;

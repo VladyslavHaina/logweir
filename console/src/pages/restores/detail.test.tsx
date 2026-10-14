@@ -114,10 +114,11 @@ describe("the words", () => {
 
 // --------------------------------------------------------------- the page
 
-const net = vi.hoisted(() => ({ answers: new Map<string, unknown>() }));
+const net = vi.hoisted(() => ({ answers: new Map<string, unknown>(), asked: [] as string[] }));
 vi.mock("../../mock/fetch", () => ({
   mockFetch: async (request: Request) => {
     const path = new URL(request.url).pathname.replace(/^.*?\/api\/v1/, "");
+    net.asked.push(path);
     const body = net.answers.get(path);
     if (path === "/session") {
       const caps = { restoreCreate: true, operationsRead: true, restoresRead: true, backupsRead: true };
@@ -130,6 +131,7 @@ vi.mock("../../mock/fetch", () => ({
 
 function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null, extra: Record<string, unknown> = {}) {
   net.answers.clear();
+  net.asked.length = 0;
   for (const [path, body] of Object.entries(extra)) net.answers.set(path, body);
   net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
@@ -214,6 +216,41 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     await screen.findByText("Restored and verified");
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+  });
+
+  // Review L2: the bound holds on the page's reads, not only in the hook. Past
+  // VERDICT_FOLLOW_MS both polls stop and the page says the verdict is still pending.
+  it("stops reading a verdict that stays pending after two minutes, and says so", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const name = pendingRestore().name;
+      const asked = (path: string) => net.asked.filter((p) => p === path).length;
+      const item = `/namespaces/t/restores/${name}`;
+      const op = `/namespaces/t/operations/restore/${name}`;
+      showRestore(pendingRestore(), pendingOperation());
+      await screen.findByText(VERDICT_PENDING_SENTENCE);
+      // Following: both reads repeat.
+      const [item0, op0] = [asked(item), asked(op)];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(asked(item)).toBeGreaterThan(item0);
+      expect(asked(op)).toBeGreaterThan(op0);
+      // At the bound the page stops and says so.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(VERDICT_FOLLOW_MS);
+      });
+      expect(screen.getByText("The verdict is still pending")).toBeTruthy();
+      expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+      // The control: nothing reads it again on its own.
+      const [item1, op1] = [asked(item), asked(op)];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect([asked(item), asked(op)]).toEqual([item1, op1]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a verdict that is not pending is not followed (the control): Done, not verified stays what it is", async () => {
