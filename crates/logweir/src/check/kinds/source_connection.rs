@@ -112,14 +112,14 @@ pub fn run(req: &SourceConnectionRequest, wiring: &dyn Wiring, deadline: Deadlin
             );
             let authenticated = row.state == CheckState::Ready;
             checks.push(row);
-            // No topic is named, so `topics_ok` is the connection's own
-            // answer; the plan validation refuses a topic-reading row here.
+            // No topic is named, so no topics row blocks anything; the plan
+            // validation refuses a topic-reading row here.
             for row in super::readiness::capability_rows(
                 &req.capability_checks,
                 &req.connection,
                 probe.as_ref(),
                 &[],
-                (authenticated, authenticated),
+                (authenticated, None),
                 deadline,
                 now,
             ) {

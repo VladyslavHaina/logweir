@@ -317,7 +317,9 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
             let (row, _) = authenticated(auth_id, probe.as_ref(), Some(scope.clone()), now);
             let authenticated_ok = row.state == CheckState::Ready;
             push(row, &skip, &mut checks);
-            let mut topics_ok = authenticated_ok;
+            // The topics row's code when it did not pass: what the capability rows that
+            // depend on it say they were blocked by (DUI-36).
+            let mut topics_blocked = None;
             if let Some(tid) = topics_id {
                 let row = if !authenticated_ok {
                     blocked(tid, now)
@@ -327,7 +329,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 } else {
                     topics_describable(tid, probe.as_ref(), &req.topics, deadline, now)
                 };
-                topics_ok = row.state == CheckState::Ready;
+                topics_blocked = (row.state != CheckState::Ready).then_some(row.code);
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
             for row in capability_rows(
@@ -335,7 +337,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 &req.connection,
                 probe.as_ref(),
                 &req.topics,
-                (authenticated_ok, topics_ok),
+                (authenticated_ok, topics_blocked),
                 deadline,
                 now,
             ) {
@@ -394,26 +396,50 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     Emission::of(result)
 }
 
+/// Why a row about the selected topics' configuration was not attempted, from
+/// the code of the topics row that did not pass (DUI-36). A topic the source
+/// does not hold is ABSENT: saying the principal may not describe it sent an
+/// operator to grant an ACL for a topic that is not there.
+#[must_use]
+pub fn topics_blocked_sentence(code: CheckCode) -> &'static str {
+    match code {
+        CheckCode::TopicNotFound => {
+            "a selected topic does not exist on the source (TopicNotFound), so its \
+             configuration read was not attempted"
+        }
+        CheckCode::TopicNotAuthorized | CheckCode::TopicAuthorizationFailed => {
+            "a selected topic is not describable by this principal, so its configuration \
+             read was not attempted"
+        }
+        _ => {
+            "whether every selected topic exists could not be told, so no topic's \
+             configuration read was attempted"
+        }
+    }
+}
+
 /// The capability rows `listed`, in the plan's order, over one
 /// authenticated connection.
 ///
 /// ONE ApiVersions observation serves every row that reads it, and it is
 /// made only when such a row is listed. `passed` is whether the connection
-/// authenticated and whether every selected topic is describable: a
-/// capability row about a connection that did not authenticate, or about
-/// topics the principal cannot even describe, has no honest answer of its own
-/// and says which row to fix first.
+/// authenticated and, when a selected topic is not describable, the code of the
+/// topics row that said so (`None`: every one is): a capability row about a
+/// connection that did not authenticate, or about topics the principal cannot
+/// even describe, has no honest answer of its own and says which row to fix
+/// first, and why: a topic that does not exist is not one this principal may
+/// not describe (DUI-36).
 #[must_use]
 pub fn capability_rows(
     listed: &[CheckId],
     connection: &ConnectionPlan,
     probe: &dyn InventoryProbe,
     topics: &[String],
-    passed: (bool, bool),
+    passed: (bool, Option<CheckCode>),
     deadline: Deadline,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<CheckOutcome> {
-    let (authenticated_ok, topics_ok) = passed;
+    let (authenticated_ok, topics_blocked) = passed;
     if !authenticated_ok {
         return listed
             .iter()
@@ -458,15 +484,9 @@ pub fn capability_rows(
             (CheckId::ConnectionGroupTypes, Some(observed)) => {
                 Some(capability::group_types(observed, now))
             }
-            (CheckId::ConnectionTopicConfigsReadable, _) => Some(if topics_ok {
-                capability::topic_configs_readable(probe, topics, deadline, now)
-            } else {
-                capability::blocked(
-                    *id,
-                    "a selected topic is not describable by this principal, so its \
-                     configuration read was not attempted",
-                    now,
-                )
+            (CheckId::ConnectionTopicConfigsReadable, _) => Some(match topics_blocked {
+                None => capability::topic_configs_readable(probe, topics, deadline, now),
+                Some(code) => capability::blocked(*id, topics_blocked_sentence(code), now),
             }),
             // Not a capability row: the plan validation refused it already.
             _ => None,

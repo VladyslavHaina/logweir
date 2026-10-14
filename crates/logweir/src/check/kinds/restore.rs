@@ -1135,7 +1135,7 @@ fn target_checks(
         &req.target,
         probe.as_ref(),
         &[],
-        (authenticated_ok, authenticated_ok),
+        (authenticated_ok, None),
         deadline,
         now,
     ) {

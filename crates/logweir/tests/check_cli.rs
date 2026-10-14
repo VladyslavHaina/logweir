@@ -4089,7 +4089,7 @@ fn the_api_versions_observation_does_not_start_with_no_budget_left() {
         &r.connection,
         &probe,
         &[],
-        (true, true),
+        (true, None),
         logweir::check::Deadline::new(0),
         now,
     );
@@ -4117,7 +4117,7 @@ fn the_api_versions_observation_does_not_start_with_no_budget_left() {
         &r.connection,
         &probe,
         &[],
-        (true, true),
+        (true, None),
         logweir::check::Deadline::new(60),
         now,
     );
@@ -4311,6 +4311,66 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
         "{row:?}"
     );
     assert!(hidden.topic_config_calls().is_empty());
+}
+
+/// DUI-36: a selected topic the source does not hold blocks the configuration
+/// row as ABSENT. It used to say the topic "is not describable by this
+/// principal" beside a topics row reading `TopicNotFound`, which sends an
+/// operator to grant an ACL on a topic that is not there.
+///
+/// CONTROL: a topic the principal may not describe still says exactly that,
+/// and never that it does not exist.
+#[test]
+fn dui36_an_absent_topic_blocks_the_configuration_row_as_absent_not_undescribable() {
+    let m = mount(&capability_plan(
+        vec!["orders", "dui1-nosuch"],
+        vec![CheckId::ConnectionTopicConfigsReadable],
+    ));
+    let probe = |other: TopicPresence| {
+        FakeProbe::new()
+            .with_presence("orders", TopicPresence::Present { partitions: 6 })
+            .with_presence("dui1-nosuch", other)
+    };
+
+    let absent = probe(TopicPresence::NotFound);
+    let run = drive(&m, &capability_wiring(absent.clone()));
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicsDescribable).code,
+        CheckCode::TopicNotFound
+    );
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert_eq!(
+        (row.state, row.code, row.gating),
+        (
+            CheckState::Unknown,
+            CheckCode::BlockedByPrerequisite,
+            Gating::Advisory
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .starts_with("a selected topic does not exist on the source (TopicNotFound)"),
+        "{}",
+        row.message
+    );
+    assert!(!row.message.contains("describable"), "{}", row.message);
+    assert!(absent.topic_config_calls().is_empty());
+
+    // CONTROL: refused, not absent.
+    let run = drive(&m, &capability_wiring(probe(TopicPresence::NotAuthorized)));
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicsDescribable).code,
+        CheckCode::TopicNotAuthorized
+    );
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert!(
+        row.message
+            .starts_with("a selected topic is not describable by this principal"),
+        "{}",
+        row.message
+    );
+    assert!(!row.message.contains("does not exist"), "{}", row.message);
 }
 
 /// **A bootstrap that answers and advertised brokers that do not**
