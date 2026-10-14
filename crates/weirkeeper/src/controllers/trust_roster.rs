@@ -191,10 +191,22 @@ pub async fn reconcile_roster(
     roster: &TrustRoster,
     client: &kube::Client,
 ) -> Result<RosterVerdict, ReconcileError> {
+    reconcile_roster_at(roster, client, Utc::now()).await
+}
+
+/// [`reconcile_roster`] at `now`, the caller's one clock read, so a key's
+/// expiry and the condition reporting it cannot straddle two instants (FX-12,
+/// Global Constraint 1).
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn reconcile_roster_at(
+    roster: &TrustRoster,
+    client: &kube::Client,
+    now: chrono::DateTime<Utc>,
+) -> Result<RosterVerdict, ReconcileError> {
     let name = roster.name_any();
-    // One clock read, so a key's expiry and the condition reporting it cannot
-    // straddle two instants.
-    let now = Utc::now();
     let verdict = evaluate(&roster.spec, now);
     // The whole policy set: whether one displaces this roster is not answerable
     // from one object.

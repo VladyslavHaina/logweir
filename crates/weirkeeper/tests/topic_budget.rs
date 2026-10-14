@@ -257,6 +257,7 @@ fn a_backup_of_many_topics_is_verified_by_the_controller() {
             &sha256_prefixed(&receipt),
             SIDECAR_KEY,
             RECEIPT,
+            chrono::Utc::now(),
         );
         assert_eq!(
             r.result,
@@ -312,6 +313,7 @@ fn a_backup_of_many_topics_is_verified_by_the_controller() {
             &sha256_prefixed(&tampered),
             SIDECAR_KEY,
             RECEIPT,
+            chrono::Utc::now(),
         );
         assert_eq!(r.result, VerificationVerdict::Invalid, "{label}: {r:?}");
     }
@@ -358,6 +360,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
         &digest,
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::Valid, "{:?}", r.detail);
     assert_eq!(r.matched_key_id.as_deref(), Some(FIXTURE_KEY_ID));
@@ -392,6 +395,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
         &digest,
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(
         via_relay.result,
@@ -418,6 +422,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
             &digest,
             SIDECAR_KEY,
             SCORECARD,
+            chrono::Utc::now(),
         );
         assert_eq!(old.result, VerificationVerdict::NotAttempted, "{old:?}");
         assert!(
@@ -447,6 +452,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
         &sha256_prefixed(&tampered),
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::Invalid, "{r:?}");
 }
@@ -473,6 +479,7 @@ fn a_receipt_over_the_bound_is_not_attempted_naming_the_receipt_cap() {
         &sha256_prefixed(&receipt),
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
     let detail = r.detail.clone().expect("a refusal carries its sentence");
@@ -523,6 +530,7 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
         &digest,
         SIDECAR_KEY,
         SCORECARD,
+        chrono::Utc::now(),
     );
     assert_eq!(as_scorecard.result, VerificationVerdict::NotAttempted);
     let detail = as_scorecard.detail.expect("a sentence");
@@ -535,6 +543,7 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
         &digest,
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(
         as_receipt.result,
@@ -551,6 +560,7 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
         &digest,
         SIDECAR_KEY,
         SCORECARD,
+        chrono::Utc::now(),
     );
     assert_eq!(as_scorecard.result, VerificationVerdict::NotAttempted);
     let detail = as_scorecard.detail.expect("a sentence");
@@ -571,6 +581,7 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
         "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
     assert!(names(
@@ -588,6 +599,7 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
         &sha256_prefixed(&receipt),
         SIDECAR_KEY,
         RECEIPT,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
     let detail = r.detail.expect("a sentence");
@@ -983,6 +995,7 @@ fn one_relay(root: &Path, kind: &'static str, as_value: bool) {
         &digest,
         SIDECAR_KEY,
         kind,
+        chrono::Utc::now(),
     );
     assert_eq!(r.result, VerificationVerdict::Valid, "{r:?}");
     let facts = ReceiptFacts::fold(&payload).expect("the receipt folds");
@@ -1004,6 +1017,7 @@ fn run_child(mode: &str, root: &Path) {
                 &digest,
                 SIDECAR_KEY,
                 RECEIPT,
+                chrono::Utc::now(),
             );
             assert_eq!(r.result, VerificationVerdict::Valid, "{r:?}");
             let o = observe_archive(&store, &keys()).expect("an observation");

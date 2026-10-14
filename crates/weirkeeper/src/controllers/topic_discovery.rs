@@ -1075,6 +1075,21 @@ pub async fn reconcile_discovery(
     discovery: &TopicDiscovery,
     ctx: &DiscoveryContext,
 ) -> Result<Outcome, ReconcileError> {
+    reconcile_discovery_at(discovery, ctx, Utc::now()).await
+}
+
+/// [`reconcile_discovery`] at `now`, the caller's one clock read for the
+/// whole pass, so a verdict and the condition that reports it cannot straddle
+/// two instants (FX-12, Global Constraint 1).
+///
+/// # Errors
+///
+/// As [`reconcile_discovery`].
+pub async fn reconcile_discovery_at(
+    discovery: &TopicDiscovery,
+    ctx: &DiscoveryContext,
+    now: chrono::DateTime<Utc>,
+) -> Result<Outcome, ReconcileError> {
     let name = discovery.name_any();
     let namespace = discovery
         .namespace()
@@ -1084,10 +1099,6 @@ pub async fn reconcile_discovery(
         .uid()
         .filter(|u| !u.is_empty())
         .ok_or_else(|| ReconcileError::NoUid(name.clone()))?;
-
-    // One clock read for the whole pass, so a verdict and the condition that
-    // reports it cannot straddle two instants.
-    let now = Utc::now();
 
     // STEP 1. Terminal is done.
     let phase = discovery

@@ -1699,7 +1699,7 @@ async fn evidence_fetch_pass(
                                 payload_type,
                             };
                             let result = crate::verification::verify_relayed(
-                                client, &reference, &payload, &sidecar,
+                                client, &reference, &payload, &sidecar, now,
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
@@ -1895,11 +1895,14 @@ async fn read_verdict(
     reference: EvidenceRef,
     verify: VerifyOracle<'_>,
     client: &kube::Client,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     match source {
         EvidenceSource::Destination(store) => {
-            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
-                .await
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone(), now)(
+                reference,
+            )
+            .await
         }
         _ => verify(reference).await,
     }
@@ -2115,6 +2118,7 @@ async fn controller_read_pass(
                 },
                 reads.verify,
                 client,
+                now,
             )
             .await
         }
@@ -5159,7 +5163,7 @@ async fn reconcile_backup_inner(
             (
                 source @ (EvidenceSource::GlobalHandle | EvidenceSource::Destination(_)),
                 Some(reference),
-            ) => Some(read_verdict(source, reference, verify, client).await),
+            ) => Some(read_verdict(source, reference, verify, client, now).await),
             // GC11's no-artifact case, and a fetch that returned no digest: no
             // document, no opinion, no block.
             _ => None,
@@ -5409,7 +5413,7 @@ pub async fn reconcile_in_context_pooled(
                 .flatten()
         })
     };
-    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
+    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone(), now);
     // The handle's own location, read beside the handle; see
     // `reconcile_backup_at`.
     let archive_url =

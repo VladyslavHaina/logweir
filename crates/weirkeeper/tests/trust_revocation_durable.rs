@@ -426,13 +426,28 @@ fn roster_object(spec: &TrustRosterSpec) -> String {
     .to_string()
 }
 
-/// Run one reconcile of `p` over a cluster holding `all` and `roster`, and
-/// return every body the reconciler sent.
+/// Run one reconcile of `p` over a cluster holding `all` and `roster`, at the
+/// fixture's [`now`], and return every body the reconciler sent.
 async fn reconcile(
     p: &TrustPolicy,
     all: &[TrustPolicy],
     roster: Option<&TrustRosterSpec>,
 ) -> (Result<(), String>, Vec<SeenBody>) {
+    let (outcome, seen) = reconcile_at(p, all, roster, now()).await;
+    (outcome.map(|_| ()), seen)
+}
+
+/// [`reconcile`] at `instant`, returning the verdict (FX-12: the pass is
+/// judged at the instant handed in, never at the wall clock).
+async fn reconcile_at(
+    p: &TrustPolicy,
+    all: &[TrustPolicy],
+    roster: Option<&TrustRosterSpec>,
+    instant: DateTime<Utc>,
+) -> (
+    Result<weirkeeper::controllers::trust_policy::PolicyVerdict, String>,
+    Vec<SeenBody>,
+) {
     let object = serde_json::to_string(p).expect("serialises");
     let list = json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList",
                       "metadata": {"resourceVersion": "1"}, "items": all})
@@ -480,12 +495,29 @@ async fn reconcile(
         }),
     }
     let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
-    let outcome = trust_policy::reconcile_policy(p, &client)
+    let outcome = trust_policy::reconcile_policy_at(p, &client, instant)
         .await
-        .map(|_| ())
         .map_err(|e| e.to_string());
     let seen = bodies.lock().expect("bodies").clone();
     (outcome, seen)
+}
+
+/// **FX-12: a policy's keys are judged at the instant the pass hands in.**
+/// The fixture key is open until 2027-06-01: `Active` judged at the fixture's
+/// instant, `Expired` judged at 2027-07-01, whatever the wall clock says. A
+/// reconcile that read its own clock would answer the same twice.
+///
+/// KILLS: `reconcile_policy_at` evaluating at `Utc::now()`.
+#[tokio::test]
+async fn a_policy_is_judged_at_the_instant_it_is_handed() {
+    let p = policy("incident", &["team-a"], vec![active(SIGNER, SIGNER_PEM)]);
+    let mut states = Vec::new();
+    for instant in [now(), at("2027-07-01T00:00:00Z")] {
+        let (verdict, _) = reconcile_at(&p, std::slice::from_ref(&p), None, instant).await;
+        let verdict = verdict.expect("a verdict");
+        states.push(verdict.keys[0].effective_state.clone());
+    }
+    assert_eq!(states, ["Active", "Expired"]);
 }
 
 /// The PATCHes sent to the policy OBJECT (not `/status`).
