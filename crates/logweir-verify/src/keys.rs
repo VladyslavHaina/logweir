@@ -45,7 +45,19 @@ impl VerifyingKey {
     /// blockers, for free — the other, an unconditional
     /// `rand_core` + `getrandom`, is exactly what this crate's manifest does
     /// not declare. The WASM verifier itself stays out of tag 1.
+    ///
+    /// **One `PUBLIC KEY` block, then nothing but whitespace** (the PoC's
+    /// L1): an editor's or a `kubectl` copy's extra trailing newline is
+    /// accepted, as `docs/verify_scorecard.py` accepts it, and RFC 7468's
+    /// explanatory text before the block is ignored by both; text after the
+    /// block is refused by both (`scripts/check-verifier-parity.sh`'s key-file
+    /// loop).
     pub fn from_pem_str(pem: &str) -> Result<Self, Error> {
+        let pem = format!(
+            "{}\n",
+            pem.trim_end_matches(|c: char| c.is_ascii_whitespace())
+        );
+        let pem = pem.as_str();
         if let Ok(k) = p256::ecdsa::VerifyingKey::from_public_key_pem(pem) {
             return Ok(VerifyingKey::P256(k));
         }

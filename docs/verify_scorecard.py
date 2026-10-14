@@ -635,7 +635,12 @@ FORMAT_VERSION = "1.4.0"
 # before `redactions`), `--positions-mapping <file>` (arms PMD-1 to PMD-7,
 # `check_positions_mapping_document`), and the switchover record's payload
 # type, verified signature-only like the teardown attestation.
-SCRIPT_VERSION = "1.33.0"
+#
+# 1.34.0 (L1, theme A's PoC) takes the public key file as the Rust reader
+# does: one `PUBLIC KEY` block, then nothing but whitespace. A trailing blank
+# line stays accepted, and so does RFC 7468's explanatory text before the
+# block; text after it is refused.
+SCRIPT_VERSION = "1.34.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -6021,8 +6026,23 @@ def main(
     except OSError as e:
         print(f"INVALID: cannot read public key {pubkey_path!r}: {e}", file=sys.stderr)
         return 1
+    # 1.34.0 (L1): ONE `PUBLIC KEY` block, then nothing but whitespace, as the
+    # Rust reader takes it (RFC 7468's explanatory text BEFORE the block is
+    # ignored by both). `load_pem_public_key` alone would also skip text after
+    # the block, which `logweir drill verify` refuses.
+    pem_text = pubkey_bytes.rstrip(b" \t\r\n\v\f")
+    if (
+        not pem_text.endswith(b"-----END PUBLIC KEY-----")
+        or pem_text.count(b"-----BEGIN") != 1
+    ):
+        print(
+            f"INVALID: {pubkey_path!r} is not one PEM public key block followed only by "
+            "whitespace (-----BEGIN PUBLIC KEY----- ... -----END PUBLIC KEY-----)",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        public_key = serialization.load_pem_public_key(pubkey_bytes)
+        public_key = serialization.load_pem_public_key(pem_text + b"\n")
     except ValueError as e:
         print(f"INVALID: {pubkey_path!r} is not a valid PEM public key: {e}", file=sys.stderr)
         return 1
