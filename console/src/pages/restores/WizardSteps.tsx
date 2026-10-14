@@ -645,7 +645,13 @@ export function TargetStep({
         control={control}
         name="topicConfiguration"
         render={({ field }) => (
-          <TopicConfigurationChoice value={field.value} onChange={field.onChange} target={connection?.name ?? "the target"} ownersAsked={ownersAsked} />
+          <TopicConfigurationChoice
+            value={field.value}
+            onChange={field.onChange}
+            target={connection?.name ?? "the target"}
+            ownersAsked={ownersAsked}
+            error={err(errors, "topicConfiguration")}
+          />
         )}
       />
       <Controller

@@ -44,6 +44,7 @@ import {
   BROKERS_NOT_READ,
   defaultPrefixFor,
   endInstant,
+  ownersLooked,
   planFields,
   policyRefusal,
   readinessRefusal,
@@ -420,7 +421,13 @@ function WizardBody({
   // Theme A: the check's per-topic configuration preview, read once it is done.
   const tcChosen = values.topicConfiguration?.transition != null;
   const tcDetails = usePreflightDetails(ns, tcChosen && readiness.result ? readiness.result : undefined, TOPIC_CONFIGURATION_CHECK);
-  const ownersAsked = tcChosen && (topicPreviewLines(tcDetails.data ?? []).refusal ?? "").includes("TopicOwnerNotChecked");
+  // DUI-17: the preview's own refusal is the plan's, so it holds Next as a stale verdict does.
+  const tcRefusal = tcChosen ? (topicPreviewLines(tcDetails.data ?? []).refusal ?? null) : null;
+  // The owners are asked whenever the point's backup did not look for them, before any check.
+  const ownersAsked = tcChosen && (!point || !ownersLooked(point) || (tcRefusal ?? "").includes("TopicOwnerNotChecked"));
+  const stepRefusal =
+    checkRefusal ??
+    (tcRefusal ? `The topic configuration preview refuses this plan: ${tcRefusal} Go back to Target and change the topic configuration, then check again.` : null);
   const topicPreview = tcChosen && tcDetails.data ? <TopicConfigurationPreview entries={tcDetails.data} /> : undefined;
 
   // ------------------------------------------------------------ the submit
@@ -450,6 +457,7 @@ function WizardBody({
         setReadiness((r) => ({ ...r, result: fresh.stale || !r.result?.stale ? fresh : r.result }));
         const again = movedUnder ?? readinessRefusal(fresh, readiness.boundHash, reviewed.hash);
         if (again) throw new LocalRefusal(`Nothing was sent: ${again}`);
+        if (tcRefusal) throw new LocalRefusal(`Nothing was sent: the topic configuration preview refuses this plan: ${tcRefusal}`);
       } else if (canCheck) {
         throw new LocalRefusal("Nothing was sent: run the readiness check for this plan first.");
       }
@@ -501,7 +509,7 @@ function WizardBody({
         footer={
           <Footer
             validate={async (id) => (id === "point" ? !!point && !resolved?.destinationProblem && (await form.trigger(STEP_FIELDS(id))) : form.trigger(STEP_FIELDS(id)))}
-            nextBlocked={(id) => (id === "point" ? !point || !!resolved?.destinationProblem : id === "check" ? canCheck && checkRefusal !== null : false)}
+            nextBlocked={(id) => (id === "point" ? !point || !!resolved?.destinationProblem : id === "check" ? canCheck && stepRefusal !== null : false)}
             onCreate={() => void submit()}
             creating={submitting}
             createBlocked={!current || policyRefusal(policy) !== null}
@@ -554,7 +562,7 @@ function WizardBody({
           )}
         </WizardStep>
         <WizardStep name="Readiness check" id="check" isDisabled={!point}>
-          <CheckStep readiness={readiness} refusal={checkRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} topicPreview={topicPreview} />
+          <CheckStep readiness={readiness} refusal={stepRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} topicPreview={topicPreview} />
         </WizardStep>
         <WizardStep name="Review and create" id="review" isDisabled={!point}>
           {point && fields && replication && (

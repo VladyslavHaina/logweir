@@ -13,7 +13,8 @@ from is recorded in that file's history (`git log --follow console/fixtures/READ
   `plan*.golden.yaml` what it renders. `src/pages/restores/plan.test.ts` holds the renderer to
   the goldens byte for byte; `crates/logweir/tests/console_plan.rs` deserialises each golden
   into the runner's `RestoreSpec`. `plan-clone.golden.yaml` is theme A's clone, which a runner
-  from before theme A refuses.
+  from before theme A refuses; `plan-owners.golden.yaml` states the topics' declarative owners
+  for the source's topic configuration.
 - `legacy-console.json` records what the retired console produced for the inputs the new
   console's differential rows used, so those rows still compare the two.
 
