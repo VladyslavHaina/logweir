@@ -113,26 +113,88 @@ fn evidence_store(spec: &logweir_core::spec::DrillSpec, contract: bool) -> Resul
     }
 }
 
-/// One capped read of an evidence object, by key: the bytes, or why not in
-/// words. A closure, so `switchover run` reads its `Store` and the
-/// `switchoverReadiness` check its read-only evidence handle.
-pub type EvidenceRead<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
+/// One capped read of an evidence object, by key. A closure, so `switchover
+/// run` reads its `Store` and the `switchoverReadiness` check its read-only
+/// evidence handle.
+pub type EvidenceRead<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, StoreError> + 'a;
+
+/// A failed evidence read, in words.
+fn read_failure(key: &str, e: &StoreError) -> String {
+    match e {
+        StoreError::NotFound(_) => format!("{key} is not in the evidence store"),
+        other => format!("{key} could not be read: {other}"),
+    }
+}
+
+/// **FX-36: one answer for a bound document that is absent, has other bytes
+/// or is over its read cap** (FX-14's rule): the evidence store does not hold
+/// the bytes the plan or the signed scorecard binds, and which of the three it
+/// was is not said.
+fn not_held(key: &str, sha256: &str, cap: u64) -> String {
+    format!(
+        "the evidence store does not hold the document bound at {key}: it is absent, its bytes \
+         do not hash to {sha256}, or it is over the {cap}-byte read cap"
+    )
+}
+
+/// Why [`bound_read`] has no bytes: the store does not hold the bound ones
+/// ([`not_held`], one answer), or it did not answer.
+enum BoundRead {
+    NotHeld(String),
+    Failed(String),
+}
+
+impl BoundRead {
+    fn into_message(self) -> String {
+        match self {
+            Self::NotHeld(m) | Self::Failed(m) => m,
+        }
+    }
+}
+
+/// One capped read of a document a digest binds: its bytes when they hash to
+/// `sha256`; [`BoundRead::NotHeld`] when it is absent, other bytes or over
+/// `cap`; [`BoundRead::Failed`] when the store did not answer.
+fn bound_read(
+    read: &EvidenceRead<'_>,
+    key: &str,
+    sha256: &str,
+    cap: u64,
+) -> Result<Vec<u8>, BoundRead> {
+    match read(key, cap) {
+        Ok(bytes) if logweir_core::ids::sha256_prefixed(&bytes) == sha256 => Ok(bytes),
+        Ok(_) | Err(StoreError::NotFound(_) | StoreError::TooLarge { .. }) => {
+            Err(BoundRead::NotHeld(not_held(key, sha256, cap)))
+        }
+        Err(e) => Err(BoundRead::Failed(read_failure(key, &e))),
+    }
+}
 
 /// The document at `key` and its sidecar, verified under `keyring` for
 /// `payload_type` and judged for `EvidenceSigning` by the installation's
-/// trust.
+/// trust AT `now` (FX-12: the caller's one clock read, never a second).
+/// `bound`: the digest a plan binds the document to, held before the
+/// signature is read ([`bound_read`]).
 fn verified_evidence(
     read: &EvidenceRead<'_>,
     key: &str,
     sidecar_key: &str,
     payload_type: &str,
     keyring: &logweir_core::execution_contract::EvidenceKeyring,
+    bound: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<u8>, String> {
     use logweir_core::trust::{decide, EvidenceClaim, IndependentObservation, KeyUsage};
-    let bytes = read(key, caps::SIGNED_DOCUMENT)?;
-    let sidecar: logweir_evidence::Sidecar =
-        serde_json::from_slice(&read(sidecar_key, caps::SIDECAR)?)
-            .map_err(|e| format!("{sidecar_key} is not a DSSE sidecar: {e}"))?;
+    let bytes = match bound {
+        Some(sha256) => {
+            bound_read(read, key, sha256, caps::SIGNED_DOCUMENT).map_err(BoundRead::into_message)?
+        }
+        None => read(key, caps::SIGNED_DOCUMENT).map_err(|e| read_failure(key, &e))?,
+    };
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(
+        &read(sidecar_key, caps::SIDECAR).map_err(|e| read_failure(sidecar_key, &e))?,
+    )
+    .map_err(|e| format!("{sidecar_key} is not a DSSE sidecar: {e}"))?;
     let key_found = keyring.keys.iter().find(|k| {
         logweir_evidence::keys::VerifyingKey::from_pem_str(&k.public_key_pem)
             .ok()
@@ -154,7 +216,7 @@ fn verified_evidence(
         KeyUsage::EvidenceSigning,
         &EvidenceClaim::from_document(payload_type, &json),
         &IndependentObservation::none(),
-        chrono::Utc::now(),
+        now,
     );
     if !verdict.may_render_green() {
         return Err(format!(
@@ -165,13 +227,9 @@ fn verified_evidence(
     Ok(bytes)
 }
 
-/// One capped read from the evidence store, its failure in words.
-fn store_read(store: &Store, key: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-    match store.get_capped(key, max_bytes) {
-        Ok((bytes, _)) => Ok(bytes),
-        Err(StoreError::NotFound(_)) => Err(format!("{key} is not in the evidence store")),
-        Err(e) => Err(format!("{key} could not be read: {e}")),
-    }
+/// One capped read from the evidence store.
+fn store_read(store: &Store, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    store.get_capped(key, max_bytes).map(|(bytes, _)| bytes)
 }
 
 /// What step 3 verified: the restore's signed scorecard and the positions
@@ -193,7 +251,15 @@ pub struct RestoreEvidence {
 /// `approval.plan_hash` (`restore_plan_hash`), a complete verification, the
 /// mapping block, and the mapping document by its digest and its arms.
 /// `bound` is a plan's `(scorecard_sha256, mapping_sha256)`, held as soon as
-/// each is known; the review has none.
+/// each is known; the review has none. The trust is judged at `now`, the
+/// caller's one clock read (FX-12).
+///
+/// **Every key is confined before it is read (FX-36).** `scorecard_key` must
+/// be a drill scorecard's (`logweir/drills/<run id>.json`), its sidecar is
+/// derived from it, and the mapping document is read only at the key beside
+/// that scorecard's run (arm PM-4 of the scorecard's invariants). A document a
+/// digest binds that is absent, has other bytes or is over its cap gets one
+/// answer ([`not_held`]).
 ///
 /// # Errors
 ///
@@ -205,31 +271,29 @@ pub fn restore_evidence(
     scorecard_key: &str,
     restore_plan_hash: &str,
     bound: Option<(&str, &str)>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RestoreEvidence, String> {
-    let sidecar_key = scorecard_key
-        .strip_suffix(".json")
-        .map(|stem| format!("{stem}.sig"))
-        .unwrap_or_else(|| format!("{scorecard_key}.sig"));
+    let Some(run_id) = logweir_core::ids::scorecard_run_id(scorecard_key) else {
+        return Err(refusal(
+            so::MAPPING_DIGEST_MISMATCH,
+            format!(
+                "the restore's scorecard key {scorecard_key:?} is not a scorecard key \
+                 (logweir/drills/<run id>.json); nothing was read"
+            ),
+        ));
+    };
+    let sidecar_key = format!("logweir/drills/{run_id}.sig");
     let sc_bytes = verified_evidence(
         read,
         scorecard_key,
         &sidecar_key,
         logweir_evidence::PAYLOAD_TYPE_SCORECARD,
         keyring,
+        bound.map(|(scorecard_sha256, _)| scorecard_sha256),
+        now,
     )
     .map_err(|e| refusal(so::MAPPING_DIGEST_MISMATCH, e))?;
     let sc_digest = logweir_core::ids::sha256_prefixed(&sc_bytes);
-    if let Some((scorecard_sha256, _)) = bound {
-        if sc_digest != scorecard_sha256 {
-            return Err(refusal(
-                so::MAPPING_DIGEST_MISMATCH,
-                format!(
-                    "the restore's scorecard hashes to {sc_digest}, and the plan binds \
-                     {scorecard_sha256}"
-                ),
-            ));
-        }
-    }
     let scorecard: Scorecard = serde_json::from_slice(&sc_bytes).map_err(|e| {
         refusal(
             so::MAPPING_DIGEST_MISMATCH,
@@ -272,8 +336,18 @@ pub fn restore_evidence(
             ));
         }
     }
-    let mapping_bytes = read(&document.key, pm::MAX_DOCUMENT_BYTES)
-        .map_err(|e| refusal(so::NO_POSITIONS_MAPPING, e))?;
+    // The key is the one beside this scorecard's run: arm PM-4, held by
+    // `validate_invariants` above, before anything reads it (FX-36).
+    let mapping_bytes = match bound_read(
+        read,
+        &document.key,
+        &document.sha256,
+        pm::MAX_DOCUMENT_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(BoundRead::NotHeld(why)) => return Err(refusal(so::MAPPING_DIGEST_MISMATCH, why)),
+        Err(BoundRead::Failed(why)) => return Err(refusal(so::NO_POSITIONS_MAPPING, why)),
+    };
     let mapping: MappingDocument = serde_json::from_slice(&mapping_bytes).map_err(|e| {
         refusal(
             so::MAPPING_DIGEST_MISMATCH,
@@ -445,13 +519,15 @@ fn verify_approval(args: &RunArgs, plan_bytes: &[u8]) -> Result<so::ApprovalSumm
     })
 }
 
-/// Steps 1 to 4: everything that is read before the target is dialled.
+/// Steps 1 to 4: everything that is read before the target is dialled,
+/// with the evidence's trust judged at `now` (the run's one clock read).
 fn verify_inputs(
     args: &RunArgs,
     store: &Store,
     keyring: &logweir_core::execution_contract::EvidenceKeyring,
     plan_bytes: &[u8],
     restore_text: &str,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Verified, Refused> {
     let plan = SwitchoverPlan::parse(plan_bytes).map_err(Refused)?;
     let restore_hash = logweir_core::ids::sha256_prefixed(restore_text.as_bytes());
@@ -484,6 +560,7 @@ fn verify_inputs(
         &args.scorecard_key,
         &plan.restore.plan_hash,
         Some((&plan.restore.scorecard_sha256, &plan.restore.mapping_sha256)),
+        now,
     )
     .map_err(Refused)?;
 
@@ -492,25 +569,24 @@ fn verify_inputs(
         None => so::check_against_mapping(&plan, &mapping)
             .map_err(|e| Refused(refusal(so::PLAN_DISAGREES_WITH_MAPPING, e)))?,
         Some(r) => {
-            let sidecar = r
-                .key
-                .strip_suffix(".record.json")
-                .map(|s| format!("{s}.record.sig"))
-                .unwrap_or_default();
+            // `SwitchoverPlan::parse` held the key to `record_key(<run id>)`
+            // (FX-36); the sidecar is the record's own.
+            let Some(record_run) = so::record_run_id(&r.key) else {
+                return Err(Refused(refusal(
+                    so::PLAN_INVALID,
+                    "rollback_of.key is not a switchover record key; nothing was read",
+                )));
+            };
             let bytes = verified_evidence(
                 &read,
                 &r.key,
-                &sidecar,
+                &so::record_sidecar_key(record_run),
                 logweir_evidence::PAYLOAD_TYPE_SWITCHOVER_RECORD,
                 keyring,
+                Some(&r.sha256),
+                now,
             )
             .map_err(|e| Refused(refusal(so::PLAN_DISAGREES_WITH_MAPPING, e)))?;
-            if logweir_core::ids::sha256_prefixed(&bytes) != r.sha256 {
-                return Err(Refused(refusal(
-                    so::PLAN_DISAGREES_WITH_MAPPING,
-                    "the record the rollback plan names is not the bytes it binds",
-                )));
-            }
             let record: SwitchoverRecord = serde_json::from_slice(&bytes).map_err(|e| {
                 Refused(refusal(
                     so::PLAN_DISAGREES_WITH_MAPPING,
@@ -860,7 +936,14 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
     };
 
     let outcome: Result<(), Refused> = (|| {
-        let v = verify_inputs(args, &store, &keyring, &plan_bytes, &restore_text)?;
+        let v = verify_inputs(
+            args,
+            &store,
+            &keyring,
+            &plan_bytes,
+            &restore_text,
+            started_at,
+        )?;
         record.approval = v.approval.clone();
         let reader = target_reader(&v.restore_spec).map_err(|e| {
             Refused(refusal(
@@ -1075,4 +1158,274 @@ pub fn rollback_plan(args: &RollbackPlanArgs) -> Result<String, String> {
     let (plan, notes) = so::rollback_plan(&record, rref)?;
     write_plan(&plan, &args.out)?;
     Ok(summary(&plan, &notes, &args.out))
+}
+
+#[cfg(test)]
+mod tests {
+    //! FX-36's and FX-12's rows for step 3, the restore's evidence, read
+    //! through a double that records every key it is asked for.
+    use super::*;
+    use logweir_core::execution_contract::{EvidenceKey, EvidenceKeyring};
+    use logweir_core::trust::{KeyState, KeyUsage, TrustedKey};
+    use logweir_evidence::keys::SigningKey;
+    use std::cell::RefCell;
+
+    const SCORECARD: &str =
+        include_str!("../../../../e2e/fixtures/invariants/positions_mapping_accepted.json");
+    const PM4: &str = include_str!(
+        "../../../../e2e/fixtures/invariants/positions_mapping_pm4_another_runs_key.json"
+    );
+    const MAPPING: &[u8] = include_bytes!(
+        "../../../../e2e/fixtures/invariants/positions_mapping_accepted.mapping.json"
+    );
+    const RUN: &str = "01J9X2QK7C4V0R8YB3ZP6MTS5A";
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .expect("an instant")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// After the fixture's signing time; the key's window is 2000 to 2999.
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        at("2026-10-01T00:00:00Z")
+    }
+
+    /// An evidence store in memory, every read recorded, and the keyring
+    /// that trusts the key its scorecard is signed with.
+    struct Evidence {
+        objects: BTreeMap<String, Vec<u8>>,
+        /// Keys answered `TooLarge`.
+        oversized: Vec<String>,
+        reads: RefCell<Vec<String>>,
+        keyring: EvidenceKeyring,
+        plan_hash: String,
+    }
+
+    impl Evidence {
+        /// `scorecard` signed at `logweir/drills/<RUN>.json`, and the
+        /// mapping beside it.
+        fn of(scorecard: &str) -> Self {
+            let signer = SigningKey::generate_ed25519();
+            let bytes = scorecard.as_bytes().to_vec();
+            let sidecar = logweir_evidence::sign::sign_detached(
+                &signer,
+                logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+                &bytes,
+            )
+            .expect("sign");
+            let doc: serde_json::Value = serde_json::from_str(scorecard).expect("json");
+            let objects = BTreeMap::from([
+                (format!("logweir/drills/{RUN}.json"), bytes),
+                (
+                    format!("logweir/drills/{RUN}.sig"),
+                    serde_json::to_vec(&sidecar).expect("serialises"),
+                ),
+                (pm::document_key(RUN), MAPPING.to_vec()),
+            ]);
+            Self {
+                objects,
+                oversized: Vec::new(),
+                reads: RefCell::new(Vec::new()),
+                keyring: EvidenceKeyring {
+                    format_version:
+                        logweir_core::execution_contract::EVIDENCE_KEYRING_FORMAT_VERSION.into(),
+                    keys: vec![EvidenceKey {
+                        public_key_pem: signer.verifying_key().to_public_key_pem().expect("pem"),
+                        trust: TrustedKey {
+                            key_id: signer.key_id(),
+                            principal_id: format!("install:{}", signer.key_id()),
+                            usages: vec![KeyUsage::EvidenceSigning],
+                            not_before: at("2000-01-01T00:00:00Z"),
+                            not_after: at("2999-01-01T00:00:00Z"),
+                            state: KeyState::Active,
+                            retired_at: None,
+                            revoked_at: None,
+                            revocation_reason: None,
+                            revocation_effective_from: None,
+                        },
+                    }],
+                },
+                plan_hash: doc["approval"]["plan_hash"]
+                    .as_str()
+                    .expect("a plan hash")
+                    .into(),
+            }
+        }
+
+        fn read(&self, key: &str, cap: u64) -> Result<Vec<u8>, StoreError> {
+            self.reads.borrow_mut().push(key.to_string());
+            if self.oversized.iter().any(|k| k == key) {
+                return Err(StoreError::TooLarge {
+                    key: key.into(),
+                    cap,
+                    observed: logweir_engine_oso::storage::OverCap::Reported(cap + 1),
+                });
+            }
+            self.objects
+                .get(key)
+                .cloned()
+                .ok_or_else(|| StoreError::NotFound(key.into()))
+        }
+
+        fn evidence(
+            &self,
+            scorecard_key: &str,
+            bound: Option<(&str, &str)>,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<RestoreEvidence, String> {
+            let read = |k: &str, cap: u64| self.read(k, cap);
+            restore_evidence(
+                &read,
+                &self.keyring,
+                scorecard_key,
+                &self.plan_hash,
+                bound,
+                now,
+            )
+        }
+
+        fn taken(&self) -> Vec<String> {
+            std::mem::take(&mut *self.reads.borrow_mut())
+        }
+    }
+
+    fn scorecard_key() -> String {
+        format!("logweir/drills/{RUN}.json")
+    }
+
+    /// The CONTROL every row below departs from: the fixture's scorecard and
+    /// mapping verify, through exactly three reads.
+    #[test]
+    fn the_restores_evidence_is_read_at_its_own_three_keys() {
+        let e = Evidence::of(SCORECARD);
+        let ev = e
+            .evidence(&scorecard_key(), None, now())
+            .expect("it verifies");
+        assert_eq!(
+            ev.mapping_sha256,
+            logweir_core::ids::sha256_prefixed(MAPPING)
+        );
+        assert_eq!(
+            e.taken(),
+            [
+                scorecard_key(),
+                format!("logweir/drills/{RUN}.sig"),
+                pm::document_key(RUN)
+            ]
+        );
+    }
+
+    /// **FX-36: the scorecard key is a drill scorecard's, or nothing is
+    /// read.** The key comes from the restore's status, and every object of
+    /// the restore's evidence is read from it; a key of another kind, another
+    /// prefix or a relative path is refused before any read.
+    ///
+    /// KILLS: the `scorecard_run_id` check removed (each key is read).
+    #[test]
+    fn a_scorecard_key_that_is_not_a_drill_scorecard_reads_nothing() {
+        let e = Evidence::of(SCORECARD);
+        for key in [
+            format!("logweir/drills/{RUN}.offsets.json"),
+            format!("logweir/drills/{RUN}.positions-mapping.json"),
+            format!("tenant-b/logweir/drills/{RUN}.json"),
+            format!("/logweir/drills/{RUN}.json"),
+            "logweir/drills/../backups/nightly-7/run-1.receipt.json".to_string(),
+            "logweir/backups/nightly-7/run-1.receipt.json".to_string(),
+            "logweir/drills/.json".to_string(),
+        ] {
+            let why = e.evidence(&key, None, now()).expect_err(&key);
+            assert!(
+                why.starts_with(so::MAPPING_DIGEST_MISMATCH) && why.contains("nothing was read"),
+                "{key}: {why}"
+            );
+            assert!(e.taken().is_empty(), "{key}");
+        }
+    }
+
+    /// **FX-36: the mapping is read only beside its scorecard's run.** A
+    /// signed scorecard whose block names ANOTHER run's mapping is refused by
+    /// arm PM-4 before the mapping is read.
+    ///
+    /// KILLS: the invariants checked after the mapping read (the named key is
+    /// read).
+    #[test]
+    fn a_mapping_not_beside_its_scorecards_run_is_not_read() {
+        let e = Evidence::of(PM4);
+        let why = e.evidence(&scorecard_key(), None, now()).expect_err("PM-4");
+        assert!(why.starts_with(so::MAPPING_DIGEST_MISMATCH), "{why}");
+        assert_eq!(
+            e.taken(),
+            [scorecard_key(), format!("logweir/drills/{RUN}.sig")]
+        );
+    }
+
+    /// **FX-36: one answer for a bound document that is absent, has other
+    /// bytes or is over its cap**, for the mapping the scorecard binds and for
+    /// the scorecard a plan binds. The plan's scorecard digest is held before
+    /// the sidecar is read.
+    ///
+    /// KILLS: absent answered `NoPositionsMapping` again (the message
+    /// differs); the plan's digest held after the signature (the sidecar is
+    /// read); `TooLarge` reaching the store-failure arm.
+    #[test]
+    fn a_bound_document_absent_altered_or_oversized_gets_one_answer() {
+        let mapping_key = pm::document_key(RUN);
+        let mut answers = Vec::new();
+        for case in ["absent", "altered", "oversized"] {
+            let mut e = Evidence::of(SCORECARD);
+            match case {
+                "absent" => {
+                    e.objects.remove(&mapping_key);
+                }
+                "altered" => {
+                    e.objects.insert(mapping_key.clone(), b"{}".to_vec());
+                }
+                _ => e.oversized.push(mapping_key.clone()),
+            }
+            let why = e.evidence(&scorecard_key(), None, now()).expect_err(case);
+            assert!(
+                why.starts_with(so::MAPPING_DIGEST_MISMATCH),
+                "{case}: {why}"
+            );
+            answers.push(why);
+        }
+        assert!(answers.windows(2).all(|w| w[0] == w[1]), "{answers:#?}");
+
+        let e = Evidence::of(SCORECARD);
+        let other = format!("sha256:{}", "0".repeat(64));
+        let mapping = logweir_core::ids::sha256_prefixed(MAPPING);
+        let altered = e
+            .evidence(&scorecard_key(), Some((&other, &mapping)), now())
+            .expect_err("not the bound scorecard");
+        assert_eq!(e.taken(), [scorecard_key()], "nothing past the scorecard");
+        let mut gone = Evidence::of(SCORECARD);
+        gone.objects.remove(&scorecard_key());
+        let absent = gone
+            .evidence(&scorecard_key(), Some((&other, &mapping)), now())
+            .expect_err("absent");
+        assert_eq!(altered, absent, "one answer");
+        assert!(
+            altered.contains("does not hold the document bound at"),
+            "{altered}"
+        );
+    }
+
+    /// **FX-12: the restore's evidence is judged at the caller's instant,
+    /// never at a clock read of its own.** The scorecard claims a signing
+    /// time in 2026-09: judged at 2001 that claim is in the future and the
+    /// key is refused; judged at 2026-10 it verifies. A verifier that read the
+    /// wall clock would accept at "2001".
+    ///
+    /// KILLS: `verified_evidence` deciding at `Utc::now()`.
+    #[test]
+    fn the_restores_evidence_is_judged_at_the_callers_instant() {
+        let e = Evidence::of(SCORECARD);
+        let why = e
+            .evidence(&scorecard_key(), None, at("2001-01-01T00:00:00Z"))
+            .expect_err("signed after the instant asked about");
+        assert!(why.contains("trust refuses that key"), "{why}");
+        e.evidence(&scorecard_key(), None, now())
+            .expect("the same evidence at an instant after its signing");
+    }
 }

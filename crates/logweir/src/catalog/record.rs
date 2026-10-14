@@ -181,6 +181,17 @@ pub fn receipt_run_id<'a>(receipt_key: &'a str, backup_id: &str) -> Option<&'a s
         .then_some(run_id)
 }
 
+/// **The set and run of a key that is, byte for byte, the key `backup run`
+/// writes SOME set's receipt at** — [`receipt_run_id`] with the set taken from
+/// the key's own first segment after [`RECEIPTS_PREFIX`] — and `None` for
+/// every other key (FX-36). For a reader that holds no set of its own to
+/// compare with: the catalog's deep check, whose record names its key.
+#[must_use]
+pub fn receipt_set_and_run(receipt_key: &str) -> Option<(&str, &str)> {
+    let (set, _) = receipt_key.strip_prefix(RECEIPTS_PREFIX)?.split_once('/')?;
+    receipt_run_id(receipt_key, set).map(|run| (set, run))
+}
+
 /// The point identity, D3 §5.1: `"lwp1-" + lowercase_hex(sha256(receipt
 /// bytes))[0..32]`, over the EXACT stored bytes of the signed backup receipt.
 ///

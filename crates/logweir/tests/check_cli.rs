@@ -11546,6 +11546,104 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     assert!(!remedy.contains("grant"), "a size names no grant: {remedy}");
 }
 
+/// **FX-36: a catalog record's receipt and signature keys are read only
+/// when they are a receipt's and the signature beside it.** A record is
+/// written by whoever holds a catalog write grant; read on its word, the walk
+/// would answer per key of the writer's choice (another tenant's prefix
+/// included) whether an object exists and whether its bytes hash to the
+/// record's digest. Each record below names a key that is not a receipt key,
+/// or a signature that is not beside its receipt, and THAT key holds the
+/// point's real receipt (or sidecar), so a walk that read it would list the
+/// point `Available`. Each is listed `Unreadable` (the record is another
+/// document), and neither named key is read.
+///
+/// CONTROL: the record as written is read at its own keys and is `Available`.
+///
+/// KILLS: `names_a_receipt` removed (the named keys are read and the point is
+/// `Available`); its sidecar half dropped (the foreign sidecar is read).
+#[test]
+fn a_catalog_record_naming_another_receipt_key_reads_nothing_it_names() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let own_sidecar = f.sidecar_key.clone();
+    let cases: Vec<(String, String)> = [
+        "tenant-b/logweir/backups/set-a/run-a.receipt.json",
+        "/logweir/backups/set-a/run-a.receipt.json",
+        "logweir/backups/set-a/../set-b/run-a.receipt.json",
+        "logweir/backups/set-a/nested/run-a.receipt.json",
+        "logweir/catalog/v1/points/lwp1-00000000000000000000000000000000/record.json",
+        "kafka-backups/set-a/manifest.json",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), k.replace(".json", ".sig")))
+    .chain([
+        // The receipt key is the record's own; its sidecar key is not.
+        (
+            f.receipt_key.clone(),
+            "tenant-b/logweir/backups/set-a/run-a.receipt.sig".to_string(),
+        ),
+        (
+            f.receipt_key.clone(),
+            "logweir/backups/set-b/run-a.receipt.sig".to_string(),
+        ),
+    ])
+    .collect();
+    for (receipt_key, sidecar_key) in cases {
+        let mut point = f.point.clone();
+        point.receipt.key = receipt_key.clone();
+        point.receipt.sidecar_key = sidecar_key.clone();
+        let objects = place(FakeObjects::new(), &f)
+            .with_object(&f.record_key, &point.canonical_bytes().expect("serialises"))
+            .with_object(&receipt_key, &f.receipt_bytes)
+            .with_object(&sidecar_key, &f.sidecar_bytes);
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        );
+        let body = body_of(&run);
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{receipt_key}: {body}");
+        assert_eq!(
+            entries[0]["availability"], "Unreadable",
+            "{receipt_key}: {body}"
+        );
+        let calls = objects.calls();
+        for named in [&receipt_key, &sidecar_key] {
+            if *named != f.receipt_key && *named != own_sidecar {
+                assert!(
+                    !calls.contains(&format!("get {named}")),
+                    "{named} was read: {calls:?}"
+                );
+            }
+        }
+        assert!(
+            !calls.contains(&format!("get {}", f.receipt_key))
+                && !calls.contains(&format!("get {own_sidecar}")),
+            "{receipt_key}: nothing past the record is read: {calls:?}"
+        );
+    }
+
+    // CONTROL: the record as written.
+    let objects = place(FakeObjects::new(), &f);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    assert_eq!(entries_of(&body)[0]["availability"], "Available", "{body}");
+    let calls = objects.calls();
+    assert!(
+        calls.contains(&format!("get {}", f.receipt_key))
+            && calls.contains(&format!("get {own_sidecar}")),
+        "{calls:?}"
+    );
+}
+
 /// **The catalog walk READS under its caps**, not only measures after: the
 /// record under `caps::CATALOG_RECORD`, the receipt under
 /// `caps::CATALOG_RECEIPT` (the topic budget's two bounds, the second

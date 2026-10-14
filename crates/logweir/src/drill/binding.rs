@@ -437,19 +437,13 @@ pub(crate) fn confine_receipt_key(
     plan: &DrillSpec,
     point: &PointBinding,
 ) -> Result<(), DrillError> {
-    use crate::catalog::record::{receipt_run_id, RECEIPTS_PREFIX, RECEIPT_SUFFIX};
+    use crate::catalog::record::{receipt_set_and_run, RECEIPTS_PREFIX, RECEIPT_SUFFIX};
     let set = plan.source.backup.as_str();
     let key = point.receipt_key.as_str();
-    if receipt_run_id(key, set).is_some() {
-        return Ok(());
-    }
-    let receipt_of = key
-        .strip_prefix(RECEIPTS_PREFIX)
-        .and_then(|rest| rest.split_once('/'))
-        .map(|(other, _)| other)
-        .filter(|other| receipt_run_id(key, other).is_some());
-    if let Some(other) = receipt_of {
-        return Err(refuse(plan_set_refusal(&point.point_id, other, set)));
+    match receipt_set_and_run(key) {
+        Some((own, _)) if own == set => return Ok(()),
+        Some((other, _)) => return Err(refuse(plan_set_refusal(&point.point_id, other, set))),
+        None => {}
     }
     Err(refuse(format!(
         "{POINT_BINDING_MISMATCH}. The plan's source.point.receipt_key `{key}` is not a receipt \

@@ -1704,6 +1704,23 @@ fn examine(
     };
     // The record's bytes are parsed; nothing below reads them again.
     drop(record_bytes);
+    // FX-36: THE KEYS A RECORD NAMES ARE READ ONLY IF THEY ARE A RECEIPT'S.
+    // A record is written by whoever holds a catalog write grant, and a walk
+    // that fetched whatever it names would answer, per key of their choosing
+    // (another tenant's prefix included), whether an object exists and
+    // whether its bytes hash to a digest. So the receipt is read only at a key
+    // `backup run` writes a receipt at, and the signature only beside it; a
+    // record naming any other is "another document" (as one naming another
+    // point is), and neither key is read. Which set and run the receipt there
+    // describes is then the cross-check's (a record that disagrees with it is
+    // a `Conflict`), as it always was.
+    if !names_a_receipt(&point) {
+        return Observation::without_record(
+            subject,
+            Availability::Unreadable,
+            EntryCause::of(CauseDocument::Record, CauseReason::Malformed),
+        );
+    }
 
     // WHAT THIS POINT HOLDS AT ONCE, by construction and not by the
     // caps alone: the parsed record, for as long as the point is examined,
@@ -1838,6 +1855,18 @@ fn examine(
     }
 
     found.observed(point, subject)
+}
+
+/// Whether a record names, byte for byte, a key `backup run` writes a receipt
+/// at (`logweir/backups/<set>/<run>.receipt.json`, each id one plain segment;
+/// [`record::receipt_set_and_run`]) and the signature key beside it
+/// (`.receipt.sig`). The manifest key is not judged here: it is read only
+/// when the receipt at the confined key attests the same one
+/// (`reader::cross_check`).
+fn names_a_receipt(point: &CatalogPoint) -> bool {
+    record::receipt_set_and_run(&point.receipt.key).is_some_and(|(set, run)| {
+        point.receipt.sidecar_key == crate::backup::phase_run::receipt_keys(set, run).sidecar_key
+    })
 }
 
 /// What the examination of a point WITH a parsed record has established so
