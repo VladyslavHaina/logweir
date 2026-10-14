@@ -5309,7 +5309,7 @@ export interface components {
         /** @description `POST .../destinations/{name}:test`. */
         TestDestinationRequest: {
             /**
-             * @description The roles to exercise, 1 to 4. Absent means every configured role.
+             * @description The roles to exercise, 1 to 4. Absent means every role a run uses this destination's credentials for: `archiveWrite`, `archiveRead` and `evidenceWrite` (unset, the last two use the archive-write credential), and `evidenceRead` when it is configured.
              * @default null
              */
             roles?: components["schemas"]["DestinationRoleDto"][] | null;
