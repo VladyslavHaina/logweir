@@ -125,11 +125,11 @@ vi.mock("../../mock/fetch", () => ({
   },
 }));
 
-function showRestore(restore: Restore, operation?: OperationView) {
+function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null) {
   net.answers.clear();
   net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
-  net.answers.set("/namespaces/t/approval-policy", { item: null, requestId: "r" });
+  net.answers.set("/namespaces/t/approval-policy", { item: policy, requestId: "r" });
   const root = createRootRoute({ component: Outlet });
   const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
   const tree = root.addChildren([ns.addChildren([createRoute({ getParentRoute: () => ns, path: "restores/$name", component: RestoreDetail })])]);
@@ -251,6 +251,23 @@ describe("v1.1: a restore's page", () => {
   });
 });
 
+describe("DUI-18: a restore waiting for its approval", () => {
+  const policy = (over: Record<string, unknown>) => ({ namespace: "t", name: "p", mode: "ordinary", operatorMode: "confirm", legacy: false, basis: "binding", requireDistinctPrincipal: false, ordinaryConfirmationAvailable: true, consoleApprovalAvailable: false, ticketRequired: false, installationDigest: "sha256:00", ...over });
+  const waiting = () => ({ ...O(subsetOperation), terminal: false, state: "pending" as const, verifiedSuccess: false, awaitingApproval: true });
+
+  it("in a confirm namespace says the controller is verifying the confirmation, never that an approver must sign", async () => {
+    showRestore(R(subsetRestore), waiting(), policy({}));
+    expect(await screen.findByText("The controller is verifying your confirmation")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/out of band|An approver who is not you/);
+  });
+
+  it("in a strict namespace still asks for the approver's countersignature (the control)", async () => {
+    showRestore(R(subsetRestore), waiting(), policy({ mode: "governed", operatorMode: "strict" }));
+    expect(await screen.findByText(/countersigns the console's confirmation with their own key/)).toBeTruthy();
+    expect(screen.getByText("Waiting for an approval")).toBeTruthy();
+  });
+});
+
 describe("FX-38: the restore readiness check", () => {
   it("a catalog point the controller could not find for an unreadable view line shows its message, and is not ready", () => {
     const MESSAGE =
@@ -278,7 +295,9 @@ describe("FX-38: the restore readiness check", () => {
       />,
     );
     const list = screen.getByRole("list", { name: "Readiness checks" });
-    expect(list.textContent).toContain(MESSAGE);
+    // DUI-22: the point id is shown as code, without the API's Markdown backticks.
+    expect(list.textContent).toContain(MESSAGE.replace(/`/g, ""));
+    expect(list.querySelector("code")?.textContent).toBe("lwp1-0123456789abcdef0123456789abcdef");
     expect(list.textContent).toContain("CatalogPointViewUnavailable");
     expect(list.textContent).toContain("Request a catalog sync and run this check again once the view is published.");
     expect(screen.getByText("Not ready", { selector: ".pf-v6-c-label__text" })).toBeTruthy();

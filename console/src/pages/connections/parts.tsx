@@ -39,7 +39,7 @@ import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
-import { ErrorText, Prose } from "../../components/Prose";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
 
 // ------------------------------------------------------------------- forms
 
@@ -332,7 +332,7 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
               <div className="lw-subtle lw-small">{c.gating ?? "blocking"}</div>
             </Td>
             <Td dataLabel="Finding" className="lw-break">
-              <div>{c.message ?? <NotRecorded />}</div>
+              <div>{c.message ? <Prose text={checkMessage(c.message)} /> : <NotRecorded />}</div>
               {c.remedy && <div className="lw-subtle lw-small">Remedy: {c.remedy}</div>}
               <div className="lw-subtle lw-small">Scope: {scopeText(c.scope)}</div>
             </Td>

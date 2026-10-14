@@ -21,7 +21,7 @@ import { When } from "../../components/When";
 import { outcomeUnknown } from "../../api/client";
 import type { Restore } from "../../api/restores";
 import { restoreVerified, summaryCase } from "./words";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 /** A restore's status: green only by the restore badge rule, and a complete verification
  *  that did not cover is never green whatever the summary says. */
@@ -63,17 +63,10 @@ export function shown(value: ReactNode | null | undefined): ReactNode {
 
 /** A sentence whose `code spans` render as code, never as literal backticks. */
 export function Coded({ text }: { text: string }) {
+  // One renderer for the API's code spans everywhere (components/Prose.tsx).
   return (
     <>
-      {text.split("`").map((part, i) =>
-        i % 2 === 1 ? (
-          <code key={i} className="lw-mono">
-            {part}
-          </code>
-        ) : (
-          part
-        ),
-      )}
+      <Prose text={text} />
     </>
   );
 }

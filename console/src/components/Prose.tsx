@@ -19,6 +19,26 @@ export function Prose({ text }: { text: string }) {
   );
 }
 
+/**
+ * A check row's message with its machine suffix ` [detail: {"count":N,"sample":[…]}]`
+ * said in words (DUI-22): "… (orders, payments, and 3 more)". A suffix this page cannot
+ * read is left as it came.
+ */
+export function checkMessage(text: string): string {
+  const at = text.lastIndexOf(" [detail: ");
+  if (at < 0 || !text.endsWith("]")) return text;
+  try {
+    const d = JSON.parse(text.slice(at + " [detail: ".length, -1)) as { count?: unknown; sample?: unknown };
+    const count = typeof d.count === "number" && Number.isInteger(d.count) ? d.count : null;
+    const sample = Array.isArray(d.sample) ? d.sample.filter((s): s is string => typeof s === "string") : [];
+    if (count === null && sample.length === 0) return text;
+    const more = count !== null && count > sample.length ? `, and ${count - sample.length} more` : "";
+    return `${text.slice(0, at)} (${sample.length ? `${sample.join(", ")}${more}` : String(count)})`;
+  } catch {
+    return text;
+  }
+}
+
 /** An error's message as prose: `ApiError` and every other `Error` carry one; anything else is stringified. */
 export function ErrorText({ error }: { error: unknown }) {
   return <Prose text={error instanceof Error ? error.message : String(error)} />;

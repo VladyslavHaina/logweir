@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { ApiError } from "../api/client";
-import { ErrorText, Prose, proseSegments } from "./Prose";
+import { ErrorText, Prose, checkMessage, proseSegments } from "./Prose";
 
 afterEach(cleanup);
 
@@ -25,5 +25,17 @@ describe("problem details as prose", () => {
   it("reads an API error's message", () => {
     const { container } = render(<ErrorText error={new ApiError(409, { code: "state_conflict", detail: "`primary` holds the flag." } as never)} />);
     expect(container.innerHTML).toContain("<code>primary</code>");
+  });
+});
+
+describe("DUI-22: a check row's machine suffix", () => {
+  it("is said in words, with the rest of the count", () => {
+    expect(checkMessage('the mapped topics exist on the target [detail: {"count":4,"sample":["dui2-a-orders","dui2-a-payments"]}]')).toBe(
+      "the mapped topics exist on the target (dui2-a-orders, dui2-a-payments, and 2 more)",
+    );
+  });
+  it("is left as it came when it cannot be read, and a message without one is unchanged (the controls)", () => {
+    expect(checkMessage("x [detail: not json]")).toBe("x [detail: not json]");
+    expect(checkMessage("plain words")).toBe("plain words");
   });
 });

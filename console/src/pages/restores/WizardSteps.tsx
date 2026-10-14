@@ -76,7 +76,7 @@ import {
   TIME_BASIS_OPTED_WARNING,
   modeMeaning,
 } from "./words";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
 
 type Errors = Partial<Record<string, { message?: string }>>;
 const err = (errors: Errors, name: string) => errors[name]?.message;
@@ -816,7 +816,12 @@ export function CheckStep({
                 <li key={c.id}>
                   <span>
                     <span className="lw-mono">{c.id}</span>
-                    {c.message ? <span className="lw-subtle"> · {c.message}</span> : null}
+                    {c.message ? (
+                      <span className="lw-subtle">
+                        {" "}
+                        · <Prose text={checkMessage(c.message)} />
+                      </span>
+                    ) : null}
                     {c.state !== "ready" && c.remedy ? <div className="lw-small">{c.remedy}</div> : null}
                     {c.code && c.state !== "ready" ? <div className="lw-subtle lw-small">{c.code}{!isBlockingRow(c) ? " (advisory)" : ""}</div> : null}
                   </span>

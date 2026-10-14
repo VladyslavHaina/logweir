@@ -10,7 +10,7 @@ import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
 import { missingRead } from "./model";
 import { WriteAlert } from "./parts";
-import { Prose } from "../../components/Prose";
+import { Prose, checkMessage } from "../../components/Prose";
 
 type BackupCheck = components["schemas"]["BackupPreflightRequest"];
 
@@ -70,7 +70,7 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
                   </span>
                 ) : (
                   <span>
-                    {c.message ?? c.id}
+                    <Prose text={checkMessage(c.message ?? c.id)} />
                     {c.remedy && <span className="lw-subtle lw-small"> {c.remedy}</span>}
                   </span>
                 )}
