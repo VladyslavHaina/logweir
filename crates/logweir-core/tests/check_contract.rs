@@ -3322,7 +3322,7 @@ fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
         "admissible": false,
         "message": format!("GroupActive: the store answered {secret} for {group}"),
         "note": secret,
-        "positions": [{"partition": 0, "class": "exact", "offset": 40}],
+        "positions": [{"partition": 0, "class": "exact", "offset": 40}], // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
     })
     .to_string();
     let free = |s: &str| redact(s);
@@ -3334,7 +3334,8 @@ fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
         assert_eq!(v["group"], group, "{kept}");
         assert_eq!(v["target"], group, "{kept}");
         assert_eq!(v["topic"], topic, "{kept}");
-        assert_eq!(v["positions"][0]["offset"], 40, "{kept}");
+        assert_eq!(v["positions"][0]["offset"], 40, "{kept}"); // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
+
         // CONTROL: the free text is still redacted.
         assert_eq!(v["note"], REDACTED, "{kept}");
         let message = v["message"].as_str().unwrap();

@@ -1166,7 +1166,7 @@ mod tests {
         assert_eq!(line["group"], group.as_str(), "{text}");
         assert_eq!(line["target"], group.as_str(), "{text}");
         assert_eq!(line["topic"], topic.as_str(), "{text}");
-        assert_eq!(line["positions"][0]["offset"], 40, "{text}");
+        assert_eq!(line["positions"][0]["offset"], 40, "{text}"); // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
         assert_eq!(
             line["message"],
             format!("the broker said {}", logweir_core::check_contract::REDACTED),
