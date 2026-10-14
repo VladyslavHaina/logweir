@@ -202,7 +202,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
       {[...new Set(groups.earlier.map((b) => b.scheduleRef!.uid!))].map((identity, i) => {
         const runs = groups.earlier.filter((b) => b.scheduleRef?.uid === identity);
         return (
-          <Section key={identity} open={!uid} text={uid ? `${runs.length} runs of an earlier schedule with this name` : `${runs.length} runs of ${name}, identity ${i + 1}`}>
+          <Section key={identity} open={!uid} text={uid ? `${runs.length} ${runs.length === 1 ? "run" : "runs"} of an earlier schedule with this name` : `${runs.length} ${runs.length === 1 ? "run" : "runs"} of ${name}, identity ${i + 1}`}>
             <Content component="p" className="lw-subtle">
               They carry schedule identity {identity}. A schedule deleted and created again under one name is a different
               schedule, so these are never merged with another identity's runs. Their points can still be restored.
@@ -212,7 +212,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
         );
       })}
       {groups.legacy.length > 0 && (
-        <Section open={!uid} text={`${groups.legacy.length} runs naming this schedule without its identity`}>
+        <Section open={!uid} text={`${groups.legacy.length} ${groups.legacy.length === 1 ? "run names" : "runs name"} this schedule without its identity`}>
           <Content component="p" className="lw-subtle">
             They record no schedule identity, so nothing tells whether this schedule or an earlier one of the same name
             made them. They are never offered as this schedule's latest point; each can still be restored on its own.
