@@ -54,7 +54,6 @@ class Release(unittest.TestCase):
         for rel in COPIED:
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / rel, self.repo / rel)
-        shutil.copytree(ROOT / "ui", self.repo / "ui")
         shutil.copytree(ROOT / "charts/logweir", self.repo / "charts/logweir",
                         ignore=shutil.ignore_patterns("rendered"))
         self.bin = self.base / "bin"
