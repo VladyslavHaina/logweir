@@ -380,7 +380,7 @@ async fn a_cleanup_that_succeeded_is_removed_and_releases_the_finalizer() {
     assert_eq!(
         status[0]["status"]["teardown"],
         json!({"attestationKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.cleanup.json",
-               "deleted": ["clone-orders"], "failed": []})
+               "deleted": ["clone-orders"], "deletedCount": 1, "failed": [], "failedCount": 0})
     );
     let finalizer = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}"));
     assert_eq!(finalizer[0]["metadata"]["finalizers"], json!([]));
