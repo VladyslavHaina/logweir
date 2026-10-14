@@ -28,11 +28,12 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+101, 102, 103 and 104. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below. Items 91 to 97
+`v0.2.0` release that carries it has its own record below. Items 91 to 104
 landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
@@ -2272,10 +2273,7 @@ guide instead.
 **Scope:** `just links` and doc_lint over the tree without the page.
 **Rollback:** an older release's documentation still carries the page.
 
-<!-- PROD-18.1 R8: one item, unnumbered on purpose. The orchestrator numbers it
-at integration: a `#### N.` heading, its doc_lint token row, and the entry's two
-item lists. -->
-**The console is rebuilt, and `logweir-api` serves it at `/ui/` (PROD-18.1).**
+#### 98. The console is rebuilt, and `logweir-api` serves it at `/ui/` (PROD-18.1)
 
 **Changed.** The console is new: React, TypeScript and PatternFly, built from
 `console/` into the `logweir-console` image. It keeps every flow the old page
@@ -2300,6 +2298,162 @@ Playwright rows against `logweir-api` on the host, and the image check; the
 journeys on a cluster are the PoC pass's.
 **Rollback:** an older `logweir-console` image serves the old page again;
 nothing is stored differently.
+
+#### 99. A complete verification reads each archived segment under a stored and a decompressed cap, and never holds a record whole (FX-30)
+
+**Changed.** A complete verification streams each archived segment, hashing
+each record as it is read and never holding it whole. The pre-restore pass
+already stops a run for a stored segment over 1 GiB (exit 1), and for a
+segment the restore reads whose body decompresses past 1 GiB (exit 3). The
+complete verification's own caps cover a segment outside the restore window
+whose body decompresses past 1 GiB (a corrupt segment or a decompression
+bomb), and an object that grew past the stored cap between the two reads.
+Such a partition is not compared, and the signed block reads `covered: false`
+with a reason that names both caps. It is never a crash or a `pass`, and no
+consumer positions are mapped over it. Measured: about 1 to 3 MB of added peak
+memory for a 1 GiB bomb, an oversized object and a 190 MiB segment, against
+391 MB for the old whole decode. The console's restore page names the reason,
+the unverified segments and the partitions not compared.
+**Do:** nothing.
+**Scope:** the streamed-digest rows over every codec and a real upstream
+segment, the child-process memory row, the complete-lane rows, one compose row
+through the shipped engine (`0.23.3+logweir.3`, Kafka 4.3), 26 mutants over
+items 99 and 100, and the console's rows.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX30-1.]
+**Rollback:** an older runner decodes each segment whole again; no scorecard
+field or format changed.
+
+#### 100. A capped, cut or partly unreadable read says partial: protection, the catalog, the restore preflight, a teardown and a switchover (FX-38)
+
+**Changed.**
+- A ProtectionPolicy over a namespace with more than 1,000 `Backup` objects
+  now reads `Unknown`, reason `BackupHistoryTooLarge`, instead of a verdict
+  over the runs it happened to read. `Backup`s are listed by name, so the
+  newest were the ones left out. It publishes no newest point, last attempt or
+  failure streak then, and opens no alert from them.
+- A catalog line that cannot be read is no longer skipped silently:
+  protection reads the view as `CatalogUnreadable`; the restore preflight
+  answers `CatalogPointViewUnavailable` instead of "not found"; the API's
+  points page says `incomplete: true`; and the API publishes a catalog that
+  has not said whether its view is a window as `truncated: true`, never
+  `false`.
+- A restore's teardown that left more than 256 topics says how many it left:
+  `teardown-failed-count=`, `Restore.status.teardown.failedCount`, and the
+  API's `failedCount`. A TTL clone's cleanup also records `deletedCount` and
+  `failedCount`.
+- A catalog's `Synced` message calls the view a window only when it is one,
+  and names entries left out for page space, which a larger `viewLimit` does
+  not cure.
+- A `Switchover` whose group lines could not all be read, or whose log was not
+  read, says its groups and counts are partial, on the object and through the
+  API's `message`, instead of publishing zero counts.
+
+The console reads `truncated` as "not known to be the whole archive", shows
+the window sentence only when `Synced` says so, and shows "not known" for the
+point, the attempt and the streak under `BackupHistoryTooLarge`.
+**Do:** where a policy reads `BackupHistoryTooLarge`, delete old terminal
+`Backup` objects (the archive keeps their points) and the policy evaluates
+again. Apply the CRDs first: the `Restore` CRD gains
+`status.teardown.failedCount` and `deletedCount`.
+**Scope:** the protection, catalog, preflight, restore and clone controller
+rows, the API rows (`d3_reads`, `operation_view`, `switchovers`), the mutants
+of item 99, and the console's rows.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX38-4, K-FX38-6, K-FX38-8, K-FX38-L4 and K-FX38-SW.]
+**Rollback:** an older controller ignores `teardown-failed-count=` and judges
+protection over the runs it read; an older `Restore` CRD prunes the new
+teardown fields; an older API publishes an unsynced catalog as
+`truncated: false`.
+
+#### 101. A restore bound to a recovery point reads only that point's own receipt (FX-36)
+
+**Changed.** The runner refuses, before reading anything, a plan whose
+`source.point.receipt_key` is not
+`logweir/backups/<source.backup>/<run id>.receipt.json`, and answers a receipt
+that is absent, has other bytes or is over the 64 MiB read cap with one exit-3
+`PointBindingMismatch` that does not say which (an absent receipt was exit 1).
+The same confinement covers the positions document a restore maps consumer
+positions from, the switchover's scorecard, mapping and rollback record (a
+rollback plan's `rollback_of.key` must be a switchover record key), the clone
+cleanup's scorecard, and the catalog's deep check, which lists a record naming
+any other key `Unreadable` and reads neither key, and a record relabelled onto
+another point's receipt `Conflict`. A switchover's `MappingDigestMismatch` now
+also covers an absent mapping and a scorecard key that is not a scorecard's.
+The console shows a refused run's sentence verbatim and offers neither kind of
+point.
+**Do:** a point-bound `Restore` whose receipt is gone now ends refused, not
+failed and retried; restore a point the catalog lists. A rollback plan names
+its record as `logweir/switchovers/<run id>.record.json`.
+**Scope:** the binding, positions, switchover, cleanup and catalog rows, which
+count every store read; compose rows on Kafka 4.3.1 (the point-set binding row
+with a live negative control, theme A's switchover and clone rows); 23
+mutants over items 101 and 102, and the console's rows.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX36-1 to K-FX36-3.]
+**Rollback:** an older runner reads the receipt key the plan names, and an
+older catalog sync lists a record by the keys it names.
+
+#### 102. The controller judges evidence at its reconcile pass's own instant (FX-12)
+
+**Changed.** A signing key's trust window and `verifiedAt` come from the
+pass's one clock read, not a second read inside the verifier; the trust
+policy, roster, destination and discovery reconcilers and the runner's phase 0
+take an instant too, so their rows run at fixed instants and none depends on
+the year.
+**Do:** nothing.
+**Scope:** every verification path judged at a handed instant (2001, 2026 and
+2999), the shifted-clock run at +26752 days with its control, the mutants of
+item 101.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX12-1.]
+**Rollback:** an older controller reads the clock again inside the verifier;
+away from a key's window edge its verdicts are the same.
+
+#### 103. A backup whose principal may not READ a source topic is named before the engine (FX-45)
+
+**Changed.** The Backup Preflight's `connection.topicsReadable` turns blocking
+`notReady` (`TopicAuthorizationFailed`) when the broker's authorized
+operations (KIP-430) say the principal may not READ a selected topic, naming
+the topic and the grant. `logweir backup run` (and every Backup Job) refuses
+such a topic before the execution claim and the engine, exit 3, instead of
+failing with "kafka-backup backup exited 1". The standalone commands now run
+PROD-01.2's capability rows first:
+- `backup run` refuses a source `connection.engineProtocol` is `notReady` for;
+- `drill run` refuses a target `target.engineProtocol` is `notReady` for at
+  phase 0, before anything is created (a restore into Redpanda v26.2.4 now
+  stops there, exit 3, instead of failing in the engine and leaving its scratch
+  topic);
+- `logweir doctor` reports it as check 8, `target engine`.
+
+An answer that could not be observed is never a refusal. The console's backup
+readiness check names the missing READ, with the topics and the grant.
+**Do:** grant READ on each topic a refusal names to the principal the
+connection authenticates as, or remove the topic from the selection.
+**Scope:** compose rows on Kafka 4.3.1 through the shipped runner image (an
+ACL principal without READ, Redpanda), the doctor row, the crate rows, 16
+mutants over items 103 and 104, and the console's rows.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K4 and K5.]
+**Rollback:** an older runner starts the engine and fails exit 1 again; an
+older controller reads the row as before.
+
+#### 104. A connection test no longer calls a cluster reachable when only its bootstrap address answers (FX-46)
+
+**Changed.** `logweir cluster-probe` asks every broker the cluster advertises.
+A silent one makes it `reachable=false`, exit 1, with a third line
+`brokers-answered=<answered>/<listed>` (`0/?` when not even the broker list
+could be read through the bootstrap address), and the `KafkaCluster` reads
+`AdvertisedBrokersUnreachable`. A `SourceConnection` Preflight (Test
+connection) now runs `connection.engineProtocol`, `target.engineProtocol` and
+`connection.groupTypes`, advisory, so it says whether the endpoint is usable
+as a backup source and as a restore target (Redpanda: a source, not a target).
+The console says `AdvertisedBrokersUnreachable` in its own words and, on a
+connection's page, what the endpoint is usable for.
+**Do:** keep the runner image at least as new as the controller: an older
+runner refuses the new `capabilityChecks` field of a connection test.
+**Scope:** compose rows on Kafka 4.3.1 (an unreachable advertised listener,
+Redpanda), a librdkafka mock-cluster row for the silent broker, the probe and
+controller rows, the mutants of item 103, and the console's rows.
+[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K1 to K3.]
+**Rollback:** an older runner prints no third line and the reason stays
+`ProbeReportedUnreachable`; an older controller asks a connection test for no
+capability row.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2364,7 +2518,7 @@ In addition to the next entry's six, in its order.
 
 **The roll:**
 - **Move `controllerImage` and `runnerImage` in one `helm upgrade`, and never
-  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65, 67 and 82). This
+  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65, 67, 82 and 104). This
   controller gives every `Restore` and `Backup` Job a `--line-token` argument,
   and every runner image published before that change, the images of this
   same entry included, stops on it: the object says `exitCode: 1`,
@@ -2440,7 +2594,8 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
+98, 99, 100, 101, 102, 103 and 104, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2515,6 +2670,13 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
 | 96 | the controller and every runner image (a new flag on every runner Job), the `KafkaCluster` CRD (a pattern) | `controllerImage` and `runnerImage` rolled together |
 | 97 | the documentation only | nothing |
+| 98 | the console image (`logweir-console`) and the API's served files | nothing; bookmarks move to the new addresses |
+| 99 | the runner's complete verification | nothing |
+| 100 | the `Restore` CRD (`status.teardown.failedCount`, `deletedCount`), the controller, the runner (a new line), the API | the CRDs applied |
+| 101 | the runner, the catalog sync, the switchover plan grammar (the API and the controller refuse a bad `rollback_of.key`) | the runner rolled with the controller |
+| 102 | the controller | nothing |
+| 103 | the runner (`backup run`, `drill run`, `doctor`) | nothing |
+| 104 | the runner (the probe and the connection test), the controller, the `KafkaCluster` CRD (a description) | `runnerImage` at least as new as `controllerImage` |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

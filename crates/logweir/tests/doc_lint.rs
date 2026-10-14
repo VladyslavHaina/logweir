@@ -2223,6 +2223,29 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the control-evidence mapping page is removed",
             "verify-a-scorecard.md#what-the-scorecard-does-not-claim",
         ),
+        // PROD-18.1 (item 98): the rebuilt console and its addresses.
+        ("the console is rebuilt", "`/ui/#/<namespace>/<page>`"),
+        // FX-30 (item 99): a capped segment is not compared, never a pass.
+        (
+            "a complete verification reads under caps",
+            "`covered: false`",
+        ),
+        // FX-38 (item 100): a cut Backup listing is Unknown, by name.
+        ("a partial read says partial", "`BackupHistoryTooLarge`"),
+        // FX-36 (item 101): one answer for a receipt not held.
+        (
+            "a bound restore reads only its own receipt",
+            "`PointBindingMismatch`",
+        ),
+        // FX-12 (item 102): one instant per reconcile pass.
+        ("evidence judged at the pass's instant", "`verifiedAt`"),
+        // FX-45 (item 103): a missing READ named before the engine.
+        ("a missing READ is named", "`TopicAuthorizationFailed`"),
+        // FX-46 (item 104): the probe's third line.
+        (
+            "the probe asks every advertised broker",
+            "`brokers-answered=<answered>/<listed>`",
+        ),
     ];
     assert_eq!(
         items.len(),
