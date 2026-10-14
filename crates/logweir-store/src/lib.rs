@@ -1555,7 +1555,7 @@ impl Store {
     /// deleting `out.sort()` leaves the suite green.
     pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         use futures::StreamExt as _;
-        self.note_read("list", prefix);
+        self.note_read("list", prefix); // engine-token-ok: a store listing verb in the read log, not an engine subcommand
         let rt = &self.rt;
         rt.block_on(async {
             let mut out = Vec::new();
@@ -1607,7 +1607,7 @@ impl Store {
         if max == 0 {
             return Ok((Vec::new(), None));
         }
-        self.note_read("list", prefix);
+        self.note_read("list", prefix); // engine-token-ok: a store listing verb in the read log, not an engine subcommand
         let rt = &self.rt;
         rt.block_on(async {
             let p = OPath::from(prefix);
