@@ -859,6 +859,13 @@ body {
 .pf-v6-c-table tr > :where(td, th).lw-break {
   overflow-wrap: anywhere;
 }
+/* DUI-22.8: a table never inherits `anywhere` from around it. PatternFly's wizard body
+   sets it, and a column header lost its word's width and broke mid-word ("Record" /
+   "s") while the table had room. In a table a word breaks only when it alone is wider
+   than its column can be; only a cell marked .lw-break (code or a token) breaks anywhere. */
+.pf-v6-c-table {
+  overflow-wrap: break-word;
+}
 /* Column headers wrap between words rather than end in an ellipsis
    ("Reco…") while the table has room: a header's words claim their width. */
 .pf-v6-c-table thead:where(.pf-v6-c-table__thead) {

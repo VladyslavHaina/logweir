@@ -192,6 +192,9 @@ describe("Connect an archive", () => {
     reads(operator);
     renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
+    // DUI-40.1: the Sync mode helper names its command as code, never in raw backticks.
+    expect(within(dialog).getByText("logweir catalog sync", { selector: "code" })).toBeTruthy();
+    expect(dialog.textContent).not.toContain("`");
     fireEvent.click(within(dialog).getByRole("button", { name: "Connect archive" }));
     await within(dialog).findByText(/A catalog needs a name/);
     expect(within(dialog).getByText(/Name the saved destination/)).toBeTruthy();
@@ -354,7 +357,15 @@ describe("one backup's page", () => {
     const doc = copy(backupDoc);
     doc.item.operation = { state: "refused", stateReason: "GuardRefused", terminal: true, verificationState: "notAttempted", verifiedSuccess: false };
     const op = copy(operationBackup) as { item: Record<string, unknown> };
-    Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: REFUSAL, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
+    Object.assign(op.item, {
+      state: "refused",
+      stateReason: "GuardRefused",
+      verifiedSuccess: false,
+      message: REFUSAL,
+      result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" },
+      // DUI-40.3: the Activity list's condition messages carry code spans too.
+      conditions: [{ type: "Failed", status: "True", reason: "GuardRefused", message: "the `runner` container exited 3", lastTransitionTime: "2026-09-12T08:01:00Z" }],
+    });
     reads(operator, (_r, path) => {
       if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
       if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
@@ -375,6 +386,8 @@ describe("one backup's page", () => {
     expect(where.textContent).toContain(said);
     expect(within(where).getAllByText("payments", { selector: "code" }).length).toBeGreaterThan(0);
     expect(where.textContent).not.toContain("`");
+    expect(within(where).getByText("runner", { selector: "code" })).toBeTruthy();
+    expect(where.textContent).toContain("the runner container exited 3");
   });
 
   it("DUI-35: a message with an unpaired backtick is shown as it came, never guessed into code (the control)", async () => {
@@ -462,7 +475,9 @@ describe("FX-38: one catalog's page says what its view does not prove", () => {
 
   it("a window says so, from the Synced message (control)", async () => {
     show(catalogDoc, catalogPoints);
-    await screen.findByText(windowSentence);
+    // DUI-40.1: its command is code now; the sentence reads the same.
+    await screen.findByText((_content, el) => el?.classList.contains("lw-prose") === true && el.textContent === windowSentence);
+    expect(screen.getAllByText("logweir catalog list", { selector: "code" }).length).toBeGreaterThan(0);
   });
 
   it("a points page with incomplete: true says the list is partial", async () => {

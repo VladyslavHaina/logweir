@@ -143,7 +143,7 @@ function ViewCard({ c }: { c: Catalog }) {
         )}
         {c.truncated && viewIsWindow(c) && (
           <Content component="p" className="lw-subtle lw-small">
-            {CATALOG_WINDOW_SENTENCE.replace(/`/g, "")}
+            <Prose text={CATALOG_WINDOW_SENTENCE} />
           </Content>
         )}
         {(c.conditions ?? []).length > 0 && (
@@ -289,7 +289,7 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                               Restore this point
                             </Button>
                           ) : (
-                            <Tooltip content={offer.offer ? RESTORE_NEEDS_ROLE : `Not offered: ${offer.reason}`}>
+                            <Tooltip content={offer.offer ? RESTORE_NEEDS_ROLE : <Prose text={`Not offered: ${offer.reason}`} />}>
                               <Button variant="secondary" size="sm" isAriaDisabled>
                                 Restore this point
                               </Button>
@@ -301,7 +301,7 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                         <Td colSpan={6}>
                           <ExpandableRowContent>
                             <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl">
-                              <Term term="Restore">{restore ? "Offered" : offer.offer ? RESTORE_NEEDS_ROLE : `Not offered: ${offer.reason}`}</Term>
+                              <Term term="Restore">{restore ? "Offered" : offer.offer ? RESTORE_NEEDS_ROLE : <Prose text={`Not offered: ${offer.reason}`} />}</Term>
                               <Term term="Remedy">
                                 <MessageValue value={p.remedy} />
                               </Term>

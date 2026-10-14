@@ -68,10 +68,15 @@ export function count(n: number | null | undefined): string {
   return typeof n === "number" ? n.toLocaleString("en-US") : "Not recorded";
 }
 
-/** "604800000 (7 days)": a millisecond setting with its value in words, when that helps. */
+/** "1 day", "7 days": a count and its noun, singular for one (DUI-40.6). */
+export function counted(n: number, one: string, many = `${one}s`): string {
+  return `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+}
+
+/** "604800000 (7 days)", "86400000 (1 day)": a millisecond setting with its value in words, when that helps. */
 export function msValue(key: string, value: string): string {
   const n = Number(value);
   if (!key.endsWith(".ms") || !Number.isFinite(n) || n < 60_000) return value;
   const days = n / 86_400_000;
-  return `${value} (${days >= 1 && Number.isInteger(days) ? `${days} days` : duration(n / 1000)})`;
+  return `${value} (${days >= 1 && Number.isInteger(days) ? counted(days, "day") : duration(n / 1000)})`;
 }

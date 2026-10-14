@@ -496,7 +496,7 @@ function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView 
               )}
               {route.pathStyle && route.endpoint && (
                 <Content component="p" className="lw-subtle lw-small">
-                  {PATH_STYLE_SENTENCE}
+                  <Prose text={PATH_STYLE_SENTENCE} />
                 </Content>
               )}
               <Commands lines={checkCommands(route, e.payloadKey!, e.sidecarKey!)} label="the commands" />
@@ -606,7 +606,7 @@ export function BackupDetail() {
         breadcrumb={breadcrumb}
         status={b.operation.state === "succeeded" ? <VerdictLabel verdict={verdict} /> : <BackupStatus b={b} />}
         description={backupSentence(b)}
-        actions={offer.offer ? restoreButton : <Tooltip content={offer.reason}>{restoreButton}</Tooltip>}
+        actions={offer.offer ? restoreButton : <Tooltip content={<Prose text={offer.reason} />}>{restoreButton}</Tooltip>}
       />
       {mismatch && (
         <PageSection>

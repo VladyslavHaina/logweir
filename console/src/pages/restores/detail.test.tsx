@@ -377,6 +377,37 @@ describe("FX-38: the restore readiness check", () => {
   });
 });
 
+describe("DUI-22.3: a check row's remediation line", () => {
+  it("renders the runner's code spans as code, never raw backticks", () => {
+    const REMEDY = "The runner still validates its signer before it writes anything, and `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.";
+    const result = {
+      id: "pf-r3", namespace: "t", uid: "u", resourceVersion: "1", operation: "restore", state: "ready", terminal: true, applicable: true,
+      stale: false, staleBasis: [], staleReasons: [], binding: { planHash: "sha256:aa", referents: [] }, warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+      checks: [
+        { id: "signer.rostered", code: "SignerKeyIdNotObserved", state: "unknown", gating: "advisory", message: "a restore preflight's check plan projects no signing key", remedy: REMEDY },
+        // The control: a remedy with an unpaired backtick is shown as it came, never guessed into code.
+        { id: "target.clusterIdentity", code: "ClusterIdMismatch", state: "unknown", gating: "advisory", message: "m", remedy: "Add it to `spec.allowedTargetClusterIds" },
+      ],
+    } as unknown as Preflight;
+    render(
+      <CheckStep
+        readiness={{ result, boundHash: "sha256:aa", boundKey: "k", error: null, starting: false, stoppedAt: null }}
+        refusal={null}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={null}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: "Readiness checks" });
+    expect(within(list).getByText("TrustRoster.spec.signingKeys", { selector: "code" })).toBeTruthy();
+    expect(list.textContent).toContain(REMEDY.replace(/`/g, ""));
+    expect(list.textContent).toContain("Add it to `spec.allowedTargetClusterIds");
+  });
+});
+
 describe("theme A's D6: the restore readiness check on an older runner", () => {
   it("lists runner.image not ready by CheckContractMismatch and runner.pod as a pod that ran", () => {
     const result = {

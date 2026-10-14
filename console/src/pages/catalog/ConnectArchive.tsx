@@ -139,7 +139,9 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
   const helper = (id: string, error: string | undefined, help: string) => (
     <FormHelperText>
       <HelperText id={`${id}-help`}>
-        <HelperTextItem variant={error ? "error" : "default"}>{error ?? help}</HelperTextItem>
+        <HelperTextItem variant={error ? "error" : "default"}>
+          <Prose text={error ?? help} />
+        </HelperTextItem>
       </HelperText>
     </FormHelperText>
   );

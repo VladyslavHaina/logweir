@@ -12,6 +12,7 @@ import {
   connectFieldOf,
   countsWords,
   duplicateOf,
+  noViewWords,
   windowedCatalogs,
   consumerPositionsWords,
   isMintedSetId,
@@ -241,6 +242,13 @@ describe("DUI-10: a duplicate catalog", () => {
     const synced = { ...duplicate, conditions: [{ type: "Ready", status: "True" }], counts: { total: 409, available: 409 }, syncedAt: "2026-10-14T08:00:00Z" } as unknown as Catalog;
     expect(countsWords(synced)).toBe("409 of 409 available");
     expect(catalogSentence(synced)).toBe("A read-only view over destination primary: 409 of 409 points available at the last sync.");
+  });
+
+  it("DUI-40.2: says once why a duplicate or unsynced catalog has nothing to count; a synced one has no such words (the control)", () => {
+    expect(noViewWords(duplicate)).toBe("no view: it duplicates another catalog and never syncs");
+    expect(noViewWords({ ...duplicate, conditions: [] } as unknown as Catalog)).toBe("Not synced yet");
+    const synced = { ...duplicate, conditions: [{ type: "Ready", status: "True" }], counts: { total: 409, available: 409 }, syncedAt: "2026-10-14T08:00:00Z" } as unknown as Catalog;
+    expect(noViewWords(synced)).toBeNull();
   });
 
   it("finds the catalog that already indexes a destination, for the connect form's warning", () => {

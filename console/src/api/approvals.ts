@@ -104,11 +104,11 @@ export const MODE_WORDS: Record<ApprovalMode, string> = {
 export function modeSentence(mode: ApprovalMode, policyName: string): string {
   switch (mode) {
     case "confirm":
-      return `Policy ${policyName} is confirm: creating a restore in the wizard is the confirmation. No key is involved, and nothing waits for an approver here.`;
+      return `Policy ${policyName} is confirm: creating a restore in the wizard, or a switchover in its cutover, is the confirmation. No key is involved, and nothing waits for an approver here.`;
     case "twoPerson":
-      return `Policy ${policyName} is two-person: a second person, signed in as an approver and not the requester, approves each restore here. No key is involved.`;
+      return `Policy ${policyName} is two-person: a second person, signed in as an approver and not the requester, approves each restore and each switchover here. No key is involved.`;
     case "strict":
-      return `Policy ${policyName} is strict: an approver other than the requester countersigns each restore with their personal key, using logweir drill countersign.`;
+      return `Policy ${policyName} is strict: an approver other than the requester countersigns each restore and each switchover with their personal key, using logweir drill countersign.`;
     case "files":
       return `No approval policy binds this namespace (${policyName}): an approver records the two files logweir drill approve wrote on their own machine.`;
   }
@@ -125,9 +125,9 @@ export function noApprovalSentence(mode: ApprovalMode): string {
     case "confirm":
       return "No Approval in this namespace yet. Its approval mode is confirm: creating a Restore in the wizard is the confirmation, no key is involved, and nothing is recorded here by hand.";
     case "twoPerson":
-      return "No Approval in this namespace yet. Its approval mode is two-person: a second person, signed in to this console as an approver and not the requester, opens a Restore waiting above and approves it there. No key is involved.";
+      return "No Approval in this namespace yet. Its approval mode is two-person: a second person, signed in to this console as an approver and not the requester, opens a restore or a switchover waiting above and approves it there. No key is involved.";
     case "strict":
-      return "No Approval in this namespace yet. Its approval mode is strict: an approver other than the requester opens a Restore waiting above and records the countersignature there.";
+      return "No Approval in this namespace yet. Its approval mode is strict: an approver other than the requester opens a restore or a switchover waiting above and records the countersignature there.";
     case "files":
       return "No Approval in this namespace yet. Choose a Restore waiting for one above, and record it there from the two files logweir drill approve wrote on the approver's own machine.";
   }
@@ -248,6 +248,7 @@ export type ApprovalStateWord =
   | "expired"
   | "refused"
   | "request-recorded"
+  | "request-expired"
   | "awaiting-verification";
 
 export interface Found {
@@ -293,6 +294,13 @@ export function recordState(approval: Approval): Found {
     // nothing until a second person approves. A record, never a refusal.
     return { state: "request-recorded", reason: verified.reason, message: verified.message ?? "" };
   }
+  if (verified && verified.status === "False" && verified.reason === AUTHORIZATION_EXPIRED && isRequestRecord(approval)) {
+    // DUI-40.5: the same record once its window closed. The controller checks the window
+    // before the second person (approval.rs, steps 4 and 5), so an old request reads
+    // AuthorizationExpired; it authorised nothing then either. Whether it was approved is
+    // the verdict on the approval it names, not a refusal of this record.
+    return { state: "request-expired", reason: verified.reason, message: verified.message ?? "" };
+  }
   if (verified && verified.status === "False") {
     return { state: verified.reason === "KeyIdExpired" ? "expired" : "refused", reason: verified.reason ?? "", message: verified.message ?? "" };
   }
@@ -321,6 +329,14 @@ export function approvalState(approval: Approval | null, subject: Subject, kind:
 /** `Verified=False` on a two-person request's own record (`approval-<hash>-confirmation`). */
 export const REQUEST_RECORD_REASON = "GovernedApprovalRequired";
 
+/** The controller's reason once a document's `expiresAt` has passed (approval.rs). */
+export const AUTHORIZATION_EXPIRED = "AuthorizationExpired";
+
+/** The API's own name for a stored two-person request: `<approvalName>-confirmation` (confirmationNameFor). */
+export function isRequestRecord(approval: Pick<Approval, "name">): boolean {
+  return approval.name.endsWith(REQUEST_RECORD_SUFFIX) && approval.name.length > REQUEST_RECORD_SUFFIX.length;
+}
+
 export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   absent: "None recorded",
   "awaiting-verification": "Awaiting verification",
@@ -329,6 +345,7 @@ export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   expired: "Expired",
   refused: "Refused",
   "request-recorded": "Request recorded",
+  "request-expired": "Request expired",
   "foreign-subject": "Bound to another subject",
   "foreign-execution": "Bound to another run",
   "plan-mismatch": "Names another plan",
@@ -358,6 +375,8 @@ export function stateSentence(found: Found, subject: Subject): string {
       return `The controller refused Approval ${name} (reason ${found.reason}): ${found.message} The Restore does not run while this stands. A refusal about the roster can clear once the roster is fixed; a refusal about the documents cannot, because an Approval's spec is immutable.`;
     case "request-recorded":
       return `Approval ${name} is the console's record of a two-person request, and authorises nothing by design (reason ${found.reason}): a second person, signed in as an approver, approves it.`;
+    case "request-expired":
+      return `Approval ${name} is the console's record of a two-person request, and its window has closed (reason ${found.reason}). It authorised nothing by design, so this refuses nothing: whether the request was approved is the verdict on the approval it asked for.`;
     case "foreign-subject":
       return `Approval ${name} exists but names ${found.detail}, not this Restore. It cannot approve this Restore, and this page will not reuse it.`;
     case "foreign-execution":
@@ -869,7 +888,10 @@ export function useRecordApprovalFiles(ns: string, expected: Subject) {
 export const COUNTERSIGN_COMMAND =
   "logweir drill countersign --document <approvalBytes> --confirmation <sidecarBytes> --key <privkey> --out approval.sig";
 
+/** The suffix of the console's confirmation object for a governed request. */
+const REQUEST_RECORD_SUFFIX = "-confirmation";
+
 /** The console's confirmation object for a governed request. */
 export function confirmationNameFor(approvalName: string): string {
-  return `${approvalName}-confirmation`;
+  return `${approvalName}${REQUEST_RECORD_SUFFIX}`;
 }

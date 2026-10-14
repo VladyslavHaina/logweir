@@ -69,6 +69,8 @@ export function ApprovalStatus({ found, waiting = false }: { found: Found; waiti
       return <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />;
     case "request-recorded":
       return <StatusLabel tone="neutral" text={STATE_WORDS["request-recorded"]} title="the console's record of a request: it authorises nothing until a second person approves" />;
+    case "request-expired":
+      return <StatusLabel tone="neutral" text={STATE_WORDS["request-expired"]} title="the console's record of a request whose window closed: it authorised nothing, and refuses nothing" />;
     case "revoked-after-use":
       return <StatusLabel tone="danger" text={STATE_WORDS["revoked-after-use"]} title={REVOKED_AFTER_USE_WORDS} />;
     default:

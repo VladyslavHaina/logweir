@@ -137,7 +137,7 @@ export function PointStep({
       )}
       {refusal && (
         <Alert variant="danger" isInline title="The point this link names cannot be restored" className="lw-gap-top lw-gap-bottom" id="point-refusal">
-          {refusal}
+          <Prose text={refusal} />
         </Alert>
       )}
       <Content component="p" className="lw-subtle">
