@@ -5489,6 +5489,10 @@ async fn reconcile_with_trust(
         let status = value.as_ref().and_then(|v| v.get("status"));
         if crate::verification::has_trust_verdict(status) {
             if let Some(namespace) = backup.namespace() {
+                // The hook's one clock read: the signing-time plan, the
+                // destination read and the re-derived verdict are judged at
+                // one instant (FX-12).
+                let now = Utc::now();
                 let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
                     policies.state().into_iter().map(|p| (*p).clone()).collect();
                 let resolution =
@@ -5499,8 +5503,7 @@ async fn reconcile_with_trust(
                 // goes through the same evidence path as the original verdict,
                 // so a destination-backed run reads its own bucket, and one
                 // whose grant only a pod may hold reads nothing and says so.
-                let signing_time = match crate::verification::signing_time_need(status, Utc::now())
-                {
+                let signing_time = match crate::verification::signing_time_need(status, now) {
                     crate::verification::ReadPlan::None => {
                         crate::verification::SigningTime::NotNeeded
                     }
@@ -5517,9 +5520,7 @@ async fn reconcile_with_trust(
                         // reason no read was attempted, and the verdict is still
                         // re-derived.
                         let (handle, unread) =
-                            match evidence_source(&backup, &ctx.client, &namespace, Utc::now())
-                                .await
-                            {
+                            match evidence_source(&backup, &ctx.client, &namespace, now).await {
                                 Ok(EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
                                 Ok(EvidenceSource::Destination(store)) => (Some(store), None),
                                 Ok(EvidenceSource::NotAttempted { detail }) => (None, Some(detail)),
@@ -5547,7 +5548,7 @@ async fn reconcile_with_trust(
                     &*backup,
                     &resolution,
                     crate::verification::backup_badge,
-                    Utc::now(),
+                    now,
                     &signing_time,
                 )
                 .await?;

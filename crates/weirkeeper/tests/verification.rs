@@ -1739,7 +1739,7 @@ fn every_verification_path_is_judged_at_the_instant_it_is_handed() {
         (before, VerificationVerdict::Untrusted),
         (verified_at(), VerificationVerdict::Valid),
     ] {
-        let (none, unreadable, governed, relayed) = rt.block_on(async {
+        let (none, unreadable, governed, relayed, relayed_unreadable) = rt.block_on(async {
             let none = weirkeeper::verification::verify_oracle(None, trust_api(None), now)(
                 reference.clone(),
             )
@@ -1764,18 +1764,28 @@ fn every_verification_path_is_judged_at_the_instant_it_is_handed() {
                 now,
             )
             .await;
-            (none, unreadable, governed, relayed)
+            let relayed_unreadable = weirkeeper::verification::verify_relayed(
+                &trust_api(None),
+                &reference,
+                &payload,
+                &sidecar,
+                now,
+            )
+            .await;
+            (none, unreadable, governed, relayed, relayed_unreadable)
         });
         for (path, r) in [
             ("oracle, no handle", &none),
             ("oracle, unreadable trust", &unreadable),
             ("oracle, governed", &governed),
             ("relay, governed", &relayed),
+            ("relay, unreadable trust", &relayed_unreadable),
         ] {
             assert_eq!(r.verified_at, now, "{path}: {r:?}");
         }
         assert_eq!(none.result, VerificationVerdict::NotAttempted);
         assert_eq!(unreadable.result, VerificationVerdict::NotAttempted);
+        assert_eq!(relayed_unreadable.result, VerificationVerdict::NotAttempted);
         assert_eq!(governed.result, verdict, "{governed:?}");
         assert_eq!(relayed.result, verdict, "{relayed:?}");
     }

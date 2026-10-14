@@ -1493,7 +1493,9 @@ impl Store {
         version: &str,
         max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
-        self.note_read("get", &format!("{key}?versionId={version}"));
+        if self.reads.is_some() {
+            self.note_read("get", &format!("{key}?versionId={version}"));
+        }
         if let Some(log) = &self.versions {
             // The test double's version log: see `versions`.
             if let Some(fault) = log.version_read_fault() {
