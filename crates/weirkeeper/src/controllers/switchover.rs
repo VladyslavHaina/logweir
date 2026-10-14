@@ -16,8 +16,11 @@
 //! Then one immutable bundle ConfigMap (the two plans, the approval, the
 //! approver's key, the evidence keyring, and for an authorization v2 the
 //! policy snapshot and the console key) and one Job, `logweir switchover
-//! run`, with the restore's target credential projection and evidence grant.
-//! The controller never dials Kafka.
+//! run`, with the restore's target credential projection and the evidence
+//! destination's two grants: `evidenceRead` to read the restore's evidence,
+//! `evidenceWrite` to write the record (theme A's D1,
+//! [`crate::destination::EvidenceAccessEnv`]). It reads no archive. The
+//! controller never dials Kafka.
 //!
 //! # The run's result
 //!
@@ -321,7 +324,8 @@ pub fn bundle_config_map(
     }
 }
 
-/// The restore's evidence and target access, as its Job had them.
+/// The restore's target access, as its Job had it, and the evidence's read
+/// and write grants.
 #[derive(Debug, Clone, Default)]
 pub struct Access {
     pub secret_mounts: Vec<SecretMount>,
@@ -331,21 +335,36 @@ pub struct Access {
     pub service_account_name: String,
     /// The store contract handshake, for a destination-backed restore.
     pub store_contract: bool,
+    /// The grant the evidence is read with, as a failure names it
+    /// (`--evidence-read-grant`).
+    pub evidence_read_grant: Option<String>,
+    /// The restore's own immutable plan `ConfigMap`, mounted at `/plan`: it
+    /// holds the CA bundles the restore froze (`evidence-ca.pem`), which the
+    /// store environment's `LOGWEIR_*_CA_FILE` name.
+    pub plan_config_map: Option<String>,
 }
 
-/// The restore's target credential projection and evidence grant: the same
-/// resolvers `Restore`'s Job uses, so a switchover reaches exactly what the
-/// restore reached.
+/// What an inline restore's Job reads and writes its evidence with: the
+/// plan's own archive credential, ambient in the pod.
+pub const INLINE_READ_GRANT: &str =
+    "the inline archive credential (spec.sourceArchive.secretRef), which reads and writes the \
+     evidence";
+
+/// The restore's target credential projection, by the resolver `Restore`'s
+/// Job uses, so a switchover reaches exactly the target the restore reached;
+/// and, for a destination-backed restore, `evidence`: the evidence
+/// destination's read grant in the archive slot and its write grant in the
+/// evidence slot (D1). An inline restore's Job reads and writes with the
+/// plan's own archive credential, as its run did.
 ///
 /// # Errors
 ///
-/// `(reason, message)` when the connection or a destination does not
-/// resolve.
+/// `(reason, message)` when the connection does not resolve.
 pub fn restore_access(
     restore: &Restore,
     plan: &logweir_core::spec::RestoreSpec,
     cluster: &KafkaCluster,
-    destinations: Option<&super::restore::RestoreDestinations>,
+    evidence: Option<&crate::destination::EvidenceAccessEnv>,
 ) -> Result<Access, (&'static str, String)> {
     use super::backup;
     let namespace = restore.namespace().unwrap_or_default();
@@ -373,11 +392,17 @@ pub fn restore_access(
         env_from_secret: projection.env_from_secret,
         env_literal: vec![("RUST_LOG".to_string(), "info".to_string())],
         service_account_name: connection.execution.service_account_name.clone(),
-        store_contract: destinations.is_some(),
+        store_contract: evidence.is_some(),
+        evidence_read_grant: Some(
+            evidence
+                .map_or(INLINE_READ_GRANT, |e| e.read_grant.as_str())
+                .to_string(),
+        ),
+        plan_config_map: Some(super::restore::plan_config_map_name(&restore.name_any())),
     };
     access.secret_mounts.extend(projection.secret_mounts);
     access.secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
-    match destinations {
+    match evidence {
         None => {
             if let Some(secret) = restore.spec.source_archive.secret_ref.as_ref() {
                 for (env, key) in [
@@ -403,24 +428,15 @@ pub fn restore_access(
             }
             access.env_literal.extend(backup::archive_addressing_env());
         }
-        Some(pair) => {
-            let evidence = pair
-                .evidence
-                .evidence_env(&pair.source)
-                .map_err(|refusal| (refusal.reason(), refusal.message))?;
-            let archive = pair.source.job_env();
-            for env in [&archive, &evidence] {
+        Some(evidence) => {
+            for env in [&evidence.read, &evidence.write] {
                 access
                     .env_from_secret
                     .extend(env.from_secret.iter().cloned());
                 access.env_literal.extend(env.literals.iter().cloned());
             }
-            if let Some(sa) = archive
-                .service_account_name
-                .clone()
-                .or_else(|| evidence.service_account_name.clone())
-            {
-                access.service_account_name = sa;
+            if let Some(sa) = evidence.service_account_name() {
+                access.service_account_name = sa.to_string();
             }
         }
     }
@@ -430,7 +446,13 @@ pub fn restore_access(
 
 /// The runner's argv.
 #[must_use]
-pub fn runner_argv(sw: &Switchover, scorecard_key: &str, v2: bool, contract: bool) -> Vec<String> {
+pub fn runner_argv(
+    sw: &Switchover,
+    scorecard_key: &str,
+    v2: bool,
+    contract: bool,
+    read_grant: Option<&str>,
+) -> Vec<String> {
     let at = |f: &str| format!("{}/{f}", job::APPROVAL_MOUNT_PATH);
     let mut argv = vec![
         "switchover".to_string(),
@@ -474,8 +496,16 @@ pub fn runner_argv(sw: &Switchover, scorecard_key: &str, v2: bool, contract: boo
             crate::destination::STORE_CONTRACT_VERSION.to_string(),
         ]);
     }
+    if let Some(grant) = read_grant {
+        argv.extend([READ_GRANT_ARG.to_string(), grant.to_string()]);
+    }
     argv
 }
+
+/// The runner flag the evidence's read grant is named with
+/// (`logweir::evidence_read::READ_GRANT_ARG`, which this crate does not
+/// link).
+pub const READ_GRANT_ARG: &str = "--evidence-read-grant";
 
 /// The Job, pure.
 #[must_use]
@@ -514,14 +544,20 @@ pub fn job_spec(sw: &Switchover, access: Access, scorecard_key: &str, v2: bool) 
             name: sw.name_any(),
             uid: sw.uid().unwrap_or_default(),
         },
-        args: runner_argv(sw, scorecard_key, v2, access.store_contract),
+        args: runner_argv(
+            sw,
+            scorecard_key,
+            v2,
+            access.store_contract,
+            access.evidence_read_grant.as_deref(),
+        ),
         deadline_seconds: sw.spec.deadline_seconds,
         service_account_name: access.service_account_name,
         secret_mounts: access.secret_mounts,
         config_map_mounts,
         env_from_secret: access.env_from_secret,
         env_literal: access.env_literal,
-        plan_config_map: None,
+        plan_config_map: access.plan_config_map,
         image: None,
         image_pull_policy: None,
         resources: None,
@@ -580,7 +616,16 @@ pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverS
         exit_code: Some(exit_code),
         exit_reason: reason_word.clone(),
         reason: Some(reason_word.unwrap_or_else(|| phase.to_string())),
-        message: Some(format!("the switchover Job exited {exit_code}: {phase}")),
+        // The runner's own sentence for a whole-run refusal or failure (D1:
+        // `EvidenceUnreadable` names the key and the grant), cleaned and
+        // bounded as every relayed message is.
+        message: Some(match last(crate_line::DETAIL) {
+            Some(detail) => format!(
+                "the switchover Job exited {exit_code}: {phase}: {}",
+                logweir_core::refusal_detail::clean_message(&detail)
+            ),
+            None => format!("the switchover Job exited {exit_code}: {phase}"),
+        }),
         job_ref: Some(job_name.to_string()),
         groups,
         counts: Some(counts),
@@ -597,6 +642,7 @@ mod crate_line {
     pub const GROUP: &str = "switchover-group=";
     pub const OUTCOME: &str = "switchover-outcome=";
     pub const RECORD: &str = "switchover-record-key=";
+    pub const DETAIL: &str = "switchover-detail=";
 }
 
 /// A reconcile's failure: a Kubernetes API error, retried.
@@ -806,7 +852,33 @@ pub async fn reconcile(
             return Ok(Action::await_change());
         }
     };
-    let access = match restore_access(&restore, &plan, &cluster, destinations.as_deref()) {
+    // D1: the evidence destination's read grant reads the restore's
+    // evidence, its write grant writes the record.
+    let evidence = match &destinations {
+        None => None,
+        Some(_) => {
+            match super::restore::restore_clone::evidence_access(
+                &restore,
+                client,
+                &namespace,
+                Utc::now(),
+            )
+            .await?
+            {
+                Ok(evidence) => evidence,
+                Err(refusal) => {
+                    patch_status(
+                        &api,
+                        &name,
+                        &refuse(refusal.reason(), refusal.message.clone()),
+                    )
+                    .await?;
+                    return Ok(Action::await_change());
+                }
+            }
+        }
+    };
+    let access = match restore_access(&restore, &plan, &cluster, evidence.as_ref()) {
         Ok(a) => a,
         Err((reason, message)) => {
             patch_status(&api, &name, &refuse(reason, message)).await?;
@@ -1214,6 +1286,43 @@ mod tests {
         assert_eq!(
             status_from_run(0, "", "sw").phase.as_deref(),
             Some(so::SUCCEEDED)
+        );
+    }
+
+    /// **D1: a store that refused the evidence is `Failed`, named, and the
+    /// status says which grant could not read what.** The runner's exit 1,
+    /// `failure-reason=EvidenceUnreadable` and its `switchover-detail=`
+    /// sentence reach `reason`, `exitReason` and `message`. CONTROL: without
+    /// a detail line the message is the exit and the phase, as before.
+    ///
+    /// KILLS: the detail line not read (the console shows only "exited 1").
+    #[test]
+    fn an_unreadable_evidence_is_failed_and_names_the_grant() {
+        let log = "switchover-run-id=X\n\
+             switchover-group={\"source\":\"a\",\"target\":\"a\",\"outcome\":\"untouched\",\"reason\":null,\"created\":false,\"committed\":false,\"partitions\":[]}\n\
+             switchover-record-key=logweir/switchovers/X.record.json\n\
+             switchover-outcome=Failed\n\
+             switchover-counts=applied=0 alreadyApplied=0 refused=0 failed=0 untouched=1\n\
+             switchover-detail=EvidenceUnreadable: could not read logweir/drills/R.json with grant evidenceRead of BackupDestination ns/d: AccessDenied; the store refused the read, so the evidence was not judged\n\
+             failure-reason=EvidenceUnreadable\n";
+        let st = status_from_run(1, log, "sw");
+        assert_eq!(st.phase.as_deref(), Some(so::RUN_FAILED));
+        assert_eq!(st.reason.as_deref(), Some("EvidenceUnreadable"));
+        assert_eq!(st.exit_reason.as_deref(), Some("EvidenceUnreadable"));
+        let message = st.message.unwrap_or_default();
+        assert!(
+            message.starts_with(
+                "the switchover Job exited 1: Failed: EvidenceUnreadable: could not read \
+                 logweir/drills/R.json with grant evidenceRead of BackupDestination ns/d: \
+                 AccessDenied"
+            ),
+            "{message}"
+        );
+        assert_eq!(
+            status_from_run(1, "failure-reason=Operational\n", "sw")
+                .message
+                .as_deref(),
+            Some("the switchover Job exited 1: Failed")
         );
     }
 

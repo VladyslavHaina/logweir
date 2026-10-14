@@ -5,10 +5,10 @@
 //! in-memory evidence store and a recording cluster double, and asserts what
 //! the deleter was ASKED, not only what the report says.
 
-use logweir::restore_cleanup::{clean, finish, Cleaned, Inputs};
+use logweir::restore_cleanup::{clean, finish, Cleaned, EvidenceStores, Inputs};
 use logweir::signer::ValidatedSigner;
 use logweir_core::spec::DrillSpec;
-use logweir_engine_oso::storage::{caps, Store};
+use logweir_engine_oso::storage::{caps, Store, StoreError};
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicDeleter, TopicMeta};
 use logweir_kafka::topic_ids::TopicIdRead;
 use std::collections::BTreeMap;
@@ -276,6 +276,92 @@ fn a_repointed_cluster_deletes_nothing() {
     assert!(cluster.asked().is_empty());
 }
 
+/// The evidence as the PoC's write grant saw it (theme A's D1): the store
+/// refuses every read with a 403; writes go to the store it wraps.
+struct Denying {
+    write: Store,
+}
+
+impl EvidenceStores for Denying {
+    fn read(&self, key: &str, _max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError::Io(format!(
+            "{key}: Error performing GET http://minio:9000/e/{key} in 2ms - Server returned \
+             non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code></Error>"
+        )))
+    }
+    fn writer(&self) -> &Store {
+        &self.write
+    }
+    fn grant(&self) -> &str {
+        "evidenceRead of BackupDestination team-a/poc"
+    }
+}
+
+/// **D1: a scorecard the store will not hand over is an operational failure
+/// that names the grant, never a refusal, never a deletion.** On the PoC the
+/// cleanup read with the write grant, was refused 403, exited 1, and the
+/// clone's status said only that. Now the failure names the key, the read
+/// grant and the store's class, the run exits 1 (a later attempt may read),
+/// and the `clone-cleanup=` line carries the sentence for the clone's status.
+/// CONTROL: the same scorecard, readable, is cleaned.
+///
+/// KILLS: the cleanup's read error without `evidence_read::unreadable` (no
+/// grant named); the report line without `error`.
+#[test]
+fn a_scorecard_the_store_refuses_is_a_named_operational_failure() {
+    let plan = plan_text("clone-", "{ttl_seconds: 300}");
+    let created = [("clone-orders", Some(A))];
+    let prefix = |d: &mut serde_json::Value| d["target"]["topic_mapping_prefix"] = "clone-".into();
+    let denying = Denying {
+        write: store_with(&plan, &created, prefix),
+    };
+    let cluster = Cluster::new(&[("clone-orders", TopicIdRead::Id(A.into()))]);
+    let spec: DrillSpec = serde_yaml::from_str(&plan).unwrap();
+    let signer = signer();
+    let trusted = [signer.verifying_key()];
+    let inputs = Inputs {
+        spec: &spec,
+        plan_bytes: plan.as_bytes(),
+        run_id: RUN,
+        attempt: 1,
+        trusted: &trusted,
+    };
+    let denied = clean(&inputs, &cluster, &cluster, &denying, &signer);
+    match &denied {
+        Err(logweir::drill::DrillError::Operational(why)) => {
+            assert!(
+                why.starts_with(&format!(
+                    "EvidenceUnreadable: could not read logweir/drills/{RUN}.json with grant \
+                     evidenceRead of BackupDestination team-a/poc: AccessDenied"
+                )),
+                "{why}"
+            );
+            assert!(!why.contains("minio:9000"), "no backend text: {why}");
+        }
+        other => panic!("expected an operational failure, got {other:?}"),
+    }
+    assert!(cluster.asked().is_empty(), "nothing deleted");
+    let mut out = Vec::new();
+    assert_eq!(
+        finish(RUN, denied, &mut out) as u8,
+        1,
+        "retried, not refused"
+    );
+    let text = String::from_utf8(out).unwrap();
+    let report = text
+        .lines()
+        .find_map(|l| l.strip_prefix("clone-cleanup="))
+        .and_then(logweir_core::target_creation::CloneCleanupReport::parse)
+        .expect("the line");
+    let error = report.error.expect("the error is on the line");
+    assert!(error.starts_with("EvidenceUnreadable: "), "{error}");
+    assert!(report.refused.is_none() && report.deleted.is_empty());
+
+    // CONTROL: readable, the same record cleans.
+    let cleaned = run(&plan, &store_with(&plan, &created, prefix), &cluster).expect("cleans");
+    assert_eq!(cleaned.report.deleted, ["clone-orders"]);
+}
+
 /// **Nothing is deleted without the run's own verified record**: a scorecard
 /// of another plan, one signed by another key, a missing one, and a plan
 /// that is not a clone are each refused, and the deleter is never asked.
@@ -422,4 +508,53 @@ fn an_unreadable_id_alone_is_retried() {
         .starts_with("CloneTargetIdentityUnknown: "));
     let mut out = Vec::new();
     assert_eq!(finish(RUN, Ok(cleaned), &mut out) as u8, 1);
+}
+
+/// **MEDIUM-1 of the fix round's review: the cleanup cleans its own error
+/// before it prints it.** An attestation PUT refused by S3 carries the error
+/// body, which on AWS names the access key id; the `clone-cleanup=` line
+/// keeps the class (`<Code>`) and drops the key and the body. CONTROL: an
+/// error with nothing to clean is printed whole.
+///
+/// KILLS: `finish` printing the error raw.
+#[test]
+fn the_cleanups_error_is_cleaned_before_it_is_printed() {
+    let line = |e: logweir::drill::DrillError| {
+        let mut out = Vec::new();
+        assert_eq!(finish(RUN, Err(e), &mut out) as u8, 1);
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("clone-cleanup="))
+            .and_then(logweir_core::target_creation::CloneCleanupReport::parse)
+            .expect("the line")
+            .error
+            .expect("the error is on the line")
+    };
+    let key = format!("{}{}", "AKIA", "Z7Q4XWERT2PLMNB8");
+    let error = line(logweir::drill::DrillError::Operational(format!(
+        "the attestation could not be put: storage: 403 Forbidden: <?xml version=\"1.0\" \
+         encoding=\"UTF-8\"?><Error><Code>InvalidAccessKeyId</Code><Message>The AWS Access \
+         Key Id you provided does not exist.</Message><AWSAccessKeyId>{key}</AWSAccessKeyId>\
+         </Error>"
+    )));
+    assert!(
+        !error.contains(&key),
+        "the access key id is removed: {error}"
+    );
+    assert!(
+        !error.contains("<Message>"),
+        "the S3 body is removed: {error}"
+    );
+    assert!(
+        error.contains("InvalidAccessKeyId"),
+        "the class stays: {error}"
+    );
+
+    // CONTROL: nothing to clean.
+    let plain = format!("EvidenceUnreadable: could not read logweir/drills/{RUN}.json");
+    assert_eq!(
+        line(logweir::drill::DrillError::Operational(plain.clone())),
+        plain
+    );
 }

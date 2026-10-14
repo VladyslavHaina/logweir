@@ -177,7 +177,7 @@ it holds (`logweir_core::runner_line::one_line`).
 
 | Line | When | Read into |
 |---|---|---|
-| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). Not printed when the evidence store or the cluster did not answer (exit 1) or the attestation was not persisted (exit 4) | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). An attempt that could not do its job (the evidence store or the cluster did not answer, exit 1; the attestation not persisted, exit 4) prints it with only `"error":"<sentence>"`, for example `EvidenceUnreadable: could not read logweir/drills/<run_id>.json with grant <grant>: AccessDenied` | `status.teardown` (`deleted`, `failed`, `attestationKey`) when it names a topic, and `status.clone` (`reason` carries `error`) |
 | `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
 
 The evidence keys (interface I8) are the final lines of a run that signed a
@@ -664,7 +664,7 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `approval.state` | blocking | The `Approval`'s own verdict |
 | `approval.keyValidity` | advisory | The approver key outlives the restore's deadline |
 | `switchover.restore` | blocking | A `Switchover` review's `Restore` exists with the named UID, is not scratch, `Succeeded` with a `Valid` verdict and a scorecard key, writes evidence to a saved destination, and the namespace has evidence keys (`RestoreNotFound`, `RestoreNotSucceeded`, `ArchiveUrlUnreadable`, `TrustRosterNotLoaded`) |
-| `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word) |
+| `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word). A store that refuses the read answers in its own code (`AccessDenied`, …), the message opening `EvidenceUnreadable` and naming the grant |
 | `switchover.target` | blocking | The target answers the restore's cluster id and each restored topic its recorded ID (`TargetNotTheRestores`) |
 | `switchover.groups` | blocking | Each requested target group admits a commit and holds no other committed position (`GroupNotAdmissible`); every position is in the details |
 

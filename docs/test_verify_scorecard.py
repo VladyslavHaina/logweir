@@ -907,7 +907,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.33.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.34.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2356,9 +2356,13 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # (PMD-1 to PMD-7, with --positions-mapping), their shape checks, the
     # `positions_mapping` lines, and the switchover record's payload type. Map
     # six.
+    #
+    # 1.34.0 (L1) takes the public key file as the Rust reader does: one
+    # `PUBLIC KEY` block, then only whitespace (text before it is RFC 7468's
+    # explanatory text). Map still six.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 6, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.33.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.34.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE

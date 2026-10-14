@@ -242,6 +242,15 @@ pub async fn create(
         },
     )?;
     validate_create(&request)?;
+    restores::refuse_taken_approval::<Switchover>(
+        &state,
+        &ns,
+        &effective,
+        &request.approval_ref.name,
+        &super::deterministic_name(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key),
+        "Switchover",
+    )
+    .await?;
     super::run_create_rate(&state, &actor, &ns, super::ManualRun::Restore)?;
     let created = create_idempotent(
         &state,

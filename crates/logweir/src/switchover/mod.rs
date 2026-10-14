@@ -50,6 +50,9 @@ pub const COUNTS_LINE: &str = "switchover-counts=";
 pub const RECORD_LINE: &str = "switchover-record-key=";
 /// The stdout line the run's outcome is printed on.
 pub const OUTCOME_LINE: &str = "switchover-outcome=";
+/// The stdout line a whole-run refusal's or failure's sentence is printed on,
+/// one line, for the `Switchover`'s `status.message`.
+pub const DETAIL_LINE: &str = "switchover-detail=";
 
 /// `logweir switchover run`'s inputs.
 #[derive(Debug, Clone)]
@@ -79,6 +82,9 @@ pub struct RunArgs {
     /// An authorization document v2's policy snapshot and console key.
     pub approval_policy: Option<PathBuf>,
     pub confirmation_key: Option<PathBuf>,
+    /// The grant the restore's evidence is read with, as the controller names
+    /// it (`--evidence-read-grant`, D1); `None` for a hand-run.
+    pub evidence_read_grant: Option<String>,
 }
 
 fn refusal(code: &str, message: impl std::fmt::Display) -> String {
@@ -165,13 +171,9 @@ fn verified_evidence(
     Ok(bytes)
 }
 
-/// One capped read from the evidence store, its failure in words.
-fn store_read(store: &Store, key: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-    match store.get_capped(key, max_bytes) {
-        Ok((bytes, _)) => Ok(bytes),
-        Err(StoreError::NotFound(_)) => Err(format!("{key} is not in the evidence store")),
-        Err(e) => Err(format!("{key} could not be read: {e}")),
-    }
+/// One capped read from the evidence store.
+fn store_read(store: &Store, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+    store.get_capped(key, max_bytes).map(|(bytes, _)| bytes)
 }
 
 /// What step 3 verified: the restore's signed scorecard and the positions
@@ -448,7 +450,7 @@ fn verify_approval(args: &RunArgs, plan_bytes: &[u8]) -> Result<so::ApprovalSumm
 /// Steps 1 to 4: everything that is read before the target is dialled.
 fn verify_inputs(
     args: &RunArgs,
-    store: &Store,
+    store: &crate::evidence_read::EvidenceReader,
     keyring: &logweir_core::execution_contract::EvidenceKeyring,
     plan_bytes: &[u8],
     restore_text: &str,
@@ -475,7 +477,7 @@ fn verify_inputs(
     let approval = verify_approval(args, plan_bytes)?;
 
     // 3. The restore's evidence (shared with the `switchoverReadiness` check).
-    let read = |k: &str, cap: u64| store_read(store, k, cap);
+    let read = |k: &str, cap: u64| store.noted(k, store_read(store, k, cap));
     let RestoreEvidence {
         scorecard, mapping, ..
     } = restore_evidence(
@@ -758,6 +760,7 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
     out_line!("switchover-run-id={run_id}");
     let fail = |code: ExitCode, why: String| {
         eprintln!("{}", crate::exit::one_line(&why));
+        out_line!("{DETAIL_LINE}{}", crate::exit::one_line(&why));
         out_line!("{OUTCOME_LINE}{}", so::RUN_FAILED);
         out_line!(
             "failure-reason={}",
@@ -805,15 +808,21 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
                 )
             }
         };
-    // The evidence store is the restore plan's; a plan that does not parse is
-    // refused below, before it is needed for anything but the record.
+    // The evidence stores are the restore plan's: the read handle, with the
+    // grant the controller named (D1), and the handle the record is written
+    // to. A plan that does not parse is refused below, before it is needed
+    // for anything but the record.
     let spec_for_store: Option<logweir_core::spec::DrillSpec> =
         serde_yaml::from_str(&restore_text).ok();
-    let store = match spec_for_store
-        .as_ref()
-        .map(|s| evidence_store(s, args.store_contract_version.is_some()))
-    {
-        Some(Ok(s)) => s,
+    let contract = args.store_contract_version.is_some();
+    let (store, record_store) = match spec_for_store.as_ref().map(|s| {
+        crate::evidence_read::read_store(&s.evidence, contract)
+            .and_then(|read| evidence_store(s, contract).map(|write| (read, write)))
+    }) {
+        Some(Ok((read, write))) => (
+            crate::evidence_read::EvidenceReader::new(read, args.evidence_read_grant.as_deref()),
+            write,
+        ),
         Some(Err(e)) => {
             return fail(
                 ExitCode::Operational,
@@ -889,10 +898,22 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
         let _ = v.plan_hash;
         Ok(())
     })();
-    let refused = outcome.as_ref().err().map(|r| r.0.clone());
-    record.reason = refused.clone();
+    // D1: a read the STORE refused fails the run by name, whatever the
+    // evidence code made of the bytes it did not get; it is never a verdict
+    // on the evidence (`MappingDigestMismatch`, `NoPositionsMapping`).
+    let (unreadable, refused) = match crate::evidence_read::ending(
+        outcome.as_ref().err().map(|r| r.0.clone()),
+        store.unreadable(),
+    ) {
+        Some(crate::evidence_read::Ending::Unreadable(why)) => (Some(why), None),
+        Some(crate::evidence_read::Ending::Refused(why)) => (None, Some(why)),
+        None => (None, None),
+    };
+    record.reason = unreadable.clone().or_else(|| refused.clone());
     record.counts = GroupCounts::of(&record.groups);
-    record.outcome = if refused.is_some() {
+    record.outcome = if unreadable.is_some() {
+        so::RUN_FAILED.into()
+    } else if refused.is_some() {
         so::RUN_REFUSED.into()
     } else {
         record.counts.outcome().into()
@@ -904,10 +925,10 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
     let written = record.to_bytes().and_then(|bytes| {
         let sidecar = signer.sign(logweir_evidence::PAYLOAD_TYPE_SWITCHOVER_RECORD, &bytes)?;
         let sig = serde_json::to_vec(&sidecar).map_err(|e| e.to_string())?;
-        store
+        record_store
             .put_create_only(&key, &bytes)
             .map_err(|e| e.to_string())?;
-        store
+        record_store
             .put_create_only(&so::record_sidecar_key(&run_id), &sig)
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -927,8 +948,19 @@ fn run_with_lines(args: &RunArgs, last: &std::cell::RefCell<crate::exit::FinalLi
     }
     out_line!("{OUTCOME_LINE}{}", record.outcome);
     out_line!("{COUNTS_LINE}{}", record.counts.render());
+    if let Some(why) = &unreadable {
+        let why = crate::exit::one_line(why);
+        eprintln!("{why}");
+        out_line!("{DETAIL_LINE}{why}");
+        out_line!(
+            "failure-reason={}",
+            crate::evidence_read::EVIDENCE_UNREADABLE
+        );
+        return ExitCode::Operational;
+    }
     if let Some(why) = &refused {
         eprintln!("{}", crate::exit::one_line(&format!("refused: {why}")));
+        out_line!("{DETAIL_LINE}{}", crate::exit::one_line(why));
         out_line!(
             "refusal-reason={}",
             why.split(':').next().unwrap_or(so::PLAN_INVALID)

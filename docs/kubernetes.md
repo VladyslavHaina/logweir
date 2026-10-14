@@ -181,6 +181,19 @@ action each removal broke, is in [reference.md](reference.md#object-storage-gran
   the point is `Unreadable`, the restore exits 1 and the preflight answers
   `archive.backupSet` `AccessDenied`. MinIO serves it under `s3:GetObject`
   (measured 2026-10-09). An unversioned bucket issues no pin.
+- **The `Switchover` Job and a TTL clone's cleanup Job read the restore's
+  evidence with `evidenceRead`** (the scorecard, its sidecar, the positions
+  mapping, a rollback's record) and write beside it with `evidenceWrite` (the
+  switchover record, the cleanup attestation). The read grant is projected in
+  the archive slot (`AWS_*`) and named on the runner's `--evidence-read-grant`;
+  neither Job reads the archive. An `evidenceRead` no pod can hold
+  (`ControllerIdentity`, absent, or a workload identity on another
+  ServiceAccount than `evidenceWrite`'s) falls back to `evidenceWrite`, which
+  then needs `s3:GetObject` on `<bucket>/logweir/*`. A store that refuses a
+  read is never a verdict on the evidence: the run fails `EvidenceUnreadable`,
+  naming the key, the grant and the store's class, for example `could not read
+  logweir/drills/<run>.json with grant evidenceRead of BackupDestination
+  team-a/primary: AccessDenied`.
 - **A point-bound restore reads its receipt through `archiveRead`**, at
   `logweir/backups/<backupId>/<run id>.receipt.json` with its signature
   [UNVERIFIED — the receipt read was not bisected on a restricted principal; the
@@ -1250,7 +1263,31 @@ deleted and created again under a recorded name between that read and the
 delete request would be deleted. The cleanup verifies the run's scorecard with
 the installation's current signing key (and, for a plan bound to a recovery
 point, the evidence keyring); a signing key rotated during a clone's lifetime
-makes it refuse, `RemovalFailed`, and nothing is deleted. **On `RemovalFailed`**, check the target for topics with the clone's
+makes it refuse, `RemovalFailed`, and nothing is deleted.
+
+The cleanup Job reads the run's scorecard with the evidence destination's
+`evidenceRead` grant and writes its attestation with `evidenceWrite`
+([the grants](#the-grants-and-the-object-storage-actions-each-one-needs)); a
+scorecard the store will not hand over is `EvidenceUnreadable`, retried like
+any failed attempt, and `status.clone.reason` names the key, the grant and the
+store's answer. The reason points at `status.teardown.failed` only when the
+last attempt left topics there; one that deleted nothing says so.
+
+**After an upgrade.** A cleanup Job a controller from before this release
+built reads with the run's write grant and runs the older runner: it is never
+started. A suspended one is replaced by the next attempt, built with this
+release's grants and runner image, at the clone's expiry. A clone already in
+`RemovalFailed` whose last cleanup Job is such a Job is re-armed,
+automatically, the first time this controller reconciles it: `status.clone`
+goes to `Removing` on the next attempt number and its old reason is cleared.
+The re-armed attempt counts against the same budget of three: if it fails, it
+is retried as any attempt is while fewer than three have run. So a clone the
+older build held at attempt 1 gets up to two more attempts, and one held at
+attempt 3 gets exactly one. Each such Job names its grant
+(`--evidence-read-grant`), so when the last one fails too, or one is refused,
+the clone holds as any `RemovalFailed` does.
+
+**On `RemovalFailed`**, check the target for topics with the clone's
 prefix, delete any the run created (`status.teardown.failed` and the scorecard's
 `target.creation` name them), then remove the finalizer:
 
@@ -2563,7 +2600,9 @@ restore's target. Nothing commits a position automatically after a restore.
    (`RestoreNotSucceeded`), a scratch restore (`RestoreIsScratch`) and a second
    switchover of the same restore while one runs (`SwitchoverInProgress`), then
    creates one Job (`logweir switchover run`) with the restore's target
-   connection and evidence grant.
+   connection and its evidence destination's two grants: `evidenceRead` to read
+   the evidence, `evidenceWrite` to write the record
+   ([the grants](#the-grants-and-the-object-storage-actions-each-one-needs)).
 7. **The run** verifies the approval, the scorecard's signature and plan hash,
    a passing complete verification (`VerificationNotComplete`, naming the
    field), the mapping's digest, every plan entry against the mapping
@@ -2580,7 +2619,11 @@ restore's target. Nothing commits a position automatically after a restore.
    otherwise — and the commit is Logweir's own non-member commit, which the
    broker refuses while the group has a member. Each group is read back.
 8. **The result.** `status.phase` is `Succeeded`, `PartiallyApplied`, `Failed`
-   or `Refused`; `status.groups[]` one outcome per group;
+   or `Refused`, and `status.message` ends with the runner's own sentence for
+   a whole-run refusal or failure. A store that refuses a read of the evidence
+   is `Failed` with reason `EvidenceUnreadable` (`could not read <key> with
+   grant <grant>: AccessDenied`), never `MappingDigestMismatch`, which means
+   the bytes are not the bound ones. `status.groups[]` one outcome per group;
    `status.evidence.recordKey` the signed record
    `logweir/switchovers/<run_id>.record.json` (+ `.sig`; verify it with
    `logweir drill verify --payload-type switchover-record`, signature only).
@@ -3097,7 +3140,9 @@ back:
   an older build until no remaining Job's pod template references it.
 - **Let in-flight `Backup`s finish.** An older runner without the execution
   claim re-runs the engine over a re-created Job's set, and an older controller
-  cannot read a `v2` frozen plan (`PlanConfigMapConflict`).
+  cannot read a `v2` frozen plan (`PlanConfigMapConflict`), nor one frozen with
+  `consumerGroups` or with the Strimzi `KafkaTopic`s a `KafkaCluster`'s
+  `spec.strimzi` listed.
 - **Bound credential Secrets keep working.** An older controller and runner
   ignore the `logweir-binding` pair.
 - **Rolling the CRDs back** (not needed: they are additive) prunes
@@ -3117,6 +3162,25 @@ back:
   kubectl --context docker-desktop delete preflight -n <ns> <name>
   ```
 
+- **Remove `Approval`s naming a `Switchover`** before rolling the controller or
+  the console below the release that added the kind (PROD-04.2). An older build
+  decodes `Approval`s as a closed set of kinds, and ONE `Switchover` approval
+  fails its whole list (``unknown variant `Switchover` ``, a warning about every
+  15 s): no `Approval` is verified, and every new `Restore` stays `Pending`,
+  `ApprovalNotVerified`, until they are gone. Record them, then delete them:
+
+  ```bash
+  kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o json \
+    | jq '[.items[] | select(.spec.subjectRef.kind == "Switchover")]' > switchover-approvals.json
+  kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o json \
+    | jq -r '.items[] | select(.spec.subjectRef.kind == "Switchover") | "-n \(.metadata.namespace) \(.metadata.name)"' \
+    | xargs -r -L1 kubectl --context "$LOGWEIR_CONTEXT" delete approval
+  ```
+
+  This loses the approvals of switchovers not yet admitted: after rolling
+  forward again, such a `Switchover` needs a new approval. A finished
+  switchover keeps its signed record (approval mode and principals), and the
+  `Switchover` objects stay, inert, under an older controller.
 - **Remove `Approval`s naming a `RehearsalSchedule`** before rolling below the
   build that added the value; expect no output from
   `kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o jsonpath='{range .items[?(@.spec.subjectRef.kind=="RehearsalSchedule")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`.

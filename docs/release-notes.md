@@ -28,11 +28,11 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97. Items continue the next entry's numbering. The candidate
+81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100 and 101. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
-`v0.2.0` release that carries it has its own record below. Items 91 to 97
+`v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in no release yet.
 
 ### Candidate record
@@ -2108,7 +2108,11 @@ bounded broker; settings never applied listed; an owned topic exported and its
 neighbour transitioned; a partial transition naming what was not applied, read
 back. Unit rows and 13 mutants on the stage table, the compare, the factor, the
 cap, the class rule, the pass gate and the read-back, all killed.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K6.]
+**Scope (PoC):** row P6 of `poc-v2a` (build `sha-4db6e5bb`, 2026-10-14): a
+compacted three-partition topic restored with `transition: afterVerification`
+reports RF `{1, 1, sourceFactor}`, `before` holding Logweir's during-restore
+set and `after` the source's settings, which the broker then reads exactly;
+both readers accept the 1.11.0 scorecard.
 **Rollback:** an older runner ignores `target.topic_configuration`, creates its
 topics as before and signs no block, so nothing is claimed; an older
 controller ignores `status.topicConfiguration`. Scorecards that carry the
@@ -2132,7 +2136,13 @@ plan and its argv, and the core's owner rule reads them back to one owner; a
 403, an unserved resource and an unlisted namespace are each
 `OwnerDetectionFailed`, the last before any read; no `spec.strimzi`, nothing
 listed.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K10 with only the `KafkaTopic` CRD installed.]
+**Scope (PoC):** row P10 of `poc-v2a` (build `sha-4db6e5bb`, 2026-10-14), with
+only Strimzi 0.45.0's `KafkaTopic` CRD installed: the controller's Role and
+RoleBinding in the listed namespace only; the receipt records owner `strimzi`
+for the managed topic and none for its neighbour; the restore exports the
+owned topic's YAML (its digest the scorecard's) and applies the neighbour.
+Controls: a `spec.strimzi.namespace` outside the list, and the values off, are
+each `OwnerDetectionFailed` with no Job.
 **Rollback:** a controller older than this field refuses such a frozen plan
 (`PlanConfigMapConflict`); let those runs finish first. An older controller
 prunes `spec.strimzi`, and a restore with the plan block and no owner
@@ -2159,7 +2169,13 @@ to run, and could sign a pass with a record left out, is now refused; use the
 point the refusal names. Roll the controller with the runner.
 **Scope:** the three record-semantics rows and the stated-start row on compose
 (Kafka 4.3.1, engine `0.23.3+logweir.3`), orchestrator rows, 11 mutants.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K3.]
+**Scope (PoC):** rows P11 to P13 of `poc-v2a` (build `sha-4db6e5bb`,
+2026-10-14): an out-of-order point is refused `PointInTimeSelectionIncomplete`
+naming the segment and the point that reads it, with no topic and no
+scorecard, and the control point restores every record, the older one
+included (P11); the floor restores the record older than its segment's first
+(P12); a point taken before the upgrade, in order, restores as before (P13,
+standing in for the withdrawn `RehearsalSchedule` row).
 **Rollback:** an older runner selects by first and last record again; an
 older controller shows `exitReason: PointInTimeSelectionIncomplete` without
 the runner's sentence.
@@ -2202,10 +2218,16 @@ mapping rule, the compare, the admission and the apply were killed; the API's
 approval gates are held to the restore's by a parity table.
 [UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K5 and K9.]
 **Rollback:** an older controller ignores `Switchover` objects, so nothing is
-applied, and a Helm rollback leaves the CRD and its objects inert. An older
-verifier ignores the mapping block and refuses the `switchover-record` payload
-type. Positions already committed stay committed: a switchover record's
-`rollback-plan` reverses them.
+applied, and a Helm rollback leaves the CRD and its objects inert. **But an
+`Approval` naming a `Switchover`, or a `Preflight` with operation `Switchover`,
+fails an older build's whole list of that kind** (`unknown variant`): every
+new `Restore` then stays `ApprovalNotVerified`, or no `Preflight` is
+reconciled. Record and delete both before rolling back (the next entry's
+rollback step; [the commands](kubernetes.md#rolling-back)); pending switchovers
+then need a new approval after rolling forward. An older verifier ignores the
+mapping block and refuses the `switchover-record` payload type. Positions
+already committed stay committed: a switchover record's `rollback-plan`
+reverses them.
 
 #### 96. Every runner line a controller acts on is sealed with the Job's token, and a runner older than the controller is named (FX-43)
 
@@ -2251,7 +2273,13 @@ released runner's real refusal of the flag (Restore, Backup, probe, check,
 retention), and the binary's sealed block. 32 mutants were killed. The
 Switchover and cleanup Jobs' wiring is compile-checked and covered by their
 existing rows only.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs FX-43's K-rows.]
+**Scope (PoC):** rows P14 to P23 of `poc-v2a` (build `sha-4db6e5bb`,
+2026-10-14): a `Backup`, a `Restore`, a refused restore, the probe, the
+client-log escape, a check's end frame and a retention run each act on their
+sealed lines only, the plain copies last (P14 to P21; a bootstrap entry with a
+control character refused by the CRD pattern, P17); a runner older than the
+controller is named `RunnerOlderThanController` on two Backups (no retry), the
+probe, a `Preflight` and a retention run (nothing deleted) (P22, P23).
 
 **Rollback:** roll both together, or the controller first. An older
 controller reads this runner as before: FX-34's `--line-token` gets FX-34's
@@ -2271,6 +2299,107 @@ longer lists it. No product behaviour, format or evidence changes.
 guide instead.
 **Scope:** `just links` and doc_lint over the tree without the page.
 **Rollback:** an older release's documentation still carries the page.
+
+#### 98. A `Switchover` and a clone's cleanup read the restore's evidence with the evidence destination's read grant; a store that refuses the read is never a verdict (theme A's PoC defects D1 and D4)
+
+**Changed.** The `Switchover` Job (item 95) and a TTL clone's cleanup Job
+(item 91) read the restore's signed evidence (the scorecard, its sidecar, the
+positions mapping, a rollback's record) with the evidence destination's
+`evidenceRead` grant, projected in the Job's archive slot and named on the
+runner's new `--evidence-read-grant`, and write the switchover record or the
+cleanup attestation with `evidenceWrite`. Before, both read with the write
+grant: on a least-privilege writer (`PutObject` under `logweir/` only, as the
+grant table advises) every switchover was refused `MappingDigestMismatch` and
+every clone ended `RemovalFailed`. A read the store refuses is now an
+operational failure by name, never a verdict on the evidence: the switchover is
+`Failed`, reason `EvidenceUnreadable`, its message naming the key, the grant
+and the store's class (`could not read logweir/drills/<run>.json with grant
+evidenceRead of BackupDestination <ns>/<name>: AccessDenied`); a clone's
+cleanup attempt carries the same sentence on its line and in
+`status.clone.reason`; the `switchoverReadiness` review answers the store's own
+code. `MappingDigestMismatch` keeps its meaning: the bytes are not the bound
+ones. An `evidenceRead` no pod can hold (`ControllerIdentity`, absent) falls
+back to `evidenceWrite` and says so; that write grant then needs `s3:GetObject`
+on `logweir/*`. A `Switchover`'s `status.message` now ends with the runner's
+own sentence for any whole-run refusal or failure, and a clone's
+`RemovalFailed` reason names the last attempt's cause, pointing at
+`status.teardown.failed` only when topics were left. That cause is cleaned
+before it is printed and again before it is stored: access key ids, S3 error
+bodies and URL queries never reach `status.clone.reason`. A cleanup attempt
+rebuilt from an older template (the run Job, or a cleanup Job an older
+controller built) runs this controller's runner image; one copied from this
+build's own attempt keeps that attempt's image. The `Switchover` Job mounts the
+restore's plan `ConfigMap` at `/plan`, so an evidence destination with a
+private CA (`spec.transport.caBundle`) resolves its CA file there, as the
+restore's own Job did.
+**Do:** give the evidence destination an `evidenceRead` grant a pod can hold
+(`SecretKeys` or `WorkloadIdentity`, `s3:GetObject` on `<bucket>/logweir/*`)
+before relying on a switchover or a clone, and roll the controller and the
+runner image together: the controller passes the new flag. After the upgrade a
+cleanup Job an older controller built is never started. A suspended one is
+replaced by the next attempt, built with this release's grants and runner
+image, at the clone's expiry; a clone such a Job left `RemovalFailed` is
+re-armed automatically: at least one more attempt, retried as any failed
+attempt is up to the third (exactly one when the older build held it at
+attempt 3), and it holds as before if the last one fails too. A
+`Switchover` the older build refused `MappingDigestMismatch` is terminal:
+create a new one with the same plan and a new approval.
+**Scope:** unit rows on the grant table, its fallback and the renderer list,
+the Switchover Job's environment and argv, a copied cleanup Job rewired, the
+403 mapping in the switchover, the cleanup and the review, the status message
+and the `RemovalFailed` reason; mock-API rows for the upgrade (an older
+suspended cleanup Job replaced, a `RemovalFailed` clone re-armed once, each
+with its control); compose rows on Kafka 4.3.1 with the PoC's least-privilege
+MinIO policies (a switchover and a clone cleanup succeed with the read grant;
+the write grant alone fails `EvidenceUnreadable` by name, nothing committed or
+deleted); after the fix round's review, rows for a rewired retry's image (with
+a copied attempt's as the control), the cleaned cause on both sides, and the
+`Switchover` Job's plan mount with its CA paths. 17 mutants were killed.
+[UNVERIFIED — not yet run on a cluster; the PoC re-run runs P1, P2, P5, P7, P8, the D4 upgrade row and a clone that fails its attempt 1 under the older build before the upgrade.]
+**Rollback:** an older controller builds both Jobs with the write grant again,
+and an older runner refuses the new flag, so roll both together. Nothing
+stored changes.
+
+#### 99. A create refused for a taken approval name leaves nothing behind (theme A's PoC defect D3)
+
+**Changed.** Under an approval policy, a `POST …/restores` or `…/switchovers`
+whose approval name (or its `-confirmation`) already belongs to another
+object's `Approval` is answered `409 state_conflict` before the `Restore` or
+`Switchover` exists ("…was not made for this request… Nothing was created.").
+Before, the subject was created and then refused, and it failed
+`ApprovalSubjectMismatch`. A replay of an interrupted request is unchanged.
+**Do:** nothing; submit again under another approval name.
+**Scope:** API rows for both kinds and one under a Governed policy, whose
+taken name is the `-confirmation`, each with its control under a free name,
+and the replay rows; 5 mutants were killed.
+**Rollback:** an older API creates the subject before refusing again.
+
+#### 100. Both verifiers read a public key file the same way (L1)
+
+**Changed.** `logweir drill verify --public-key` accepts whitespace after the
+`-----END PUBLIC KEY-----` line, so an extra blank line no longer refuses the
+key, as `verify_scorecard.py` already accepted it; `verify_scorecard.py` 1.34.0
+refuses text after the block, as `drill verify` already did. Whitespace is the
+same five characters to both (space, tab, line feed, form feed, carriage
+return); a vertical tab is text, refused by both. RFC 7468's explanatory text
+before the block stays ignored by both.
+**Do:** nothing.
+**Scope:** a key-file loop in the reader-parity gate
+(`scripts/check-verifier-parity.sh`: plain, trailing blank lines, text before,
+text after, a trailing form feed, a trailing vertical tab); 3 mutants were
+killed.
+**Rollback:** an older `drill verify` refuses the extra blank line again, and an
+older `verify_scorecard.py` accepts text after the block.
+
+#### 101. Under an older runner, a Preflight's pod rows say the pod ran (D6)
+
+**Changed.** When a check runner is older than the controller
+(`CheckContractMismatch`, `RunnerOlderThanController`), `runner.image` names
+it, `runner.pod` says the pod ran and exited, and the projection rows say they
+were in place, instead of "the check pod has not started".
+**Do:** nothing; roll the runner image to the controller's (item 96).
+**Scope:** one controller row with its control; 1 mutant was killed.
+**Rollback:** an older controller says "the check pod has not started" again.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2411,7 +2540,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96 and 97, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100 and 101, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2486,6 +2615,10 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 95 | a new CRD (`Switchover`), the `Approval` and `Preflight` CRDs, the controller, the runner (scorecard 1.12.0, a new record), both verifiers, the API, the chart's RBAC | the CRDs applied; the runner rolled with the controller |
 | 96 | the controller and every runner image (a new flag on every runner Job), the `KafkaCluster` CRD (a pattern) | `controllerImage` and `runnerImage` rolled together |
 | 97 | the documentation only | nothing |
+| 98 | the controller (the `Switchover` and clone cleanup Jobs' grants and argv, `status.message`, a re-armed `RemovalFailed`), the runner (`switchover run`, `restore cleanup`, the review), the `Restore` CRD's description | an `evidenceRead` grant a pod can hold; the runner rolled with the controller |
+| 99 | the API | nothing |
+| 100 | both verifiers (`verify_scorecard.py` 1.34.0) | nothing |
+| 101 | the controller | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
@@ -2509,7 +2642,20 @@ rollback steps:
    chart's `crds/` (`kubectl apply --server-side --force-conflicts -f
    charts/logweir/crds/`) before rolling the controller back; Helm does not
    re-create it.
-7. **Roll the chart, the CRDs, the controller, the runner and the console back
+7. **Delete every `Approval` whose `subjectRef.kind` is `Switchover`, and every
+   `Preflight` whose `spec.request.operation` is `Switchover`** (item 95),
+   after recording them:
+   `kubectl get approvals -A -o json | jq '[.items[] | select(.spec.subjectRef.kind == "Switchover")]' > switchover-approvals.json`,
+   then the delete pipeline in [kubernetes.md](kubernetes.md#rolling-back).
+   An older controller and console decode both kinds as closed sets: one such
+   object fails the whole list, so no `Approval` is verified (every new
+   `Restore` stays `Pending`, `ApprovalNotVerified`, while the controller logs
+   ``unknown variant `Switchover` ``) and no `Preflight` is reconciled. It loses
+   the approvals of switchovers not yet admitted. Let every `Backup` whose
+   `KafkaCluster` sets `spec.strimzi` finish too (item 93: an older controller
+   refuses its frozen plan), and every TTL clone settle or have its topics
+   deleted and its finalizer removed (item 91).
+8. **Roll the chart, the CRDs, the controller, the runner and the console back
    together** (items 28, 33, 60, 61, 65, 67, 74, 78 and 82). After the roll an
    older runner accepts more than 1,000 topics again and an older controller
    reads a receipt under 1 MiB again, so a backup of about 300 topics or more
@@ -2523,11 +2669,11 @@ rollback steps:
    first. The bound Secrets keep working (items 33 and 38). After the roll,
    write each `ProtectionPolicy` route again if you need the older alert sinks:
    the API server dropped their contents (item 74).
-8. **To roll back only the engine** (item 35), use the one-release rollback
+9. **To roll back only the engine** (item 35), use the one-release rollback
    image (`ENGINE_SOURCE=oso`, linux/amd64;
    [install.md](install.md#rolling-the-engine-back)) rather than an older
    runner; its documents say which engine ran.
-9. **Roll the verifiers back last** (items 33, 51 and 68): an older reader
+10. **Roll the verifiers back last** (items 33, 51 and 68): an older reader
    refuses a 1.4.0/1.5.0 document that names a new auth mode (item 33), the
    2.0.0 scorecards a subset restore signed (item 51) and an empty capture's
    receipt (item 68).

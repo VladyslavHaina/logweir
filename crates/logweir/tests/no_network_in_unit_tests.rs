@@ -86,7 +86,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 37] = [
+const ALLOWED: [(&str, &str); 38] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -146,6 +146,14 @@ const ALLOWED: [(&str, &str); 37] = [
     (
         "crates/logweir/src/drill/mod.rs",
         "production: the orchestrator's reader and its two Store handles",
+    ),
+    (
+        "crates/logweir/src/evidence_read.rs",
+        "production: `read_store` builds the evidence READ handle of `switchover run` and \
+         `restore cleanup` (theme A's D1) from the archive slot under the store contract, or \
+         ambiently for a hand-run, BY DESIGN; the rule it serves (`unreadable`, `ending`, \
+         `EvidenceReader::noted`) takes errors and values, which its unit rows drive with \
+         `Store::in_memory`",
     ),
     (
         "crates/logweir/src/restore_cleanup.rs",

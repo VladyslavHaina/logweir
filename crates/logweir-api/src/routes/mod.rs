@@ -394,6 +394,21 @@ where
     .await
 }
 
+/// The name [`create_idempotent`] gives the object this request creates, or
+/// replays, under `prefix`: a function of the actor, the namespace, the route
+/// and the `Idempotency-Key` only (never of the body), so a route can look
+/// under it BEFORE anything is created.
+#[must_use]
+pub(crate) fn deterministic_name(
+    actor: &Actor,
+    namespace: &str,
+    route: &str,
+    prefix: &str,
+    key: &IdempotencyKey,
+) -> String {
+    idempotency::identity(actor, namespace, route, prefix, key, b"").name
+}
+
 /// Whether an object under `name` is already THIS request's own — a replay —
 /// decided only by this service's idempotency record.
 ///

@@ -2229,6 +2229,24 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the control-evidence mapping page is removed",
             "verify-a-scorecard.md#what-the-scorecard-does-not-claim",
         ),
+        // Item 98 (theme A's D1, D4): the evidence read grant; the runner flag
+        // that names it.
+        (
+            "the switchover and a clone's cleanup read with the read grant",
+            "`--evidence-read-grant`",
+        ),
+        // Item 99 (D3): a refused create leaves nothing; the answer.
+        (
+            "a create refused for a taken approval name",
+            "`409 state_conflict`",
+        ),
+        // Item 100 (L1): the readers agree on a key file; the script version.
+        (
+            "both verifiers read a public key file the same way",
+            "`verify_scorecard.py` 1.34.0",
+        ),
+        // Item 101 (D6): an older runner's pod rows; the row that says it ran.
+        ("an older runner's pod rows say the pod ran", "`runner.pod`"),
     ];
     assert_eq!(
         items.len(),
