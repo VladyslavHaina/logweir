@@ -151,6 +151,93 @@ fn check_7_an_unreachable_target_is_named_as_a_target_problem() {
     assert_fails_with(doctor(&a, &ENGINE_OK), "target");
 }
 
+/// **Check 8 (FX-45), live: `doctor` names a target the engine cannot
+/// restore into.** Redpanda v26.2.4 (the stack's `redpanda` profile) serves
+/// Produce v0-v7 and the engine sends v8: check 7 passes (reachable,
+/// allowlisted, marker topic present) and check 8 FAILS by
+/// `target.engineProtocol`'s name, naming the request and the range.
+/// CONTROL: the default broker (Apache Kafka) as the target passes check 8,
+/// and the whole run exits 0.
+///
+/// Here and not in `e2e/tests/compat_contract.rs` because `doctor` compares
+/// the engine with the pin (checks 1 and 2, the stub engine), which no row of
+/// the engine matrix's suite may.
+#[cfg(feature = "e2e")]
+#[test]
+#[ignore = "needs the stack's `redpanda` profile (e2e/compose/stack-env.sh --profiles redpanda)"]
+fn check_8_a_target_the_engine_cannot_restore_into_is_named() {
+    use logweir_kafka::reader::{AuthConfig, ClusterReader};
+    let port =
+        |var: &str, default: &str| std::env::var(var).unwrap_or_else(|_| default.to_string());
+    let redpanda = format!("localhost:{}", port("LOGWEIR_E2E_REDPANDA_PORT", "9124"));
+    let kafka = format!("localhost:{}", port("LOGWEIR_E2E_KAFKA_PORT", "9092"));
+    let run = |bootstrap: &str| {
+        let id = logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
+            &[bootstrap.to_string()],
+            AuthConfig::Plaintext,
+        )
+        .expect("connect is lazy")
+        .cluster_id()
+        .unwrap_or_else(|e| panic!("{bootstrap}: {e}"));
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("archive");
+        std::fs::create_dir_all(archive.join("b-0001")).unwrap();
+        std::fs::write(archive.join("b-0001/manifest.json"), "{}").unwrap();
+        let spec = dir.path().join("drill.yaml");
+        std::fs::write(
+            &spec,
+            format!(
+                "source:\n  storage:\n    backend: filesystem\n    path: {archive}\n  \
+                 backup: latestCompleted\n  topics: [orders]\n\
+                 target:\n  bootstrap_servers: [\"{bootstrap}\"]\n  marker_topic: logweir.scratch\n  \
+                 topic_mapping_prefix: \"drill-\"\n  default_replication_factor: 1\n  \
+                 teardown: delete\n\
+                 sample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  \
+                 window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n\
+                 objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
+                 evidence:\n  backend: filesystem\n  path: {evidence}\n",
+                archive = archive.display(),
+                evidence = dir.path().join("evidence").display(),
+            ),
+        )
+        .unwrap();
+        let allowed = dir.path().join("allowed.json");
+        std::fs::write(&allowed, format!("{{\"allowed_cluster_ids\": [\"{id}\"]}}")).unwrap();
+        let out = doctor(
+            &[
+                ("--spec", spec.to_str().unwrap()),
+                ("--allowed-clusters", allowed.to_str().unwrap()),
+                OK_ARGS[2],
+            ],
+            &ENGINE_OK,
+        );
+        let said = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        (out.status.code(), said)
+    };
+    let (code, said) = run(&redpanda);
+    assert_eq!(code, Some(1), "{said}");
+    assert!(
+        said.contains("ok    target ")
+            && said.contains(&format!(
+                "FAIL  {:<18} target.engineProtocol is notReady (EngineProtocolUnsupported)",
+                "target engine"
+            ))
+            && said.contains("Produce v8")
+            && said.contains("Produce v0-v7"),
+        "{said}"
+    );
+    eprintln!("[fx-45] doctor against Redpanda:\n{said}");
+    // CONTROL.
+    let (code, said) = run(&kafka);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        said.contains(&format!("ok    {:<18} ", "target engine")),
+        "{said}"
+    );
+    eprintln!("[fx-45] doctor against the default broker:\n{said}");
+}
+
 /// A reachable archive holding zero backup sets must be a
 /// NAMED failure end-to-end through the CLI, not just at the unit-test
 /// level (`doctor::tests::check_storage_fails_on_a_reachable_but_empty_archive`

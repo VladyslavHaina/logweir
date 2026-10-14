@@ -10,7 +10,7 @@
 //! | `the_default_broker_answers_every_capability_check` | the stack as CI runs it | the shipped `logweir check run` reads the broker's ApiVersions through a real connection, plaintext and SASL, and each capability row agrees with the broker's own tool; a plan that lists none gets none |
 //! | `the_default_broker_backs_up_restores_and_verifies` | any broker line (`--kafka`) | the generic row: probe, capability checks, backup, restore, verify, on Apache Kafka. The control for the two rows below |
 //! | `confluent_platform_backs_up_restores_and_verifies` | profile `confluent` | the same generic row on Confluent Platform 8.3.2, with no difference |
-//! | `redpanda_backs_up_and_refuses_a_restore_before_it_starts` | profile `redpanda` | Redpanda v26.2.4: probe and backup work; its groups cannot be typed and the receipt says so; its broker resource reports no timestamp bound; `target.engineProtocol` is `notReady` naming Produce v8, and `drill run` refuses the restore by that row's name at phase 0 (FX-45), creating nothing and signing nothing; the Test connection says "usable as a source, not as a target" (FX-46); `doctor` check 8 names it |
+//! | `redpanda_backs_up_and_refuses_a_restore_before_it_starts` | profile `redpanda` | Redpanda v26.2.4: probe and backup work; its groups cannot be typed and the receipt says so; its broker resource reports no timestamp bound; `target.engineProtocol` is `notReady` naming Produce v8, and `drill run` refuses the restore by that row's name at phase 0 (FX-45), creating nothing and signing nothing; the Test connection says "usable as a source, not as a target" (FX-46) |
 //! | `redpanda_authenticates_both_scram_mechanisms` | profile `redpanda` | SCRAM-SHA-256 and SCRAM-SHA-512 against Redpanda's own SCRAM, on both clients; a wrong password is refused |
 //! | `seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `objectstore` | the maintained object store, through Logweir: conditional create, the pinned manifest version on a versioned bucket, backup, restore, verify |
 //! | `rustfs_takes_a_backup_a_restore_and_refuses_a_second_claim`, `versitygw_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `rustfs`, `versitygw` | the same round trip on the other two S3 servers (PROD-01.2a) |
@@ -1599,7 +1599,9 @@ fn dial(bootstrap: &str) -> logweir_kafka::inventory::KafkaInventory {
 ///   row's name, exit 3, with nothing created and no scorecard (it used to
 ///   create its scratch topic and fail in the engine with "early eof").
 /// * FX-46: the console's Test connection passes and says "usable as a
-///   source, not as a target"; and `doctor`'s check 8 names the row.
+///   source, not as a target". (`doctor`'s check 8 against Redpanda is
+///   `crates/logweir/tests/doctor.rs`'s: `doctor` compares the engine with the
+///   pin, which no row of this suite may.)
 ///
 /// CONTROL: `confluent_platform_backs_up_restores_and_verifies` and
 /// `the_default_broker_backs_up_restores_and_verifies`, the same generic row
@@ -1745,82 +1747,15 @@ fn redpanda_backs_up_and_refuses_a_restore_before_it_starts() {
         .map(|c| json!({"id": c.id, "state": c.state, "code": c.code, "gating": c.gating}))
         .collect::<Vec<_>>());
 
-    // FX-45: `doctor` names it too (check 8, `target engine`).
-    let (doctor_exit, doctor_said) = doctor_against(&bootstrap, &seen["cluster_id"]);
-    assert_eq!(doctor_exit, Some(1), "{doctor_said}");
-    assert!(
-        doctor_said.contains("ok    target ")
-            && doctor_said.contains(&format!(
-                "FAIL  {:<18} target.engineProtocol is notReady (EngineProtocolUnsupported)",
-                "target engine"
-            ))
-            && doctor_said.contains("Produce v8"),
-        "{doctor_said}"
-    );
-    seen["doctor"] = json!({"exit": doctor_exit, "said": tail(&doctor_said, 1200)});
     evidence(
         "redpanda_backs_up_and_refuses_a_restore_before_it_starts",
         &seen,
     );
     eprintln!(
         "[fx-45] redpanda: backup ok, group {}, target.engineProtocol notReady, restore refused \
-         at phase 0 (exit 3, nothing created), Test connection usable as a source only, doctor \
-         check 8 FAIL",
+         at phase 0 (exit 3, nothing created), Test connection usable as a source only",
         seen["backup"]["group"]["reason"]
     );
-}
-
-/// `logweir doctor` against `bootstrap` as a restore TARGET: a spec whose
-/// archive is a local directory holding one set (so check 6 passes with no
-/// store), the allowlist naming `cluster_id`, the stub engine of
-/// `crates/logweir/tests/doctor.rs` (checks 1 and 2). Its exit code and its
-/// whole output.
-fn doctor_against(bootstrap: &str, cluster_id: &Value) -> (Option<i32>, String) {
-    let dir = demo_dir().join(format!("compat-doctor-{}", nonce()));
-    let archive = dir.join("archive");
-    std::fs::create_dir_all(archive.join("b-0001")).unwrap();
-    std::fs::write(archive.join("b-0001/manifest.json"), "{}").unwrap();
-    let spec = dir.join("drill.yaml");
-    std::fs::write(
-        &spec,
-        format!(
-            "source:\n  storage:\n    backend: filesystem\n    path: {archive}\n  \
-             backup: latestCompleted\n  topics: [orders]\n\
-             target:\n  bootstrap_servers: [\"{bootstrap}\"]\n  marker_topic: {MARKER_TOPIC}\n  \
-             topic_mapping_prefix: \"drill-\"\n  default_replication_factor: 1\n  \
-             teardown: delete\n\
-             sample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  \
-             window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n\
-             objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
-             evidence:\n  backend: filesystem\n  path: {evidence}\n",
-            archive = archive.display(),
-            evidence = dir.join("evidence").display(),
-        ),
-    )
-    .unwrap();
-    let allow = dir.join("allowed.json");
-    std::fs::write(
-        &allow,
-        serde_json::to_vec(&json!({"allowed_cluster_ids": [cluster_id]})).unwrap(),
-    )
-    .unwrap();
-    let mut c = Command::new(bin());
-    c.arg("doctor")
-        .arg("--spec")
-        .arg(&spec)
-        .arg("--allowed-clusters")
-        .arg(&allow)
-        .arg("--approver-key")
-        .arg(root().join("e2e/fixtures/signed/public.pem"))
-        .env(
-            "LOGWEIR_ENGINE_BIN",
-            root().join("e2e/fixtures/fake-engine-ok.sh"),
-        )
-        .env_remove("LOGWEIR_TARGET_PASSWORD")
-        .env_remove("LOGWEIR_ENGINE_VERSION")
-        .env_remove("LOGWEIR_ENGINE_DIGEST");
-    let out = output_within(c, 180);
-    (out.status.code(), text(&out))
 }
 
 /// Redpanda's own SCRAM implementation, both mechanisms, both clients: a
