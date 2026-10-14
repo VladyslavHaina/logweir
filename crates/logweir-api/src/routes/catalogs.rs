@@ -238,8 +238,12 @@ pub struct CatalogView {
     pub cursor: Option<SyncCursorView>,
     /// What it found.
     pub counts: CatalogCountsView,
-    /// Whether the archive holds more points than the view carries.
-    pub truncated: bool,
+    /// Whether the archive holds more points than the view carries. ABSENT
+    /// when the catalog has not said (no view published yet, or a status
+    /// written before the field existed): unknown, never "the view is the
+    /// whole archive" (FX-38).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
     /// How many points the materialised view actually holds.
     pub view_points: i64,
     /// Points per day.
@@ -319,7 +323,7 @@ pub fn view(catalog: &RecoveryCatalog, now: DateTime<Utc>) -> CatalogView {
             deleted: c.deleted,
             unsupported_format: c.unsupported_format,
         }),
-        truncated: status.and_then(|s| s.truncated).unwrap_or(false),
+        truncated: status.and_then(|s| s.truncated),
         view_points: status
             .and_then(|s| s.pages.as_ref())
             .into_iter()
@@ -782,14 +786,18 @@ pub struct PointPageResponse {
     pub items: Vec<PointView>,
     /// Paging. `snapshot` is the view generation this page came from.
     pub page: Page,
-    /// Whether the archive holds more points than the view carries.
-    pub truncated: bool,
+    /// Whether the archive holds more points than the view carries; absent
+    /// when the catalog has not said, which is unknown, never `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
     /// Whether the view has aged out. An empty `items` with this `true` means
     /// "the window is gone", never "the archive is empty".
     pub view_expired: bool,
     /// Whether a ConfigMap page named by this view disappeared while it was
-    /// being read. Present only for the incomplete read so older clients keep
-    /// their established `false` behavior when the member is absent.
+    /// being read, or a line on a page could not be read as a view entry
+    /// (FX-38): the list is then partial. Present only for the incomplete read
+    /// so older clients keep their established `false` behavior when the
+    /// member is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<bool>,
     /// When the view ages out.
@@ -1373,7 +1381,9 @@ pub async fn points(
             // A LINE THAT IS NOT A VIEW ENTRY IS SKIPPED, NOT GUESSED AT. The
             // producer writes one JSON entry per line; a half-written line
             // rendered as a point would be a recovery point nobody recorded.
+            // And the response says so: the list is partial (FX-38).
             let Ok(entry) = serde_json::from_str::<ViewEntry>(line) else {
+                incomplete = true;
                 continue;
             };
             let view = point_view(&entry, &refusals);

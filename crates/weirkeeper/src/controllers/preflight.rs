@@ -2687,6 +2687,10 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
         ));
     }
     let mut found: Option<crate::catalog_view::ViewEntry> = None;
+    // Lines the check could not read as a view entry: any of them may be the
+    // point, so a view that holds one and does not list the point cannot
+    // answer `NotInView` (FX-38).
+    let mut unreadable: Vec<&str> = Vec::new();
     for page in &recorded {
         let map = read
             .pages
@@ -2723,14 +2727,30 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
                 ))
             }
         }
-        if found.is_none() {
-            found = lines
-                .iter()
-                .filter_map(|l| serde_json::from_str::<crate::catalog_view::ViewEntry>(l).ok())
-                .find(|e| e.point_id == read.point_id);
+        for line in &lines {
+            if found.is_some() {
+                break;
+            }
+            match serde_json::from_str::<crate::catalog_view::ViewEntry>(line) {
+                Ok(e) if e.point_id == read.point_id => found = Some(e),
+                Ok(_) => {}
+                Err(_) => {
+                    if !unreadable.contains(&page.config_map_name.as_str()) {
+                        unreadable.push(&page.config_map_name);
+                    }
+                }
+            }
         }
     }
     let Some(entry) = found else {
+        if !unreadable.is_empty() {
+            return unavailable(format!(
+                "the view does not list recovery point `{}`, and view page(s) {} hold a line \
+                 this check cannot read, which may be that point",
+                read.point_id,
+                unreadable.join(", ")
+            ));
+        }
         return CatalogPointFacts::NotInView {
             catalog,
             point_id: read.point_id.to_string(),
