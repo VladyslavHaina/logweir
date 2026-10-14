@@ -8434,6 +8434,91 @@ mod evidence_fetch_job {
             );
         }
     }
+
+    /// **THE CRASH WINDOW, AND THE SOURCE IS NO LONGER A JOB'S** (DUI-38
+    /// review L1). The terminal pass resolved a Job's grant and stopped before
+    /// `Pending` landed: the run has both keys and no verdict, which the API
+    /// serves as `pending`. Before the requeue an operator removed the
+    /// evidence destination's `evidenceRead`, or deleted the destination. The
+    /// next pass records the verdict the terminal pass records for that source,
+    /// so the run settles, and starts no Job.
+    ///
+    /// KILLS: the `(None, _) => return Ok(waiting)` arm taking this case (no
+    /// verdict is ever written, and the run reads `pending` with no end).
+    #[tokio::test]
+    async fn a_crash_window_restore_whose_destination_lost_its_reader_settles_not_attempted() {
+        let mut value =
+            serde_json::to_value(terminal_restore(SCORECARD_KEY, SIDECAR_KEY)).expect("json");
+        value["status"]["evidence"] =
+            serde_json::json!({"scorecardKey": SCORECARD_KEY, "sidecarKey": SIDECAR_KEY});
+        let restore: Restore = serde_json::from_value(value).expect("a Restore");
+        for (case, evidence, says) in [
+            (
+                "evidenceRead removed",
+                Some(evidence_destination_value()),
+                "BackupDestination ev has no spec.access.evidenceRead",
+            ),
+            (
+                "destination deleted",
+                None,
+                "has no BackupDestination named ev",
+            ),
+        ] {
+            // The terminal routes, with the evidence destination as it is now.
+            let mut routes: Vec<Route> = terminal_routes()
+                .into_iter()
+                .filter(|r| r.path_suffix != "/backupdestinations/ev")
+                .collect();
+            routes.push(match evidence {
+                Some(evidence) => route("GET", "/backupdestinations/ev", 200, evidence.to_string()),
+                None => route(
+                    "GET",
+                    "/backupdestinations/ev",
+                    404,
+                    not_found_body("backupdestinations.logweir.dev", "ev"),
+                ),
+            });
+            routes.extend(evidence_routes(None, String::new()));
+            let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+            reconcile_restore(
+                &restore,
+                &client,
+                &unobserved_scorecard,
+                &unverified_evidence,
+                now(),
+            )
+            .await
+            .expect("the reconcile succeeds");
+            let bodies = bodies.lock().expect("readable").clone();
+            assert!(
+                !bodies
+                    .iter()
+                    .any(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs")),
+                "{case}: no evidence-fetch Job for a source that is not a Job's"
+            );
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .unwrap_or_else(|| panic!("{case}: the verdict is recorded"));
+            let verification = &last["evidence"]["verification"];
+            assert_eq!(
+                verification["result"],
+                serde_json::json!("NotAttempted"),
+                "{case}: {last}"
+            );
+            assert!(
+                verification["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains(says)),
+                "{case}: the source's own sentence, as the terminal pass records it: \
+                 {verification}"
+            );
+            assert!(
+                last["outcome"].is_null() && last["completion"].is_null(),
+                "{case}: nothing copied from a document nobody read: {last}"
+            );
+        }
+    }
 }
 
 // An inline-archive restore's evidence is read ONLY through the

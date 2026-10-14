@@ -1472,4 +1472,38 @@ fn dui38_a_restore_whose_evidence_a_job_reads_is_pending_until_the_job_relays() 
         e(S::Succeeded, Some("Ok"), R::Pass, V::NotAttempted, false),
     );
     assert!(is_settled(&restore_view(&restore_of(&unread), now())));
+
+    // CONTROL (DUI-38 review L1): an evidence destination, but the runner printed
+    // the scorecard key alone. The controller resumes a fetch only with both
+    // keys, so none is owed: not attempted, settled, never pending for ever.
+    let (running, _) = patched::<Restore>(
+        base.clone(),
+        &restore_ctl::running_status_patch(&restore_of(&base), "r1", true, now()),
+    );
+    let half = RestoreEvidenceKeys {
+        sidecar: None,
+        ..keys.clone()
+    };
+    let half_terminal = restore_ctl::finished_status_patch(
+        &restore_of(&running),
+        0,
+        &half,
+        None,
+        None,
+        None,
+        None,
+        now(),
+    );
+    let (no_sidecar, _) = patched::<Restore>(running, &half_terminal);
+    assert!(
+        no_sidecar["status"]["evidence"]["scorecardKey"].is_string()
+            && no_sidecar["status"]["evidence"]["sidecarKey"].is_null(),
+        "the run names its scorecard and no sidecar: {no_sidecar}"
+    );
+    run_restore(
+        "scorecard key alone",
+        &no_sidecar,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::NotAttempted, false),
+    );
+    assert!(is_settled(&restore_view(&restore_of(&no_sidecar), now())));
 }
