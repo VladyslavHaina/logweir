@@ -3306,7 +3306,7 @@ fn a_switchover_readiness_plan_is_bounded_and_closed() {
 fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
     use logweir_core::check_contract::{
         is_relayable_group_id, is_relayable_topic_name, redact, redact_detail_line,
-        redact_detail_lines, REDACTED,
+        redact_detail_lines, redact_long_runs_in_keys, LONG_RUN_RULE, REDACTED,
     };
     let group = "dui3-billing-reconciliation-consumer-eu-west-1-settlement-01";
     let topic = "dui3r-dui3-settlement-ledger-eu-west-orders-partitioned-0002";
@@ -3366,6 +3366,36 @@ fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
     assert_eq!(v["topic"], format!("restore-o-{REDACTED}"));
     // A line that is not a JSON object is redacted whole, as before.
     assert_eq!(redact_detail_line(secret, &free), REDACTED);
+    // CONTROL (the DUI review's L1): a secret-named key's value is redacted
+    // on the runner's pass (its key-path redactor, rebuilt here as
+    // `logweir::check::redact_path` composes it) and on the controller's,
+    // although the walk hands the key and the value to the free-text rule
+    // apart; a 60-character topic beside them survives.
+    let shape: Vec<_> = redaction_rules()
+        .iter()
+        .filter(|r| r.name != LONG_RUN_RULE)
+        .copied()
+        .collect();
+    let runner_free = |s: &str| redact_long_runs_in_keys(&apply_rules(s, &shape));
+    let probe = serde_json::json!({
+        "check": "x",
+        "diff": {"sasl.password": "hunter2", "token": "abc123"},
+        "topic": topic,
+    })
+    .to_string();
+    for kept in [
+        redact_detail_line(&probe, &runner_free),
+        redact_detail_lines(&format!("{probe}\n")),
+    ] {
+        assert!(
+            !kept.contains("hunter2") && !kept.contains("abc123"),
+            "{kept}"
+        );
+        let v: serde_json::Value = serde_json::from_str(kept.trim_end()).expect("JSON");
+        assert_eq!(v["diff"]["sasl.password"], REDACTED, "{kept}");
+        assert_eq!(v["diff"]["token"], REDACTED, "{kept}");
+        assert_eq!(v["topic"], topic, "{kept}");
+    }
     // The two predicates' bounds.
     assert!(is_relayable_topic_name(topic) && !is_relayable_topic_name(".."));
     assert!(!is_relayable_topic_name(&"t".repeat(250)));

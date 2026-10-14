@@ -72,6 +72,11 @@ pub struct SessionClaims {
     /// session sealed before it existed, which then shows the subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub em: Option<String>,
+    /// Whether `name` came from the configured name claim (DUI review L3):
+    /// only then is it recorded as a name. Absent (false) on an older
+    /// session, which then records no name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nc: bool,
     /// The exact group strings the ID token carried.
     pub groups: Vec<String>,
     /// When the session was issued, as a Unix timestamp.
@@ -126,6 +131,7 @@ impl SessionClaims {
             sub: identity.subject.clone(),
             name: identity.display_name.clone(),
             em: identity.verified_email.clone(),
+            nc: identity.display_name_claimed,
             groups: identity.groups.clone(),
             iat: now.timestamp(),
             exp: (now + TimeDelta::seconds(lifetime)).timestamp(),
@@ -309,6 +315,7 @@ mod tests {
             subject: "u-1".into(),
             display_name: "Ada".into(),
             verified_email: None,
+            display_name_claimed: false,
             groups: vec!["team-a-operators".into()],
             auth_time: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         }

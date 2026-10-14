@@ -199,7 +199,7 @@ function TestAccess({ ns, d, mayTest }: { ns: string; d: Destination; mayTest: b
         </Content>
         {mayTest ? (
           <>
-            <Field id="test-roles" label="Grants to exercise" role="group" help="None chosen: every grant a run uses, including Archive read and Evidence write when they fall back to the archive-write credential.">
+            <Field id="test-roles" label="Grants to exercise" role="group" help="None chosen: every grant a run uses, including Archive read and Evidence write when they fall back to the archive-write credential. Archive write itself is never written to by a test: it is dialled through Archive read or Evidence write when they fall back to it, else the run verifies it.">
               <Flex gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
                 {GRANT_ROLES.map((role) => (
                   <Checkbox

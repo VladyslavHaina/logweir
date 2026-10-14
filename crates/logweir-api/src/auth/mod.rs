@@ -82,6 +82,9 @@ pub struct Actor {
     /// The provider-verified email, when the session has one (DUI-21): what
     /// identifies the person to someone else. Never an authorization input.
     pub verified_email: Option<String>,
+    /// Whether `display_name` came from the configured name claim, and so is
+    /// a name rather than the email or the subject (DUI review L3).
+    pub display_name_claimed: bool,
     /// The exact group claim strings this session carried. Role bindings match
     /// these by exact string; nothing here is a pattern.
     pub groups: Vec<String>,
@@ -123,6 +126,7 @@ impl Actor {
             subject: subject.into(),
             display_name: display.into(),
             verified_email: None,
+            display_name_claimed: false,
             groups: Vec::new(),
             session_id: None,
             audit: Arc::new(AuditContext::default()),

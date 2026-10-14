@@ -1952,6 +1952,7 @@ impl SharedApp {
             subject: subject.to_string(),
             display_name: display_name.to_string(),
             verified_email: None,
+            display_name_claimed: false,
             groups: groups.iter().map(|g| (*g).to_string()).collect(),
             auth_time: self.app.clock.now(),
         };

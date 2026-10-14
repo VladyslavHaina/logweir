@@ -3096,6 +3096,13 @@ pub const DETAIL_GROUP_KEYS: &[&str] = &["group", "target"];
 /// The runner passes its key-path redactor (`logweir::check::redact_path`)
 /// and the controller [`redaction_rules`], so each side keeps the free-text
 /// rule it had; only the names stop going through it.
+///
+/// The walk hands a key and its value to `free_text` apart, so the
+/// `secret-key-value` rule, which matches `"password":"…"` as ONE string,
+/// would never see the pair. It runs once more over the re-serialised line:
+/// `{"sasl.password":"hunter2"}` loses its value, as under the whole-line
+/// pass. No name key (`topic`, `mappedTopicExists`, `group`, `target`) is a
+/// secret keyword, and a name already passed that rule in [`redact_name`].
 #[must_use]
 pub fn redact_detail_line(line: &str, free_text: &dyn Fn(&str) -> String) -> String {
     fn walk(v: &mut serde_json::Value, key: Option<&str>, free_text: &dyn Fn(&str) -> String) {
@@ -3126,7 +3133,7 @@ pub fn redact_detail_line(line: &str, free_text: &dyn Fn(&str) -> String) -> Str
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(mut v @ serde_json::Value::Object(_)) => {
             walk(&mut v, None, free_text);
-            v.to_string()
+            redact_key_values(&v.to_string())
         }
         _ => free_text(line),
     }

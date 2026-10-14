@@ -361,6 +361,10 @@ pub struct Identity {
     /// (`email_verified: true`). Shown to identify the person; never an
     /// authorization input.
     pub verified_email: Option<String>,
+    /// Whether `display_name` came from the configured name claim
+    /// (`oidc.displayNameClaim`), rather than the email or the subject. Only
+    /// then is it a NAME, shown as unverified (DUI review L3).
+    pub display_name_claimed: bool,
     /// The exact group strings, sorted and deduplicated.
     pub groups: Vec<String>,
     /// The provider's `auth_time`, or `iat` when it is absent.
@@ -761,6 +765,8 @@ impl Provider {
             .ok_or(OidcError::NoSubject)?;
 
         let verified_email = verified_email_of(&claims);
+        let display_name_claimed =
+            claimed_name_of(&claims, self.settings.display_name_claim.as_deref()).is_some();
         let display_name = display_name_of(
             &claims,
             self.settings.display_name_claim.as_deref(),
@@ -789,6 +795,7 @@ impl Provider {
             subject: crate::validate::bounded(subject, 256),
             display_name,
             verified_email,
+            display_name_claimed,
             groups,
             auth_time,
         })
@@ -823,11 +830,21 @@ fn display_name_of(
     verified_email: Option<&str>,
     subject: &str,
 ) -> String {
-    let named = configured
+    let named = claimed_name_of(claims, configured);
+    crate::validate::bounded(named.or(verified_email).unwrap_or(subject), 128)
+}
+
+/// The configured name claim's value, when the install opted into one and
+/// the token carries it non-empty: the only case in which the display name is
+/// a name.
+fn claimed_name_of<'a>(
+    claims: &'a BTreeMap<String, serde_json::Value>,
+    configured: Option<&str>,
+) -> Option<&'a str> {
+    configured
         .and_then(|key| claims.get(key))
         .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty());
-    crate::validate::bounded(named.or(verified_email).unwrap_or(subject), 128)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// The most group strings this module will read out of one ID token.
@@ -1497,6 +1514,11 @@ mod tests {
             display_name_of(&empty, Some("name"), None, "u-ada"),
             "u-ada"
         );
+        // Whether the claim supplied it (the session's `nc`, DUI review L3):
+        // only when configured and present.
+        assert_eq!(claimed_name_of(&c, None), None);
+        assert_eq!(claimed_name_of(&c, Some("name")), Some("The CEO"));
+        assert_eq!(claimed_name_of(&empty, Some("name")), None);
     }
 
     #[test]

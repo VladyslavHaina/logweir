@@ -1186,11 +1186,11 @@ pub(crate) async fn authorize_submission(
         .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?;
     // DUI-21: who asked, in a document THIS console signs and binds to this
     // request (approval name, requester, plan hash): the provider-verified
-    // email, and a name only when the install opted into a name claim (the
-    // display name is then neither the email nor the subject). Beside the
-    // signed request, never in it; served only if the signature verifies.
-    let configured_name = actor.verified_email.as_deref() != Some(actor.display_name.as_str())
-        && actor.display_name != actor.subject;
+    // email, and a name only when the sign-in took the display name from the
+    // configured name claim (never a cut email or subject, DUI review L3).
+    // Beside the signed request, never in it; served only if the signature
+    // verifies.
+    let configured_name = actor.display_name_claimed;
     let display = approval::requester_display(
         key,
         approval_name,

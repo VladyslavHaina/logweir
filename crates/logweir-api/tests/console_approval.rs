@@ -174,16 +174,24 @@ fn named_session(
     verified_email: Option<&str>,
     groups: &[&str],
 ) -> Session {
-    let now = app.app.clock.now();
     let identity = Identity {
         issuer: issuer.to_string(),
         subject: subject.to_string(),
         display_name: display.to_string(),
         verified_email: verified_email.map(str::to_string),
+        // This helper's `display` is a claimed name whenever it is neither
+        // the email nor the subject, as a sign-in with a name claim gives.
+        display_name_claimed: verified_email != Some(display) && display != subject,
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
-        auth_time: now,
+        auth_time: app.app.clock.now(),
     };
-    let claims = SessionClaims::issue(&identity, sid.to_string(), app.keys.version(), now, 900);
+    session_of(app, sid, &identity)
+}
+
+/// The session a sign-in seals for `identity`.
+fn session_of(app: &SharedApp, sid: &str, identity: &Identity) -> Session {
+    let now = app.app.clock.now();
+    let claims = SessionClaims::issue(identity, sid.to_string(), app.keys.version(), now, 900);
     Session {
         cookie: session::set_cookie(&app.keys, &claims, now)
             .split(';')
@@ -2815,16 +2823,29 @@ async fn the_request_shows_who_asked_only_from_a_display_the_console_signed_for_
     assert_eq!(seen["requesterDetailsNotVerified"], true, "{seen}");
     assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
 
-    // Signed by this very console, for another plan or another approval name: not this request's.
+    // Signed by this very console, for another plan, another approval name or
+    // another requester (the same approval name and plan: the DUI review's L2):
+    // not this request's.
     let request = stored_document(&app, confirmation).0;
-    for (approval_name, plan_hash) in [
-        ("approval-named", format!("sha256:{}", "e".repeat(64))),
-        ("approval-other", request.plan_hash.clone()),
+    let alice_principal = format!("{ISSUER}#alice");
+    let mallory = format!("{ISSUER}#mallory");
+    for (approval_name, requester, plan_hash) in [
+        (
+            "approval-named",
+            &alice_principal,
+            format!("sha256:{}", "e".repeat(64)),
+        ),
+        (
+            "approval-other",
+            &alice_principal,
+            request.plan_hash.clone(),
+        ),
+        ("approval-named", &mallory, request.plan_hash.clone()),
     ] {
         let (document, signature) = logweir_api::approval::requester_display(
             console.key(),
             approval_name,
-            &format!("{ISSUER}#alice"),
+            requester,
             &plan_hash,
             Some("ceo@example.test"),
             None,
@@ -2837,7 +2858,7 @@ async fn the_request_shows_who_asked_only_from_a_display_the_console_signed_for_
         let seen = seen_with(copied).await;
         assert!(
             seen.get("requesterEmail").is_none(),
-            "{approval_name} {plan_hash}: {seen}"
+            "{approval_name} {requester} {plan_hash}: {seen}"
         );
         assert_eq!(seen["requesterDetailsNotVerified"], true, "{seen}");
     }
@@ -2853,6 +2874,39 @@ async fn the_request_shows_who_asked_only_from_a_display_the_console_signed_for_
         "{seen}"
     );
     assert!(seen.get("requesterDetailsNotVerified").is_none(), "{seen}");
+
+    // A verified email longer than the 128-byte display name, and no name
+    // claim (the DUI review's L3): the sign-in cuts the display name, and the
+    // cut copy is not a name. The document holds the whole email and no name.
+    let long_email = format!("{}@example.test", "e".repeat(150));
+    let erin = session_of(
+        &app,
+        "sid-erin",
+        &Identity {
+            issuer: ISSUER.to_string(),
+            subject: "erin".to_string(),
+            display_name: logweir_api::validate::bounded(&long_email, 128),
+            verified_email: Some(long_email.clone()),
+            display_name_claimed: false,
+            groups: vec!["ops".to_string()],
+            auth_time: app.app.clock.now(),
+        },
+    );
+    let created = request_as(&app, &erin, "long-email", restore_request("approval-long")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let long = app
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-long-confirmation")
+        .expect("the request");
+    let long: Value = serde_json::from_str(
+        long["metadata"]["annotations"]["logweir.dev/requester-display"]
+            .as_str()
+            .expect("a display document"),
+    )
+    .expect("JSON");
+    assert_eq!(long["email"], long_email.as_str(), "{long}");
+    assert!(long.get("name").is_none_or(Value::is_null), "{long}");
 
     // No verified email and no configured name (the display name is the subject):
     // no display document at all, so only the signed principal is shown.

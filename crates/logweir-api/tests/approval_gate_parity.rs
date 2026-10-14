@@ -231,6 +231,7 @@ fn session_as(app: &SharedApp, subject: &str, groups: &[&str]) -> Session {
         subject: subject.to_string(),
         display_name: subject.to_string(),
         verified_email: None,
+        display_name_claimed: false,
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         auth_time: now,
     };
