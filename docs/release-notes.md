@@ -29,13 +29,13 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115 and 116. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 and 117. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 116 landed after the `v0.3.0` tag and are in no
+is below. Items 102 to 117 landed after the `v0.3.0` tag and are in no
 release yet.
 
 ### Candidate record
@@ -2999,9 +2999,28 @@ Logweir code changes.
 **Do:** nothing beyond rolling the images.
 **Scope:** `cargo deny` over the workspace (advisories, licences, bans and
 sources pass), the workspace built against it, and the TLS suites (both
-`linkage` suites and `tls_ca`).
-[UNVERIFIED — the engine, build 3, still links rustls 0.23.45; its build 4 moves the engine's lockfile through patch 0001 and needs its compose rows (record semantics, the full drill, the support matrix's row) first.]
+`linkage` suites and `tls_ca`). The engine in the runner image moves to
+rustls 0.23.46 with its build 4 (item 117), whose `cargo deny` passes and whose
+compose rows ran.
 **Rollback:** an older image links 0.23.45 again; nothing stored changes.
+
+#### 117. The engine is build `0.23.3+logweir.4`: its rustls is 0.23.46 (RUSTSEC-2026-0346 to -0349)
+
+**Changed.** Patch `0001-lockfile-rustls-h2-spin.patch` moves the engine's
+lockfile from rustls 0.23.45 to 0.23.46, for item 116's four advisories. It is
+a lockfile-only change: the patch list is the same, and no engine code
+changes. The engine is `kafka-backup 0.23.3+logweir.4` (build-input digest
+`sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662`), and
+`logweir doctor` accepts only that version: build 3 is now a version mismatch.
+**Do:** roll the controller and the runner images together, as for item 35. A
+standalone CLI install replaces its engine with build 4 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4` and
+`LOGWEIR_ENGINE_DIGEST=sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662`
+([quickstart.md](quickstart.md), step 4).
+**Scope:** the engine's `cargo deny` (advisories, bans, licences and sources pass; build 3 fails advisories), the six patch oracles, and `record_semantics` (13 rows, the contract asserted) and `full_drill` (15/15) with build 4 built natively on compose (Kafka 4.3.1).
+[UNVERIFIED — no PoC drill has signed engine build 4 yet; the next image refresh runs one.]
+**Rollback:** roll both images back together; the engine is build 3 again,
+and its documents say so. Documents build 4 signed stay valid.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -3085,8 +3104,8 @@ In addition to the next entry's six, in its order.
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35). A standalone CLI install
   replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3` and its digest (items 28, 35, 41
-  and 82),
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4` and its digest (items 28, 35, 41,
+  82 and 117),
   and every spec that names an `http://` archive endpoint says
   `allow_http: true` (item 28).
 - **Back up the console key too, once it exists** (item 29):
@@ -3148,7 +3167,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115 and 116, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 and 117, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3242,6 +3261,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 114 | the console | nothing |
 | 115 | the console | nothing |
 | 116 | every Logweir binary's TLS library (rustls 0.23.46) | nothing |
+| 117 | the engine in the runner image (its rustls) | the controller and runner images rolled together |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

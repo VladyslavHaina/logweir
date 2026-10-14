@@ -2292,6 +2292,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ("layout and wording", "`DuplicateCatalog`"),
         // Item 116: RUSTSEC-2026-0346 to -0349; the version that fixes them.
         ("Logweir's binaries carry rustls 0.23.46", "rustls 0.23.46"),
+        // Item 117: engine build 4; the patch that makes it.
+        (
+            "the engine is build 4",
+            "0001-lockfile-rustls-h2-spin.patch",
+        ),
     ];
     assert_eq!(
         items.len(),
