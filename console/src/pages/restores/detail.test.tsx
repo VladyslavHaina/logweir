@@ -4,7 +4,7 @@
 // never a pass, a narrowed restore is said as partial, a stopped creation step names
 // every topic it left, and a failed run offers a retry to a fresh target.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, render, screen } from "@testing-library/react";
+import { cleanup, configure, render, screen, within } from "@testing-library/react";
 import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
@@ -266,5 +266,40 @@ describe("FX-38: the restore readiness check", () => {
     expect(list.textContent).toContain("CatalogPointViewUnavailable");
     expect(list.textContent).toContain("Request a catalog sync and run this check again once the view is published.");
     expect(screen.getByText("Not ready", { selector: ".pf-v6-c-label__text" })).toBeTruthy();
+  });
+});
+
+describe("theme A's D6: the restore readiness check on an older runner", () => {
+  it("lists runner.image not ready by CheckContractMismatch and runner.pod as a pod that ran", () => {
+    const result = {
+      id: "pf-r2", namespace: "t", uid: "u", resourceVersion: "1", operation: "restore", state: "notReady", terminal: true, applicable: true,
+      stale: false, staleBasis: [], staleReasons: [], binding: { planHash: "sha256:aa", referents: [] }, warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+      checks: [
+        { id: "runner.image", code: "CheckContractMismatch", state: "notReady", gating: "blocking", message: "RunnerOlderThanController: the runner image is older than this controller" },
+        { id: "runner.pod", code: "PodCompleted", state: "ready", gating: "blocking", message: "the check pod ran and its runner exited 1; the runner image is older than this controller (runner.image)" },
+      ],
+    } as unknown as Preflight;
+    const refusal = readinessRefusal(result, "sha256:aa", "sha256:aa");
+    expect(refusal).toMatch(/runner\.image \(CheckContractMismatch\)/);
+    expect(refusal).not.toMatch(/runner\.pod/);
+    render(
+      <CheckStep
+        readiness={{ result, boundHash: "sha256:aa", boundKey: "k", error: null, starting: false, stoppedAt: null }}
+        refusal={refusal}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={null}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+    const items = within(screen.getByRole("list", { name: "Readiness checks" })).getAllByRole("listitem");
+    const image = items.find((li) => li.textContent?.includes("runner.image"))!;
+    const pod = items.find((li) => li.textContent?.includes("runner.pod"))!;
+    expect(image.textContent).toContain("CheckContractMismatch");
+    expect(image.textContent).toContain("Not ready");
+    expect(pod.textContent).toContain("Passed");
+    expect(pod.textContent).toContain("the check pod ran and its runner exited 1");
   });
 });

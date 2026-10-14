@@ -98,6 +98,30 @@ describe("a readiness check", () => {
   });
 });
 
+describe("theme A's D6: a check run on a runner older than the controller", () => {
+  it("shows runner.image not ready with CheckContractMismatch, and runner.pod as a pod that ran", () => {
+    const p = preflight("preflight-ready.json");
+    const at = "2026-09-17T04:58:00Z";
+    const older: Preflight = {
+      ...p,
+      state: "notReady",
+      checks: [
+        { id: "runner.image", category: "runner", state: "notReady", gating: "blocking", authority: "podStatus", code: "CheckContractMismatch", message: "RunnerOlderThanController: the runner image is older than this controller (it did not know the plan field `capabilityChecks`)", observedAt: at },
+        { id: "runner.pod", category: "runner", state: "ready", gating: "blocking", authority: "podStatus", code: "PodCompleted", message: "the check pod ran and its runner exited 1; the runner image is older than this controller (runner.image)", observedAt: at },
+      ],
+    };
+    render(<CheckResult preflight={older} stopped="" />);
+    const image = screen.getByText("runner.image").closest("tr") as HTMLElement;
+    expect(image.textContent).toContain("Not ready");
+    expect(image.textContent).toContain("CheckContractMismatch");
+    expect(image.textContent).toContain("RunnerOlderThanController");
+    const pod = screen.getByText("runner.pod").closest("tr") as HTMLElement;
+    expect(pod.textContent).toContain("Ready");
+    expect(pod.textContent).toContain("the check pod ran and its runner exited 1");
+    expect(text()).not.toMatch(/has not started/);
+  });
+});
+
 describe("Test connection", () => {
   const conn = (reason: string): Connection => ({
     ...(fixture<S["ConnectionResponse"]>("connection.json").item as Connection),

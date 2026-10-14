@@ -126,6 +126,44 @@ describe("the restore wizard", () => {
     expect((await list).items.filter((r) => r.planHash === body.planHash)).toHaveLength(1);
   });
 
+  it("theme A's D3: a create refused for a taken approval name shows the API's sentence, and that nothing was created", async () => {
+    const DETAIL =
+      "An Approval named approval-1234abcd already exists in team-a and was not made for this request: it binds another object, and it is never adopted. Nothing was created. Submit this Restore with another approval name.";
+    // The demo's first row already made a restore of this plan, so its check answers ready
+    // for the draft here, bound to the plan it was asked about (as the OD-10 row does).
+    let item: unknown = null;
+    net.override = (path, method, body) => {
+      const answer = (status: number) => new Response(JSON.stringify({ item, requestId: "r" }), { status, headers: { "content-type": "application/json" } });
+      if (method === "POST" && path === "/namespaces/team-a/restores") {
+        return new Response(JSON.stringify({ type: "https://logweir.dev/problems/state-conflict", title: "state_conflict", status: 409, code: "state_conflict", detail: DETAIL, requestId: "r-d3", retryable: false }), {
+          status: 409,
+          headers: { "content-type": "application/problem+json" },
+        });
+      }
+      if (method === "GET" && path.endsWith("/preflights/pf-d3")) return answer(200);
+      if (method !== "POST" || !path.endsWith("/preflights")) return null;
+      const r = (body as S["CreatePreflightRequest"]).restore!;
+      item = {
+        id: "pf-d3", namespace: "team-a", uid: "u", resourceVersion: "1", operation: "restore", state: "unknown", terminal: true, applicable: true,
+        stale: false, staleBasis: [], staleReasons: [], binding: { planHash: r.planHash, referents: [] }, warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+        checks: [
+          { id: "target.mappedTopics", code: "MappedTopicsAbsent", state: "ready", gating: "blocking" },
+          { id: "approval.state", code: "SubjectNotCreated", state: "skipped", gating: "blocking" },
+        ],
+      };
+      return answer(201);
+    };
+    const router = renderAt("/team-a/restores/new");
+    await toReview();
+    fireEvent.click(screen.getByRole("button", { name: "Create restore" }));
+    const title = await screen.findByText("The restore was not created");
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    expect(alert.textContent).toContain(DETAIL);
+    expect(alert.textContent).toContain("409 state_conflict");
+    expect(alert.textContent).not.toMatch(/The answer was lost/);
+    expect(router.state.location.pathname).toBe("/team-a/restores/new");
+  });
+
   it("OD-10: under one-person confirmation the original names are re-typed before anything is sent", async () => {
     // The demo's orders-dr already holds these names (the mock refuses MappedTopicExists),
     // so this check answers ready for the draft, bound to the plan it was asked about.

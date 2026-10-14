@@ -8,8 +8,11 @@ import namesPlan from "../pages/cutover/fixtures/switchover-plan-names.golden.ya
 import { ApiError } from "./client";
 import {
   chosenByDefault,
+  EVIDENCE_UNREADABLE_WORDS,
   REFUSAL_WORDS,
   evidenceDigests,
+  evidenceUnreadable,
+  reasonWords,
   groupsPartial,
   mintNames,
   offered,
@@ -372,5 +375,24 @@ describe("FX-36, FX-38: the switchover's words", () => {
     // CONTROLS: an ordinary run's message, and none.
     expect(at("the switchover Job exited 0: Succeeded")).toBe(false);
     expect(at(undefined)).toBe(false);
+  });
+});
+
+describe("theme A's D1: evidence the store would not read", () => {
+  const SENTENCE =
+    "EvidenceUnreadable: could not read logweir/drills/R.json with grant evidenceRead of BackupDestination team-a/primary: AccessDenied; the store refused the read, so the evidence was not judged";
+  it("is a storage permission problem with the evidenceRead grant, never tampered evidence or a mapping mismatch", () => {
+    expect(reasonWords("EvidenceUnreadable")).toBe(EVIDENCE_UNREADABLE_WORDS);
+    expect(EVIDENCE_UNREADABLE_WORDS).toMatch(/storage permission problem with the evidence destination's evidenceRead grant, not tampered/);
+    expect(EVIDENCE_UNREADABLE_WORDS).not.toMatch(/mapping|digest/i);
+    expect(REFUSAL_WORDS.EvidenceUnreadable).not.toBe(REFUSAL_WORDS.MappingDigestMismatch);
+  });
+  it("is told from the runner's sentence wherever it is relayed", () => {
+    expect(evidenceUnreadable(SENTENCE)).toBe(true);
+    expect(evidenceUnreadable(`the switchover Job exited 1: Failed: ${SENTENCE}`)).toBe(true);
+    expect(evidenceUnreadable(`the cleanup Job exited 1: ${SENTENCE}`)).toBe(true);
+    // CONTROLS: a mapping that does not verify, and nothing.
+    expect(evidenceUnreadable("MappingDigestMismatch: the scorecard binds mapping sha256:aa, and the plan binds sha256:bb")).toBe(false);
+    expect(evidenceUnreadable(undefined)).toBe(false);
   });
 });

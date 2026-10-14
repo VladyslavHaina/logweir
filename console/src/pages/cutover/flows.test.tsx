@@ -381,6 +381,36 @@ describe("FX-38: a switchover whose groups are partial", () => {
   });
 });
 
+describe("theme A's D1: evidence the store would not read", () => {
+  const SENTENCE =
+    "EvidenceUnreadable: could not read logweir/drills/R.json with grant evidenceRead of BackupDestination team-a/primary: AccessDenied; the store refused the read, so the evidence was not judged";
+  it("a Switchover that failed on it shows the message verbatim and says it is a storage permission problem", async () => {
+    const message = `the switchover Job exited 1: Failed: ${SENTENCE}`;
+    serve({ switchover: switchover({ phase: "Failed", reason: "EvidenceUnreadable", exitCode: 1, message, groups: [{ source: "app", target: "app", outcome: "untouched", created: false, partitions: 2 }] }) });
+    renderAt(`${FLOW}?switchover=swo-1`);
+    const title = await screen.findByText("Failed: EvidenceUnreadable");
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    expect(alert.textContent).toContain(message);
+    expect(alert.textContent).toMatch(/storage permission problem with the evidence destination's evidenceRead grant, not tampered/);
+    expect(alert.textContent).not.toMatch(/positions mapping is not held|does not verify against the signed scorecard/);
+  });
+
+  it("a review whose evidence row the store refused says so, with the row's code and message", async () => {
+    serve({ review: review({}, { state: "notReady", code: "AccessDenied", message: SENTENCE }) });
+    renderAt(FLOW);
+    await screen.findByText("The review could not read the restore's evidence");
+    expect(screen.getByText("AccessDenied")).toBeTruthy();
+    expect(document.body.textContent).toContain(SENTENCE);
+    expect(document.body.textContent).toMatch(/not tampered or mismatched evidence/);
+    cleanup();
+    // CONTROL: a review that refused the evidence itself reads as a refusal.
+    serve({ review: review({}, { state: "notReady", code: "RestoreEvidenceRefused", message: "VerificationNotComplete: coverage is sampled" }) });
+    renderAt(FLOW);
+    await screen.findByText("The review refused this restore");
+    expect(document.body.textContent).not.toMatch(/storage permission problem/);
+  });
+});
+
 describe("the Switchover's page", () => {
   const LEGACY = { ...CONFIRM, name: "legacy-governed-v1", legacy: true, mode: "governed", operatorMode: "strict", ordinaryConfirmationAvailable: false };
   it("the approval command names the plan file only when the name is a plain object name", async () => {

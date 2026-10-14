@@ -271,3 +271,18 @@ describe("FX-38: a switchover whose groups are partial, and a teardown cut at 25
     expect(screen.queryByText(/topics were left; the first/)).toBeNull();
   });
 });
+
+describe("theme A's D4: a clone held in RemovalFailed", () => {
+  it("shows the controller's reason verbatim, with the steps, and names an unreadable evidence as a grant problem", () => {
+    const reason =
+      "the cleanup Job exited 1: EvidenceUnreadable: could not read logweir/drills/R.json with grant evidenceRead of BackupDestination team-a/primary: AccessDenied; the store refused the read, so the evidence was not judged; 3 attempts failed and the last deleted nothing. Fix the cause (for EvidenceUnreadable, the evidence destination's evidenceRead grant), delete the topics the clone's scorecard lists under target.creation yourself, then remove the finalizer logweir.dev/clone-cleanup";
+    render(<CloneStatus clone={{ phase: "RemovalFailed", attempts: 3, reason }} restoreName="orders-clone" />);
+    expect(screen.getByText(reason)).toBeTruthy();
+    expect(document.body.textContent).toMatch(/storage permission problem with the evidence destination's evidenceRead grant/);
+    expect(screen.getByText(/patch restore 'orders-clone' --type=json/)).toBeTruthy();
+    cleanup();
+    // CONTROL: another cause gets no evidence words.
+    render(<CloneStatus clone={{ phase: "RemovalFailed", attempts: 3, reason: "the cleanup Job exited 1: CloneTargetClusterChanged" }} restoreName="orders-clone" />);
+    expect(document.body.textContent).not.toMatch(/storage permission problem/);
+  });
+});

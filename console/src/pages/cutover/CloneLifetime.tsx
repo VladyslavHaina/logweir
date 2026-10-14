@@ -10,7 +10,7 @@
 import { Alert, Content, DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm, FormGroup, FormHelperText, FormSelect, FormSelectOption, HelperText, HelperTextItem, Radio } from "@patternfly/react-core";
 import InfoIcon from "@patternfly/react-icons/dist/esm/icons/info-circle-icon";
 import type { components } from "../../api/schema";
-import { type Clone } from "../../api/switchovers";
+import { EVIDENCE_UNREADABLE_WORDS, evidenceUnreadable, type Clone } from "../../api/switchovers";
 import { shellArg } from "../../lib/shell";
 import { CLONE_TTL_SECONDS, cloneTtlError } from "../restores/plan";
 import { teardownLeftWords } from "../restores/words";
@@ -193,7 +193,8 @@ export function CloneStatus({ clone: c, teardown, restoreName }: { clone: Clone;
                   : c.phase === "RemovalFailed"
                     ? `Stopped after ${c.attempts ?? 0} attempt(s).`
                     : "Not run yet. Deleting this restore runs it at once."}
-            {c.reason && <div className="lw-reason">{c.reason}</div>}
+            {/* The controller's sentence, verbatim (theme A's D4: the cause and the steps out of RemovalFailed). */}
+            {c.reason && <div className="lw-small lw-break">{c.reason}</div>}
           </DescriptionListDescription>
         </DescriptionListGroup>
         {teardown && (teardown.deleted?.length || teardown.failed?.length || teardown.attestationKey) && (
@@ -215,6 +216,7 @@ export function CloneStatus({ clone: c, teardown, restoreName }: { clone: Clone;
       </DescriptionList>
       {c.phase === "RemovalFailed" && (
         <Alert isInline variant="danger" className="lw-gap-top" title="The clone's topics may still exist">
+          {evidenceUnreadable(c.reason) && <Content component="p">{EVIDENCE_UNREADABLE_WORDS}</Content>}
           <Content component="p">
             Check the target for topics with the clone's prefix, delete those this run created (the scorecard's target.creation and the
             teardown's failed list name them), then remove the finalizer:

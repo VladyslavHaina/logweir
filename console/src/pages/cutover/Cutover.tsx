@@ -42,9 +42,11 @@ import { useRestore } from "../../api/queries";
 import { ApiError } from "../../api/client";
 import type { ApprovalPolicy } from "../../api/approvals";
 import {
+  EVIDENCE_UNREADABLE_WORDS,
   UNKNOWN_OUTCOME,
   chosenByDefault,
   evidenceDigests,
+  evidenceUnreadable,
   groupsPartial,
   isTerminal,
   mintNames,
@@ -526,7 +528,14 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
           )}
           {s.phase === "Refused" && (
             <Alert isInline variant="danger" title={`Refused: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
-              {reasonWords(s.reason) ?? "The switchover was refused."} Nothing was committed.
+              <p>{reasonWords(s.reason) ?? "The switchover was refused."} Nothing was committed.</p>
+              {s.message && <p className="lw-break">{s.message}</p>}
+            </Alert>
+          )}
+          {s.phase === "Failed" && (
+            <Alert isInline variant="danger" title={`Failed: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
+              <p>{reasonWords(s.reason) ?? "The switchover run failed; its signed record says what it applied."}</p>
+              {s.message && <p className="lw-break">{s.message}</p>}
             </Alert>
           )}
           {groupsPartial(s) && (
@@ -724,7 +733,12 @@ function CutoverFlow() {
     body = (
       <Card>
         <CardBody>
-          <Alert isInline variant="danger" title="The review refused this restore">
+          <Alert
+            isInline
+            variant="danger"
+            title={state.checks.every((c) => evidenceUnreadable(c.message)) ? "The review could not read the restore's evidence" : "The review refused this restore"}
+          >
+            {state.checks.every((c) => evidenceUnreadable(c.message)) && <p>{EVIDENCE_UNREADABLE_WORDS}</p>}
             {state.checks.map((c) => (
               <div key={c.id}>
                 <span className="lw-reason">{c.code ?? c.id}</span> {c.message}

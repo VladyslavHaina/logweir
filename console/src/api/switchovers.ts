@@ -55,8 +55,21 @@ export const UNAVAILABLE_WORDS: Record<string, string> = {
   NotCaptured: "The backup did not capture this group's positions.",
 };
 
+/**
+ * Theme A's D1: the store refused to read the restore's evidence. A permission problem with
+ * the evidence destination's `evidenceRead` grant, never tampered or mismatched evidence.
+ */
+export const EVIDENCE_UNREADABLE_WORDS =
+  "The store refused to read the restore's evidence: a storage permission problem with the evidence destination's evidenceRead grant, not tampered or mismatched evidence: the evidence was not judged.";
+
+/** Whether a message is the runner's `EvidenceUnreadable` sentence ("…could not read <key> with grant <grant>: <class>…"). */
+export function evidenceUnreadable(message: string | null | undefined): boolean {
+  return /(^|: )EvidenceUnreadable: could not read /.test(message ?? "");
+}
+
 /** Why a group, or a whole switchover, is refused (§3.4, §3.5, §6), in the operator's words. */
 export const REFUSAL_WORDS: Record<string, string> = {
+  EvidenceUnreadable: EVIDENCE_UNREADABLE_WORDS,
   GroupActive: "The group has members on the target. The broker takes a position only while a group has none: stop its consumers.",
   TargetGroupTypeUnsupported: "The target group is a share or streams group, or another protocol, which a switchover does not set.",
   TargetGroupTypeUnproven: "The target's brokers cannot say what type the group is, so it is not set.",
