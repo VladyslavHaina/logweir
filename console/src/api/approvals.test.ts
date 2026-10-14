@@ -181,6 +181,18 @@ describe("an approval's state", () => {
     expect(said).toContain("KeyCompromise");
     expect(said).toContain("never green");
     // NEGATIVE CONTROL: the same refusal without the admission is a plain refusal.
+    // DUI-43: a consumed, clean verdict says which run used it: a Switchover's as a Restore's.
+    const usedSwitchover: Approval = {
+      ...revoked,
+      verified: true,
+      verifiedSubject: { ...revoked.verifiedSubject!, kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" },
+      conditions: revoked.conditions.map((c) => (c.type === "Verified" ? { ...c, status: "True", reason: "Verified" } : c.type === "Consumed" ? { ...c, reason: "SwitchoverAdmitted" } : c)),
+    };
+    const used = recordState(usedSwitchover);
+    expect(used).toMatchObject({ state: "verified", usedBy: { kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" } });
+    expect(stateSentence(used, { ...subject, name: "swo-ttusskxkeb5i65k4gx4jd6davm" })).toContain("The Switchover was admitted under it at 2026-09-09T13:01:00Z");
+    // ...and a verdict no run consumed names none.
+    expect(recordState({ ...usedSwitchover, conditions: usedSwitchover.conditions.filter((c) => c.type !== "Consumed") }).usedBy).toBeUndefined();
     const unconsumed = { ...revoked, conditions: revoked.conditions.filter((c) => c.type !== "Consumed") };
     expect(recordState(unconsumed).state).toBe("refused");
   });

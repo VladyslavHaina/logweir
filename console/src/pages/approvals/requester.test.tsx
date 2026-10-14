@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import type { ApprovalGrant } from "../../api/approvals";
-import { DETAILS_NOT_VERIFIED, Requester, UNVERIFIED_NAME, principalText } from "./parts";
+import { ApprovalStatus, DETAILS_NOT_VERIFIED, Requester, UNVERIFIED_NAME, principalText } from "./parts";
 
 afterEach(cleanup);
 
@@ -67,5 +67,15 @@ describe("DUI-21, second review: details the API could not verify", () => {
     const { container } = render(<Requester id={DEX} email="alice@example.com" grant={bob} />);
     expect(container.querySelector("[data-verified-identifier]")?.textContent).toBe("alice@example.com");
     expect(container.querySelector("[data-details-not-verified]")).toBeNull();
+  });
+});
+
+describe("DUI-43: a consumed approval's verdict", () => {
+  it("reads Verified · used by the run it admitted; one no run used reads Verified alone (the control)", () => {
+    const { container } = render(<ApprovalStatus found={{ state: "verified", key: "k", consumedAt: "2026-10-14T22:17:00Z", usedBy: { kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" } }} />);
+    expect(container.textContent).toBe("Verified · used by swo-ttusskxkeb5i65k4gx4jd6davm");
+    cleanup();
+    const plain = render(<ApprovalStatus found={{ state: "verified", key: "k" }} />);
+    expect(plain.container.textContent).toBe("Verified");
   });
 });

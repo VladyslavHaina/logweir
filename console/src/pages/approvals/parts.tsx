@@ -66,7 +66,17 @@ export function ApprovalStatus({ found, waiting = false }: { found: Found; waiti
     case "awaiting-verification":
       return <StatusLabel tone="progress" text={STATE_WORDS["awaiting-verification"]} title={title} />;
     case "verified":
-      return <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />;
+      // DUI-43: a consumed verdict is the record of the run it admitted, a Restore or a Switchover.
+      return found.usedBy ? (
+        <span>
+          <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />
+          <span className="lw-subtle lw-small lw-break">
+            {" "}· used by {found.usedBy.name}
+          </span>
+        </span>
+      ) : (
+        <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />
+      );
     case "request-recorded":
       return <StatusLabel tone="neutral" text={STATE_WORDS["request-recorded"]} title="the console's record of a request: it authorises nothing until a second person approves" />;
     case "request-expired":

@@ -521,7 +521,8 @@ Other conditions: `HistoryRetained` (`Retained`, `HistoryLarge`,
 The v1 checks run in this order: payload type; every key parses; each `keyId`
 is its key's SHA-256; a signature's key is trusted; it verifies; the key is in
 its window; the signed `plan_hash`; `subject_kind`; `spec.planHash`. A consumed
-record carries `Consumed=True`, `RestoreAdmitted`.
+record carries `Consumed=True`, `RestoreAdmitted` (`SwitchoverAdmitted` for a
+`Switchover`'s).
 
 ### `TrustPolicy` and `TrustRoster`
 

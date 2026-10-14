@@ -1251,6 +1251,274 @@ async fn a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_
     assert_eq!(outside.reason(), "AuthorizationExpired", "{outside:?}");
 }
 
+// DUI-43: a Switchover consumes its Approval, as a Restore does.
+//
+// Its approval was judged again on every pass: about fifteen minutes after a
+// two-person-approved switchover succeeded, the document's expiry rewrote it
+// `Verified=False/AuthorizationExpired` and erased its approver, key and
+// authorization. The fixture below is an Ordinary v2 document for Switchover
+// `sw1`, signed OUT OF TREE (like every signature in this file) by a throwaway
+// console key whose private half existed only in one Python process.
+
+const SW_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwyqzp8JnkBieEE+pt0xiQ7A6ChsFGZSOF/76JevFGLw=\n-----END PUBLIC KEY-----\n";
+const SW_CONSOLE_KEY_ID: &str = "df85a30a947cad52737d3caf024bb70560f1601979c12653cba1f0a3195a2b3a";
+const SW_PLAN_BYTES: &str = "format_version: 1.0.0\ngroups: []\n";
+const SW_PLAN_HASH: &str =
+    "sha256:92815250faf085e1ad1affc5b43fbd918b5c4620e4783165fdaeee08a26c4ec1";
+const SW_UID: &str = "switchover-uid-1";
+const SW_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Switchover","namespace":"logweir-t16","name":"sw1","uid":"switchover-uid-1"},"planHash":"sha256:92815250faf085e1ad1affc5b43fbd918b5c4620e4783165fdaeee08a26c4ec1","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
+const SW_CONSOLE_SIG: &str =
+    "toFaoqI/g6jwC3zTC9FDZUxS6wTHkd+1LhHfL1t881EVshN9iOSj97zBD9xCsRiZuL1zdjgrkm1Dkjzgc2BQAQ==";
+
+fn sw_console() -> SpecKey {
+    key(
+        SW_CONSOLE_KEY_ID,
+        SW_CONSOLE_PEM,
+        SpecUsage::ConsoleConfirmation,
+        "logweir-api:console",
+    )
+}
+
+/// The Switchover's Approval `a1`, with no status yet.
+fn sw_approval() -> Approval {
+    let mut object = approval_object(
+        SW_DOC,
+        &sidecar(V2_PAYLOAD, &[(SW_CONSOLE_KEY_ID, SW_CONSOLE_SIG)]),
+    );
+    object.spec.subject_ref = SubjectRef {
+        kind: SubjectKind::Switchover,
+        name: "sw1".to_string(),
+    };
+    object.spec.plan_hash = SW_PLAN_HASH.to_string();
+    object
+}
+
+/// The Switchover `sw1`; `job` is `status.jobRef`, which its controller writes
+/// on the pass that admitted it and created its Job.
+fn switchover_body(job: Option<&str>) -> String {
+    let mut value = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
+        "metadata": {"name": "sw1", "namespace": NS, "uid": SW_UID},
+        "spec": {
+            "planBytes": SW_PLAN_BYTES, "approvalRef": {"name": "a1"},
+            "restoreRef": {"name": "r1", "uid": RESTORE_UID}, "deadlineSeconds": 600
+        },
+        "status": {"phase": "Pending"}
+    });
+    if let Some(job) = job {
+        value["status"] = serde_json::json!({"phase": "Succeeded", "jobRef": job, "exitCode": 0});
+    }
+    value.to_string()
+}
+
+/// The approval bundle the Switchover controller materialised for its Job at
+/// `created`: controlled by the Switchover UID, carrying the Approval's bytes.
+fn sw_bundle(created: &str, approval: &Approval) -> String {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {
+            "name": "sw1-switchover", "namespace": NS, "uid": "sw-bundle-uid",
+            "creationTimestamp": created,
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover", "name": "sw1",
+                "uid": SW_UID, "controller": true, "blockOwnerDeletion": true,
+            }],
+        },
+        "immutable": true,
+        "data": {
+            "approval.json": approval.spec.approval_bytes,
+            "approval.sig": approval.spec.sidecar_bytes,
+        },
+    })
+    .to_string()
+}
+
+fn sw_routes(job: Option<&str>, bundle: Option<String>) -> Vec<Route> {
+    let mut table = routes(vec![sw_console()]);
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/switchovers/sw1",
+        status: 200,
+        body: switchover_body(job),
+    });
+    table.push(match bundle {
+        Some(body) => Route {
+            method: "GET",
+            path_suffix: "/configmaps/sw1-switchover",
+            status: 200,
+            body,
+        },
+        None => Route {
+            method: "GET",
+            path_suffix: "/configmaps/sw1-switchover",
+            status: 404,
+            body: not_found("configmaps sw1-switchover not found"),
+        },
+    });
+    table
+}
+
+async fn sw_decide(
+    approval: &Approval,
+    routes: Vec<Route>,
+    when: DateTime<Utc>,
+) -> ApprovalOutcome {
+    let (client, _recorder) = mock_client_recording(routes);
+    approval::decide_with_policy_at(approval, &client, &bind("team-ordinary"), when)
+        .await
+        .expect("a verdict")
+}
+
+/// The Switchover's Approval as this controller verified it at 13:00, before
+/// the switchover ran.
+async fn verified_sw_approval() -> Approval {
+    let mut object = sw_approval();
+    let outcome = sw_decide(&object, sw_routes(None, None), now()).await;
+    assert!(
+        matches!(outcome, ApprovalOutcome::Verified(_)),
+        "the switchover fixture verifies inside its window: {outcome:?}"
+    );
+    object.status = Some(approval::status_for(&object, &outcome, now()));
+    object
+}
+
+#[test]
+fn the_switchover_fixture_key_id_is_its_public_key() {
+    let key = logweir_verify::VerifyingKey::from_pem_str(SW_CONSOLE_PEM).expect("a PEM");
+    assert_eq!(key.key_id(), SW_CONSOLE_KEY_ID);
+    assert_eq!(
+        logweir_core::ids::sha256_prefixed(SW_PLAN_BYTES.as_bytes()),
+        SW_PLAN_HASH
+    );
+}
+
+#[tokio::test]
+async fn dui43_an_admitted_switchover_keeps_its_approval_verified_past_its_expiry() {
+    let object = verified_sw_approval().await;
+    let stored = object.status.clone().expect("verified status");
+    assert!(stored.approver.is_some() && stored.authorization.is_some());
+
+    // The switchover ran at 13:01 (its bundle, then its Job); at 13:20 the
+    // document is past its 13:10 expiry.
+    let admitted = sw_routes(
+        Some("sw1"),
+        Some(sw_bundle("2026-09-09T13:01:00Z", &object)),
+    );
+    let outcome = sw_decide(&object, admitted, after_expiry()).await;
+    assert!(
+        outcome.is_consumed() && outcome.is_verified(),
+        "a Switchover admitted at 13:01 consumed the verdict: {outcome:?}"
+    );
+    let status = approval::status_for(&object, &outcome, after_expiry());
+    assert_eq!(status.verified, Some(true));
+    assert_eq!(status.approver, stored.approver, "the approver is kept");
+    assert_eq!(status.matched_key_id, stored.matched_key_id);
+    assert_eq!(status.authorization, stored.authorization);
+    let consumed = condition(&status, approval::CONDITION_CONSUMED);
+    assert_eq!(consumed.status, "True");
+    assert_eq!(
+        consumed.reason.as_deref(),
+        Some(approval::REASON_SWITCHOVER_ADMITTED)
+    );
+    assert_eq!(
+        consumed.last_transition_time,
+        Some(at("2026-09-09T13:01:00Z"))
+    );
+    let message = consumed.message.clone().unwrap_or_default();
+    assert!(
+        message.starts_with("Switchover logweir-t16/sw1") && message.contains(SW_UID),
+        "{message}"
+    );
+
+    // A record an earlier build rewrote (the PoC's two) is re-established from
+    // its signed bytes at the admission instant, never copied from a field.
+    let mut rewritten = object.clone();
+    let (withdrawn, _) = (
+        sw_decide(&object, sw_routes(None, None), after_expiry()).await,
+        (),
+    );
+    assert_eq!(withdrawn.reason(), "AuthorizationExpired");
+    rewritten.status = Some(approval::status_for(&object, &withdrawn, after_expiry()));
+    assert_eq!(
+        rewritten.status.as_ref().and_then(|s| s.approver.clone()),
+        None
+    );
+    let late = at("2026-09-09T13:40:00Z");
+    let repaired = sw_decide(
+        &rewritten,
+        sw_routes(
+            Some("sw1"),
+            Some(sw_bundle("2026-09-09T13:01:00Z", &object)),
+        ),
+        late,
+    )
+    .await;
+    let ApprovalOutcome::Consumed(consumption) = &repaired else {
+        panic!("admitted at 13:01, inside the window: {repaired:?}");
+    };
+    assert!(
+        consumption.reverified.is_some(),
+        "re-established, not copied"
+    );
+    let status = approval::status_for(&rewritten, &repaired, late);
+    assert_eq!(status.verified, Some(true));
+    assert_eq!(status.approver, stored.approver);
+}
+
+#[tokio::test]
+async fn dui43_an_unused_switchover_approval_past_its_expiry_is_still_refused() {
+    // CONTROLS: no Job (never admitted), a bundle that is not this
+    // Switchover's, one carrying other bytes, and one admitted after the
+    // window: each is a request the expiry still refuses, with nothing kept.
+    let object = verified_sw_approval().await;
+    let mut foreign: serde_json::Value =
+        serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("JSON");
+    foreign["metadata"]["ownerReferences"][0]["uid"] = serde_json::json!("another-switchover");
+    let mut other_bytes: serde_json::Value =
+        serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("JSON");
+    other_bytes["data"]["approval.json"] = serde_json::json!("{}");
+    for (label, routes) in [
+        (
+            "not admitted",
+            sw_routes(None, Some(sw_bundle("2026-09-09T13:01:00Z", &object))),
+        ),
+        ("no bundle", sw_routes(Some("sw1"), None)),
+        (
+            "another switchover's bundle",
+            sw_routes(Some("sw1"), Some(foreign.to_string())),
+        ),
+        (
+            "other bytes",
+            sw_routes(Some("sw1"), Some(other_bytes.to_string())),
+        ),
+    ] {
+        let outcome = sw_decide(&object, routes, after_expiry()).await;
+        assert_eq!(
+            outcome.reason(),
+            "AuthorizationExpired",
+            "{label}: {outcome:?}"
+        );
+        assert!(!outcome.is_consumed(), "{label}");
+        let status = approval::status_for(&object, &outcome, after_expiry());
+        assert_eq!(status.verified, Some(false), "{label}");
+        assert_eq!(status.approver, None, "{label}");
+    }
+    // Admitted after its window closed: asked at that instant, still refused.
+    let mut rewritten = object.clone();
+    let withdrawn = sw_decide(&object, sw_routes(None, None), after_expiry()).await;
+    rewritten.status = Some(approval::status_for(&object, &withdrawn, after_expiry()));
+    let late = sw_decide(
+        &rewritten,
+        sw_routes(
+            Some("sw1"),
+            Some(sw_bundle("2026-09-09T13:15:00Z", &object)),
+        ),
+        at("2026-09-09T13:40:00Z"),
+    )
+    .await;
+    assert_eq!(late.reason(), "AuthorizationExpired", "{late:?}");
+}
+
 // Compromise, planted consumption, and the binding fences
 
 /// The console key, REVOKED with `reason` effective at `effective`.

@@ -259,6 +259,8 @@ export interface Found {
   message?: string;
   /** When the Restore was admitted under it (`Consumed=True`). */
   consumedAt?: string;
+  /** DUI-43: the run admitted under it, Restore or Switchover, when it is consumed. */
+  usedBy?: { kind: string; name: string };
 }
 
 function condition(approval: Approval, type: string) {
@@ -278,7 +280,8 @@ export function recordState(approval: Approval): Found {
   const verified = condition(approval, "Verified");
   const consumed = consumedAt(approval);
   if (approval.verified === true && approval.verifiedSubject) {
-    return { state: "verified", key: approval.matchedKeyId ?? "", ...(consumed !== undefined ? { consumedAt: consumed } : {}) };
+    const used = consumed !== undefined ? { consumedAt: consumed, usedBy: { kind: approval.verifiedSubject.kind, name: approval.verifiedSubject.name } } : {};
+    return { state: "verified", key: approval.matchedKeyId ?? "", ...used };
   }
   if (verified && verified.status === "False" && consumed !== undefined && COMPROMISE_REASONS.includes(verified.reason ?? "")) {
     return {
@@ -365,7 +368,7 @@ export function stateSentence(found: Found, subject: Subject): string {
       return `Approval ${name} is recorded and the controller has not verified it yet. The Restore runs only once it is verified for this Restore's UID.`;
     case "verified":
       return `The controller verified Approval ${name} against key ${found.key} for Restore ${subject.name} (uid ${subject.uid}).${
-        found.consumedAt ? ` The Restore was admitted under it at ${found.consumedAt}; the verdict is now the record of that admission and authorises nothing else.` : ""
+        found.consumedAt ? ` The ${found.usedBy?.kind ?? "Restore"} was admitted under it at ${found.consumedAt}; the verdict is now the record of that admission and authorises nothing else.` : ""
       }`;
     case "revoked-after-use":
       return `Restore ${subject.name} was admitted under Approval ${name} at ${found.consumedAt}, and a key it names was later revoked for KeyCompromise (reason ${found.reason}): ${found.message} This is never green: the record (key ${found.key}, the authorization, the admission) is kept so the run can be investigated.`;

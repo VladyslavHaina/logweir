@@ -2299,7 +2299,12 @@ kubectl --context docker-desktop get approval a1 \
 
 **After admission the `Approval` is a record, not a gate.** Once the `Restore`
 it names is `Admitted=True` and its bundle names this `Approval`'s UID, the
-controller adds `Consumed=True` (reason `RestoreAdmitted`). The verdict then
+controller adds `Consumed=True` (reason `RestoreAdmitted`). A `Switchover`'s
+`Approval` is consumed the same way (reason `SwitchoverAdmitted`) once the
+Switchover records its Job (`status.jobRef`) and its own bundle carries this
+`Approval`'s signed bytes; the bundle's creation is the admission instant. An
+`Approval` an older build rewrote `AuthorizationExpired` after its switchover ran
+is re-verified from its signed bytes at that instant and recorded again. The verdict then
 stays as recorded whatever the clock, a key's `notAfter`, a retirement or a
 policy edit does. Only a compromise reaches it: `verified` becomes `false`, and
 `Verified` reads `RecordedBeforeRevocation` when the admission preceded the
