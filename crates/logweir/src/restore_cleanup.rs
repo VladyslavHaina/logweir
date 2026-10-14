@@ -62,6 +62,9 @@ pub struct CleanupArgs {
     pub attempt: u32,
     /// D2 §3.5's store-contract handshake, as `restore run` takes it.
     pub store_contract_version: Option<String>,
+    /// The grant the scorecard is read with, as the controller names it
+    /// (`--evidence-read-grant`, D1); `None` for a hand-run.
+    pub evidence_read_grant: Option<String>,
 }
 
 /// `logweir restore cleanup`: run, print the `clone-cleanup=` line (and a
@@ -128,8 +131,21 @@ pub fn finish(
         }
         Err(e) => {
             // On one line: the error can repeat a plan value or a broker's
-            // message.
+            // message. It goes on the report line too (D1), so the clone's
+            // status says why the attempt failed, not only that it did.
             eprintln!("{}", crate::exit::one_line(&e.to_string()));
+            let why = match &e {
+                // Its own word first (`EvidenceUnreadable: …`), without the
+                // `operational: ` the exit code already says.
+                DrillError::Operational(m) => m.clone(),
+                other => other.to_string(),
+            };
+            let report = CloneCleanupReport {
+                run_id: run_id.to_string(),
+                error: Some(crate::exit::one_line(&why)),
+                ..CloneCleanupReport::default()
+            };
+            let _ = writeln!(out, "{}", report.line());
             e.exit_code()
         }
     }
@@ -162,7 +178,7 @@ pub fn execute(args: &CleanupArgs) -> Result<Cleaned, DrillError> {
         trusted.extend(keyring(path)?);
     }
     let contract = crate::backup::store_contract::admit(args.store_contract_version.as_deref())?;
-    let store = if contract {
+    let write = if contract {
         let archive = crate::backup::store_contract::archive_options()?;
         let evidence = crate::backup::store_contract::evidence_options(&archive)?;
         Store::from_url_with(&spec.evidence, &evidence)
@@ -170,6 +186,18 @@ pub fn execute(args: &CleanupArgs) -> Result<Cleaned, DrillError> {
         Store::from_url(&spec.evidence)
     }
     .map_err(|e| DrillError::Operational(e.to_string()))?;
+    // D1: the scorecard is read with the evidence destination's read grant
+    // (the archive slot), the attestation written with its write grant.
+    let read = crate::evidence_read::read_store(&spec.evidence, contract)
+        .map_err(DrillError::Operational)?;
+    let store = SplitStores {
+        read,
+        write,
+        grant: args
+            .evidence_read_grant
+            .clone()
+            .unwrap_or_else(|| crate::evidence_read::AMBIENT_GRANT.to_string()),
+    };
     let target = target_client(&spec)?;
     clean(
         &Inputs {
@@ -249,6 +277,56 @@ fn target_client(
     Ok(reader)
 }
 
+/// **Where the cleanup reads the run's scorecard and writes its attestation**
+/// (D1): a [`Store`] for both (a hand-run, a test), or [`SplitStores`], the
+/// read grant's handle and the write grant's, for a controller-built Job.
+pub trait EvidenceStores {
+    /// One capped read, with the grant [`EvidenceStores::grant`] names.
+    ///
+    /// # Errors
+    ///
+    /// The store's.
+    fn read(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError>;
+    /// The handle the attestation is written to.
+    fn writer(&self) -> &Store;
+    /// The read grant, as a failure names it.
+    fn grant(&self) -> &str {
+        crate::evidence_read::AMBIENT_GRANT
+    }
+}
+
+impl EvidenceStores for Store {
+    fn read(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        self.get_capped(key, max_bytes).map(|(bytes, _)| bytes)
+    }
+    fn writer(&self) -> &Store {
+        self
+    }
+}
+
+/// The read grant's handle and the write grant's, with the read grant's name.
+pub struct SplitStores {
+    /// Built from the archive slot: the evidence destination's read grant.
+    pub read: Store,
+    /// Built from the evidence slot: its write grant.
+    pub write: Store,
+    /// `evidenceRead of BackupDestination <ns>/<name>`, as the controller
+    /// named it.
+    pub grant: String,
+}
+
+impl EvidenceStores for SplitStores {
+    fn read(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
+        self.read.get_capped(key, max_bytes).map(|(bytes, _)| bytes)
+    }
+    fn writer(&self) -> &Store {
+        &self.write
+    }
+    fn grant(&self) -> &str {
+        &self.grant
+    }
+}
+
 /// What [`clean`] reads besides the clients.
 pub struct Inputs<'a> {
     /// The approved plan, parsed.
@@ -278,7 +356,7 @@ pub fn clean(
     inputs: &Inputs<'_>,
     reader: &dyn ClusterReader,
     deleter: &dyn TopicDeleter,
-    store: &Store,
+    store: &dyn EvidenceStores,
     signer: &ValidatedSigner,
 ) -> Result<Cleaned, DrillError> {
     refuse_unless_clone(inputs.spec)?;
@@ -372,7 +450,7 @@ pub fn clean(
         topic_configuration: None,
     };
     let key = cleanup_attestation_key(&sc.run_id, inputs.attempt);
-    persist(&attestation, &key, signer, store)?;
+    persist(&attestation, &key, signer, store.writer())?;
     Ok(Cleaned {
         retry: !plan.unreadable.is_empty() || !failed.is_empty(),
         report: CloneCleanupReport {
@@ -385,6 +463,7 @@ pub fn clean(
                 .collect(),
             attestation_key: Some(key),
             refused: None,
+            error: None,
         },
     })
 }
@@ -394,7 +473,7 @@ pub fn clean(
 /// against this plan's bytes.
 fn verified_scorecard(
     inputs: &Inputs<'_>,
-    store: &Store,
+    store: &dyn EvidenceStores,
 ) -> Result<(Vec<u8>, Scorecard), DrillError> {
     let refuse = |why: String| -> DrillError { GuardRefusal(why).into() };
     let run_id = inputs.run_id;
@@ -410,15 +489,17 @@ fn verified_scorecard(
     let key = format!("logweir/drills/{run_id}.json");
     let sidecar_key = format!("logweir/drills/{run_id}.sig");
     let read = |key: &str, max_bytes: u64| -> Result<Vec<u8>, DrillError> {
-        match store.get_capped(key, max_bytes) {
-            Ok((bytes, _)) => Ok(bytes),
+        match store.read(key, max_bytes) {
+            Ok(bytes) => Ok(bytes),
             Err(StoreError::NotFound(_)) => Err(refuse(format!(
                 "{key} is not in the evidence store: without the run's signed record nothing \
                  proves which topics it created; nothing was deleted"
             ))),
-            Err(e) => Err(DrillError::Operational(format!(
-                "{key} could not be read: {e}"
-            ))),
+            // D1: a store's refusal names the key, the grant and its class.
+            Err(e) => Err(DrillError::Operational(
+                crate::evidence_read::unreadable(key, &e, store.grant())
+                    .map_or_else(|| format!("{key} could not be read: {e}"), |u| u.sentence),
+            )),
         }
     };
     let bytes = read(&key, caps::SIGNED_DOCUMENT)?;

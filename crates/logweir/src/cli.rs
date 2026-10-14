@@ -560,6 +560,11 @@ pub struct RestoreCleanupArgs {
     /// FX-43: see `restore run`'s flag of the same name.
     #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
     pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
+    /// The grant the run's scorecard is read with, as the controller names it
+    /// in a failure. The read uses the archive slot's credential (`AWS_*`),
+    /// the attestation the evidence slot's.
+    #[arg(long)]
+    pub evidence_read_grant: Option<String>,
 }
 
 impl From<RestoreCleanupArgs> for crate::restore_cleanup::CleanupArgs {
@@ -571,6 +576,7 @@ impl From<RestoreCleanupArgs> for crate::restore_cleanup::CleanupArgs {
             evidence_keys: a.evidence_keys,
             attempt: a.attempt,
             store_contract_version: a.store_contract_version,
+            evidence_read_grant: a.evidence_read_grant,
         }
     }
 }
@@ -912,6 +918,9 @@ pub enum SubjectKindArg {
 
 /// `logweir switchover` (PROD-04.2).
 #[derive(Subcommand)]
+// `Run` carries the Job's every flag; the plan builders are the small
+// variants, parsed once per process.
+#[allow(clippy::large_enum_variant)]
 pub enum SwitchoverCmd {
     /// Build a switchover plan from a verified restore's scorecard and its
     /// positions mapping (both local copies). Runs nothing.
@@ -982,6 +991,12 @@ pub enum SwitchoverCmd {
         /// FX-43: see `restore run`'s flag of the same name.
         #[arg(long, value_name = "HEX", value_parser = parse_line_token)]
         runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
+        /// The grant the restore's evidence is read with, as the controller
+        /// names it in a failure (`evidenceRead of BackupDestination <ns>/<name>`).
+        /// The read uses the archive slot's credential (`AWS_*`), the record
+        /// the evidence slot's.
+        #[arg(long)]
+        evidence_read_grant: Option<String>,
     },
 }
 

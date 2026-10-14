@@ -1387,6 +1387,7 @@ mod tests {
             }],
             attestation_key: Some("logweir/drills/r.cleanup.json".into()),
             refused: None,
+            error: None,
         };
         assert_eq!(
             teardown_value(&report, &[]),

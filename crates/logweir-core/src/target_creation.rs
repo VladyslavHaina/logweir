@@ -363,6 +363,10 @@ pub struct CloneCleanupReport {
     /// The refusal, when the cleanup deleted nothing by rule (exit 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Why the attempt could not do its job (exit 1, 2 or 4), for example a
+    /// scorecard the store would not hand over (`EvidenceUnreadable`, D1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One topic the cleanup left, and why.
