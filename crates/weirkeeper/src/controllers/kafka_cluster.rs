@@ -258,9 +258,10 @@ pub struct ProbeReport {
     /// make a probe read as reachable.
     pub credential_binding_refused: bool,
     /// FX-46's `brokers-answered=<answered>/<listed>`, when the line is there
-    /// and is two numbers with `answered <= listed`. Read only to NAME a
-    /// `reachable=false`; it never makes a probe read as reachable.
-    pub brokers_answered: Option<(u32, u32)>,
+    /// and is two numbers with `answered <= listed`, or `<answered>/?` (the
+    /// broker list could not be read: `listed` is `None`). Read only to NAME
+    /// a `reachable=false`; it never makes a probe read as reachable.
+    pub brokers_answered: Option<(u32, Option<u32>)>,
 }
 
 /// Read the two contract lines out of a pod log, by key name, from a bounded
@@ -297,8 +298,12 @@ pub fn probe_report(log: &str) -> ProbeReport {
             .pop()
             .and_then(|v| {
                 let (a, l) = v.trim().split_once('/')?;
-                let (a, l) = (a.parse::<u32>().ok()?, l.parse::<u32>().ok()?);
-                (a <= l).then_some((a, l))
+                let a = a.parse::<u32>().ok()?;
+                if l == "?" {
+                    return Some((a, None));
+                }
+                let l = l.parse::<u32>().ok()?;
+                (a <= l).then_some((a, Some(l)))
             }),
     }
 }
@@ -317,9 +322,10 @@ pub struct Verdict {
     /// The value for `status.clusterId`, written only alongside
     /// `reachable: Some(true)`.
     pub cluster_id: Option<String>,
-    /// FX-46: how many of the advertised brokers answered, for the message of
-    /// an [`REASON_ADVERTISED_BROKERS_UNREACHABLE`] verdict.
-    pub brokers_answered: Option<(u32, u32)>,
+    /// FX-46: how many of the advertised brokers answered (of how many, when
+    /// their list was read), for the message of an
+    /// [`REASON_ADVERTISED_BROKERS_UNREACHABLE`] verdict.
+    pub brokers_answered: Option<(u32, Option<u32>)>,
 }
 
 /// The verdict for one finished probe, from its log alone.
@@ -354,7 +360,7 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
         Some(false)
             if report
                 .brokers_answered
-                .is_some_and(|(answered, listed)| answered < listed) =>
+                .is_some_and(|(answered, listed)| listed.is_none_or(|l| answered < l)) =>
         {
             Verdict {
                 status: "False",
@@ -418,25 +424,33 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
     if let (REASON_ADVERTISED_BROKERS_UNREACHABLE, Some((answered, listed))) =
         (v.reason.as_str(), v.brokers_answered)
     {
+        let how_many = match listed {
+            Some(listed) => format!(
+                "only {answered} of the {listed} broker(s) the cluster advertises answered the \
+                 probe on their advertised addresses"
+            ),
+            None => "no broker the cluster advertises answered a metadata request, so their \
+                     list could not even be read"
+                .to_string(),
+        };
         return format!(
-            "the bootstrap address answered and named the cluster, and only {answered} of the \
-             {listed} broker(s) the cluster advertises answered the probe on their advertised \
-             addresses (pod exit {exit_code}), so no backup or restore through this connection \
-             can reach every partition. Every broker must advertise a host and port the runner \
-             pods in this namespace can reach: check advertised.listeners for the listener the \
-             bootstrap address belongs to, or use a bootstrap address of a listener meant for \
-             this network. The probe Job's log names each broker that did not answer"
+            "the bootstrap address answered and named the cluster, and {how_many} (pod exit \
+             {exit_code}), so no backup or restore through this connection can reach every \
+             partition. Every broker must advertise a host and port the runner pods in this \
+             namespace can reach: check advertised.listeners for the listener the bootstrap \
+             address belongs to, or use a bootstrap address of a listener meant for this \
+             network. The probe Job's log names each broker that did not answer"
         );
     }
     match v.reachable {
         Some(true) => match v.brokers_answered {
-            Some((answered, listed)) => format!(
+            Some((answered, Some(listed))) => format!(
                 "the probe reached a broker, read cluster id {}, and {answered} of the {listed} \
                  broker(s) the cluster advertises answered on their advertised addresses (pod \
                  exit {exit_code})",
                 v.cluster_id.as_deref().unwrap_or("<unnamed>")
             ),
-            None => format!(
+            _ => format!(
                 "the probe reached a broker and read cluster id {} (pod exit {exit_code})",
                 v.cluster_id.as_deref().unwrap_or("<unnamed>")
             ),

@@ -37,10 +37,12 @@ that shape is to a function with `#[test]` above it; and every check id named
 here exists.
 
 **A passing connection test is none of these.** `logweir cluster-probe` and the
-console's Test connection reach the bootstrap address and read the cluster id.
-They do not show that the engine can read or write there
-([Advertised addresses](#advertised-addresses), and the capability checks
-below).
+console's Test connection show that the bootstrap address and every broker the
+cluster advertises answer (FX-46, [Advertised addresses](#advertised-addresses)).
+The Test connection also runs the engine-protocol capability rows, advisory, so
+it says whether the endpoint is usable as a backup source and as a restore
+target. Neither shows that the engine's run will succeed there (the capability
+checks below, and the minimum ACLs).
 
 Every row ran `kafka-backup` `0.23.3+logweir.2`, the engine the images shipped
 then (build 3 changes only the restore checkpoint), on a compose stack. **A
@@ -81,7 +83,7 @@ of its own, under [Capability checks](#capability-checks).
 | Apache Kafka 4.1.2 | **supported** | The same. | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` and `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check` with `--kafka 4.1`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for these two rows has not yet run on GitHub |
 | Apache Kafka 4.3.1, the default fixture and the line CI runs on every pull request (PROD-01.5a) | **supported** | The same. | CI: `e2e/tests/full_drill.rs::a_full_drill_produces_a_signed_scorecard_with_real_numbers`, `e2e/tests/mvp_demo.rs::mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies`, `e2e/tests/compat_contract.rs::the_default_broker_answers_every_capability_check`. `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` with `--kafka 4.3`: by hand, 2026-10-10, and by the weekly `broker-lines` job of `engine-matrix.yml`, whose step for this row has not yet run on GitHub |
 | Confluent Platform 8.3.2 (the `confluentinc/cp-kafka` image, which reports `8.3.2-ccs`) | **supported** | The whole path, with no difference from Apache Kafka 4.3.1: the same request ranges, the same capability answers, a classic group captured. | `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; weekly in `compat-weekly.yml`, not yet run on GitHub) |
-| Redpanda v26.2.4 | **limited** | **A backup source only.** The probe, a backup and both verifiers pass, with topic IDs and the topic's configuration recorded. **A restore into it cannot run:** the engine sends Produce v8 and never negotiates, and Redpanda serves Produce v0–v7. `target.engineProtocol` is `notReady` and says so before a restore starts; a restore started anyway fails in the engine and signs nothing. Restore its archive into a cluster that serves Produce v8. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; weekly in `compat-weekly.yml`, not yet run on GitHub) |
+| Redpanda v26.2.4 | **limited** | **A backup source only.** The probe, a backup and both verifiers pass, with topic IDs and the topic's configuration recorded. **A restore into it cannot run:** the engine sends Produce v8 and never negotiates, and Redpanda serves Produce v0–v7. `target.engineProtocol` is `notReady` and says so before a restore starts; `drill run` refuses the restore at phase 0 by that row's name, exit 3, before anything is created, and `doctor` names it (FX-45). The Test connection passes and says usable as a backup source, not as a restore target (FX-46). Restore its archive into a cluster that serves Produce v8. | `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10 and, with FX-45/46, 2026-10-13; weekly in `compat-weekly.yml`, not yet run on GitHub) |
 | Apache Kafka 4.0.x and 4.2.x | **untested** | No pinned image and no row. | |
 | Apache Kafka on ZooKeeper (any 3.x) | **untested** | Every fixture is KRaft. | |
 | Any other Kafka-compatible endpoint | **untested** | `connection.engineProtocol` and `target.engineProtocol` answer, before anything is read or written, whether it serves the request versions the engine sends. | |
@@ -98,7 +100,7 @@ reason**. It is never recorded as an empty answer.
 | Topic IDs (which generation of a topic the backup read) | All six endpoints above | **supported** | `topic_id` before and after the engine, source `describeTopics`. | On every endpoint, the generic row, which requires the ID and that it did not change during the capture: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; the Apache Kafka lines also weekly, as above, and the other two weekly in `compat-weekly.yml`, not yet run on GitHub). A recreated topic is a new generation, CI on 4.3.1: `e2e/tests/topic_ids.rs::a_recreated_topic_is_a_new_generation_and_the_same_topic_continues` |
 | Topic configuration | All six endpoints above | **supported** | Coverage `captured`, with the entries the endpoint reports. A principal without DescribeConfigs on the topic gets `captureDenied` and no entries, and `connection.topicConfigsReadable` is `notReady` (advisory) before the backup. | On every endpoint, the generic row, which requires coverage `captured`: `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies` (the four Apache Kafka lines), `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`. The denied read, on Apache Kafka 4.3.1: `e2e/tests/compat_contract.rs::the_minimum_acls_for_probe_backup_and_restore`. All four: by hand, 2026-10-10. Weekly: the Apache Kafka lines, as above, and Confluent Platform and Redpanda in `compat-weekly.yml` (not yet run on GitHub); no workflow runs the denied read |
 | The broker's timestamp type and record-timestamp bound | Apache Kafka (all four lines); Confluent Platform 8.3.2 | **supported** | The receipt records the topic's timestamp type with its source. Before a restore, a `Restore` Preflight in the shape the controller renders (`restorePreflight`) answers `target.timestampBound` `ready` and quotes the bound the broker's own tool reports; during it, phase 0 records the target's timestamp type as that tool reports it (the run's `topic-preflight=` line). The rows restore a recent window, so they show the bound read and compared, and not a window the bound refuses: that arm is in process, `crates/logweir/tests/check_cli.rs` | `e2e/tests/compat_contract.rs::the_default_broker_backs_up_restores_and_verifies`, `e2e/tests/compat_contract.rs::confluent_platform_backs_up_restores_and_verifies` (by hand, 2026-10-10; the Apache Kafka lines also weekly, as above, and Confluent Platform weekly in `compat-weekly.yml`, not yet run on GitHub) |
-| The broker's timestamp type and record-timestamp bound | Redpanda v26.2.4 | **unsupported** | Its broker resource reports neither (it keeps them per topic). Nothing is recorded as `CreateTime` and nothing as "no bound": the type is absent, and `target.timestampBound` is `unknown` (`TimestampBoundNotReported`). | Live, the nine keys, a `Restore` Preflight's `target.timestampBound` and phase 0's own account: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10; weekly in `compat-weekly.yml`, not yet run on GitHub). Over those nine keys, in process, on every `cargo test`: `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`, `crates/logweir/tests/topic_preflight.rs::a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time` |
+| The broker's timestamp type and record-timestamp bound | Redpanda v26.2.4 | **unsupported** | Its broker resource reports neither (it keeps them per topic). Nothing is recorded as `CreateTime` and nothing as "no bound": the type is absent, and `target.timestampBound` is `unknown` (`TimestampBoundNotReported`). | Live, the nine keys and a `Restore` Preflight's `target.timestampBound`: `e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts` (by hand, 2026-10-10 and 2026-10-13; weekly in `compat-weekly.yml`, not yet run on GitHub). Phase 0's own account of the type was measured live on 2026-10-10; since FX-45 a restore into Redpanda is refused at phase 0 before that read. Over those nine keys, in process, on every `cargo test`: `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`, `crates/logweir/tests/topic_preflight.rs::a_broker_that_does_not_report_its_timestamp_type_is_not_recorded_as_create_time` |
 
 ### Authentication modes
 
@@ -221,7 +223,7 @@ and then removing one grant at a time:
 | Operation | The ACLs it needs | With one removed |
 |---|---|---|
 | Probe (`cluster-probe`, Test connection) | None beyond authenticating. | Nothing to remove: with no ACL at all for the principal, the probe reads the cluster id. |
-| Backup | `Read` on each source topic (it implies `Describe`), and `DescribeConfigs` on each source topic. | Without `Read`: exit 1, the engine fails, no receipt. Without `DescribeConfigs`: exit 0, and the receipt says `captureDenied` with no timestamp type. |
+| Backup | `Read` on each source topic (it implies `Describe`), and `DescribeConfigs` on each source topic. | Without `Read`: exit 3 before the engine, naming the topic and the grant, no receipt; the Backup Preflight's `connection.topicsReadable` is `notReady` (FX-45, from the broker's authorized operations; it was exit 1, "kafka-backup backup exited 1", when PROD-01.2 measured it; `e2e/tests/compat_contract.rs::a_backup_principal_without_read_is_refused_by_name_before_the_engine`, by hand, 2026-10-13). Without `DescribeConfigs`: exit 0, and the receipt says `captureDenied` with no timestamp type. |
 | Restore into new topics (a scratch drill) | On the target: `Create`, `Write`, `Read` and `Delete` on the drill's topic prefix, `DescribeConfigs` on the cluster, and `Describe` on the scratch marker topic. | Without `Create`: exit 1, the topic is not created, nothing is left. Without `Write` or `Read`: exit 1, nothing signed, and the run removes the topic it created and says so. Without `DescribeConfigs` on the cluster: exit 1, naming the grant. Without `Describe` on the marker: exit 3, refused by the guard. **Without `Delete`: exit 0 and a signed `pass`, the scratch topic is left behind, and the run says so and why**: a warning names the topic and the missing grant, the summary line repeats the topic beside `outcome pass`, the signed teardown attestation records it, and `Restore.status.teardown.failed` names it. Without `Write` and `Delete`: exit 1, the topic is left, and the run names it and the grant the same way. |
 
 **Give the restore identity `Delete`.** A leftover scratch topic blocks the
@@ -253,14 +255,16 @@ Archive permissions are the object store's, and are not in this table.
 
 A Kafka client reaches the bootstrap address first and then the addresses the
 cluster advertises. When the second kind cannot be reached from where Logweir
-runs, the probe still passes and nothing else does. Measured on a Confluent
-Platform listener that advertises a dead address
-(`e2e/tests/compat_contract.rs::an_unreachable_advertised_address_is_not_a_reachable_cluster`):
+runs, nothing but the bootstrap works. The probe asks every broker the cluster
+lists, on its advertised address (FX-46). Measured on a Confluent Platform
+listener that advertises a dead address
+(`e2e/tests/compat_contract.rs::an_unreachable_advertised_address_is_not_a_reachable_cluster`,
+by hand, 2026-10-13):
 
 | Step | Result |
 |---|---|
-| `logweir cluster-probe` | exit 0, `reachable=true`, the cluster id |
-| The readiness check | `connection.authenticated` is `notReady` (`BrokerUnreachable`), and its message says the bootstrap address answered and the advertised brokers did not. The capability rows are `unknown`, blocked behind it. |
+| `logweir cluster-probe` | exit 1, `reachable=false`, the cluster id, and `brokers-answered=0/1` with the broker's advertised address on stderr, or `brokers-answered=0/?` when librdkafka had already retired the bootstrap address and no advertised broker answered a metadata request (which of the two depends on a race inside the client); stderr names `advertised.listeners`, and the `KafkaCluster` reads `AdvertisedBrokersUnreachable` |
+| The Test connection and the readiness check | `connection.authenticated` is `notReady` (`BrokerUnreachable`), and its message says the bootstrap address answered and the advertised brokers did not. The capability rows are `unknown`, blocked behind it. |
 | `logweir backup run` | exit 1 after the metadata timeout, no receipt |
 
 ## The floors, stated first
@@ -558,9 +562,11 @@ topic IDs, the topic's configuration and a classic group captured, a drill
 1. **A restore into it cannot run.** The engine sends Produce v8; Redpanda
    serves up to v7 and closes the connection on v8. `target.engineProtocol`
    says so before the restore (`notReady`: "it sends Produce v8 and this
-   endpoint serves Produce v0-v7"). A drill started anyway exits 1 at the
-   engine ("early eof" reading the response), signs no scorecard, and leaves
-   the scratch topic it created.
+   endpoint serves Produce v0-v7"). When PROD-01.2 measured it, a drill
+   started anyway exited 1 at the engine ("early eof" reading the response),
+   signed no scorecard, and left the scratch topic it created. Since FX-45
+   `drill run` runs the same row at phase 0 and refuses by its name, exit 3,
+   before anything is created.
 2. **Its groups cannot be typed** (ListGroups v0–v4), so a selected group is
    `excluded: GroupTypeNotCaptured`, announced by `connection.groupTypes`.
 3. **Its broker resource reports nine configuration keys**, and neither the

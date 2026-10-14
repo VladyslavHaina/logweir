@@ -3598,18 +3598,27 @@ fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
         .cluster_id()
         .expect("the EXTERNAL listener");
     assert_eq!(
-        (
-            exit,
-            reachable.as_str(),
-            line("brokers-answered").as_str(),
-            id.as_str()
-        ),
-        (Some(1), "false", "0/1", real_id.as_str()),
+        (exit, reachable.as_str(), id.as_str()),
+        (Some(1), "false", real_id.as_str()),
         "FX-46: the bootstrap answered, the advertised broker did not: not reachable\n{said}"
     );
+    // Either side of librdkafka's race (`probe::with_brokers`): the broker
+    // list was read through the bootstrap address and its one broker did not
+    // answer (`0/1`, naming `127.0.0.1:1`), or the bootstrap address was
+    // retired first and no advertised broker answered a metadata request
+    // (`0/?`).
+    let brokers = line("brokers-answered");
+    match brokers.as_str() {
+        "0/1" => assert!(said.contains("(127.0.0.1:1)"), "{said}"),
+        "0/?" => assert!(
+            said.contains("no broker it advertises answered a metadata request"),
+            "{said}"
+        ),
+        other => panic!("brokers-answered={other}:\n{said}"),
+    }
     assert!(
-        said.contains("(127.0.0.1:1)") && said.contains("advertised.listeners"),
-        "the diagnostic names the advertised address and the remedy: {said}"
+        said.contains("advertised.listeners"),
+        "the diagnostic names the remedy: {said}"
     );
     // CONTROL: the EXTERNAL listener of the same broker.
     let (control_exit, control, _) = probe_lines(&bootstrap_confluent(), &auth);

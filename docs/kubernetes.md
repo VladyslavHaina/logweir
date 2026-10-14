@@ -1487,7 +1487,11 @@ Each row in `status.result.checks[]` carries a code, a message, a remedy, an
 uid}`, `gating` (`blocking`, `advisory` or `executionOnly`) and its own
 `expiresAt`. An `executionOnly` row (`connection.topicsReadable`,
 `destination.archivePrefixWritable`, `target.logAppendTime`,
-`configuration.egress`) is `unknown` forever. Non-secret facts are rendered into
+`configuration.egress`) is `unknown` forever, with one exception:
+`connection.topicsReadable` turns blocking `notReady`
+(`TopicAuthorizationFailed`) when the broker's authorized operations (KIP-430)
+say the principal may not READ a named topic, naming the topic and the grant
+(FX-45). Non-secret facts are rendered into
 the message as `[key=value; …]`; long lists go to the immutable `ConfigMap`
 `status.result.detailsRef`. Messages pass the redaction chokepoint: a credential
 value is removed under a key name at any length, and unkeyed at 40 characters
@@ -1554,7 +1558,16 @@ which keeps the verdict `unknown`. A `Preflight` over a draft plan has no
   every bootstrap address answered within 10 s (`brokersAnswered: 3 of 3`), else
   `unknown`, `ApiVersionsNotObserved`. A bootstrap that answers while advertised
   listeners do not is `notReady`, `BrokerUnreachable`: check
-  `advertised.listeners`.
+  `advertised.listeners`. A `SourceConnection` Preflight (Test connection)
+  answers `connection.engineProtocol`, `target.engineProtocol` and
+  `connection.groupTypes` ADVISORY (FX-46): the test passes when the connection
+  answers, and the rows say whether the endpoint is usable as a backup source,
+  as a restore target, and whether its groups can be typed. The standalone
+  commands run the same rows (FX-45): `backup run` refuses a source
+  `connection.engineProtocol` is `notReady` for, and a topic the principal may
+  not READ, before the engine (exit 3); `drill run` refuses a target
+  `target.engineProtocol` is `notReady` for at phase 0, before anything is
+  created; `doctor` reports it as check 8, `target engine`.
 - **`recoveryPoint.state`** compares the point's frozen `locationDigest`
   (`Backup.status.destination`) with the source destination's: equal is `ready`,
   `RecoveryPointSucceeded`; different is `notReady`,

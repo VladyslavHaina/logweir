@@ -1394,7 +1394,7 @@ fn a_cluster_whose_advertised_broker_did_not_answer_is_named() {
         "{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}false\n{BROKERS_ANSWERED_PREFIX}0/1\n"
     );
     let report = probe_report(&log_body(&log));
-    assert_eq!(report.brokers_answered, Some((0, 1)));
+    assert_eq!(report.brokers_answered, Some((0, Some(1))));
     let v = verdict(&report);
     assert_eq!(
         (
@@ -1418,12 +1418,25 @@ fn a_cluster_whose_advertised_broker_did_not_answer_is_named() {
     );
     assert!(PROBE_CONDITION_REASONS.contains(&REASON_ADVERTISED_BROKERS_UNREACHABLE));
 
+    // The other side of the race: the broker list could not be read at all.
+    let unread = probe_report(&format!(
+        "{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}false\n{BROKERS_ANSWERED_PREFIX}0/?\n"
+    ));
+    assert_eq!(unread.brokers_answered, Some((0, None)));
+    let v = verdict(&unread);
+    assert_eq!(v.reason, REASON_ADVERTISED_BROKERS_UNREACHABLE);
+    assert!(
+        verdict_message(&v, 1).contains("no broker the cluster advertises answered"),
+        "{}",
+        verdict_message(&v, 1)
+    );
+
     // CONTROLS.
     let older = verdict(&probe_report(&format!(
         "{CLUSTER_ID_PREFIX}\n{REACHABLE_PREFIX}false\n"
     )));
     assert_eq!(older.reason, REASON_PROBE_REPORTED_UNREACHABLE);
-    for bad in ["1/0", "a/b", "1", "-1/2", "", "2/1"] {
+    for bad in ["1/0", "a/b", "1", "-1/2", "", "2/1", "?/1", "0/?/1"] {
         assert_eq!(
             probe_report(&format!("{BROKERS_ANSWERED_PREFIX}{bad}\n")).brokers_answered,
             None,

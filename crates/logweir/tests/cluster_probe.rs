@@ -207,6 +207,13 @@ fn the_probe_prints_the_contract_lines_and_nothing_else() {
         (probe(&bootstrap_only(offnet), None), 3),
         (
             probe(
+                &bootstrap_only(|| Err(NotObserved::Partial(Partial::NoBrokerList))),
+                None,
+            ),
+            3,
+        ),
+        (
+            probe(
                 &bootstrap_only(|| Err(NotObserved::Other("no log".into()))),
                 None,
             ),
@@ -281,6 +288,28 @@ fn a_cluster_whose_advertised_broker_does_not_answer_is_not_reachable() {
         err.contains("the bootstrap address answered and named cluster ALLOWED0000000000000000")
             && err.contains("1 of the 1 broker(s) it advertises did not answer")
             && err.contains("broker 1 (127.0.0.1:1)")
+            && err.contains("advertised.listeners"),
+        "{err}"
+    );
+
+    // The same listener, the other side of librdkafka's race: its own
+    // "connected" refresh was answered first, so the bootstrap address was
+    // retired and the broker list could not be read at all. Not reachable,
+    // `0/?` (measured on OFFNET, 2026-10-13).
+    let o = probe(
+        &bootstrap_only(|| Err(NotObserved::Partial(Partial::NoBrokerList))),
+        None,
+    );
+    let (out, err) = streams(&o);
+    assert_eq!(
+        out,
+        format!(
+            "{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}false\n{BROKERS_ANSWERED_LINE}0/?\n"
+        )
+    );
+    assert_eq!(o.code, ExitCode::Operational);
+    assert!(
+        err.contains("no broker it advertises answered a metadata request")
             && err.contains("advertised.listeners"),
         "{err}"
     );

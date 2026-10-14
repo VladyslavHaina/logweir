@@ -342,6 +342,26 @@ Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
 subset), carrying `target.creation`; older readers accept it and ignore the
 block.
 
+### A connection test asks more, and the probe asks every advertised broker (FX-45, FX-46)
+
+A `SourceConnection` check plan now lists `capabilityChecks`; a runner from
+before FX-46 refuses it (`CheckContractMismatch`, naming the field), so keep
+the runner at least as new as the controller. A newer runner under an older
+controller gets no list and emits no capability row. `cluster-probe` prints a
+third line, `brokers-answered=<answered>/<listed>`, and answers
+`reachable=false` when a broker the cluster lists does not answer on its
+advertised address; an older controller reads the first two lines by key and
+records `ProbeReportedUnreachable`, this one records
+`AdvertisedBrokersUnreachable`. A cluster whose advertised addresses this
+namespace cannot reach therefore turns `reachable: false` after the upgrade,
+and admission refuses its runs, as it would have failed them.
+`connection.topicsReadable` may now be blocking `notReady`
+(`TopicAuthorizationFailed`), a code and a gating every controller reads.
+`backup run` and `drill run` refuse, by the row's name, what the broker
+reports the principal may not READ and what the endpoint was seen not to
+serve, before the engine; not observed is never a refusal. No signed document
+changes.
+
 ### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
 
 A `Backup` or `Restore` that finished before `status.evidence.verification.signedAt`
@@ -775,8 +795,8 @@ word in its text (versitygw's `404 XAdminUserNotFound` is a refused credential,
 `InvalidCredentials`). A marker topic the restore identity may not Describe is
 refused as before (exit 3), and the message says it does not exist or is not
 describable and names the grant; `connection.authenticated` says when a
-cluster's advertised brokers cannot be reached (`logweir cluster-probe` still
-reads only the cluster id). An older runner refuses a plan that lists the new rows,
+cluster's advertised brokers cannot be reached (`logweir cluster-probe` read
+only the cluster id then; since FX-46 it asks every advertised broker). An older runner refuses a plan that lists the new rows,
 so the runner image moves with the controller. No signed document changes.
 
 ### `RetentionPolicy` in `Enforce` is where the deletion boundary moves, and it is an installation decision

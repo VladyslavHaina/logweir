@@ -86,9 +86,15 @@ pub const REACHABLE_LINE: &str = "reachable=";
 
 /// FX-46's THIRD stdout line, as a prefix: how many of the brokers the
 /// cluster lists answered this probe on their advertised addresses, as
-/// `<answered>/<listed>`. Printed only when the brokers were asked and the
-/// answer was read whole; absent on every other arm.
+/// `<answered>/<listed>`, or `0/?` when the bootstrap address named the
+/// cluster and the list of brokers it advertises could not be read at all
+/// (see [`with_brokers`]). Printed only when the brokers were asked and the
+/// answer says something about them; absent on every other arm.
 pub const BROKERS_ANSWERED_LINE: &str = "brokers-answered=";
+
+/// The `<listed>` half of [`BROKERS_ANSWERED_LINE`] when the cluster's broker
+/// list could not be read.
+pub const LISTED_UNKNOWN: &str = "?";
 
 /// How long the probe waits for every broker the cluster lists to answer,
 /// after the bootstrap address named its cluster: the observation's own
@@ -247,66 +253,89 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
 ///   `reachable=false`, `brokers-answered=<answered>/<listed>`, exit 1, and a
 ///   diagnostic naming each silent broker by id and advertised address, and
 ///   the remedy, `advertised.listeners`.
+/// * The bootstrap address answered ApiVersions and the cluster's broker list
+///   could not be read through it within [`BROKERS_TIMEOUT`]
+///   (`Partial::NoBrokerList`): `reachable=false`, `brokers-answered=0/?`,
+///   exit 1. This is the advertised-address failure seen from the other side
+///   of a race: librdkafka retires a bootstrap address as soon as the cluster
+///   has advertised its brokers (`rd_kafka_metadata_decommission_unavailable_
+///   brokers`, `rdkafka_metadata.c:476-535` in rdkafka-sys 4.10.0+2.12.1),
+///   so when its own "connected" refresh is answered first, every later
+///   metadata request goes to the advertised brokers, and none answered
+///   (measured on the `confluent` profile's OFFNET listener).
 /// * Every listed broker answered and a bootstrap address did not: reachable,
 ///   with the silent address named on stderr. The cluster says it has those
 ///   brokers, and each one answered.
-/// * The observation could not be made or read: the bootstrap's answer
-///   stands (`reachable=true`, two lines), and stderr says the brokers were
-///   not established. Not observed is never "unreachable".
+/// * Any other observation that could not be made or read: the bootstrap's
+///   answer stands (`reachable=true`, two lines), and stderr says the brokers
+///   were not established. Not observed is never "unreachable".
 #[must_use]
 pub fn with_brokers(id: &str, brokers: &Result<ApiVersions, NotObserved>) -> ProbeOutcome {
-    let lines = |reachable: bool, answered: Option<(usize, usize)>| {
+    let lines = |reachable: bool, answered: Option<(usize, Option<usize>)>| {
         let mut out = format!("{CLUSTER_ID_LINE}{id}\n{REACHABLE_LINE}{reachable}\n");
         if let Some((a, l)) = answered {
+            let l = l.map_or_else(|| LISTED_UNKNOWN.to_string(), |l| l.to_string());
             out.push_str(&format!("{BROKERS_ANSWERED_LINE}{a}/{l}\n"));
         }
         out
     };
-    match brokers {
-        Ok(view) => ProbeOutcome {
-            stdout: lines(true, Some((view.brokers(), view.brokers()))),
-            diagnostic: None,
+    let remedy = "Every broker must advertise a host and port this pod can reach: check \
+                  advertised.listeners for the listener this bootstrap address belongs to, or \
+                  use the bootstrap address of a listener meant for this network";
+    let unreachable = |answered: Option<(usize, Option<usize>)>, diagnostic: String| ProbeOutcome {
+        stdout: lines(false, answered),
+        diagnostic: Some(diagnostic),
+        refusal: None,
+        code: ExitCode::Operational,
+    };
+    let reachable =
+        |answered: Option<(usize, Option<usize>)>, diagnostic: Option<String>| ProbeOutcome {
+            stdout: lines(true, answered),
+            diagnostic,
             refusal: None,
             code: ExitCode::Ok,
-        },
-        Err(
-            why @ NotObserved::Partial(Partial::NotEveryone {
+        };
+    match brokers {
+        Ok(view) => reachable(Some((view.brokers(), Some(view.brokers()))), None),
+        Err(why) => match why {
+            NotObserved::Partial(Partial::NotEveryone {
                 answered,
                 listed,
                 silent,
                 ..
-            }),
-        ) if !silent.is_empty() => ProbeOutcome {
-            stdout: lines(false, Some((*answered, listed.len()))),
-            diagnostic: Some(format!(
-                "cluster-probe: the bootstrap address answered and named cluster {id}, and {} \
-                 of the {} broker(s) it advertises did not answer: {why} Every broker must \
-                 advertise a host and port this pod can reach: check advertised.listeners for \
-                 the listener this bootstrap address belongs to, or use the bootstrap address of \
-                 a listener meant for this network",
-                silent.len(),
-                listed.len()
-            )),
-            refusal: None,
-            code: ExitCode::Operational,
-        },
-        Err(why @ NotObserved::Partial(Partial::NotEveryone { listed, .. })) => ProbeOutcome {
-            stdout: lines(true, Some((listed.len(), listed.len()))),
-            diagnostic: Some(format!(
-                "cluster-probe: every broker cluster {id} advertises answered, and a bootstrap \
-                 address did not: {why}"
-            )),
-            refusal: None,
-            code: ExitCode::Ok,
-        },
-        Err(why) => ProbeOutcome {
-            stdout: lines(true, None),
-            diagnostic: Some(format!(
-                "cluster-probe: the bootstrap address answered and named cluster {id}; whether \
-                 every broker it advertises can be reached was not established: {why}"
-            )),
-            refusal: None,
-            code: ExitCode::Ok,
+            }) if !silent.is_empty() => unreachable(
+                Some((*answered, Some(listed.len()))),
+                format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}, and \
+                     {} of the {} broker(s) it advertises did not answer: {why} {remedy}",
+                    silent.len(),
+                    listed.len()
+                ),
+            ),
+            NotObserved::Partial(Partial::NoBrokerList) => unreachable(
+                Some((0, None)),
+                format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}, and \
+                     no broker it advertises answered a metadata request within \
+                     {BROKERS_TIMEOUT:?} (a client stops using a bootstrap address once the \
+                     cluster has advertised its brokers). {remedy}"
+                ),
+            ),
+            NotObserved::Partial(Partial::NotEveryone { listed, .. }) => reachable(
+                Some((listed.len(), Some(listed.len()))),
+                Some(format!(
+                    "cluster-probe: every broker cluster {id} advertises answered, and a \
+                     bootstrap address did not: {why}"
+                )),
+            ),
+            _ => reachable(
+                None,
+                Some(format!(
+                    "cluster-probe: the bootstrap address answered and named cluster {id}; \
+                     whether every broker it advertises can be reached was not established: \
+                     {why}"
+                )),
+            ),
         },
     }
 }

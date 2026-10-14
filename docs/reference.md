@@ -547,8 +547,9 @@ A run or check over a destination can also meet `DestinationRoleNotConfigured`
 `Reachable`: `Reachable` (True); `ProbeReportedUnreachable` (False);
 `AdvertisedBrokersUnreachable` (False: the bootstrap address answered and a
 broker the cluster advertises did not answer the probe on its advertised
-address, FX-46; the probe prints `brokers-answered=<answered>/<listed>` and
-names each silent broker in its log);
+address, FX-46; the probe prints `brokers-answered=<answered>/<listed>`, or
+`0/?` when not even the broker list could be read through the bootstrap
+address, and names each silent broker in its log);
 `ProbeOutputUnreadable`, `ProbeRunning`, `ProbeStale`, `PodCreationForbidden`,
 `NoExitCode` and the crash states (Unknown); and the configuration refusals
 `ConnectionConfigInvalid`, `CredentialNotRenderable`, `PlainWithoutTls`,
@@ -635,8 +636,8 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `connection.authenticated` | blocking | The broker accepted the credential |
 | `connection.clusterIdentity` | blocking | The broker's cluster id is the recorded one; a backup source is not an allowlisted target |
 | `connection.topicsDescribable` | blocking | Every named topic exists and may be described |
-| `connection.topicsReadable` | execution-only | Proved only by the run |
-| `connection.engineProtocol` | blocking | The source serves the request versions the engine sends |
+| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); otherwise `unknown`, proved only by the run, with what the broker reported |
+| `connection.engineProtocol` | blocking; advisory on a `SourceConnection` | The source serves the request versions the engine's backup sends |
 | `connection.topicConfigsReadable` | advisory | DescribeConfigs on the named topics |
 | `connection.groupTypes` | advisory | The group listing names group types (ListGroups v5) |
 | `destination.resolved` | blocking | The destination and its grants resolve for one pod |
@@ -657,7 +658,7 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `target.topicCreate` | blocking | A validate-only create of every mapped topic succeeds |
 | `target.timestampBound` | blocking | The broker's record-timestamp bound admits the archive |
 | `target.logAppendTime` | execution-only | Phase 0's override probe |
-| `target.engineProtocol` | blocking | The target serves the engine's request versions |
+| `target.engineProtocol` | blocking; advisory on a `SourceConnection` | The target serves the engine's restore request versions |
 | `plan.parse` | blocking | The plan parses |
 | `plan.bindings` | blocking | The plan names the request's referents and locations |
 | `plan.names` | blocking | Every mapped name is legal and not the identity mapping (unless original names were asked for) |
@@ -671,6 +672,12 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `switchover.evidence` | blocking | The restore's signed scorecard and the positions mapping it binds verify, as the switchover's step 3 (`RestoreEvidenceRefused`, the message opening with the switchover's word) |
 | `switchover.target` | blocking | The target answers the restore's cluster id and each restored topic its recorded ID (`TargetNotTheRestores`) |
 | `switchover.groups` | blocking | Each requested target group admits a commit and holds no other committed position (`GroupNotAdmissible`); every position is in the details |
+
+A `SourceConnection` Preflight (the console's Test connection) answers
+`connection.authenticated` and, advisory, `connection.engineProtocol` (usable
+as a backup source), `target.engineProtocol` (usable as a restore target) and
+`connection.groupTypes` (FX-46): its verdict is whether the connection answers,
+and the three rows say what the endpoint can be used for.
 
 A row expires after 15 minutes, except `connection.topicsDescribable` and
 `connection.topicConfigsReadable` (10 minutes), the `archive.*` rows (30
