@@ -1542,7 +1542,9 @@ uid}`, `gating` (`blocking`, `advisory` or `executionOnly`) and its own
 `connection.topicsReadable` turns blocking `notReady`
 (`TopicAuthorizationFailed`) when the broker's authorized operations (KIP-430)
 say the principal may not READ a named topic, naming the topic and the grant
-(FX-45). Non-secret facts are rendered into
+(FX-45), and (`TopicNotFound`) when the broker does not hold a named topic and
+the principal may Describe the cluster: "topic `x` does not exist on the
+source" (DUI-5). Non-secret facts are rendered into
 the message as `[key=value; …]`; long lists go to the immutable `ConfigMap`
 `status.result.detailsRef`. Messages pass the redaction chokepoint: a credential
 value is removed under a key name at any length, and unkeyed at 40 characters

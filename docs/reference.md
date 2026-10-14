@@ -638,7 +638,7 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `connection.authenticated` | blocking | The broker accepted the credential |
 | `connection.clusterIdentity` | blocking | The broker's cluster id is the recorded one; a backup source is not an allowlisted target |
 | `connection.topicsDescribable` | blocking | Every named topic exists and may be described |
-| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); otherwise `unknown`, proved only by the run, with what the broker reported |
+| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); a topic it does not hold, for a principal that may Describe the cluster, is `notReady` (`TopicNotFound`), blocking, naming it (DUI-5); otherwise `unknown`, proved only by the run, with what the broker reported |
 | `connection.engineProtocol` | blocking; advisory on a `SourceConnection` | The source serves the request versions the engine's backup sends |
 | `connection.topicConfigsReadable` | advisory | DescribeConfigs on the named topics |
 | `connection.groupTypes` | advisory | The group listing names group types (ListGroups v5) |
