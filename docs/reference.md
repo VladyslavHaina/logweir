@@ -85,7 +85,7 @@ condition's reason.
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
 | `RunnerOlderThanController` | Exit 0 to 4 with no sealed `runner-exit=` line: the runner image is older than the controller ([sealed lines](#sealed-lines-fx-43)) |
 | `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
-| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point whose receipt or manifest is missing or unreadable is exit 1 |
+| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point's receipt key outside the plan's own set, and a receipt that is absent, has other bytes or is over the cap, are one exit-3 `PointBindingMismatch` (FX-36); a receipt or manifest the store could not read, and a missing manifest, are exit 1 |
 
 Plus the no-exit-code states of the `Backup` table, `PodOwnershipContested`,
 `JobNameConflict` and `PlanConfigMapConflict`. `Admitted` is its own condition
@@ -847,6 +847,7 @@ An object over its cap is never a crash and never a pass:
 | An evidence relay | The Job reports the object `present` and `truncated` and relays no bytes: `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`. Final. |
 | `Preflight` `archive.backupSet` | Not ready: `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | `Preflight` `archive.backupSet`, a point-bound plan's receipt | `PointBindingMismatch`: `…it is absent, its bytes do not hash to the bound digest, or it is larger than the 67108864-byte read cap for a receipt`. |
+| `restore run`, a point-bound plan's receipt | exit 3 `PointBindingMismatch`: `…it is absent, its bytes do not hash to the bound <digest>, or it is larger than the 67108864-byte read cap for a receipt; no data operation was started.` (FX-36) |
 | Drill, `backup run`, `catalog sync` | exit 1, or an `Unreadable` point, naming the cap. |
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
