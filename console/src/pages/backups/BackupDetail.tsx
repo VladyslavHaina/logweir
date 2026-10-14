@@ -93,9 +93,20 @@ const STEPS = [
   { id: "verify", title: "Verifying", desc: "The controller checks the signed receipt", at: ["verifying"] },
 ] as const;
 
+/**
+ * The step a moving run is at. DUI-41.6: a run whose Job finished and whose receipt the
+ * controller is verifying has state `verifying` and stage `finished`, which no step names, so
+ * every step read empty; its state decides, and a finished stage has every step done.
+ */
+export function liveStepIndex(stage: string | null | undefined, state: string): number {
+  if (state === "verifying") return STEPS.findIndex((s) => s.id === "verify");
+  const now = stage ?? state;
+  if (now === "finished") return STEPS.length;
+  return STEPS.findIndex((s) => (s.at as readonly string[]).includes(now));
+}
+
 function LiveProgress({ b, op }: { b: Backup; op: OperationView | undefined }) {
-  const now = op?.stage ?? b.operation.state;
-  const at = STEPS.findIndex((s) => (s.at as readonly string[]).includes(now));
+  const at = liveStepIndex(op?.stage, op?.state ?? b.operation.state);
   return (
     <ProgressStepper isCenterAligned aria-label="Backup progress" className="lw-stepper">
       {STEPS.map((s, i) => (

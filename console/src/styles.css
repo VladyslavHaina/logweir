@@ -703,6 +703,17 @@ body {
   padding: var(--pf-t--global--spacer--sm) 0;
   border-bottom: 1px solid var(--pf-t--global--border--color--default);
 }
+/* DUI-44: a check row's words take the room its verdict leaves and wrap their long tokens
+   (a cluster id, "[brokersAnswered=…; engineRequests=…]"), so at 390 px the verdict stays
+   on screen and the form around the list never widens with it. */
+.lw-checks li > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.lw-checks li > :last-child {
+  flex: none;
+}
 .lw-time-input,
 .lw-prefix-input {
   max-width: 20rem;

@@ -46,7 +46,9 @@ export function useNow(): number {
 }
 
 export function When({ value, exact = false }: { value: string | number | null | undefined; exact?: boolean }) {
-  const now = useNow();
+  // The tick only re-renders; the time is read now. A value recorded after the last tick
+  // (a verdict landing seconds after the page opened) is past, never "in a moment" (DUI-41.1).
+  const now = Math.max(useNow(), Date.now());
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
   const iso = utcIso(value);
   if (iso === null) return <span className="lw-subtle" title={String(value)}>Not a time</span>;

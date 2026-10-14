@@ -307,6 +307,25 @@ describe("DUI-7 and DUI-11: what a check's rows say", () => {
   });
 });
 
+describe("DUI-41.5: a check's rows at phone width", () => {
+  it("render the server's code spans as code in the compact layout too, as the table does", () => {
+    const narrow = (matches: boolean) =>
+      (window.matchMedia = ((query: string) => ({ matches, media: query, addEventListener: () => undefined, removeEventListener: () => undefined })) as unknown as typeof window.matchMedia);
+    const p = preflight("preflight-not-ready.json");
+    p.checks = [{ id: "destination.archiveListable", gating: "blocking", state: "notReady", code: "InvalidCredentials", message: "the archive prefix `rc3m` on destination `rc3-badkey-390` is not listable", remedy: "Rotate the key under `logweir/readiness/`." } as Preflight["checks"][number]];
+    try {
+      narrow(true);
+      render(<CheckResult preflight={p} stopped="" />);
+      const list = screen.getByRole("list", { name: "Blocking checks" });
+      expect(within(list).getByText("rc3-badkey-390", { selector: "code" })).toBeTruthy();
+      expect(within(list).getByText("logweir/readiness/", { selector: "code" })).toBeTruthy();
+      expect(list.textContent).not.toContain("`");
+    } finally {
+      narrow(false);
+    }
+  });
+});
+
 describe("DUI-31.6: the Reason while a probe runs again", () => {
   const at = new Date(Date.now() - 60_000).toISOString();
 

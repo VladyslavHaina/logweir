@@ -1,7 +1,7 @@
 // The five steps of the restore wizard: the recovery point, topics and time, the
 // target, the readiness check, and review and create. Each step reads the one form
 // (react-hook-form) and the facts the page resolved; none of them sends anything.
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Controller, useWatch, type Control } from "react-hook-form";
 import {
@@ -121,6 +121,21 @@ export function PointStep({
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(SHOWN);
   const matching = useMemo(() => points.filter((b) => matchesQuery(pointHaystack(b), query)), [points, query]);
+  // DUI-41.4: a catalog point chosen before the wizard opened (Recovery catalog → Restore this
+  // point) is shown as chosen: its section opens, it is listed even past the first 50, and it
+  // is brought into view once.
+  const pointKey = useWatch({ control, name: "pointKey" }) as string;
+  const chosenOffer = pointKey.startsWith("catalog/") ? offers.find((o) => offerKeyOf(o) === pointKey) : undefined;
+  const [offersOpen, setOffersOpen] = useState(pointKey.startsWith("catalog/"));
+  const listedOffers = chosenOffer && !offers.slice(0, 50).includes(chosenOffer) ? [chosenOffer, ...offers.slice(0, 49)] : offers.slice(0, 50);
+  const chosenRow = useRef<HTMLDivElement>(null);
+  const revealed = useRef(false);
+  useEffect(() => {
+    if (revealed.current || !chosenOffer) return;
+    revealed.current = true;
+    setOffersOpen(true);
+    requestAnimationFrame(() => chosenRow.current?.scrollIntoView?.({ block: "center" }));
+  }, [chosenOffer]);
   const newest = points[0]?.uid;
   const end = (b: Backup) => {
     const w = restorableWindow(b.windowCovered);
@@ -244,7 +259,13 @@ export function PointStep({
         name="pointKey"
         render={({ field }) => (
           offersPending || offers.length > 0 || offerNotes.length > 0 ? (
-          <ExpandableSection toggleText={`From recovery catalogs${offersPending ? "" : ` (${offers.length})`}`} className="lw-gap-top" isIndented>
+          <ExpandableSection
+            toggleText={`From recovery catalogs${offersPending ? "" : ` (${offers.length})`}`}
+            className="lw-gap-top"
+            isIndented
+            isExpanded={offersOpen}
+            onToggle={(_e, open) => setOffersOpen(open)}
+          >
             <Content component="p" className="lw-subtle">
               Points a connected archive holds, whether or not a Backup in this namespace produced them: a restore from one is bound to
               the point itself.
@@ -255,8 +276,8 @@ export function PointStep({
               <Content component="p" className="lw-subtle">No catalog offers a point.</Content>
             ) : (
               <div className="lw-list lw-list--rows" role="radiogroup" aria-label="Catalog points">
-                {offers.slice(0, 50).map((o, i) => (
-                  <div key={offerKeyOf(o)} className="lw-list__row">
+                {listedOffers.map((o, i) => (
+                  <div key={offerKeyOf(o)} className="lw-list__row" ref={o === chosenOffer ? chosenRow : undefined}>
                     <div className="lw-list__main">
                       <Radio
                         id={`offer-${i}`}
@@ -937,7 +958,8 @@ export function ReviewStep({
           { term: "Time basis", value: v.timeBasis ? "producer time (restore.time_basis: producerTime)" : "not stated: a LogAppendTime topic at this point is refused before anything is created" },
           { term: "Approval subject", value: original ? "originalName: only an approval signed for a restore under the original names authorises it" : "ordinary" },
           { term: "Plan", value: prepared ? <Ident value={prepared.hash} label="plan sha256" /> : <span className="lw-subtle">{planProblem ? "No plan" : "Computing the hash"}</span> },
-          prepared && { term: "Names minted", value: <>{prepared.restoreName}, {prepared.approvalName}</> },
+          // DUI-41.3: the approval's name is minted from the plan bytes; the Restore's is the service's, given on create.
+          prepared && { term: "Approval name", value: prepared.approvalName },
         ]}
       />
       {planProblem && (

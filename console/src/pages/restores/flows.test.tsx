@@ -12,6 +12,7 @@ import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRou
 import type { components } from "../../api/schema";
 import { RestoreWizard, restoreSearch } from "./RestoreWizard";
 import { RestoreDetail } from "./RestoreDetail";
+import { readCatalogOffers } from "../../api/restores";
 
 type S = components["schemas"];
 
@@ -103,10 +104,42 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe("DUI-41.4: Restore this point from a recovery catalog", () => {
+  it("opens step 1 with that point chosen, in view, in an open catalog section", async () => {
+    const { offers } = await readCatalogOffers("team-a");
+    expect(offers.length).toBeGreaterThan(0);
+    const chosen = offers[offers.length - 1]!;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      renderAt(`/team-a/restores/new?catalog=${chosen.catalog.name}&point=${chosen.entry.pointId}`);
+      const radios = await screen.findAllByRole("radio", { checked: true }, { timeout: 15_000 });
+      const ticked = radios.find((r) => r.getAttribute("name") === "point");
+      expect(ticked, "the chosen catalog point is ticked and visible").toBeTruthy();
+      expect(ticked!.closest(".lw-list__row")?.textContent).toContain(`catalog ${chosen.catalog.name}`);
+      await waitFor(() => expect(scrolled).toHaveBeenCalled());
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it("keeps the catalog section closed when no catalog point was chosen (the control)", async () => {
+    renderAt("/team-a/restores/new");
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    const toggle = await screen.findByRole("button", { name: /From recovery catalogs/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
 describe("the restore wizard", () => {
   it("sends the reviewed plan unchanged, and two clicks make one restore with one key", async () => {
     const router = renderAt("/team-a/restores/new");
     await toReview();
+    // DUI-41.3: the review names the approval minted from the plan, never a "restore-…" name the
+    // service does not use (it gives the Restore its own, rst-…, on create).
+    expect(screen.getByText("Approval name")).toBeTruthy();
+    expect(screen.queryByText("Names minted")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/restore-[0-9a-f]{8}\b/);
     const create = screen.getByRole("button", { name: "Create restore" });
     fireEvent.click(create);
     fireEvent.click(create);

@@ -22,6 +22,7 @@ import operator from "../../../fixtures/console/session-manual-backups.json";
 import viewer from "../../../fixtures/console/session-viewer.json";
 import schedulesList from "../../../fixtures/console/schedules-list.json";
 import backupDoc from "../../../fixtures/console/backup.json";
+import destinationDoc from "../../../fixtures/console/destination.json";
 import backupsList from "../../../fixtures/console/backups-list.json";
 import operationBackup from "../../../fixtures/console/operation-backup.json";
 import catalogsList from "../../../fixtures/console/catalogs-list.json";
@@ -323,6 +324,20 @@ describe("one backup's page", () => {
       if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
       return null;
     });
+
+  it("DUI-41.2: the Check it yourself note names its command as code, never in raw backticks", async () => {
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
+      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, operationBackup);
+      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path.startsWith("/namespaces/team-a/destinations/")) return json(200, { ...destinationDoc, item: { ...destinationDoc.item, locationDigest: backupDoc.item.locationDigest ?? null } });
+      return null;
+    });
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    const code = await screen.findByText("aws configure set s3.addressing_style path", { selector: "code" });
+    expect(code.closest("p")?.textContent).not.toContain("`");
+  });
 
   it("shows the controller's verdict and never claims the page checked anything", async () => {
     detail(operationBackup);
