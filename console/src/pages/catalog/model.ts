@@ -65,6 +65,11 @@ export function viewIsWindow(c: Pick<Catalog, "conditions">): boolean {
   return /The view is a WINDOW/.test(conditionOf(c.conditions, "Synced")?.message ?? "");
 }
 
+/** DUI-19: the catalogs whose view IS a bounded window (FX-38's rule, as the catalog page applies it). */
+export function windowedCatalogs<C extends Pick<Catalog, "truncated" | "conditions">>(catalogs: C[]): C[] {
+  return catalogs.filter((c) => c.truncated && viewIsWindow(c));
+}
+
 /**
  * FX-38: `truncated: true` means "not known to be the whole archive" (a catalog that
  * has not synced publishes it too), never "the archive holds more". Why is the

@@ -12,6 +12,7 @@ import {
   connectFieldOf,
   countsWords,
   duplicateOf,
+  windowedCatalogs,
   consumerPositionsWords,
   isMintedSetId,
   redactedBindingReason,
@@ -247,5 +248,15 @@ describe("DUI-10: a duplicate catalog", () => {
     expect(catalogOf(catalogs, "primary")).toBe("archive");
     expect(catalogOf(catalogs, "secondary")).toBeNull();
     expect(catalogOf(catalogs, "")).toBeNull();
+  });
+});
+
+describe("DUI-19: the list's window sentence", () => {
+  it("names only a catalog whose view the controller says is a window, never a whole one", () => {
+    const whole = { name: "archive", truncated: false, conditions: [{ type: "Synced", status: "True", message: "the walk completed; the newest 410 of 410 points are materialised" }] } as unknown as Catalog;
+    const window = { name: "big", truncated: true, conditions: [{ type: "Synced", status: "True", message: "The view is a WINDOW: the newest 2000 of 5100 points" }] } as unknown as Catalog;
+    expect(windowedCatalogs([whole]).map((c) => c.name)).toEqual([]);
+    // The control: a window is named.
+    expect(windowedCatalogs([whole, window]).map((c) => c.name)).toEqual(["big"]);
   });
 });

@@ -27,7 +27,7 @@ import { useCatalog, useCatalogPoints, useCatalogSigners, type Catalog, type Poi
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { StatusLabel } from "../../components/Status";
-import { When, count } from "../../components/When";
+import { When, count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { Commands, Term, Value, useFlags } from "../backups/parts";
 import { RESTORE_NEEDS_ROLE } from "../backups/verdict";
@@ -267,7 +267,9 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                         <Td dataLabel="Point">
                           <Ident value={p.pointId} label="recovery point id" />
                           <div className="lw-subtle lw-small">
-                            point in time <When value={p.recoveryPointAt} />
+                            {/* DUI-22: recoveryPointAt is when the capture started; the records it holds end at coveredTo. */}
+                            captured <When value={p.recoveryPointAt} />
+                            {p.coveredTo ? <> · records up to {exactUtc(p.coveredTo)}</> : null}
                           </div>
                         </Td>
                         <Td dataLabel="Availability">
