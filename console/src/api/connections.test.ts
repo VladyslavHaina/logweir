@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./client";
 import {
+  ADVERTISED_BROKERS_UNREACHABLE_WORDS,
   CONNECTION_DEFAULTS,
   KEY_IN_PLAIN_FIELD,
   LocalRefusal,
@@ -23,9 +24,11 @@ import {
   placeProblems,
   preferredConnection,
   probeState,
+  REFUSAL_GLOSS,
   resolveSelection,
   savedConnections,
   stoppedFor,
+  usability,
   type Connection,
   type ConnectionValues,
 } from "./connections";
@@ -86,6 +89,66 @@ describe("the connection probe", () => {
     expect(sayReady(Object.values(PROBE_WORDS))).toBe(false);
     // Control: the same test catches the word when it is there.
     expect(sayReady([...Object.values(PROBE_WORDS), "Ready"])).toBe(true);
+  });
+});
+
+describe("FX-46: advertised brokers that cannot be reached", () => {
+  it("is the probe's own verdict with its own words, never a later probe's reason beside an earlier reading", () => {
+    const p = probeState({ state: "unreachable", reason: "AdvertisedBrokersUnreachable", observedAt: "2026-09-12T09:19:00Z" }, NOW);
+    expect(p).toMatchObject({ verdict: "unreachable", laterReason: "", laterGloss: "" });
+    expect(REFUSAL_GLOSS.AdvertisedBrokersUnreachable).toBe(ADVERTISED_BROKERS_UNREACHABLE_WORDS);
+    expect(ADVERTISED_BROKERS_UNREACHABLE_WORDS).toMatch(/^Not reachable: the bootstrap address answered, but the brokers this cluster advertises cannot be reached/);
+    // CONTROL: a reason that is not a reading's own is still glossed as a later probe's.
+    expect(probeState({ state: "unreachable", reason: "NoExitCode" }, NOW).laterGloss).toMatch(/earlier probe/);
+  });
+});
+
+type Row = S["CheckEntryView"];
+const row = (id: string, state: Row["state"], message: string): Row => ({ id, state, code: "X", gating: "advisory", message });
+const KAFKA = [
+  row("connection.engineProtocol", "ready", "serves Fetch v4 and up"),
+  row("target.engineProtocol", "ready", "Produce v8 (served v0-v13)"),
+  row("connection.groupTypes", "ready", "lists groups with their types"),
+];
+
+describe("FX-46: what a Test connection says the endpoint is usable for", () => {
+  it("reads the three rows by id from checks and warnings, and sums up the two engine rows", () => {
+    expect(usability({ checks: KAFKA, warnings: [] })).toEqual({
+      summary: "Usable as a source and as a target",
+      lines: [
+        { id: "connection.engineProtocol", label: "Usable as a backup source", state: "yes", message: "serves Fetch v4 and up" },
+        { id: "target.engineProtocol", label: "Usable as a restore target", state: "yes", message: "Produce v8 (served v0-v13)" },
+        { id: "connection.groupTypes", label: "Consumer group positions can be recorded", state: "yes", message: "lists groups with their types" },
+      ],
+    });
+    // Redpanda: the API puts an advisory notReady row in `warnings`.
+    const redpanda = usability({
+      checks: [KAFKA[0]!],
+      warnings: [
+        row("target.engineProtocol", "notReady", "the engine sends Produce v8 and this endpoint serves Produce v0-v7"),
+        row("connection.groupTypes", "notReady", "groups will be recorded as not captured (GroupTypeNotCaptured)"),
+      ],
+    })!;
+    expect(redpanda.summary).toBe("Usable as a source, not as a target");
+    expect(redpanda.lines.map((l) => l.state)).toEqual(["yes", "no", "no"]);
+    expect(redpanda.lines[1]!.message).toMatch(/Produce v0-v7/);
+    const reversed = usability({ checks: [KAFKA[1]!], warnings: [row("connection.engineProtocol", "notReady", "no capture request")] })!;
+    expect(reversed.summary).toBe("Usable as a target, not as a source");
+  });
+
+  it("an unknown or absent row is not determined, with its message, and so is the summary", () => {
+    const u = usability({ checks: [row("connection.engineProtocol", "unknown", "2 of 3 broker(s) the cluster lists answered ApiVersions"), KAFKA[1]!], warnings: [] })!;
+    expect(u.lines.map((l) => l.state)).toEqual(["undetermined", "yes", "undetermined"]);
+    expect(u.lines[0]!.message).toMatch(/2 of 3 broker/);
+    expect(u.lines[2]!.message).toBe("this check recorded no answer for it");
+    expect(u.summary).toBe("What it can be used for was not determined");
+    expect(usability({ checks: [], warnings: [row("connection.engineProtocol", "notReady", "a"), row("target.engineProtocol", "notReady", "b")] })!.summary).toBe(
+      "Usable neither as a source nor as a target",
+    );
+  });
+
+  it("an older controller's check, which has none of the rows, shows no line and no summary", () => {
+    expect(usability({ checks: [row("connection.authenticated", "ready", "authenticated as User:app")], warnings: [] })).toBeNull();
   });
 });
 

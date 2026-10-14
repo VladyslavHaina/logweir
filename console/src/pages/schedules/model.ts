@@ -5,6 +5,7 @@
 // replaces the WHOLE future policy, so it shows and sends every field the
 // create sends, minus the source, which never changes.
 import { z } from "zod";
+import type { components } from "../../api/schema";
 import type { Backup } from "../../api/types";
 import { ApiError, outcomeUnknown } from "../../api/client";
 import {
@@ -478,4 +479,37 @@ export function retentionOf(s: Schedule, policies: RetentionPolicy[] | undefined
 /** Whether a covering policy deletes: by what is happening, then by the mode asked for. */
 export function deletes(p: RetentionPolicy): boolean {
   return p.enforcement === "LogweirWorker" || p.enforcement === "ExternalLifecycleDeclared" || p.mode === "Enforce" || p.mode === "ExternalLifecycle";
+}
+
+// ------------------------------------------------- a READ grant the broker denies
+
+type CheckRow = components["schemas"]["CheckEntryView"];
+
+/**
+ * FX-45: a Backup Preflight whose `connection.topicsReadable` is blocking `notReady`
+ * `TopicAuthorizationFailed`: the broker REPORTS that the principal may not READ
+ * some selected topics. The count and the bounded sample come from the row's
+ * ` [detail: {"count":N,"sample":[...]}]`; null for any other row, which stays in
+ * the execution-only list with its message.
+ */
+export function missingRead(row: CheckRow): { count: number; sample: string[]; message: string; remedy: string } | null {
+  if (row.id !== "connection.topicsReadable" || row.state !== "notReady" || row.code !== "TopicAuthorizationFailed" || row.gating === "executionOnly") {
+    return null;
+  }
+  const full = row.message ?? "";
+  const at = full.lastIndexOf(" [detail: ");
+  let sample: string[] = [];
+  let count: number | null = null;
+  if (at >= 0 && full.endsWith("]")) {
+    try {
+      const d = JSON.parse(full.slice(at + " [detail: ".length, -1)) as { count?: unknown; sample?: unknown };
+      if (typeof d.count === "number" && Number.isInteger(d.count)) count = d.count;
+      if (Array.isArray(d.sample)) sample = d.sample.filter((t): t is string => typeof t === "string");
+    } catch {
+      // Not a detail this page can read: the message is shown whole below.
+    }
+  }
+  const message = count === null ? full : full.slice(0, at);
+  count ??= Number(/may not READ (\d+) of/.exec(full)?.[1] ?? sample.length);
+  return { count, sample, message, remedy: row.remedy ?? "" };
 }

@@ -24,6 +24,25 @@ export function viewIsUsable(c: Pick<Catalog, "conditions">): boolean {
 export const CATALOG_WINDOW_SENTENCE =
   "This view is a bounded window over the durable catalog in object storage. Points beyond it are counted and histogrammed here and listed by `logweir catalog list` against the archive itself; none of them is hidden and none of them is deleted.";
 
+/** FX-38: the view is a window only when the `Synced` condition's message says so. */
+export function viewIsWindow(c: Pick<Catalog, "conditions">): boolean {
+  return /The view is a WINDOW/.test(conditionOf(c.conditions, "Synced")?.message ?? "");
+}
+
+/**
+ * FX-38: `truncated: true` means "not known to be the whole archive" (a catalog that
+ * has not synced publishes it too), never "the archive holds more". Why is the
+ * `Synced` condition's message.
+ */
+export function truncatedWords(c: Pick<Catalog, "truncated" | "conditions">): string {
+  if (!c.truncated) return "Not truncated";
+  const why = conditionOf(c.conditions, "Synced")?.message?.replace(/`/g, "");
+  return `Not known to be the whole archive: ${why ? `the Synced condition says "${why}"` : "the catalog has not said why (no Synced message)"}`;
+}
+
+/** FX-38: a points page with `incomplete: true`. */
+export const PARTIAL_POINTS_SENTENCE = "This list is partial: a page or a line of the view could not be read.";
+
 export const VIEW_EXPIRED_SENTENCE =
   "The Kubernetes view of this catalog has expired or has never been synced. That is a missing view and not a missing archive: the points are still in object storage. Sync the catalog to get the window back.";
 
@@ -158,7 +177,8 @@ export function catalogPointOffer(e: PointView | null | undefined, page: Partial
       `the product API could not read every Backup verdict in this namespace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt; this page does not offer a point over a verdict nobody could read`,
     );
   }
-  if (e.selectable !== true) {
+  // FX-36: a record naming another document is Unreadable, and a relabelled one a Conflict: never offered.
+  if (e.availability === "Unreadable" || e.availability === "Conflict" || e.selectable !== true) {
     return no(
       `the catalog does not list this point as restorable: availability ${e.availability || "unknown"}, verification ${e.verification || "unknown"}${
         typeof e.remedy === "string" && e.remedy.length > 0 ? ` (${e.remedy})` : ""

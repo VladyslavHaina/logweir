@@ -37,7 +37,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { Discovery } from "./Discovery";
-import { CheckResult, Instant, LastTestLine, NotRecorded, ProbeLabels, ReasonText, Term, WriteOutcome } from "./parts";
+import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ReasonText, Term, WriteOutcome } from "./parts";
 
 export const CONNECTION_CHECK_SENTENCE =
   "Test connection starts a readiness check: an isolated Job that projects this connection's own credential and dials these brokers now. What it records is that Job's own result at the moment it ran. It is not a promise about the next run, and Ready authorises nothing: every guard still runs when a backup or restore executes.";
@@ -130,6 +130,8 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
   const [started, setStarted] = useState<string | null>(null);
   const [local, setLocal] = useState<unknown>(null);
   const { query: check, stopped } = useFollowedPreflight(ns, started);
+  // FX-46: the recorded test's own rows say what the endpoint is usable for; `lastTest` carries only its id.
+  const { query: recorded } = useFollowedPreflight(ns, started === null && readable ? (c.lastTest?.preflightId ?? null) : null);
   const refused = CONNECTION_REFUSAL_REASONS.includes(c.reachability.reason ?? "") ? (c.reachability.reason as string) : "";
 
   const run = () => {
@@ -193,13 +195,24 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
               {local !== null && <WriteOutcome error={local} subject="the check" credentials={false} unmatched={[]} />}
               {start.isError && <WriteOutcome error={start.error} subject="the check" credentials={false} unmatched={[]} />}
               {started === null ? (
-                <LastTestLine test={c.lastTest} noun="connectivity check" subject="connection" />
+                <>
+                  <LastTestLine test={c.lastTest} noun="connectivity check" subject="connection" />
+                  {recorded.data && <ConnectionUsability preflight={recorded.data} />}
+                  {recorded.isError && (
+                    <Content component="p" className="lw-subtle lw-small">
+                      The recorded check could not be read, so what this endpoint is usable for is not shown.
+                    </Content>
+                  )}
+                </>
               ) : check.isPending ? (
                 <LoadingRows rows={3} label="Loading the check" />
               ) : check.isError ? (
                 <ErrorState error={check.error} onRetry={() => void check.refetch()} />
               ) : (
-                <CheckResult preflight={check.data} stopped={stopped} onRunAgain={mayStart ? run : undefined} runAgainDisabled={start.isPending} />
+                <>
+                  <CheckResult preflight={check.data} stopped={stopped} onRunAgain={mayStart ? run : undefined} runAgainDisabled={start.isPending} />
+                  <ConnectionUsability preflight={check.data} />
+                </>
               )}
             </div>
           </>

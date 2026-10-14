@@ -8,6 +8,7 @@ import type { components } from "../../api/schema";
 import { mintIntent, usePreflight, useStartReadiness, type Preflight } from "../../api/schedules";
 import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
+import { missingRead } from "./model";
 import { WriteAlert } from "./parts";
 
 type BackupCheck = components["schemas"]["BackupPreflightRequest"];
@@ -50,15 +51,32 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
       </Flex>
       {rows.length > 0 && (
         <ol className="lw-checks">
-          {rows.map((c) => (
-            <li key={c.id}>
-              <span>
-                {c.message ?? c.id}
-                {c.remedy && <span className="lw-subtle lw-small"> {c.remedy}</span>}
-              </span>
-              <StatusLabel {...(VERDICT[c.state] ?? { tone: "neutral" as const, text: c.state })} title={c.code ?? c.id} />
-            </li>
-          ))}
+          {rows.map((c) => {
+            const read = missingRead(c);
+            return (
+              <li key={c.id}>
+                {read ? (
+                  <span>
+                    <strong>Missing READ on {read.count} topic(s)</strong>
+                    {read.sample.length > 0 && (
+                      <span>
+                        : {read.sample.join(", ")}
+                        {read.count > read.sample.length ? `, and ${read.count - read.sample.length} more` : ""}
+                      </span>
+                    )}
+                    <span className="lw-subtle lw-small"> {read.message}</span>
+                    {read.remedy && <span className="lw-subtle lw-small"> {read.remedy}</span>}
+                  </span>
+                ) : (
+                  <span>
+                    {c.message ?? c.id}
+                    {c.remedy && <span className="lw-subtle lw-small"> {c.remedy}</span>}
+                  </span>
+                )}
+                <StatusLabel {...(VERDICT[c.state] ?? { tone: "neutral" as const, text: c.state })} title={c.code ?? c.id} />
+              </li>
+            );
+          })}
         </ol>
       )}
       {preflight.executionOnly.length > 0 && (

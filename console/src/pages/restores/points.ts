@@ -180,7 +180,8 @@ export function catalogPointOffer(
   if (page.backupVerdictsIncomplete) {
     return no(`the product API could not read every Backup verdict in this namespace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt`);
   }
-  if (e.selectable !== true) {
+  // FX-36: a record naming another document is Unreadable, and a relabelled one a Conflict: never offered.
+  if (e.availability === "Unreadable" || e.availability === "Conflict" || e.selectable !== true) {
     return no(
       `the catalog does not list this point as restorable: availability ${e.availability || "unknown"}, verification ${e.verification || "unknown"}${e.remedy ? ` (${e.remedy})` : ""}`,
     );

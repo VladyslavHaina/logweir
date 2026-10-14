@@ -240,6 +240,10 @@ const analytics: Backup[] = [1, 2, 3, 4].map((d) => {
   const at = Math.floor(NOW / DAY) * DAY - (d - 1) * DAY + 2 * HOUR - (NOW % DAY < 2 * HOUR ? DAY : 0);
   const failed = d <= 2;
   return verifiedBackup(`analytics-daily-${slotName(at)}`, at, failed ? 0 : 2_840_112 + d * 1201, {
+    // Its own uid and set id: orders-hourly's 02:00 run has the same instant, and a shared uid
+    // made the wizard's newest point resolve to this run between 02:00 and 04:00 UTC.
+    uid: uid(at / MINUTE + 1),
+    backupId: "01JB" + hex(at / MINUTE + 1, 22).toUpperCase(),
     schedule: "analytics-daily",
     scheduleRef: { name: "analytics-daily" },
     sourceRef: { name: "analytics-prod" },

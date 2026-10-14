@@ -27,6 +27,8 @@ import {
   UNAVAILABLE_WORDS,
   classCounts,
   fileName,
+  groupsPartial,
+  isTerminal,
   offered,
   plannedPositions,
   reasonWord,
@@ -324,7 +326,7 @@ export function OutcomeTable({ sw, plan, target }: { sw: Switchover; plan: Parse
     ? sw.groups.map((g) => ({ key: g.target, source: g.source, target: g.target, outcome: g.outcome as string | null, reason: g.reason ?? undefined, created: g.created, partitions: g.partitions }))
     : (plan?.groups ?? []).map((g) => ({ key: g.target, source: g.source, target: g.target, outcome: null, reason: undefined, created: false, partitions: g.partitions.length }));
   const note = (r: (typeof rows)[number]) => {
-    if (r.outcome === null) return "Waiting for the run's result";
+    if (r.outcome === null) return isTerminal(sw) ? "Not known here: the signed switchover record names its outcome" : "Waiting for the run's result";
     if (r.outcome === "applied") return r.created ? `Group created on ${target}; its positions committed` : "Its prior positions recorded, then committed";
     if (r.outcome === "alreadyApplied") return "Its positions already equalled the plan; nothing committed";
     if (r.outcome === "untouched") return "The run stopped before this group; nothing committed";
@@ -394,6 +396,14 @@ export function OutcomeTable({ sw, plan, target }: { sw: Switchover; plan: Parse
 /** "2 applied · 1 refused": the controller's counts, from the groups it reported. */
 export function OutcomeCounts({ sw }: { sw: Switchover }) {
   const n = (o: string) => sw.groups.filter((g) => g.outcome === o).length;
+  // FX-38: counts over a partial list are not known, never 0.
+  if (groupsPartial(sw)) {
+    return (
+      <Content component="p" className="lw-subtle lw-small lw-gap-top">
+        Counts not known here: the groups listed are not every group. The signed switchover record names each one.
+      </Content>
+    );
+  }
   if (sw.groups.length === 0) return null;
   return (
     <Content component="p" className="lw-subtle lw-small lw-gap-top">

@@ -8,13 +8,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { ProgressVariant } from "@patternfly/react-core";
 import type { components } from "../../api/schema";
-import { ageVsObjective } from "../../app/policyAge";
+import { ageVsObjective, historyTooLarge } from "../../app/policyAge";
+import { attentionItems } from "../../app/attention";
 import { HealthStatus } from "../../components/Status";
 import { SessionProvider } from "../../api/session";
 import type { Session } from "../../api/types";
 import { scheduleRoutes } from "../schedules/routes";
 import sessionDoc from "../../../fixtures/console/session.json";
-import { openProblems, protectedWords } from "./Protection";
+import { failedWords, openProblems, protectedWords } from "./Protection";
 import listFixture from "../../../fixtures/console/protection-policies-list.json";
 import healthy from "../../../fixtures/console/protection-policy.json";
 import unknown from "../../../fixtures/console/protection-policy-unknown.json";
@@ -116,5 +117,51 @@ describe("the policy's statuses", () => {
     const bar = await screen.findByRole("progressbar", { name: /p-ok: newest recovery point/ });
     expect(bar.getAttribute("aria-label")).toBe(`p-ok: newest recovery point ${ageVsObjective(items[0]!).text}`);
     expect(bar.getAttribute("aria-valuenow")).toBe("50");
+  });
+});
+
+describe("FX-38: a Backup listing cut at its bound (BackupHistoryTooLarge)", () => {
+  const REMEDY =
+    "the namespace holds more Backups than one evaluation reads (5 pages of 200), and they are listed by name, so the newest runs may be the ones not read; delete old terminal Backup objects (the archive keeps their points) and the policy evaluates again";
+  const cut = (): P =>
+    policy({
+      name: "protect-cut",
+      health: "Unknown",
+      lastAvailablePoint: undefined,
+      lastAttempt: undefined,
+      consecutiveFailedRuns: undefined,
+      conditions: [{ type: "Protected", status: "Unknown", reason: "BackupHistoryTooLarge", message: REMEDY }],
+    });
+
+  it("reads the point, the attempt and the streak as not known, never as none or 0", () => {
+    expect(historyTooLarge(cut())).toBe(true);
+    expect(ageVsObjective(cut())).toMatchObject({ text: "Not known", percent: 0 });
+    expect(ageVsObjective(cut()).variant).toBeUndefined();
+    expect(failedWords(cut())).toMatch(/^Not known \(/);
+    // CONTROLS: the same absent point on another reason is no recovery point, and a recorded 0 is 0.
+    const none = policy({ lastAvailablePoint: undefined });
+    expect(historyTooLarge(none)).toBe(false);
+    expect(ageVsObjective(none)).toMatchObject({ text: "No recovery point", variant: ProgressVariant.danger });
+    expect(failedWords(policy({ consecutiveFailedRuns: 0 }))).toMatch(/^0 \(/);
+  });
+
+  it("the attention item gives the controller's message, not \"no recovery point\"", () => {
+    const [item] = attentionItems("team-a", [cut()], [], []);
+    expect(item!.detail).toBe(REMEDY);
+    expect(item!.title).toBe("protect-cut could not be evaluated");
+  });
+
+  it("the page shows the message with its remedy, and not known for the point, the attempt and the streak", async () => {
+    net.answer = (path) => (path === "/namespaces/team-a/protection-policies/protect-cut" ? { item: cut(), requestId: "r" } : undefined);
+    renderAt("/team-a/protection/protect-cut");
+    await screen.findByText("Could not be evaluated: too many Backup objects to read");
+    const body = () => document.body.textContent ?? "";
+    expect(body()).toContain(REMEDY);
+    expect(body()).toContain("neither healthy nor a failure");
+    expect(body()).toMatch(/Not known: the controller could not read every Backup/);
+    expect(body()).toContain("Not known (");
+    expect(body()).not.toContain("None yet");
+    expect(body()).not.toContain("There is no recovery point this objective can use");
+    expect(body()).not.toMatch(/\b0 \(\d+ allowed\)/);
   });
 });

@@ -12,8 +12,11 @@ import {
   isMintedSetId,
   redactedBindingReason,
   schemaDependentTopics,
+  truncatedWords,
   viewIsUsable,
+  viewIsWindow,
 } from "./model";
+import { catalogPointOffer as wizardPointOffer } from "../restores/points";
 import setIds from "../../../fixtures/set-ids.json";
 import states from "../../../fixtures/console/catalog-points-states.json";
 import catalogDoc from "../../../fixtures/console/catalog.json";
@@ -175,5 +178,37 @@ describe("the view", () => {
     expect(connectFieldOf("legacyArchive.url")).toBe("destination");
     expect(connectFieldOf("syncMode")).toBe("syncMode");
     expect(connectFieldOf("viewLimit")).toBeUndefined();
+  });
+});
+
+describe("FX-36, FX-38: what a catalog's view does not prove", () => {
+  const MALFORMED =
+    "The object at this recovery point's receipt key is not a receipt: it is not JSON, or it is another document. This is the object's content; no permission or network change lists the point.";
+
+  it("never offers an Unreadable or Conflict point, even one an older API marks selectable", () => {
+    for (const availability of ["Unreadable", "Conflict"]) {
+      const e = row({ availability, verification: "Unverified", remedy: MALFORMED });
+      for (const offer of [catalogPointOffer, wizardPointOffer]) {
+        const verdict = offer(e, {});
+        expect(verdict.offer, availability).toBe(false);
+        expect(verdict.offer ? "" : verdict.reason).toContain(MALFORMED);
+      }
+    }
+    // CONTROL: the same row Available is offered by both.
+    expect(catalogPointOffer(row(), {})).toEqual({ offer: true });
+    expect(wizardPointOffer(row(), {})).toEqual({ offer: true });
+  });
+
+  it("reads truncated as not known to be the whole archive, and calls the view a window only when Synced says so", () => {
+    const synced = (message: string) => ({ truncated: true, conditions: [{ type: "Synced", status: "True", reason: "Synced", message }] });
+    const window = synced("the walk completed; the newest 500 of 900 points are materialised across 3 page(s). The view is a WINDOW: points beyond it are counted and histogrammed here and listed by `logweir catalog list` against the archive");
+    expect(viewIsWindow(window)).toBe(true);
+    expect(truncatedWords(window)).toMatch(/^Not known to be the whole archive: the Synced condition says "the walk completed;.*listed by logweir catalog list/);
+    const space = synced("the walk completed; the newest 400 of 400 points are materialised across 3 page(s). 4 entr(y/ies) did not fit the view's 3 page(s) and are not listed");
+    expect(viewIsWindow(space)).toBe(false);
+    expect(truncatedWords({ truncated: true, conditions: [] })).toBe("Not known to be the whole archive: the catalog has not said why (no Synced message)");
+    expect(truncatedWords({ truncated: true, conditions: [] })).not.toMatch(/holds more/);
+    // CONTROL: a whole view is said whole.
+    expect(truncatedWords({ truncated: false, conditions: [] })).toBe("Not truncated");
   });
 });

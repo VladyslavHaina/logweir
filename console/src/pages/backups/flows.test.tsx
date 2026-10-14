@@ -15,6 +15,8 @@ import { ConnectArchive } from "../catalog/ConnectArchive";
 import { KEYS_FORBIDDEN_SENTENCE } from "../trust/model";
 import { DIFFERENT_RUN_SENTENCE } from "./BackupDetail";
 import { CASES } from "./verdict";
+import { CATALOG_WINDOW_SENTENCE, PARTIAL_POINTS_SENTENCE } from "../catalog/model";
+import catalogPoints from "../../../fixtures/console/catalog-points.json";
 import { SessionGate } from "../../app/SessionGate";
 import operator from "../../../fixtures/console/session-manual-backups.json";
 import viewer from "../../../fixtures/console/session-viewer.json";
@@ -346,6 +348,26 @@ describe("one backup's page", () => {
     expect(document.body.textContent).not.toMatch(/Verified by the controller at/);
   });
 
+  it("FX-45: a run refused before the engine shows the refusal sentence verbatim", async () => {
+    const REFUSAL =
+      "the backup principal may not READ 1 of 2 selected topic(s): `payments` (the broker reports its operations exclude READ). Grant READ on each named topic to the principal this connection authenticates as";
+    const doc = copy(backupDoc);
+    doc.item.operation = { state: "refused", stateReason: "GuardRefused", terminal: true, verificationState: "notAttempted", verifiedSuccess: false };
+    const op = copy(operationBackup) as { item: Record<string, unknown> };
+    Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: REFUSAL, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
+      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, op);
+      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    const title = await screen.findByText("This run was refused: GuardRefused");
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    await within(alert).findByText(REFUSAL);
+  });
+
   it("tells a role that cannot restore who can, instead of offering the action", async () => {
     detail(operationBackup, viewer);
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
@@ -384,5 +406,43 @@ describe("one catalog's page", () => {
     expect(names.length).toBeGreaterThan(0);
     for (const n of names) expect(n, n).toMatch(/^Copy|key id|sha256/i);
     expect(posts()).toHaveLength(0);
+  });
+});
+
+describe("FX-38: one catalog's page says what its view does not prove", () => {
+  const show = (catalog: unknown, points: unknown) => {
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/catalogs/primary") return json(200, catalog);
+      if (path.startsWith("/namespaces/team-a/catalogs/primary/points")) return json(200, points);
+      if (path.startsWith("/namespaces/team-a/catalogs/primary/signers")) return json(200, signers);
+      return null;
+    });
+    renderAt("/team-a/catalog/primary");
+  };
+  const windowSentence = CATALOG_WINDOW_SENTENCE.replace(/`/g, "");
+
+  it("a truncated view that is not a window is not known to be whole, and is not called a window", async () => {
+    const doc = copy(catalogDoc);
+    doc.item.conditions = doc.item.conditions.map((c) => (c.type === "Synced" ? { ...c, message: "the walk completed; the newest 4 of 4 points are materialised across 1 page(s). 1 entr(y/ies) did not fit the view's 1 page(s) and are not listed" } : c));
+    show(doc, catalogPoints);
+    await screen.findByText(/^Not known to be the whole archive: the Synced condition says/);
+    expect(document.body.textContent).not.toContain(windowSentence);
+    expect(document.body.textContent).not.toMatch(/the archive holds more points than the view carries/);
+  });
+
+  it("a window says so, from the Synced message (control)", async () => {
+    show(catalogDoc, catalogPoints);
+    await screen.findByText(windowSentence);
+  });
+
+  it("a points page with incomplete: true says the list is partial", async () => {
+    show(catalogDoc, { ...copy(catalogPoints), incomplete: true });
+    await screen.findByText(PARTIAL_POINTS_SENTENCE);
+    cleanup();
+    // CONTROL: a whole page says nothing of the kind.
+    show(catalogDoc, catalogPoints);
+    await screen.findByText("Recovery points");
+    await screen.findAllByText("Restore this point");
+    expect(screen.queryByText(PARTIAL_POINTS_SENTENCE)).toBeNull();
   });
 });

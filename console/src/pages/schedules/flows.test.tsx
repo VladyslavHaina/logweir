@@ -13,6 +13,7 @@ import { SessionGate } from "../../app/SessionGate";
 import { scheduleRoutes } from "./routes";
 import { BackUpNow } from "./BackUpNow";
 import { NextRuns } from "./parts";
+import { Verdict } from "./Readiness";
 import repeated from "../../../fixtures/console/cadence-preview-repeated.json";
 import policyFixture from "../../../fixtures/console/schedule-policy.json";
 
@@ -373,5 +374,39 @@ describe("suspend and resume", () => {
     expect(sent.key).toBeNull();
     // The refusal re-read the schedule.
     await waitFor(() => expect(read).toBeGreaterThan(1));
+  });
+});
+
+describe("FX-45: the backup readiness check", () => {
+  const check = (rows: S["CheckEntryView"][], executionOnly: S["ExecutionOnlyView"][] = []): S["Preflight"] =>
+    ({
+      id: "pf-backup-1", namespace: "team-a", uid: "u", resourceVersion: "1", operation: "backup", state: "notReady", terminal: true, applicable: true,
+      stale: false, staleBasis: [], staleReasons: [], binding: { referents: [] }, warnings: [], executionOnly, conditions: [], detailsAvailable: false, checks: rows,
+    }) as S["Preflight"];
+
+  it("names a missing READ by topic, with the bounded sample and the remedy", () => {
+    render(
+      <Verdict
+        preflight={check([
+          {
+            id: "connection.topicsReadable", state: "notReady", code: "TopicAuthorizationFailed", gating: "blocking",
+            message: 'the broker reports that this principal may not READ 12 of 14 selected topic(s), so a backup of them would fail in the engine: grant READ on each [detail: {"count":12,"sample":["orders","payments"]}]',
+            remedy: "Grant READ on each named topic to the principal this connection authenticates as.",
+          },
+        ])}
+      />,
+    );
+    const text = document.body.textContent ?? "";
+    expect(screen.getByText("Missing READ on 12 topic(s)")).toBeTruthy();
+    expect(text).toContain(": orders, payments, and 10 more");
+    expect(text).toContain("Grant READ on each named topic");
+    expect(text).not.toContain("[detail:");
+  });
+
+  it("leaves an execution-only row in the execution-only list, with its message", () => {
+    const note = "the broker reports READ for this principal on all 2 selected topic(s)";
+    render(<Verdict preflight={check([{ id: "connection.topicsReadable", state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: note }], [{ id: "connection.topicsReadable", note }])} />);
+    expect(screen.queryByText(/Missing READ/)).toBeNull();
+    expect(document.body.textContent).toContain(`Only the run itself can answer: ${note}`);
   });
 });

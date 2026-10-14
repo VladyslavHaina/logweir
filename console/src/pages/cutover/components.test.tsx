@@ -8,7 +8,8 @@ import { useState } from "react";
 import { SwitchoverApprovalSummary } from "./SwitchoverApprovalSummary";
 import { TopicConfigurationChoice, TopicConfigurationPreview, TopicConfigurationResult, desiredStateYaml, kubernetesName, topicConfigurationPlan, type TopicConfigurationValue, type TopicDesired } from "./TopicConfiguration";
 import { CloneLifetime, CloneStatus, cloneListWords, cloneTeardown, cloneTtlError } from "./CloneLifetime";
-import type { DetailEntry, SwitchoverApprovalRequest } from "../../api/switchovers";
+import type { DetailEntry, Switchover, SwitchoverApprovalRequest } from "../../api/switchovers";
+import { OutcomeCounts, OutcomeTable } from "./parts";
 
 configure({ asyncUtilTimeout: 5000 });
 afterEach(cleanup);
@@ -232,5 +233,41 @@ describe("CloneLifetime and CloneStatus (R5's wizard and restore page)", () => {
     render(<CloneStatus clone={{ phase: "Active", expiresAt: expires, ttlSeconds: 86400, attempts: 0 }} restoreName="orders-clone" />);
     expect(screen.queryByText(/patch restore/)).toBeNull();
     expect(screen.getByText(/Deletes in 23 hours/)).toBeTruthy();
+  });
+});
+
+describe("FX-38: a switchover whose groups are partial, and a teardown cut at 256", () => {
+  const sw = (over: Partial<Switchover>): Switchover => ({
+    name: "swo-1", namespace: "team-a", uid: "u", approvalName: "a", planHash: sha("d"), restore: { name: "r", uid: "u" }, phase: "Succeeded",
+    groups: [{ source: "app", target: "app", outcome: "applied", created: false, partitions: 2 }],
+    ...over,
+  });
+
+  it("counts over a partial list are not known, never 0", () => {
+    render(<OutcomeCounts sw={sw({ message: "the switchover Job exited 2: PartiallyApplied; 1 group line(s) are not listed here (1 unreadable, 0 past the 64-group bound), so the groups and counts are partial: the signed switchover record names every group" })} />);
+    expect(screen.getByText(/Counts not known here/)).toBeTruthy();
+    expect(screen.queryByText(/0 refused/)).toBeNull();
+    cleanup();
+    // CONTROL: a whole list is counted.
+    render(<OutcomeCounts sw={sw({ message: "the switchover Job exited 0: Succeeded" })} />);
+    expect(screen.getByText(/1 applied · 0 already applied · 0 refused/)).toBeTruthy();
+  });
+
+  it("a finished run whose log was not read names no group's outcome", () => {
+    const unread = sw({ groups: [], message: "the switchover Job exited 0: Succeeded; its log tail was past the 1048576-byte bound and was not read" });
+    const plan = { groups: [{ source: "app", target: "app", partitions: [{ topic: "r-orders", partition: 0, offset: 1 }] }] } as never;
+    render(<OutcomeTable sw={unread} plan={plan} target="orders-dr" />);
+    expect(screen.getAllByText(/Not known here: the signed switchover record names its outcome/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Waiting for the run's result/)).toBeNull();
+  });
+
+  it("the clone's teardown says how many topics were left beyond the 256 it lists", () => {
+    const failed = Array.from({ length: 256 }, (_, i) => ({ topic: `clone-${i}`, error: "CloneTargetReplaced" }));
+    render(<CloneStatus clone={{ phase: "RemovalFailed", attempts: 3 }} teardown={{ deletedTruncated: false, deleted: [], failed, failedCount: 300 }} restoreName="orders-clone" />);
+    expect(screen.getByText("300 topics were left; the first 256 are listed")).toBeTruthy();
+    cleanup();
+    // CONTROL: a whole list adds no count.
+    render(<CloneStatus clone={{ phase: "RemovalFailed", attempts: 3 }} teardown={{ deletedTruncated: false, deleted: [], failed: failed.slice(0, 3), failedCount: 3 }} restoreName="orders-clone" />);
+    expect(screen.queryByText(/topics were left; the first/)).toBeNull();
   });
 });

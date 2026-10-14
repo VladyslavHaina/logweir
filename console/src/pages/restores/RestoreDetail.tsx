@@ -67,11 +67,14 @@ import {
   independentCheck,
   notCovered,
   operationVerified,
+  outcomeShown,
   planEvidenceBucket,
   planEvidenceRoute,
   planTimeBasis,
+  refusalSentence,
   selectionWords,
   signedTimeBasisText,
+  teardownLeftWords,
   verificationScopeSentence,
 } from "./words";
 import "./restores.css";
@@ -336,7 +339,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
           <CreationStopped r={r} />
           {failed && (
             <Alert variant="danger" isInline title={`This restore ${r.operation.state === "refused" ? "was refused" : "failed"}${r.operation.stateReason ? `: ${r.operation.stateReason}` : ""}`}>
-              {RETRY_FRESH_TARGET_SENTENCE}
+              {refusalSentence(op) && <p className="lw-break">{refusalSentence(op)}</p>}
+              <p>{RETRY_FRESH_TARGET_SENTENCE}</p>
             </Alert>
           )}
           {notCovered(scope?.complete) && (
@@ -502,7 +506,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     narrow
                     items={[
                       { term: "Result", value: `${op.result.status}${typeof op.result.exitCode === "number" ? `, exit ${op.result.exitCode}` : ""}${op.result.exitReason ? ` (${op.result.exitReason})` : ""}` },
-                      { term: "Outcome", value: <Claim value={op.result.outcome} verified={signed} /> },
+                      { term: "Outcome", value: <Claim value={outcomeShown(op)} verified={signed} /> },
                       { term: "Last phase completed", value: shown(op.result.lastPhaseCompleted) },
                       { term: "Signature", value: `${op.verification.state}${op.verification.detail ? `: ${op.verification.detail}` : ""}` },
                       { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
@@ -643,7 +647,15 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     <Facts
                       items={[
                         { term: "Deleted", value: op.teardown.deleted?.length ? `${op.teardown.deleted.join(", ")}${op.teardown.deletedTruncated ? " and more" : ""}` : shown(null) },
-                        { term: "Not deleted", value: op.teardown.failed?.length ? op.teardown.failed.map((f) => `${f.topic}: ${f.error}`).join("; ") : "none" },
+                        {
+                          term: "Not deleted",
+                          value: (
+                            <>
+                              {teardownLeftWords(op.teardown) && <div><strong>{teardownLeftWords(op.teardown)}</strong></div>}
+                              {op.teardown.failed?.length ? op.teardown.failed.map((f) => `${f.topic}: ${f.error}`).join("; ") : "none"}
+                            </>
+                          ),
+                        },
                         op.teardown.attestationKey ? { term: "Attestation", value: <Ident value={op.teardown.attestationKey} label="teardown attestation key" /> } : null,
                       ]}
                     />

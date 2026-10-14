@@ -23,15 +23,20 @@ import {
   coverageWords,
   evidenceCase,
   operationVerified,
+  outcomeShown,
   planBlockValue,
   planEvidenceBucket,
   planTimeBasis,
+  refusalSentence,
   restoreVerified,
   selectionWords,
   signedTimeBasisText,
+  teardownLeftWords,
   verificationScopeSentence,
 } from "./words";
 import { RestoreDetail } from "./RestoreDetail";
+import { CheckStep } from "./WizardSteps";
+import { readinessRefusal, type Preflight } from "./model";
 
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 30_000 });
@@ -159,5 +164,107 @@ describe("a restore's page", () => {
     cleanup();
     showRestore(R(plainRestore), { ...op, verifiedSuccess: true, trust: { ...op.trust, state: "verified", basis: "Current" }, verification: { ...op.verification, state: "valid" } });
     await screen.findByText("Restored and verified");
+  });
+});
+
+// The refusal sentences the runner writes (crates/logweir/src/drill/binding.rs, phase0_admit.rs).
+const BINDING_REFUSAL =
+  "PointBindingMismatch: PointBindingMismatch. This archive does not hold the receipt the plan binds as recovery point lwp1-0123456789abcdef0123456789abcdef at logweir/backups/set-a/run-1.receipt.json: it is absent, its bytes do not hash to the bound sha256:aa, or it is larger than the 67108864-byte read cap for a receipt; no data operation was started.";
+const ENGINE_REFUSAL =
+  "target.engineProtocol is notReady (EngineProtocolUnsupported): the engine sends Produce v8 and this endpoint serves Produce v0-v7 Refused at phase 0: nothing was created on the target and no record was restored";
+const refused = (message: string): OperationView => ({
+  ...O(uncoveredOperation),
+  state: "refused",
+  stateReason: "GuardRefused",
+  verifiedSuccess: false,
+  message,
+  result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" },
+  conditions: [{ type: "Failed", status: "True", reason: "GuardRefused", message }],
+  verificationScope: { ...O(uncoveredOperation).verificationScope, complete: undefined },
+});
+
+describe("v1.1: what the restore page says", () => {
+  it("FX-36, FX-45: a run refused before the engine shows its refusal sentence verbatim", () => {
+    expect(refusalSentence(refused(BINDING_REFUSAL))).toBe(BINDING_REFUSAL);
+    expect(refusalSentence({ ...refused(""), message: undefined, conditions: [{ type: "Failed", status: "False", reason: "GuardRefused", message: ENGINE_REFUSAL }] })).toBe(ENGINE_REFUSAL);
+    // CONTROL: a run that did not pass is not a refusal.
+    expect(refusalSentence(O(uncoveredOperation))).toBeNull();
+  });
+
+  it("FX-30: a complete verification that did not cover the restore names its reason, its unverified segments and the partitions not compared, and is never a pass", () => {
+    const c = O(uncoveredOperation).verificationScope.complete!;
+    const sentence = completeCoverageSentence(c, null);
+    expect(sentence).toContain(c.incompleteReason!);
+    expect(sentence).toContain("2 archive segment(s) were not verified");
+    expect(sentence).toContain("(not compared: orders/1)");
+    expect(sentence).toMatch(/never a pass/);
+    const forged = { ...O(uncoveredOperation), result: { ...O(uncoveredOperation).result, outcome: "pass" } };
+    expect(outcomeShown(forged)).toBe("not a pass: complete coverage did not cover this restore");
+    // CONTROL: a covered run's pass is its pass.
+    expect(outcomeShown({ ...forged, verificationScope: { ...forged.verificationScope, complete: { ...c, covered: true } } })).toBe("pass");
+  });
+
+  it("FX-38: a teardown that left more than it lists says how many", () => {
+    const failed = Array.from({ length: 256 }, (_, i) => ({ topic: `t-${i}`, error: "TopicAuthorizationFailed" }));
+    expect(teardownLeftWords({ failed, failedCount: 300 })).toBe("300 topics were left; the first 256 are listed");
+    // CONTROLS: a whole list, and an older status with no count.
+    expect(teardownLeftWords({ failed, failedCount: 256 })).toBeNull();
+    expect(teardownLeftWords({ failed })).toBeNull();
+  });
+});
+
+describe("v1.1: a restore's page", () => {
+  it("FX-36: a refused restore shows the binding refusal verbatim and nothing about which case it was", async () => {
+    const r = { ...R(plainRestore), operation: { ...R(plainRestore).operation, state: "refused" as const, stateReason: "GuardRefused", verifiedSuccess: false } };
+    showRestore(r, refused(BINDING_REFUSAL));
+    await screen.findByText("This restore was refused: GuardRefused");
+    const alert = screen.getByText("This restore was refused: GuardRefused").closest(".pf-v6-c-alert") as HTMLElement;
+    expect(alert.textContent).toContain(BINDING_REFUSAL);
+    expect(alert.textContent).not.toMatch(/\b(was absent|was altered|was oversized)\b/);
+  });
+
+  it("FX-38: the teardown card says how many topics were left beyond the 256 it lists", async () => {
+    const failed = Array.from({ length: 256 }, (_, i) => ({ topic: `t-${i}`, error: "TopicAuthorizationFailed" }));
+    showRestore(R(plainRestore), { ...O(subsetOperation), teardown: { deleted: [], deletedTruncated: false, failed, failedCount: 300 } });
+    await screen.findByText("300 topics were left; the first 256 are listed");
+    cleanup();
+    // CONTROL: the same list with a matching count says nothing more.
+    showRestore(R(plainRestore), { ...O(subsetOperation), teardown: { deleted: [], deletedTruncated: false, failed, failedCount: 256 } });
+    await screen.findByText("Teardown");
+    expect(screen.queryByText(/topics were left; the first/)).toBeNull();
+  });
+});
+
+describe("FX-38: the restore readiness check", () => {
+  it("a catalog point the controller could not find for an unreadable view line shows its message, and is not ready", () => {
+    const MESSAGE =
+      "the view does not list recovery point `lwp1-0123456789abcdef0123456789abcdef`, and view page(s) primary-view-2 hold a line this check cannot read, which may be that point";
+    const result = {
+      id: "pf-r1", namespace: "t", uid: "u", resourceVersion: "1", operation: "restore", state: "unknown", terminal: true, applicable: true,
+      stale: false, staleBasis: [], staleReasons: [], binding: { planHash: "sha256:aa", referents: [] }, warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+      checks: [
+        { id: "target.mappedTopics", code: "MappedTopicsAbsent", state: "ready", gating: "blocking" },
+        { id: "recoveryPoint.state", code: "CatalogPointViewUnavailable", state: "unknown", gating: "blocking", message: MESSAGE, remedy: "Request a catalog sync and run this check again once the view is published." },
+      ],
+    } as unknown as Preflight;
+    const refusal = readinessRefusal(result, "sha256:aa", "sha256:aa");
+    expect(refusal).toMatch(/recoveryPoint\.state \(CatalogPointViewUnavailable\)/);
+    render(
+      <CheckStep
+        readiness={{ result, boundHash: "sha256:aa", boundKey: "k", error: null, starting: false, stoppedAt: null }}
+        refusal={refusal}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={null}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: "Readiness checks" });
+    expect(list.textContent).toContain(MESSAGE);
+    expect(list.textContent).toContain("CatalogPointViewUnavailable");
+    expect(list.textContent).toContain("Request a catalog sync and run this check again once the view is published.");
+    expect(screen.getByText("Not ready", { selector: ".pf-v6-c-label__text" })).toBeTruthy();
   });
 });

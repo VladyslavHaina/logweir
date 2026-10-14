@@ -13,6 +13,7 @@ import type { components } from "../../api/schema";
 import { type Clone } from "../../api/switchovers";
 import { shellArg } from "../../lib/shell";
 import { CLONE_TTL_SECONDS, cloneTtlError } from "../restores/plan";
+import { teardownLeftWords } from "../restores/words";
 import { StatusLabel } from "../../components/Status";
 import { When, duration, relative } from "../../components/When";
 
@@ -201,6 +202,7 @@ export function CloneStatus({ clone: c, teardown, restoreName }: { clone: Clone;
             <DescriptionListDescription>
               {teardown.deleted?.length ? teardown.deleted.join(", ") : <span className="lw-subtle">None</span>}
               {teardown.deletedTruncated && <span className="lw-subtle"> (and more)</span>}
+              {teardownLeftWords(teardown) && <div className="lw-small"><strong>{teardownLeftWords(teardown)}</strong></div>}
               {teardown.failed?.map((f) => (
                 <div key={f.topic} className="lw-small">
                   Left {f.topic} <span className="lw-reason">{f.error}</span>

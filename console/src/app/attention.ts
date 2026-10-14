@@ -26,6 +26,15 @@ export function pointAgeSeconds(p: ProtectionPolicy, now: number): number | unde
   return typeof point.ageSeconds === "number" ? point.ageSeconds : undefined;
 }
 
+/**
+ * FX-38: the controller's `Backup` listing was cut at its bound (`Protected` reason
+ * `BackupHistoryTooLarge`), so the newest point, the last attempt and the failure
+ * streak are not known. Neither healthy nor a failure.
+ */
+export function historyTooLarge(p: Pick<ProtectionPolicy, "conditions">): boolean {
+  return (p.conditions ?? []).some((c) => c.type === "Protected" && c.reason === "BackupHistoryTooLarge");
+}
+
 /** "Verified" only when the controller verified the point's signed evidence. */
 export function pointVerified(p: ProtectionPolicy): boolean {
   const evidence = p.lastAvailablePoint?.evidence;
@@ -40,6 +49,8 @@ const HEALTH_TITLE: Record<string, { tone: Attention["tone"]; says: string }> = 
 };
 
 function policyDetail(p: ProtectionPolicy, now: number): string {
+  // FX-38: nothing about the point or the streak is known; the controller's message says why and what to do.
+  if (historyTooLarge(p)) return p.conditions?.find((c) => c.type === "Protected")?.message || "Open the policy for what the controller found.";
   const failed = p.consecutiveFailedRuns ?? 0;
   const age = pointAgeSeconds(p, now);
   const objective = p.objectives.maxRecoveryPointAgeSeconds;

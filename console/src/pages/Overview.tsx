@@ -39,7 +39,7 @@ import { ErrorState, LoadingRows } from "../components/States";
 import { When, duration, useNow } from "../components/When";
 import { CompactList, useNarrow } from "../components/CompactList";
 import { attentionItems, useAttentionReadable, type Attention } from "../app/attention";
-import { ageVsObjective } from "../app/policyAge";
+import { ageVsObjective, newestPointWords } from "../app/policyAge";
 import { mintKey, outcomeUnknown } from "../api/client";
 import { can, useSessionDoc } from "../api/session";
 import { activity, backupDay, freshestPoint, protectionCount, strip } from "./overviewData";
@@ -185,7 +185,7 @@ function PolicyTable({ policies, now }: { policies: ProtectionPolicy[]; now: num
                   aria-label={`${p.name}: newest recovery point ${age.text}`}
                 />
                 <div className="lw-subtle">
-                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : "None yet"} · objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}
+                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}
                 </div>
               </Td>
               <Td dataLabel="Source" className="lw-break">

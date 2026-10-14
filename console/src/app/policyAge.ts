@@ -5,11 +5,20 @@
 import { ProgressVariant } from "@patternfly/react-core";
 import type { ProtectionPolicy } from "../api/types";
 import { duration } from "../components/When";
-import { pointAgeSeconds } from "./attention";
+import { historyTooLarge, pointAgeSeconds } from "./attention";
+
+export { historyTooLarge };
+
+/** The newest point's line under the bar: its time, "None yet", or not known. */
+export function newestPointWords(p: ProtectionPolicy): "point" | "None yet" | "Not known" {
+  if (p.lastAvailablePoint) return "point";
+  return historyTooLarge(p) ? "Not known" : "None yet";
+}
 
 export function ageVsObjective(p: ProtectionPolicy, now = Date.now()) {
   const age = pointAgeSeconds(p, now);
   const objective = p.objectives.maxRecoveryPointAgeSeconds;
+  if (age === undefined && historyTooLarge(p)) return { percent: 0, variant: undefined, text: "Not known" };
   if (age === undefined) return { percent: 100, variant: ProgressVariant.danger, text: "No recovery point" };
   const percent = Math.min(100, Math.round((age / objective) * 100));
   const variant = percent >= 100 ? ProgressVariant.danger : percent >= 75 ? ProgressVariant.warning : ProgressVariant.success;

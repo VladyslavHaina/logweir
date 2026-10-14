@@ -8,7 +8,9 @@ import namesPlan from "../pages/cutover/fixtures/switchover-plan-names.golden.ya
 import { ApiError } from "./client";
 import {
   chosenByDefault,
+  REFUSAL_WORDS,
   evidenceDigests,
+  groupsPartial,
   mintNames,
   offered,
   outcomeUnknown,
@@ -353,5 +355,22 @@ describe("a review cut at its size bound", () => {
     expect(read.groups[1]!.reason).toBe("ReviewTruncated");
     // Control: the same lines with no cut offer both.
     expect(reviewGroups(lines.slice(0, 2)).groups.map(offered)).toEqual([true, true]);
+  });
+});
+
+describe("FX-36, FX-38: the switchover's words", () => {
+  it("MappingDigestMismatch says not held or does not verify, and NoPositionsMapping never claims the restore wrote none", () => {
+    expect(REFUSAL_WORDS.MappingDigestMismatch).toBe("The positions mapping is not held by the archive or does not verify against the signed scorecard.");
+    expect(REFUSAL_WORDS.NoPositionsMapping).not.toMatch(/wrote no positions mapping/);
+    expect(REFUSAL_WORDS.NoPositionsMapping).toMatch(/the archive did not answer/);
+  });
+
+  it("a message that says the groups are partial, or the log was not read, makes the groups partial", () => {
+    const at = (message?: string) => groupsPartial({ message });
+    expect(at("the switchover Job exited 2: PartiallyApplied; 3 group line(s) are not listed here (1 unreadable, 2 past the 64-group bound), so the groups and counts are partial: the signed switchover record names every group")).toBe(true);
+    expect(at("the switchover Job exited 0: Succeeded; its log tail was past the 1048576-byte bound and was not read, so which groups were applied is not known here: the signed switchover record names them")).toBe(true);
+    // CONTROLS: an ordinary run's message, and none.
+    expect(at("the switchover Job exited 0: Succeeded")).toBe(false);
+    expect(at(undefined)).toBe(false);
   });
 });

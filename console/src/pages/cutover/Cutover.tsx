@@ -45,6 +45,7 @@ import {
   UNKNOWN_OUTCOME,
   chosenByDefault,
   evidenceDigests,
+  groupsPartial,
   isTerminal,
   mintNames,
   offered,
@@ -528,6 +529,11 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
               {reasonWords(s.reason) ?? "The switchover was refused."} Nothing was committed.
             </Alert>
           )}
+          {groupsPartial(s) && (
+            <Alert isInline variant="warning" title="Not every group is listed here" className="lw-gap-below">
+              {s.message}
+            </Alert>
+          )}
           <OutcomeTable sw={s} plan={plan} target={target} />
           <OutcomeCounts sw={s} />
           {s.recordKey && (
@@ -550,7 +556,7 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
             </Alert>
           )}
           {s.phase === "PartiallyApplied" && (
-            <Alert isInline variant="warning" title={`${plural(left.length, "group")} not switched over`} className="lw-gap-top">
+            <Alert isInline variant="warning" title={groupsPartial(s) ? "Some groups not switched over" : `${plural(left.length, "group")} not switched over`} className="lw-gap-top">
               {left.map((g) => `${g.target} (${g.reason ?? g.outcome})`).join(", ")}. The groups that were applied can start on {target}. Review
               again to switch the rest: the applied ones then read as already switched.
             </Alert>

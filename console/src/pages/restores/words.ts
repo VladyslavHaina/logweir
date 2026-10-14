@@ -110,6 +110,30 @@ export function selectionWords(sel: Selection | null | undefined): string {
 
 const n = (v: number | null | undefined) => (typeof v === "number" ? v.toLocaleString("en-US") : "Not recorded");
 
+/**
+ * FX-36, FX-45: a run refused before the engine (`result.status: refused`) says why in
+ * its condition's message (the runner's refusal detail), shown verbatim: this page
+ * never adds which of absent, altered or oversized a refused receipt was.
+ */
+export function refusalSentence(op: Pick<OperationView, "result" | "message" | "conditions"> | null | undefined): string | null {
+  if (!op || op.result.status !== "refused") return null;
+  return op.message || op.conditions.find((c) => c.status !== "True" && c.message)?.message || null;
+}
+
+/** FX-30: the run's recorded outcome, never `pass` over a complete verification that did not cover the restore. */
+export function outcomeShown(op: Pick<OperationView, "result" | "verificationScope">): string | null {
+  const outcome = op.result.outcome ?? null;
+  if (outcome === "pass" && notCovered(op.verificationScope.complete)) return "not a pass: complete coverage did not cover this restore";
+  return outcome;
+}
+
+/** FX-38: a teardown that left more topics than its status lists says how many. */
+export function teardownLeftWords(t: { failed?: unknown[] | null; failedCount?: number | null } | null | undefined): string | null {
+  const listed = t?.failed?.length ?? 0;
+  if (typeof t?.failedCount === "number" && t.failedCount > listed) return `${t.failedCount} topics were left; the first ${listed} are listed`;
+  return null;
+}
+
 /** The sentence for a recorded complete verification. */
 export function completeCoverageSentence(c: CompleteView | null | undefined, sel: Selection | null | undefined): string {
   if (!c || typeof c.covered !== "boolean") {
@@ -118,8 +142,10 @@ export function completeCoverageSentence(c: CompleteView | null | undefined, sel
   if (!c.covered) {
     const rows = c.partitions ?? [];
     const compared = rows.filter((p) => p.compared).length;
-    return `Complete coverage was asked for and did NOT cover this restore: ${c.incompleteReason || "the scorecard names no reason"}. ${
-      rows.length > 0 ? `${compared} of ${n(c.partitionCount)} partitions were compared. ` : ""
+    const notCompared = rows.filter((p) => !p.compared).map((p) => `${p.topic}/${p.partition}`);
+    const unverified = typeof c.segmentsUnverified === "number" && c.segmentsUnverified > 0 ? `${n(c.segmentsUnverified)} archive segment(s) were not verified. ` : "";
+    return `Complete coverage was asked for and did NOT cover this restore: ${c.incompleteReason || "the scorecard names no reason"}. ${unverified}${
+      rows.length > 0 ? `${compared} of ${n(c.partitionCount)} partitions were compared${notCompared.length > 0 ? ` (not compared: ${notCompared.slice(0, 10).join(", ")}${notCompared.length > 10 ? `, and ${notCompared.length - 10} more` : ""})` : ""}. ` : ""
     }A verification that did not cover the restore is never a pass.`;
   }
   const r = c.replay;

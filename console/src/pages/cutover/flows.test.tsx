@@ -347,6 +347,40 @@ describe("switched over", () => {
   });
 });
 
+describe("FX-38: a switchover whose groups are partial", () => {
+  const PARTIAL =
+    "the switchover Job exited 2: PartiallyApplied; 2 group line(s) are not listed here (1 unreadable, 1 past the 64-group bound), so the groups and counts are partial: the signed switchover record names every group";
+  it("shows the controller's message, and the Switchover's page shows it too", async () => {
+    const sw = switchover({
+      phase: "PartiallyApplied",
+      reason: "PartiallyApplied",
+      exitCode: 2,
+      message: PARTIAL,
+      groups: [{ source: "app", target: "app", outcome: "applied", created: true, partitions: 2 }],
+    });
+    serve({ switchover: sw });
+    renderAt(`${FLOW}?switchover=swo-1`);
+    await screen.findByText("Not every group is listed here");
+    expect(screen.getAllByText(PARTIAL).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Counts not known here/)).toBeTruthy();
+    expect(screen.getByText("Some groups not switched over")).toBeTruthy();
+    expect(screen.queryByText(/0 groups not switched over/)).toBeNull();
+    cleanup();
+    serve({ switchover: sw });
+    renderAt("/team-a/switchovers/swo-1");
+    await screen.findByText("Message");
+    expect(screen.getAllByText(PARTIAL).length).toBeGreaterThan(0);
+  });
+
+  it("an ordinary run's message is shown without the partial note (control)", async () => {
+    serve({ switchover: switchover({ phase: "Succeeded", reason: "Succeeded", exitCode: 0, message: "the switchover Job exited 0: Succeeded", groups: [{ source: "app", target: "app", outcome: "applied", created: true, partitions: 2 }] }) });
+    renderAt("/team-a/switchovers/swo-1");
+    await screen.findByText("the switchover Job exited 0: Succeeded");
+    expect(screen.queryByText("Not every group is listed here")).toBeNull();
+    expect(screen.getByText(/1 applied · 0 already applied/)).toBeTruthy();
+  });
+});
+
 describe("the Switchover's page", () => {
   const LEGACY = { ...CONFIRM, name: "legacy-governed-v1", legacy: true, mode: "governed", operatorMode: "strict", ordinaryConfirmationAvailable: false };
   it("the approval command names the plan file only when the name is a plain object name", async () => {

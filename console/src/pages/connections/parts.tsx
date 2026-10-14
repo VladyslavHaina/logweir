@@ -29,9 +29,11 @@ import {
   PROBE_WORDS,
   REFUSAL_GLOSS,
   outcomeOf,
+  usability,
   type Preflight,
   type ProbeState,
   type Stopped,
+  type Usable,
 } from "../../api/connections";
 import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
@@ -454,6 +456,39 @@ export function CheckResult({
         </>
       )}
     </div>
+  );
+}
+
+const USABLE: Record<Usable, { tone: Tone; text: string }> = {
+  yes: { tone: "success", text: "Yes" },
+  no: { tone: "danger", text: "No" },
+  undetermined: { tone: "neutral", text: "Not determined" },
+};
+
+/**
+ * FX-46: what a Test connection says the endpoint is usable for, from its three
+ * advisory rows. A check without them (an older controller) shows nothing here.
+ */
+export function ConnectionUsability({ preflight }: { preflight: Preflight }) {
+  const u = usability(preflight);
+  if (u === null) return null;
+  return (
+    <section aria-label="What this endpoint is usable for" className="lw-gap-top">
+      <Title headingLevel="h4" size="md">
+        {u.summary}
+      </Title>
+      <ul className="lw-plain-list">
+        {u.lines.map((l) => (
+          <li key={l.id}>
+            {l.label}: <StatusLabel tone={USABLE[l.state].tone} text={USABLE[l.state].text} title={`${l.id} ${l.state}`} />
+            {l.state !== "yes" && l.message && <span className="lw-subtle"> {l.message}</span>}
+          </li>
+        ))}
+      </ul>
+      <Content component="p" className="lw-subtle lw-small">
+        Advisory: these lines never change the check's verdict, and a backup or restore still runs every guard.
+      </Content>
+    </section>
   );
 }
 

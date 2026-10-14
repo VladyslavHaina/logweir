@@ -40,6 +40,7 @@ import {
   MORE_POINTS_SENTENCE,
   NO_ONE_CLICK_TRUST_SENTENCE,
   NO_POINT_SENTENCE,
+  PARTIAL_POINTS_SENTENCE,
   POINT_BINDING_REDACTED_SENTENCE,
   SCHEMA_DEPENDENCY_NOTE,
   SCHEMA_REGISTRY_NOT_CAPTURED,
@@ -50,7 +51,9 @@ import {
   consumerPositionsWords,
   isRedacted,
   schemaDependentTopics,
+  truncatedWords,
   viewIsUsable,
+  viewIsWindow,
 } from "./model";
 
 const COUNTS: [keyof Catalog["counts"], string][] = [
@@ -87,7 +90,7 @@ function ViewCard({ c }: { c: Catalog }) {
           <Term term="Points in view">
             {count(c.viewPoints)} of at most {count(c.viewLimit)}
           </Term>
-          <Term term="Window">{c.truncated ? "Truncated: the archive holds more points than the view carries" : "Not truncated"}</Term>
+          <Term term="Window">{truncatedWords(c)}</Term>
           <Term term="Walk">
             {c.cursor?.complete === true ? "Complete" : c.cursor?.complete === false ? "Not complete: a budgeted walk that will continue" : <Value value={null} />}
             {c.cursor?.indexShard && <span className="lw-subtle"> · index shard {c.cursor.indexShard}</span>}
@@ -128,7 +131,7 @@ function ViewCard({ c }: { c: Catalog }) {
             </ul>
           </div>
         )}
-        {c.truncated && (
+        {c.truncated && viewIsWindow(c) && (
           <Content component="p" className="lw-subtle lw-small">
             {CATALOG_WINDOW_SENTENCE.replace(/`/g, "")}
           </Content>
@@ -177,7 +180,6 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
   const flags = useFlags(ns);
   const mayRestore = flags?.restoreCreate === true;
   const pages: PointPage[] = points.data?.pages ?? [];
-  const first = pages[0];
   const pageFacts = { viewExpired: pages.some((p) => p.viewExpired), backupVerdictsIncomplete: pages.find((p) => p.backupVerdictsIncomplete)?.backupVerdictsIncomplete };
   const rows = pages.flatMap((p) => p.items);
   const redacted = rows.some((p) => isRedacted(p.receiptKey) || isRedacted(p.backupId));
@@ -214,9 +216,9 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
             {pageFacts.backupVerdictsIncomplete && (
               <Alert isInline variant="danger" title={`Backup verdicts incomplete (${pageFacts.backupVerdictsIncomplete})`} children={BACKUP_VERDICTS_INCOMPLETE_SENTENCE} />
             )}
-            {first?.incomplete && (
-              <Alert isInline variant="warning" title="A page of this view disappeared while it was read">
-                The list below is incomplete; read it again.
+            {pages.some((p) => p.incomplete) && (
+              <Alert isInline variant="warning" title={PARTIAL_POINTS_SENTENCE}>
+                A point on a line this page could not read is not listed. Read the list again.
               </Alert>
             )}
             {rows.length === 0 ? (

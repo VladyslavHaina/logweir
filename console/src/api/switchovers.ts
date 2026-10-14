@@ -76,13 +76,22 @@ export const REFUSAL_WORDS: Record<string, string> = {
   RestoreNotSucceeded: "The restore did not succeed with a verified scorecard.",
   RestoreIsScratch: "The restore is a clone (scratch mode); its topics are deleted when it expires.",
   SwitchoverInProgress: "Another switchover of this restore is still running.",
-  NoPositionsMapping: "The restore wrote no positions mapping.",
+  NoPositionsMapping:
+    "No positions mapping was read: the restore's signed scorecard binds none (its point captured no consumer group, or the restore was not bound to a point), or the archive did not answer when it was read. The run's log says which.",
   VerificationNotComplete: "The restore was not verified completely (coverage complete, every partition covered); positions are mapped only then.",
-  MappingDigestMismatch: "The positions mapping does not match the digest the signed scorecard binds.",
+  MappingDigestMismatch: "The positions mapping is not held by the archive or does not verify against the signed scorecard.",
   PlanDisagreesWithMapping: "A planned position is not the one the restore's mapping maps.",
   ReviewTruncated: "The review's details were cut off inside this group, so not all of its partitions were read. Plan it with logweir switchover plan.",
   SubjectKindMismatch: "The approval was minted for another kind of object.",
 };
+
+/**
+ * FX-38: the controller's `message` says the groups (and so any count) are partial: a group
+ * line it could not read, more groups than the status holds, or a run log it did not read.
+ */
+export function groupsPartial(sw: Pick<Switchover, "message">): boolean {
+  return /groups and counts are partial|was not read/.test(sw.message ?? "");
+}
 
 /** The leading reason word of a reason that may carry a sentence (`Word: why`). */
 export function reasonWord(reason: string | null | undefined): string {

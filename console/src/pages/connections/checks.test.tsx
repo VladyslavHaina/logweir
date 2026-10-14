@@ -12,7 +12,7 @@ import { SessionProvider } from "../../api/session";
 import { session } from "../../mock/data";
 import { ConnectionCheck } from "./ConnectionDetail";
 import { Discovery } from "./Discovery";
-import { CheckResult, LastTestLine } from "./parts";
+import { CheckResult, ConnectionUsability, LastTestLine, ReasonText } from "./parts";
 
 type S = components["schemas"];
 const fixtures = import.meta.glob("../../../fixtures/console/*.json", { eager: true, import: "default" });
@@ -130,6 +130,64 @@ describe("Test connection", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: /Test connection/ }) as HTMLButtonElement).disabled).toBe(true));
     await screen.findByText("Blocking checks");
     expect(bodies).toEqual([{ operation: "sourceConnection", sourceConnection: { connectionRef: "orders-prod" } }]);
+  });
+});
+
+describe("FX-46: the probe's reason and what the endpoint is usable for", () => {
+  type Row = S["CheckEntryView"];
+  const row = (id: string, state: Row["state"], message: string): Row => ({ id, state, code: "X", gating: "advisory", message });
+  /** A Test connection's check as the API serves it: an advisory notReady row is in `warnings`. */
+  const sourceConnection = (rows: Row[]): Preflight => {
+    const p = preflight("preflight-ready.json");
+    return { ...p, id: "pf-test", operation: "sourceConnection", checks: [...p.checks, ...rows.filter((r) => r.state !== "notReady")], warnings: rows.filter((r) => r.state === "notReady") };
+  };
+  const redpanda = () =>
+    sourceConnection([
+      row("connection.engineProtocol", "ready", "serves the capture requests"),
+      row("target.engineProtocol", "notReady", "the engine sends Produce v8 and this endpoint serves Produce v0-v7"),
+      row("connection.groupTypes", "unknown", "BlockedByPrerequisite: not asked"),
+    ]);
+
+  it("says AdvertisedBrokersUnreachable in its own words", () => {
+    render(<ReasonText reason="AdvertisedBrokersUnreachable" />);
+    expect(text()).toContain("AdvertisedBrokersUnreachable");
+    expect(text()).toContain("Not reachable: the bootstrap address answered, but the brokers this cluster advertises cannot be reached from the cluster");
+    expect(text()).not.toMatch(/earlier probe/);
+  });
+
+  it("shows the three lines, each no or not determined with its message, and one summary", () => {
+    render(<ConnectionUsability preflight={redpanda()} />);
+    expect(screen.getByRole("heading", { name: "Usable as a source, not as a target" })).toBeTruthy();
+    const region = screen.getByRole("region", { name: "What this endpoint is usable for" });
+    expect(region.textContent).toMatch(/Usable as a backup source: Yes/);
+    expect(region.textContent).toMatch(/Usable as a restore target: No the engine sends Produce v8 and this endpoint serves Produce v0-v7/);
+    expect(region.textContent).toMatch(/Consumer group positions can be recorded: Not determined BlockedByPrerequisite: not asked/);
+    // A yes carries no message.
+    expect(region.textContent).not.toContain("serves the capture requests");
+  });
+
+  it("shows nothing for an older controller's check, which carries none of the rows", () => {
+    render(<ConnectionUsability preflight={preflight("preflight-ready.json")} />);
+    expect(screen.queryByRole("region", { name: "What this endpoint is usable for" })).toBeNull();
+    expect(text()).not.toMatch(/Usable as/);
+  });
+
+  it("reads the recorded test's own check, by lastTest.preflightId, to say what the endpoint is usable for", async () => {
+    const asked: string[] = [];
+    vi.spyOn(api, "GET").mockImplementation(((path: string, init: { params: { path: { id?: string } } }) => {
+      asked.push(`${path} ${init.params.path.id ?? ""}`);
+      if (path === "/api/v1/namespaces/{ns}/preflights/{id}" && init.params.path.id === "pf-recorded") return Promise.resolve(answer({ item: redpanda(), requestId: "r" }));
+      return Promise.reject(new Error(`unexpected ${path}`));
+    }) as never);
+    const c: Connection = {
+      ...(fixture<S["ConnectionResponse"]>("connection.json").item as Connection),
+      reachability: { state: "reachable", reason: "Reachable" },
+      lastTest: { preflightId: "pf-recorded", state: "ready", stale: false, truncated: false },
+    };
+    withClient(<ConnectionCheck ns="team-a" c={c} mayStart readable />);
+    await screen.findByRole("heading", { name: "Usable as a source, not as a target" });
+    expect(asked).toEqual(["/api/v1/namespaces/{ns}/preflights/{id} pf-recorded"]);
+    expect(text()).toContain("Last connectivity check");
   });
 });
 

@@ -197,6 +197,12 @@ export function SwitchoverPage() {
                       )}
                     </DescriptionListDescription>
                   </DescriptionListGroup>
+                  {s.message && (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>Message</DescriptionListTerm>
+                      <DescriptionListDescription className="lw-break">{s.message}</DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
                   <DescriptionListGroup>
                     <DescriptionListTerm>Exit code</DescriptionListTerm>
                     <DescriptionListDescription>{s.exitCode ?? <span className="lw-subtle">Not recorded</span>}</DescriptionListDescription>

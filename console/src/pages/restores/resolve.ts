@@ -88,7 +88,7 @@ export async function resolveCatalogPoint(ns: string, catalogName: string, point
         : found.viewExpired
           ? "The catalog's view has aged out (viewExpired); sync the catalog again."
           : found.incomplete
-            ? "A page of the catalog's view disappeared while it was being read; reload."
+            ? "The catalog's point list is partial: a page or a line of its view could not be read; reload."
             : `Catalog ${catalogName} does not list point ${pointId}.`,
     };
   }

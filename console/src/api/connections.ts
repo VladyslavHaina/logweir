@@ -154,6 +154,14 @@ export const CONNECTION_REFUSAL_REASONS: readonly string[] = [
 const PROBE_REFUSAL_REASONS: readonly string[] = [...CONNECTION_REFUSAL_REASONS, "CredentialBindingMismatch", "PodCreationForbidden"];
 export const PROBE_RUNNING_REASON = "ProbeRunning";
 
+/**
+ * FX-46: the probe's own verdict when the bootstrap address answered and the
+ * brokers the cluster advertises did not. It is this probe's reading, never a
+ * later probe's reason beside an earlier one.
+ */
+export const ADVERTISED_BROKERS_UNREACHABLE_WORDS =
+  "Not reachable: the bootstrap address answered, but the brokers this cluster advertises cannot be reached from the cluster. Check advertised.listeners for this listener, or use the bootstrap address of a listener meant for this network.";
+
 /** A gloss beside the controller's own reason, never a replacement for it. */
 export const REFUSAL_GLOSS: Record<string, string> = {
   ConnectionConfigInvalid:
@@ -168,6 +176,7 @@ export const REFUSAL_GLOSS: Record<string, string> = {
   PodCreationForbidden: "the probe pod was refused at creation (a quota or an admission policy), so nothing was dialled",
   ProbeStale: "the last reading is too old to vouch for; the next probe that answers replaces it",
   ProbeOutputUnreadable: "the probe's output could not be read, so nothing about the cluster is known either way",
+  AdvertisedBrokersUnreachable: ADVERTISED_BROKERS_UNREACHABLE_WORDS,
 };
 
 /** A later probe's reason beside an earlier reading (an older controller left `reachable` alone). */
@@ -175,7 +184,7 @@ export const LATER_PROBE_GLOSS: Record<string, string> = {
   NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
   ProbeOutputUnreadable: "the latest probe's output could not be read",
 };
-const VERDICT_OWN_REASONS = ["Reachable", "ProbeReportedUnreachable"];
+const VERDICT_OWN_REASONS = ["Reachable", "ProbeReportedUnreachable", "AdvertisedBrokersUnreachable"];
 
 export type ProbeVerdict = "reachable" | "unreachable" | "refused" | "probing" | "unknown" | "never";
 
@@ -236,6 +245,52 @@ export function probeState(r: Reachability | undefined, now = Date.now(), freshS
       ? `${LATER_PROBE_GLOSS[reason] ?? "the latest probe recorded this reason"}; the ${verdict === "reachable" ? "reachable" : "not reachable"} reading is from an earlier probe`
       : "",
   };
+}
+
+// ------------------------------------------- what the endpoint is usable for
+
+/**
+ * FX-46: a Test connection's three advisory capability rows (PROD-01.2), read by
+ * id from `checks` and `warnings` (the API puts an advisory `notReady` row in
+ * `warnings`). They never change the check's verdict.
+ */
+export const USABILITY_ROWS = [
+  { id: "connection.engineProtocol", label: "Usable as a backup source" },
+  { id: "target.engineProtocol", label: "Usable as a restore target" },
+  { id: "connection.groupTypes", label: "Consumer group positions can be recorded" },
+] as const;
+
+export type Usable = "yes" | "no" | "undetermined";
+
+export interface UsabilityLine {
+  id: string;
+  label: string;
+  state: Usable;
+  /** The row's own message; shown beside a no or a not determined. */
+  message: string;
+}
+
+/**
+ * The three lines and one summary sentence from the two engine rows, or null when
+ * the check carries none of the rows (an older controller asked for none).
+ */
+export function usability(p: Pick<Preflight, "checks" | "warnings">): { lines: UsabilityLine[]; summary: string } | null {
+  const rows = [...p.checks, ...p.warnings];
+  const found = USABILITY_ROWS.map((u) => ({ u, row: rows.find((r) => r.id === u.id) }));
+  if (found.every((f) => f.row === undefined)) return null;
+  const lines: UsabilityLine[] = found.map(({ u, row }) => ({
+    id: u.id,
+    label: u.label,
+    state: row?.state === "ready" ? "yes" : row?.state === "notReady" ? "no" : "undetermined",
+    message: row ? (row.message ?? "") : "this check recorded no answer for it",
+  }));
+  const [source, target] = [lines[0]!.state, lines[1]!.state];
+  let summary = "What it can be used for was not determined";
+  if (source === "yes" && target === "yes") summary = "Usable as a source and as a target";
+  else if (source === "yes" && target === "no") summary = "Usable as a source, not as a target";
+  else if (source === "no" && target === "yes") summary = "Usable as a target, not as a source";
+  else if (source === "no" && target === "no") summary = "Usable neither as a source nor as a target";
+  return { lines, summary };
 }
 
 // ------------------------------------------------------------ the create form

@@ -12,6 +12,7 @@ import {
   editBody,
   fieldOf,
   latestPoint,
+  missingRead,
   movesLocation,
   outcomeOf,
   placeFieldErrors,
@@ -282,5 +283,36 @@ describe("retention for a schedule's destination", () => {
   it("an archive URL is named by no policy", () => {
     const inline = list.items.find((x) => x.name === "orders-hourly")!;
     expect(retentionOf(inline, retention.items).kind).toBe("inline");
+  });
+});
+
+describe("FX-45: a READ grant the broker reports missing", () => {
+  type Row = components["schemas"]["CheckEntryView"];
+  const denied: Row = {
+    id: "connection.topicsReadable",
+    state: "notReady",
+    code: "TopicAuthorizationFailed",
+    gating: "blocking",
+    message:
+      'the broker reports that this principal may not READ 12 of 14 selected topic(s) (1 of them it may not even Describe), so a backup of them would fail in the engine: grant READ on each [detail: {"count":12,"sample":["orders","payments"]}]',
+    remedy: "Grant READ on each named topic to the principal this connection authenticates as (READ implies DESCRIBE), or remove the topic from the selection.",
+  };
+
+  it("reads the count and the bounded sample from the row's detail, and keeps the message and the remedy", () => {
+    expect(missingRead(denied)).toEqual({
+      count: 12,
+      sample: ["orders", "payments"],
+      message: "the broker reports that this principal may not READ 12 of 14 selected topic(s) (1 of them it may not even Describe), so a backup of them would fail in the engine: grant READ on each",
+      remedy: denied.remedy,
+    });
+    // A detail this page cannot read: the count from the message, the message whole.
+    const bare = missingRead({ ...denied, message: "the broker reports that this principal may not READ 3 of 4 selected topic(s), so a backup of them would fail" })!;
+    expect(bare).toMatchObject({ count: 3, sample: [] });
+  });
+
+  it("is nothing for the execution-only row, which stays in the execution-only list with its message", () => {
+    expect(missingRead({ ...denied, state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: "the broker reports READ for this principal on all 14 selected topic(s)" })).toBeNull();
+    expect(missingRead({ ...denied, gating: "executionOnly" })).toBeNull();
+    expect(missingRead({ ...denied, id: "connection.topicsDescribable" })).toBeNull();
   });
 });

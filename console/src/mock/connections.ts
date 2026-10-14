@@ -145,8 +145,22 @@ function entry(id: string, state: CheckEntry["state"], code: string, at: number,
   return { id, state, code, gating: "blocking", authority: "checkJob", category: id.split(".")[0], observedAt: iso(at), expiresAt: iso(at + 15 * MINUTE), ...extra };
 }
 
-function connectionCheckResult(c: Connection): HeldCheck["final"] {
-  const at = Date.now() + 4500;
+/** FX-46: the three advisory capability rows a Test connection carries. */
+function capabilityRows(at: number, scope: CheckEntry["scope"], authenticated: boolean): CheckEntry[] {
+  const advisory = { gating: "advisory" as const, scope };
+  if (!authenticated) {
+    return ["connection.engineProtocol", "target.engineProtocol", "connection.groupTypes"].map((id) =>
+      entry(id, "unknown", "BlockedByPrerequisite", at, { ...advisory, message: "the connection did not authenticate, so this check did not run" }),
+    );
+  }
+  return [
+    entry("connection.engineProtocol", "ready", "EngineProtocolServed", at, { ...advisory, message: "the brokers serve every request version the engine sends to back up (Fetch v4 and up)" }),
+    entry("target.engineProtocol", "ready", "EngineProtocolServed", at, { ...advisory, message: "the brokers serve every request version the engine sends to restore (Produce v8, served v0-v13)" }),
+    entry("connection.groupTypes", "ready", "GroupTypesListed", at, { ...advisory, message: "the brokers list consumer groups with their types" }),
+  ];
+}
+
+function connectionCheckResult(c: Connection, at = Date.now() + 4500): HeldCheck["final"] {
   const scope = { kind: "KafkaCluster", name: c.name, uid: c.uid };
   const reachable = reachNow(c).reachability.state !== "unreachable";
   const principal = c.auth.username ? `User:${c.auth.username}` : c.auth.mode === "mtls" ? "the client certificate's subject" : "ANONYMOUS";
@@ -167,6 +181,7 @@ function connectionCheckResult(c: Connection): HeldCheck["final"] {
         ? entry("connection.clusterIdentity", "ready", "ClusterIdentityMatched", at, { scope, message: `cluster id ${reachNow(c).reachability.clusterId ?? "recorded"}` })
         : entry("connection.clusterIdentity", "unknown", "NotAttempted", at, { scope, message: "not attempted: the connection did not authenticate" }),
       entry("runner.image", "ready", "RunnerImagePinned", at, { authority: "controller" }),
+      ...capabilityRows(at, scope, reachable),
     ],
     warnings: [],
     executionOnly: [],
@@ -315,6 +330,22 @@ const SEEDED_TESTS: Record<string, S["LastTestView"]> = {
   "analytics-prod": { preflightId: "pf-7mz2b4qkx6cv3ahd5ryuse2wtn", state: "notReady", stale: false, truncated: false, observedAt: iso(NOW - DAY + 40 * MINUTE) },
 };
 
+// The seeded tests' own checks, so the page can read their rows (FX-46). Kept apart from
+// `checks`, so a connection's recorded test stays the seeded summary above.
+const seededChecks = new Map<string, HeldCheck>();
+for (const [name, t] of Object.entries(SEEDED_TESTS)) {
+  const c = connections.find((x) => x.name === name);
+  if (!c) continue;
+  const done = Date.parse(t.observedAt ?? "");
+  const made = startCheck(c.namespace, `seed-${name}`, "sourceConnection", { kind: "KafkaCluster", name: c.name, uid: c.uid }, connectionCheckResult(c, done));
+  const held = checks.get(made.item.id)!;
+  checks.delete(made.item.id);
+  checkKeys.delete(`${c.namespace}/seed-${name}`);
+  held.item = { ...held.item, id: t.preflightId, createdAt: iso(done - held.runMs) };
+  held.since = done - held.runMs;
+  seededChecks.set(t.preflightId, held);
+}
+
 // ------------------------------------------------------------------ creates
 
 const HOST_PORT = /^[^\s:/@]+:\d{1,5}$/;
@@ -420,7 +451,7 @@ export async function connectionsMock(request: Request, method: string, path: st
     return json(made.replayed ? 200 : 202, { item: made.item, replayed: made.replayed, requestId: requestId() });
   }
   if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/preflights\/([^/:]+)$/))) {
-    const held = checks.get(p[1]!);
+    const held = checks.get(p[1]!) ?? seededChecks.get(p[1]!);
     return held ? json(200, { item: checkNow(held), requestId: requestId() }) : problem(404, "not_found", `No readiness check named ${p[1]} in ${ns}.`);
   }
 

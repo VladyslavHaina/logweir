@@ -28,7 +28,7 @@ import ShieldAltIcon from "@patternfly/react-icons/dist/esm/icons/shield-alt-ico
 import { useProtection } from "../../api/queries";
 import { ApiError } from "../../api/client";
 import { useProtectionPolicy, type ProtectionPolicy } from "../../api/schedules";
-import { ageVsObjective } from "../../app/policyAge";
+import { ageVsObjective, historyTooLarge, newestPointWords } from "../../app/policyAge";
 import { PageHeader } from "../../components/PageHeader";
 import { HealthStatus, StatusLabel } from "../../components/Status";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
@@ -69,8 +69,10 @@ export function protectedWords(p: ProtectionPolicy): { tone: "success" | "danger
   return { tone: "danger", text: "Objective not met", title };
 }
 
-function failedWords(p: ProtectionPolicy): string {
-  return `${p.consecutiveFailedRuns ?? 0} (${p.objectives.maxConsecutiveFailedRuns} allowed)`;
+/** The failure streak; an absent one is not known, never 0 (FX-38). */
+export function failedWords(p: ProtectionPolicy): string {
+  const streak = typeof p.consecutiveFailedRuns === "number" ? String(p.consecutiveFailedRuns) : "Not known";
+  return `${streak} (${p.objectives.maxConsecutiveFailedRuns} allowed)`;
 }
 
 function AgeBar({ p }: { p: ProtectionPolicy }) {
@@ -85,7 +87,7 @@ function AgeBar({ p }: { p: ProtectionPolicy }) {
         aria-label={`${p.name}: newest recovery point ${age.text}`}
       />
       <div className="lw-subtle lw-small">
-        {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : "None yet"} · objective{" "}
+        {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · objective{" "}
         {duration(p.objectives.maxRecoveryPointAgeSeconds)}
       </div>
     </>
@@ -233,6 +235,14 @@ export function ProtectionDetail() {
           )
         }
       />
+      {historyTooLarge(p) && (
+        <PageSection>
+          <Alert isInline variant="info" title="Could not be evaluated: too many Backup objects to read">
+            <p>{p.conditions?.find((c) => c.type === "Protected")?.message ?? "The controller recorded no message."}</p>
+            <p>The newest point, the last attempt and the failure streak are not known until it can read them all. This is neither healthy nor a failure.</p>
+          </Alert>
+        </PageSection>
+      )}
       {(behind || p.staleSince) && (
         <PageSection>
           {behind && (
@@ -283,6 +293,10 @@ export function ProtectionDetail() {
                       </Term>
                       <Term term="Availability from">{p.availabilityBasis ?? "Not recorded"}</Term>
                     </DescriptionList>
+                  ) : historyTooLarge(p) ? (
+                    <Content component="p" className="lw-gap-top">
+                      Not known: the controller could not read every Backup in this namespace, so it names no newest point.
+                    </Content>
                   ) : (
                     <Content component="p" className="lw-gap-top">
                       There is no recovery point this objective can use.{" "}
@@ -457,7 +471,7 @@ export function ProtectionDetail() {
                           </div>
                         </>
                       ) : (
-                        <span className="lw-subtle">Not recorded</span>
+                        <span className="lw-subtle">{historyTooLarge(p) ? "Not known" : "Not recorded"}</span>
                       )}
                     </Term>
                   </DescriptionList>
