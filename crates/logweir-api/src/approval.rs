@@ -114,12 +114,17 @@ pub fn confirmation_name(approval_name: &str) -> String {
 /// decision.
 pub const REQUESTER_ANNOTATION: &str = "logweir.dev/requester";
 
-/// DUI-21: the annotation carrying the requester's display name, so a second
-/// person can see who asked. **Presentation only and NOT part of the signed
-/// request**: the identity provider's name for them at request time, cleaned
-/// by [`shown_name`]. The request view serves it only beside the requester
-/// the console's signature verifies, and only when [`REQUESTER_ANNOTATION`]
-/// names that same principal.
+/// DUI-21: the annotation carrying the requester's provider-VERIFIED email
+/// (`email_verified: true`) at request time, so a second person can see who
+/// asked. NOT part of the signed request: served only beside the requester
+/// the console's signature verifies, when [`REQUESTER_ANNOTATION`] names that
+/// same principal, and always with that principal shown too.
+pub const REQUESTER_EMAIL_ANNOTATION: &str = "logweir.dev/requester-email";
+
+/// DUI-21: the annotation carrying the requester's name from the claim the
+/// install OPTED INTO (`oidc.displayNameClaim`). Self-asserted at most
+/// identity providers, so it is served as unverified, secondary text and never
+/// in place of an identifier. Written only when such a name exists.
 pub const REQUESTER_NAME_ANNOTATION: &str = "logweir.dev/requester-name";
 
 /// The most characters a shown name keeps.

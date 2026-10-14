@@ -407,12 +407,16 @@ More refusals at `POST …/restores`:
 
 `GET …/approval-request` verifies the console's own signature on the stored
 request before projecting anything, and `approve.offered` is advisory.
-Its `requesterName` is the requester's display name, as the identity provider
-named them; not part of the signed request (the `name` claim, else `email`, else
-the subject; at most 128 characters, control and invisible formatting characters
-removed). It is recorded on the request object as the
-`logweir.dev/requester-name` annotation and served only beside the verified
-`requester`; a request made before it existed has none.
+Beside the signed `requester` it serves `requesterEmail`, the requester's email
+when the identity provider marked it verified (`email_verified: true`), and
+`requesterName`, only when `oidc.displayNameClaim` is configured: self-asserted at
+most identity providers, so shown as unverified and never in place of the
+identifier. Neither is part of the signed request. Both are recorded on the
+request object (annotations `logweir.dev/requester-email` and
+`logweir.dev/requester-name`; at most 128 characters, control and invisible
+formatting characters removed) and served only when the object's requester
+annotation is the verified `requester`. A request made before they existed has
+neither.
 `POST …/console-approval` takes `{"confirmationSha256": "sha256:<64 hex>"}` and
 nothing else: `201` with the `Approval`, or `200 replayed: true` for the same
 approver's second click. Checked in order:
@@ -640,9 +644,9 @@ oidc:
   clientId: logweir-console                        # EXACT; also the expected audience
   clientSecretFile: /var/run/secrets/oidc/clientSecret
   allowedAlgorithms: [RS256, ES256]                # the two this service verifies
-  scopes: [openid, profile, groups]                # must contain `openid`
+  scopes: [openid, profile, email, groups]         # must contain `openid`; `email` names a requester to an approver
   groupsClaim: groups                              # the EXACT claim name
-  displayNameClaim: name                           # presentation only; else email, else the subject
+  # displayNameClaim: name                         # OPT-IN: self-asserted at most identity providers; shown as unverified
   tokenAuthMethod: clientSecretBasic               # or clientSecretPost
   caBundleFile: /var/run/logweir/oidc-ca/ca.crt    # OPTIONAL: a private issuer CA, ADDED to the system roots
   systemRoots: true                                # false: trust caBundleFile alone

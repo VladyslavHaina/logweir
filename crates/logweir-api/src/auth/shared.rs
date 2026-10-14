@@ -75,6 +75,7 @@ impl Authenticator for SessionAuthenticator {
                 issuer: claims.iss,
                 subject: claims.sub,
                 display_name: claims.name,
+                verified_email: claims.em,
                 groups: claims.groups,
                 session_id: Some(claims.sid),
                 audit: Arc::new(crate::audit::AuditContext::default()),
@@ -163,6 +164,7 @@ mod tests {
             issuer: "https://idp.example".into(),
             subject: "u-1".into(),
             display_name: "Ada".into(),
+            verified_email: None,
             groups: vec!["g-a".into()],
             auth_time: at(900),
         }

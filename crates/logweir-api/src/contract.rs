@@ -4346,8 +4346,8 @@ pub struct ApproveOfferView {
 /// PROD-16.2: a two-person request as the approver is shown it. Every field
 /// from `requester` to `confirmationSha256` comes from the request's signed
 /// bytes, AFTER the console verified its own signature on them; none is read
-/// from the stored object's metadata — except `requesterName`, which says
-/// so and decides nothing.
+/// from the stored object's metadata — except `requesterEmail` and
+/// `requesterName`, which say so and decide nothing.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestView {
@@ -4373,13 +4373,20 @@ pub struct ApprovalRequestView {
     /// Who asked, `<issuer>#<subject>`, as the console attested them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
-    /// DUI-21: the requester's display name, as the identity provider named
-    /// them; not part of the signed request. Recorded when the request was
-    /// made (the `name` claim, else `email`, else the subject), cleaned of
-    /// control and invisible formatting characters and at most 128
-    /// characters. ABSENT on a request made before it was recorded, and
-    /// whenever the stored object's requester is not the verified one.
-    /// Presentation only: `requester` is who asked.
+    /// DUI-21: the requester's email, verified by the identity provider
+    /// (`email_verified: true`) when the request was made; not part of the
+    /// signed request. Show it with `requester`, never instead of it. ABSENT
+    /// when the provider vouched for no email, on a request made before it was
+    /// recorded, and whenever the stored object's requester is not the
+    /// verified one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_email: Option<String>,
+    /// DUI-21: the requester's name from the claim the install opted into
+    /// (`oidc.displayNameClaim`); not part of the signed request. Self-asserted
+    /// at most identity providers: show it as unverified, after the
+    /// identifier, never in its place. ABSENT unless a name claim is
+    /// configured, and as `requesterEmail` is. Cleaned of control and
+    /// invisible formatting characters, at most 128 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_name: Option<String>,
     /// The plan hash the request names — the Restore's own, recomputed.
@@ -4645,8 +4652,12 @@ pub struct SwitchoverApprovalRequestView {
     pub state_sentence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
-    /// DUI-21: the requester's display name, as the identity provider named
-    /// them; not part of the signed request (as `ApprovalRequestView.requesterName`).
+    /// DUI-21: the requester's provider-verified email; not part of the signed
+    /// request (as `ApprovalRequestView.requesterEmail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_email: Option<String>,
+    /// DUI-21: the requester's name from an opted-in claim, unverified; not
+    /// part of the signed request (as `ApprovalRequestView.requesterName`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1204,7 +1204,7 @@ export interface components {
         };
         /** @description Where a two-person request stands. */
         ApprovalRequestState: "pending" | "approved" | "expired" | "notConfirmed";
-        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterName`, which says so and decides nothing. */
+        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterEmail` and `requesterName`, which say so and decide nothing. */
         ApprovalRequestView: {
             /** @description The Approval the Restore references (`spec.approvalRef.name`), which a click creates. */
             approvalName: string;
@@ -1243,7 +1243,9 @@ export interface components {
             policyDigest: string;
             /** @description Who asked, `<issuer>#<subject>`, as the console attested them. */
             requester?: string | null;
-            /** @description DUI-21: the requester's display name, as the identity provider named them; not part of the signed request. Recorded when the request was made (the `name` claim, else `email`, else the subject), cleaned of control and invisible formatting characters and at most 128 characters. ABSENT on a request made before it was recorded, and whenever the stored object's requester is not the verified one. Presentation only: `requester` is who asked. */
+            /** @description DUI-21: the requester's email, verified by the identity provider (`email_verified: true`) when the request was made; not part of the signed request. Show it with `requester`, never instead of it. ABSENT when the provider vouched for no email, on a request made before it was recorded, and whenever the stored object's requester is not the verified one. */
+            requesterEmail?: string | null;
+            /** @description DUI-21: the requester's name from the claim the install opted into (`oidc.displayNameClaim`); not part of the signed request. Self-asserted at most identity providers: show it as unverified, after the identifier, never in its place. ABSENT unless a name claim is configured, and as `requesterEmail` is. Cleaned of control and invisible formatting characters, at most 128 characters. */
             requesterName?: string | null;
             /** @description The Restore the request is for. */
             restore: string;
@@ -5138,7 +5140,9 @@ export interface components {
             policy: string;
             policyDigest: string;
             requester?: string | null;
-            /** @description DUI-21: the requester's display name, as the identity provider named them; not part of the signed request (as `ApprovalRequestView.requesterName`). */
+            /** @description DUI-21: the requester's provider-verified email; not part of the signed request (as `ApprovalRequestView.requesterEmail`). */
+            requesterEmail?: string | null;
+            /** @description DUI-21: the requester's name from an opted-in claim, unverified; not part of the signed request (as `ApprovalRequestView.requesterName`). */
             requesterName?: string | null;
             /** @description Present exactly when `scopeComplete`. */
             scope?: components["schemas"]["SwitchoverScopeView"];

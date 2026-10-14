@@ -1184,9 +1184,19 @@ pub(crate) async fn authorize_submission(
     let sidecar = key
         .sign(&bytes)
         .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?;
-    // DUI-21: who asked, by the name the identity provider gave them, so a
-    // second person can see it. Beside the signed bytes, never in them.
-    let requester_name = approval::shown_name(&actor.display_name)
+    // DUI-21: who asked, beside the signed bytes and never in them: the
+    // provider-verified email, and a name only when the install opted into a
+    // name claim (the display name is then neither the email nor the subject).
+    let requester_email = actor
+        .verified_email
+        .as_deref()
+        .and_then(approval::shown_name)
+        .map(|email| (approval::REQUESTER_EMAIL_ANNOTATION.to_string(), email));
+    let configured_name = actor.verified_email.as_deref() != Some(actor.display_name.as_str())
+        && actor.display_name != actor.subject;
+    let requester_name = configured_name
+        .then(|| approval::shown_name(&actor.display_name))
+        .flatten()
         .map(|name| (approval::REQUESTER_NAME_ANNOTATION.to_string(), name));
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -1205,6 +1215,7 @@ pub(crate) async fn authorize_submission(
                     (approval::REQUESTER_ANNOTATION.to_string(), actor.id()),
                 ]
                 .into_iter()
+                .chain(requester_email)
                 .chain(requester_name)
                 .collect(),
             ),

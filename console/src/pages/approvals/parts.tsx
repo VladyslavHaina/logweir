@@ -43,7 +43,6 @@ import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
 import { ErrorText } from "../../components/Prose";
-import { shortSubject } from "../../app/subject";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -103,41 +102,58 @@ export function Principal({ id, grant }: { id: string | null | undefined; grant:
   );
 }
 
+export const UNVERIFIED_NAME = "(name as given to the identity provider, not verified)";
+
 /**
- * DUI-21: who asked. With the name the identity provider gave them (the API's
- * `requesterName`, not part of the signed request): "Alice Martin (CiQxZjBjOW…BWxvY2Fs)",
- * and the signed principal whole below it for the audit. A request made before names
- * were recorded has none, and shows the principal in full, as before.
+ * DUI-21, after its security review: who asked, the VERIFIED identifier first. That
+ * is the email the identity provider verified (`requesterEmail`), or else the signed
+ * principal in full, never shortened. A name from a claim the install opted into
+ * (`requesterName`) may follow, labelled unverified: at most providers the person sets
+ * it, so it is never bold and never in place of the identifier. The signed principal
+ * stays visible. "you" is decided on the signed principal alone.
  */
-export function Requester({ id, name, grant }: { id: string | null | undefined; name?: string | null; grant: ApprovalGrant }) {
+export function Requester({ id, email, name, grant }: { id: string | null | undefined; email?: string | null; name?: string | null; grant: ApprovalGrant }) {
   if (!id) return <NotRecorded />;
-  if (!name) return <Principal id={id} grant={grant} />;
   const you = youOf(id, grant);
-  const at = id.lastIndexOf("#");
-  const subject = at === -1 ? id : id.slice(at + 1);
+  const unverified = name ? (
+    <span className="lw-subtle lw-small lw-block" data-unverified-name>
+      {name} {UNVERIFIED_NAME}
+    </span>
+  ) : null;
   return (
     <span className="lw-principal">
       {you && <strong>{you} · </strong>}
-      <strong className="lw-break">{name}</strong>{" "}
-      <span className="lw-subtle" title={id}>
-        ({shortSubject(subject)})
-      </span>
-      <span className="lw-subtle lw-small lw-block">
-        Signed as <code className="lw-mono lw-break">{id}</code>. The name is the identity provider&apos;s and not part of the signed request.
-      </span>
+      {email ? (
+        <>
+          <span className="lw-break" data-verified-identifier>
+            {email}
+          </span>{" "}
+          <span className="lw-subtle lw-small">(email verified by the identity provider)</span>
+          {unverified}
+          <span className="lw-subtle lw-small lw-block">
+            Signed as <code className="lw-mono lw-break">{id}</code>
+          </span>
+        </>
+      ) : (
+        <>
+          <code className="lw-mono lw-break" data-verified-identifier>
+            {id}
+          </code>
+          {unverified}
+        </>
+      )}
     </span>
   );
 }
 
-/** A list's short form of `<issuer>#<subject>`: the issuer's host and the subject, the full value on hover. */
-export function principalShort(id: string, grant: ApprovalGrant): string {
+/**
+ * A list's principal (DUI-21's review): in FULL, never shortened, since the list
+ * names who approved. "you (…)" first when it is the signed-in actor's own,
+ * decided on the principal alone.
+ */
+export function principalText(id: string, grant: ApprovalGrant): string {
   const you = youOf(id, grant);
-  if (you) return you;
-  const at = id.indexOf("#");
-  if (at === -1) return id;
-  const host = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(id.slice(0, at))?.[1] ?? id.slice(0, at);
-  const subject = id.slice(at + 1);
-  return `${host} · ${subject.length > 20 ? `${subject.slice(0, 6)}…${subject.slice(-12)}` : subject}`;
+  return you ? `${you} · ${id}` : id;
 }
 
 /** A refusal: what was not done and why, in the server's words. Not an error. */

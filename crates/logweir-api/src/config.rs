@@ -293,8 +293,10 @@ pub struct OidcConfig {
     pub scopes: Vec<String>,
     /// The exact claim name carrying group membership.
     pub groups_claim: String,
-    /// The exact claim name carrying a display name.
-    pub display_name_claim: String,
+    /// The claim naming the person, OPT-IN: self-asserted at most identity
+    /// providers, so shown as unverified. Unset: the verified email, else the
+    /// subject.
+    pub display_name_claim: Option<String>,
     /// How the client authenticates at the token endpoint.
     pub token_auth_method: TokenAuthMethod,
     /// Whether a plain-HTTP loopback issuer is permitted. For a local mock
@@ -1269,7 +1271,7 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
     }
 
     let scopes = file.scopes.unwrap_or_else(|| {
-        ["openid", "profile", "groups"]
+        ["openid", "profile", "email", "groups"]
             .iter()
             .map(|s| (*s).to_string())
             .collect()
@@ -1287,13 +1289,14 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
     }
 
     let groups_claim = file.groups_claim.unwrap_or_else(|| "groups".to_string());
-    let display_name_claim = file
-        .display_name_claim
-        .unwrap_or_else(|| "name".to_string());
-    for (value, name) in [
-        (&groups_claim, "oidc.groupsClaim"),
-        (&display_name_claim, "oidc.displayNameClaim"),
-    ] {
+    // No default: `name` is self-asserted at most providers, so it is read only
+    // where the install says so (DUI-21 security review).
+    let display_name_claim = file.display_name_claim;
+    for (value, name) in std::iter::once((&groups_claim, "oidc.groupsClaim")).chain(
+        display_name_claim
+            .as_ref()
+            .map(|claim| (claim, "oidc.displayNameClaim")),
+    ) {
         validate::check_single_line(value, 64).map_err(|code| field(name, code))?;
         if value.trim().is_empty() {
             return Err(field(name, "must not be empty"));
@@ -1669,6 +1672,41 @@ mod tests {
     /// document rather than retyped, so the two cannot drift, and the derived
     /// redirect URI is asserted because it is the one value an administrator
     /// must also register at the identity provider.
+    /// **DUI-21's security review: the `name` claim is opt-in.** It is
+    /// self-asserted at most identity providers, so it is read only where the
+    /// install configures `displayNameClaim`; the documented example leaves it
+    /// out, and the default scopes ask for `email`, which identifies a person
+    /// only when the provider verified it.
+    #[test]
+    fn the_name_claim_is_opt_in_and_the_default_scopes_ask_for_email() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .find(|rest| rest.trim_start().starts_with("# console.yaml"))
+            .and_then(|rest| rest.split("```").next())
+            .expect("docs/api.md has a ```yaml block starting `# console.yaml`");
+        let parse = |yaml: &str| {
+            let config = Config::parse(yaml, Path::new("/etc/logweir")).expect("it parses");
+            config.shared().expect("shared").oidc.clone()
+        };
+        assert_eq!(parse(block).display_name_claim, None);
+        // The control: configured, it is read.
+        let opted = block.replace("  # displayNameClaim: name", "  displayNameClaim: name");
+        assert_eq!(parse(&opted).display_name_claim.as_deref(), Some("name"));
+        // No scopes in the file: the defaults, which ask for `email`.
+        let defaults: String = block
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("scopes:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(parse(&defaults).scopes.iter().any(|s| s == "email"));
+    }
+
     #[test]
     fn the_documented_shared_configuration_parses() {
         let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

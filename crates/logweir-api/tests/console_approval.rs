@@ -158,17 +158,20 @@ fn session_as(app: &SharedApp, sid: &str, issuer: &str, subject: &str, groups: &
         issuer,
         subject,
         &format!("{subject} display"),
+        None,
         groups,
     )
 }
 
-/// A session whose identity provider named the person `display`.
+/// A session whose identity provider named the person `display` and, when
+/// `verified_email` is given, vouched for that address.
 fn named_session(
     app: &SharedApp,
     sid: &str,
     issuer: &str,
     subject: &str,
     display: &str,
+    verified_email: Option<&str>,
     groups: &[&str],
 ) -> Session {
     let now = app.app.clock.now();
@@ -176,6 +179,7 @@ fn named_session(
         issuer: issuer.to_string(),
         subject: subject.to_string(),
         display_name: display.to_string(),
+        verified_email: verified_email.map(str::to_string),
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         auth_time: now,
     };
@@ -2722,17 +2726,28 @@ async fn a_two_person_request_is_made_only_with_a_ticket_its_scope_can_show() {
     assert_eq!(created.status, 201, "{}", created.text());
 }
 
-/// **DUI-21: an approver sees who asked.** The request object carries the
-/// requester's display name as an annotation, cleaned and capped, beside the
-/// signed bytes and never in them; the request view serves it as
-/// `requesterName` beside the signed `requester`. Controls: a request made
-/// before the annotation existed serves no name, and a name beside another
-/// principal's requester annotation is not served.
+/// **DUI-21: an approver sees who asked, and nothing self-asserted passes
+/// for an identifier.** The request object carries the requester's
+/// provider-verified email and, when the install opted into a name claim, that
+/// name, as annotations beside the signed bytes and never in them, cleaned and
+/// capped. The request view serves them as `requesterEmail` and `requesterName`
+/// beside the signed `requester`. Controls: a request made before they were
+/// recorded serves neither; values planted beside another principal's
+/// requester annotation are not served; a session with no verified email and
+/// no configured name records neither.
 #[tokio::test]
-async fn the_request_shows_who_asked_by_name_and_signs_none_of_it() {
+async fn the_request_shows_who_asked_by_verified_email_and_signs_none_of_it() {
     let (app, _console) = pair_app();
     let hostile = format!("Alice \u{202E}Martin\u{200B}\u{0007}\n{}", "x".repeat(300));
-    let alice = named_session(&app, "sid-alice-named", ISSUER, "alice", &hostile, &["ops"]);
+    let alice = named_session(
+        &app,
+        "sid-alice-named",
+        ISSUER,
+        "alice",
+        &hostile,
+        Some("alice@example.test"),
+        &["ops"],
+    );
     let created = request_as(&app, &alice, "named", restore_request("approval-named")).await;
     assert_eq!(created.status, 201, "{}", created.text());
     let restore = created.json()["item"]["name"]
@@ -2747,9 +2762,14 @@ async fn the_request_shows_who_asked_by_name_and_signs_none_of_it() {
         .fake
         .object("approvals", NS_A, confirmation)
         .expect("the request");
-    let written = stored["metadata"]["annotations"]["logweir.dev/requester-name"]
+    let annotations = &stored["metadata"]["annotations"];
+    assert_eq!(
+        annotations["logweir.dev/requester-email"],
+        "alice@example.test"
+    );
+    let written = annotations["logweir.dev/requester-name"]
         .as_str()
-        .expect("the requester's name is recorded")
+        .expect("the configured name is recorded")
         .to_string();
     assert!(written.starts_with("Alice Martin x"), "{written}");
     assert_eq!(
@@ -2763,33 +2783,59 @@ async fn the_request_shows_who_asked_by_name_and_signs_none_of_it() {
     );
     let bytes = stored["spec"]["approvalBytes"].as_str().expect("bytes");
     assert!(
-        !bytes.contains("Alice"),
-        "the name is not in the signed request: {bytes}"
+        !bytes.contains("Alice") && !bytes.contains("alice@example.test"),
+        "neither is in the signed request: {bytes}"
     );
 
     // Served to the second person beside the signed requester.
     let bob = signed_in(&app, "bob", &["approvers"]);
     let seen = view(&app, &bob, &restore).await.json()["item"].clone();
     assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+    assert_eq!(seen["requesterEmail"], "alice@example.test", "{seen}");
     assert_eq!(seen["requesterName"], written.as_str(), "{seen}");
 
-    // Control 1: a request made before the name was recorded serves none.
+    // Control 1: a request made before they were recorded serves neither.
     let mut older = stored.clone();
-    older["metadata"]["annotations"]
+    let kept = older["metadata"]["annotations"]
         .as_object_mut()
-        .expect("annotations")
-        .remove("logweir.dev/requester-name");
+        .expect("annotations");
+    kept.remove("logweir.dev/requester-name");
+    kept.remove("logweir.dev/requester-email");
     app.app.fake.seed("approvals", NS_A, older);
     let seen = view(&app, &bob, &restore).await.json()["item"].clone();
     assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
-    assert!(seen.get("requesterName").is_none(), "{seen}");
+    assert!(
+        seen.get("requesterEmail").is_none() && seen.get("requesterName").is_none(),
+        "{seen}"
+    );
 
-    // Control 2: a name planted beside another principal is not shown as the requester's.
+    // Control 2: values planted beside another principal are not shown as the requester's.
     let mut planted = stored.clone();
     planted["metadata"]["annotations"]["logweir.dev/requester"] = json!(format!("{ISSUER}#carol"));
-    planted["metadata"]["annotations"]["logweir.dev/requester-name"] = json!("Carol");
+    planted["metadata"]["annotations"]["logweir.dev/requester-email"] = json!("ceo@example.test");
     app.app.fake.seed("approvals", NS_A, planted);
     let seen = view(&app, &bob, &restore).await.json()["item"].clone();
-    assert!(seen.get("requesterName").is_none(), "{seen}");
+    assert!(
+        seen.get("requesterEmail").is_none() && seen.get("requesterName").is_none(),
+        "{seen}"
+    );
     assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+
+    // Control 3: no verified email and no configured name (the display name is
+    // the subject): nothing but the signed principal is recorded.
+    let dave = named_session(&app, "sid-dave", ISSUER, "dave", "dave", None, &["ops"]);
+    let created = request_as(&app, &dave, "plain", restore_request("approval-plain")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let plain = app
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-plain-confirmation")
+        .expect("the request");
+    let plain = &plain["metadata"]["annotations"];
+    assert!(
+        plain.get("logweir.dev/requester-email").is_none(),
+        "{plain}"
+    );
+    assert!(plain.get("logweir.dev/requester-name").is_none(), "{plain}");
+    assert_eq!(plain["logweir.dev/requester"], format!("{ISSUER}#dave"));
 }

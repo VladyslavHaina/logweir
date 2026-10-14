@@ -68,6 +68,10 @@ pub struct SessionClaims {
     pub sub: String,
     /// The display claim. Presentation only.
     pub name: String,
+    /// The provider-verified email, when there is one (DUI-21). Absent on a
+    /// session sealed before it existed, which then shows the subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub em: Option<String>,
     /// The exact group strings the ID token carried.
     pub groups: Vec<String>,
     /// When the session was issued, as a Unix timestamp.
@@ -121,6 +125,7 @@ impl SessionClaims {
             iss: identity.issuer.clone(),
             sub: identity.subject.clone(),
             name: identity.display_name.clone(),
+            em: identity.verified_email.clone(),
             groups: identity.groups.clone(),
             iat: now.timestamp(),
             exp: (now + TimeDelta::seconds(lifetime)).timestamp(),
@@ -303,6 +308,7 @@ mod tests {
             issuer: "https://idp.example".into(),
             subject: "u-1".into(),
             display_name: "Ada".into(),
+            verified_email: None,
             groups: vec!["team-a-operators".into()],
             auth_time: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         }

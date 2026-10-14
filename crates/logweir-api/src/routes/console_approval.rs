@@ -133,11 +133,11 @@ async fn console_policy(
 /// What a stored request turned out to be.
 enum Loaded {
     /// This console's own request for this Restore, this plan and this
-    /// policy, inside its window, with the name the object shows for its
+    /// policy, inside its window, with what the object shows of its
     /// requester ([`shown_requester`]).
-    Pending(VerifiedRequest, Option<String>),
+    Pending(VerifiedRequest, ShownRequester),
     /// The same, with its window closed.
-    Expired(VerifiedRequest, Option<String>),
+    Expired(VerifiedRequest, ShownRequester),
     /// Not this console's confirmation of this Restore under this policy. The
     /// sentence is for the page; the reason is for the audit record.
     NotConfirmed {
@@ -271,24 +271,36 @@ async fn load_request(
     }
 }
 
-/// DUI-21: the requester's display name a request object shows, for the
-/// verified requester `principal` only. The annotation is unsigned and anyone
-/// who may write Approvals in the namespace can change it, so it is served
-/// only when the object's requester annotation names that same principal,
-/// cleaned again here, and labelled as the identity provider's name, never
-/// as who asked. A request made before it was recorded shows none.
+/// What a request object shows of its requester beside the signed principal
+/// (DUI-21): the provider-verified email, and a name from an opted-in claim.
+#[derive(Debug, Default)]
+struct ShownRequester {
+    email: Option<String>,
+    name: Option<String>,
+}
+
+/// DUI-21: what a request object shows of the verified requester
+/// `principal`. The annotations are unsigned and anyone who may write
+/// Approvals in the namespace can change them, so they are served only when
+/// the object's requester annotation names that same principal, cleaned again
+/// here, and always beside the signed principal: never the only identity
+/// shown. A request made before they were recorded shows neither.
 fn shown_requester(
     annotations: &std::collections::BTreeMap<String, String>,
     principal: &str,
-) -> Option<String> {
+) -> ShownRequester {
     if annotations
         .get(approval::REQUESTER_ANNOTATION)
         .map(String::as_str)
         != Some(principal)
     {
-        return None;
+        return ShownRequester::default();
     }
-    approval::shown_name(annotations.get(approval::REQUESTER_NAME_ANNOTATION)?)
+    let shown = |key: &str| annotations.get(key).and_then(|v| approval::shown_name(v));
+    ShownRequester {
+        email: shown(approval::REQUESTER_EMAIL_ANNOTATION),
+        name: shown(approval::REQUESTER_NAME_ANNOTATION),
+    }
 }
 
 /// The approval already stored under the object's `approvalRef`, when this
@@ -570,6 +582,7 @@ async fn request_for(
         state: ApprovalRequestState::NotConfirmed,
         state_sentence: String::new(),
         requester: None,
+        requester_email: None,
         requester_name: None,
         plan_hash: None,
         approval_subject: None,
@@ -590,7 +603,7 @@ async fn request_for(
         },
     };
     let loaded = load_request(state, &subject, &bound).await?;
-    let (verified, expired, requester_name) = match loaded {
+    let (verified, expired, shown_requester) = match loaded {
         Loaded::NotConfirmed { code, sentence } => {
             actor.audit.note("approvalRequest", code);
             view.state_sentence = sentence;
@@ -601,7 +614,8 @@ async fn request_for(
     };
     let doc = &verified.document;
     view.requester = Some(doc.requester.principal_id());
-    view.requester_name = requester_name;
+    view.requester_email = shown_requester.email;
+    view.requester_name = shown_requester.name;
     view.plan_hash = Some(doc.plan_hash.clone());
     let approval_subject =
         logweir_core::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref());
@@ -746,6 +760,7 @@ pub async fn switchover_request(
                 state: view.state,
                 state_sentence: view.state_sentence,
                 requester: view.requester,
+                requester_email: view.requester_email,
                 requester_name: view.requester_name,
                 plan_hash: view.plan_hash,
                 scope_complete: view.scope_complete && scope.is_some(),

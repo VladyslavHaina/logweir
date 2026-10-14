@@ -29,7 +29,7 @@ import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { StatusLabel } from "../../components/Status";
-import { ApprovalStatus, ErrorLine, principalShort } from "./parts";
+import { ApprovalStatus, ErrorLine, principalText } from "./parts";
 import "./approvals.css";
 
 /** Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A). */
@@ -227,7 +227,7 @@ export function ApprovalList() {
                 title: `${a.subjectRef.kind}/${a.subjectRef.name}`,
                 meta: (
                   <>
-                    {a.approver ? principalShort(a.approver, grant) : "No approver recorded"} · <When value={a.createdAt} />
+                    {a.approver ? principalText(a.approver, grant) : "No approver recorded"} · <When value={a.createdAt} />
                   </>
                 ),
                 status: <ApprovalStatus found={recordState(a)} />,
@@ -260,9 +260,7 @@ export function ApprovalList() {
                       </Td>
                       <Td dataLabel="Approver">
                         {a.approver ? (
-                          <span title={a.approver} className="lw-break">
-                            {principalShort(a.approver, grant)}
-                          </span>
+                          <span className="lw-break lw-mono">{principalText(a.approver, grant)}</span>
                         ) : (
                           <span className="lw-subtle">Not recorded</span>
                         )}
