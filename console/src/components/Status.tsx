@@ -82,13 +82,6 @@ export function ReachStatus({ state }: { state: string }) {
   return <StatusLabel tone="neutral" text="Not checked yet" />;
 }
 
-export function CheckStatus({ state }: { state: "pending" | "running" | "pass" | "warn" }) {
-  if (state === "pass") return <StatusLabel tone="success" text="Passed" />;
-  if (state === "warn") return <StatusLabel tone="warning" text="Warning" />;
-  if (state === "running") return <StatusLabel tone="progress" text="Checking" />;
-  return <StatusLabel tone="neutral" text="Waiting" />;
-}
-
 /** Captured with a recovery point, or not (and why). */
 export function CaptureStatus({ captured, reason }: { captured: boolean; reason?: string | null }) {
   return captured ? <StatusLabel tone="success" text="Captured" /> : <StatusLabel tone="neutral" text="Not captured" title={reason ?? undefined} />;

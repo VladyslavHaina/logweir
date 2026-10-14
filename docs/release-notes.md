@@ -2283,7 +2283,8 @@ had, under grouped navigation (Overview; Protect: Backups, Schedules,
 Protection; Recover: Restores, Switchovers, Approvals; Evidence: Recovery
 catalog, Trust; Settings: Connections, Destinations), with a five-step restore
 wizard in place of six, a live restore page, theme A's switchover review, and
-light and dark themes. Addresses are `/ui/#/<namespace>/<page>`; an old
+light and dark themes. The restore review no longer names schema-dependent
+topics; the Recovery catalog page does. Addresses are `/ui/#/<namespace>/<page>`; an old
 address such as `#/backups?ns=team-a` reaches no page (it reads as a namespace
 named `backups`). The image serves
 the build's page and its hashed files under `assets/` (`immutable`), and

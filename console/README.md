@@ -100,7 +100,7 @@ scripts off (`.npmrc`).
 4. ESLint (`npm run lint`), with the rules above;
 5. Vitest (`npm test`), on jsdom, over the fixtures in `fixtures/`;
 6. `vite build`, then `scripts/check-dist.mjs`: the output has the shape `/ui/`
-   serves, and none of the mock;
+   serves, none of the mock, and no stylesheet that loads from another origin;
 7. `npm audit --audit-level=high`;
 8. `scripts/check-licences.mjs`: each package's licence from the lockfile is on
    the allowlist (shipped code, or build and test tools).

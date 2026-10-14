@@ -190,7 +190,7 @@ jobs:
               exit 1
               ;;
           esac
-      # check-image-api.sh holds the console image's /ui/next (PROD-18.1) to this
+      # check-image-api.sh holds the console image's /ui (PROD-18.1) to this
       # tree's console build, which is the same bytes on every platform. It is
       # built in `console-dist`, a job with no secret that pushes nothing; this
       # job, which logs in and pushes, runs no npm code and takes only the

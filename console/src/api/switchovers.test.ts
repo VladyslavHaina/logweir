@@ -336,3 +336,22 @@ describe("names and outcomes", () => {
     expect(outcomeUnknown(new ApiError(409, { code: "idempotency_conflict" }))).toBe(false);
   });
 });
+
+describe("a review cut at its size bound", () => {
+  it("never offers the group the cut may have split; the groups before it are whole", () => {
+    const lines = [
+      line("first", { topic: "a" }),
+      line("split", { topic: "a" }),
+      { entry: { truncated: true } } as DetailEntry,
+    ];
+    const read = reviewGroups(lines);
+    expect(read.truncated).toBe(true);
+    expect(read.groups.map((g) => [g.source, offered(g)])).toEqual([
+      ["first", true],
+      ["split", false],
+    ]);
+    expect(read.groups[1]!.reason).toBe("ReviewTruncated");
+    // Control: the same lines with no cut offer both.
+    expect(reviewGroups(lines.slice(0, 2)).groups.map(offered)).toEqual([true, true]);
+  });
+});

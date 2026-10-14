@@ -12,7 +12,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
 import { useCan } from "./session";
-import type { Backup, Connection, CreateRestoreRequest, Restore } from "./types";
+import type { Backup, Connection } from "./types";
 
 const LIVE_MS = 1500;
 
@@ -153,19 +153,6 @@ export function useProtection(ns: string) {
   });
 }
 
-export function usePoints(ns: string, catalog = "primary") {
-  return useQuery({
-    queryKey: keys.item("points", ns, catalog),
-    enabled: useCan(ns, "catalogs"),
-    queryFn: async ({ signal }) =>
-      (
-        await call(() =>
-          api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", { params: { path: { ns, name: catalog } }, signal }),
-        )
-      ).items,
-  });
-}
-
 /** Back up now from a schedule. `key` is the Idempotency-Key: the caller keeps it for a
  *  retry after an unknown outcome, so a second click names the same run. */
 export function useBackUpNow(ns: string) {
@@ -184,18 +171,3 @@ export function useBackUpNow(ns: string) {
   });
 }
 
-export function useCreateRestore(ns: string) {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: async (body: CreateRestoreRequest): Promise<Restore> =>
-      (
-        await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/restores", {
-            params: { path: { ns }, header: createHeaders(body.planHash) },
-            body,
-          }),
-        )
-      ).item,
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("restores", ns) }),
-  });
-}

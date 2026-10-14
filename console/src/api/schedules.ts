@@ -76,7 +76,7 @@ export function useDiscoveredTopics(ns: string, connection: string) {
         }),
       )) as unknown as S["DiscoveryLatestResponse"];
       const found = latest.lastSuccessful;
-      if (!found) return { discovery: undefined, failed: latest.latestAttempt?.state === "failed", topics: [] as string[] };
+      if (!found) return { discovery: undefined, failed: latest.latestAttempt?.state === "failed", topics: [] as string[], more: false };
       const page = await call(() =>
         api.GET("/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics", {
           params: { path: { ns, id: found.id }, query: { limit: 200 } },
@@ -87,6 +87,8 @@ export function useDiscoveredTopics(ns: string, connection: string) {
         discovery: found,
         failed: latest.latestAttempt?.state === "failed",
         topics: page.items.filter((t) => !t.internal).map((t) => t.name),
+        // One page of 200 is offered; past it the operator types the name.
+        more: Boolean(page.page.nextCursor),
       };
     },
     staleTime: 60_000,

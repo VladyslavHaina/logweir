@@ -80,6 +80,7 @@ export const REFUSAL_WORDS: Record<string, string> = {
   VerificationNotComplete: "The restore was not verified completely (coverage complete, every partition covered); positions are mapped only then.",
   MappingDigestMismatch: "The positions mapping does not match the digest the signed scorecard binds.",
   PlanDisagreesWithMapping: "A planned position is not the one the restore's mapping maps.",
+  ReviewTruncated: "The review's details were cut off inside this group, so not all of its partitions were read. Plan it with logweir switchover plan.",
   SubjectKindMismatch: "The approval was minted for another kind of object.",
 };
 
@@ -212,7 +213,15 @@ export function reviewGroups(entries: DetailEntry[]): { groups: ReviewGroup[]; t
     }
     groups.set(key, g);
   }
-  return { groups: [...groups.values()], truncated, unread };
+  // A group's lines are contiguous, so the last group read before a cut may be missing
+  // topics: it is never offered (a plan would commit only the part that was read).
+  const read = [...groups.values()];
+  const last = read.at(-1);
+  if (truncated && last?.admissible) {
+    last.admissible = false;
+    last.reason = "ReviewTruncated";
+  }
+  return { groups: read, truncated, unread };
 }
 
 export type Verdict = "ready" | "alreadyApplied" | "stopConsumers" | "blocked";

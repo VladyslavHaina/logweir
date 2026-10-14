@@ -278,6 +278,7 @@ function TopicPicker({ ns, control, source, onAdd }: { ns: string; control: Cont
         {d.visibility?.state === "limited" ? ". Visibility was limited, so this is a subset: type any topic it does not offer." : "."}
         {d.stale ? " This inventory is out of date." : ""}
         {found.data.failed ? " A newer discovery failed." : ""}
+        {found.data.more ? " These are the first 200 of the topics it saw: type any other." : ""}
       </Content>
       <LabelGroup numLabels={12} categoryName="Add a topic" isCompact className="lw-topic-offer">
         {found.data.topics.map((t) => {

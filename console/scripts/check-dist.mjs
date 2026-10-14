@@ -31,6 +31,8 @@ for (const file of files) {
   if (/\.(js|css|html)$/.test(name)) {
     const text = readFileSync(path, "utf8");
     for (const marker of MOCK_MARKERS) if (text.includes(marker)) problems.push(`${file} carries the mock ("${marker}")`);
+    // A stylesheet loads nothing from elsewhere (the job check-ui-offline.sh did for ui/).
+    if (name.endsWith(".css") && /@import|url\(\s*["']?(https?:|\/\/)/i.test(text)) problems.push(`${file} loads a stylesheet or a resource from another origin`);
   }
 }
 const page = readFileSync(join(dist, "index.html"), "utf8");

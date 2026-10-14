@@ -75,7 +75,6 @@ export function createConsoleRouter() {
     // Filled in by <RouterProvider context> once the session gate has a session.
     context: { session: undefined! },
     defaultPreload: false,
-    scrollRestoration: true,
   });
 }
 

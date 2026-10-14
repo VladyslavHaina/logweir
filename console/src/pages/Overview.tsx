@@ -40,7 +40,7 @@ import { When, duration, useNow } from "../components/When";
 import { CompactList, useNarrow } from "../components/CompactList";
 import { attentionItems, useAttentionReadable, type Attention } from "../app/attention";
 import { ageVsObjective } from "../app/policyAge";
-import { ApiError } from "../api/client";
+import { mintKey, outcomeUnknown } from "../api/client";
 import { can, useSessionDoc } from "../api/session";
 import { activity, backupDay, freshestPoint, protectionCount, strip } from "./overviewData";
 import { GettingStarted } from "./GettingStarted";
@@ -53,7 +53,14 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
   // same schedule sends the same Idempotency-Key, so it names that run, never a second one.
   const unanswered = useRef(new Map<string, string>());
   const start = (schedule: string) => {
-    const key = unanswered.current.get(schedule) ?? `logweir-console.backup.${crypto.randomUUID()}`;
+    let key: string;
+    try {
+      // mintKey refuses, rather than counting, where the platform has no random source.
+      key = unanswered.current.get(schedule) ?? mintKey("manual");
+    } catch (error) {
+      setToast({ variant: "danger", title: `${schedule}: the backup was not started`, body: error instanceof Error ? error.message : String(error) });
+      return;
+    }
     backUp.mutate(
       { schedule, key },
       {
@@ -62,7 +69,7 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
           setToast({ variant: "info", title: `Backup ${b.name} started`, body: "It appears under Recent activity and updates as it runs." });
         },
         onError: (error) => {
-          const noAnswer = !(error instanceof ApiError) || error.status === 0 || error.status >= 500;
+          const noAnswer = outcomeUnknown(error);
           if (noAnswer) unanswered.current.set(schedule, key);
           else unanswered.current.delete(schedule);
           setToast({

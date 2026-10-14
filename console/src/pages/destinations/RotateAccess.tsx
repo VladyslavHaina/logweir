@@ -41,7 +41,7 @@ import { GrantFields, clearGrantSecrets, type GrantsForm } from "./GrantFields";
 
 export function RotateAccess({
   ns,
-  destination: d,
+  destination: live,
   onClose,
   onRotated,
   onReRead,
@@ -52,6 +52,17 @@ export function RotateAccess({
   onRotated: (d: Destination) => void;
   onReRead: () => void;
 }) {
+  // The destination this dialog opened with, and its generation, until the operator re-reads
+  // it: a resend after a lost answer whose rotation landed is then refused (412), never a
+  // second rotation.
+  const [d, setD] = useState(live);
+  const [adopting, setAdopting] = useState(false);
+  useEffect(() => {
+    if (adopting && live.generation !== d.generation) {
+      setD(live);
+      setAdopting(false);
+    }
+  }, [adopting, live, d.generation]);
   const rotate = useRotateAccess(ns, d.name);
   const [unmatched, setUnmatched] = useState<string[]>([]);
   const schema = z
@@ -167,7 +178,14 @@ export function RotateAccess({
                 variant="warning"
                 title="The destination changed since this page read it. Nothing was written."
                 actionLinks={
-                  <Button variant="link" isInline onClick={onReRead}>
+                  <Button
+                    variant="link"
+                    isInline
+                    onClick={() => {
+                      setAdopting(true);
+                      onReRead();
+                    }}
+                  >
                     Re-read the destination
                   </Button>
                 }
