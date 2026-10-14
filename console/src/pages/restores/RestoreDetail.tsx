@@ -3,7 +3,7 @@
 // The old console's #/operations (restore) and #/history restore detail in one page.
 // It computes no state (the API's word is shown) and never merges the result with the
 // evidence: "the run passed" and "its signed scorecard verifies" are two facts.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
@@ -37,6 +37,8 @@ import {
   useCapabilities,
   useRestoreItem,
   useRestoreOperation,
+  useVerdictFollow,
+  verdictPending,
   type OperationView,
   type Restore,
 } from "../../api/restores";
@@ -274,6 +276,11 @@ function CompleteCoverage({ op, verified }: { op: OperationView; verified: boole
   );
 }
 
+export const VERDICT_PENDING_SENTENCE =
+  "The run has finished and the controller is verifying its signed scorecard. This page follows it until the verdict is recorded.";
+export const VERDICT_STOPPED_SENTENCE =
+  "The run finished, and after two minutes the controller has still recorded no verdict on its scorecard, so this page stopped following it. Nothing about the restore changed; read it again to see the verdict when it lands.";
+
 /** One page per restore: moving to another restore starts its page afresh. */
 export function RestoreDetail() {
   const { ns, name } = useParams({ from: "/$ns/restores/$name" });
@@ -283,10 +290,15 @@ export function RestoreDetail() {
 function Detail({ ns, name }: { ns: string; name: string }) {
   const navigate = useNavigate();
   const caps = useCapabilities(ns);
-  const restore = useRestoreItem(ns, name);
+  // DUI-38: a terminal restore whose verdict is still pending is followed until the
+  // verdict lands, for at most VERDICT_FOLLOW_MS (the decision is read below and fed back).
+  const [follow, setFollow] = useState(false);
+  const restore = useRestoreItem(ns, name, { follow });
   // While the run moves, its event stream (R1) writes the operation view and the poll stands down.
-  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && !restore.data.operation.terminal);
-  const operation = useRestoreOperation(ns, name, streaming);
+  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && (!restore.data.operation.terminal || follow));
+  const operation = useRestoreOperation(ns, name, streaming, follow);
+  const verdict = useVerdictFollow(verdictPending(restore.data?.operation) || verdictPending(operation.data));
+  useEffect(() => setFollow(verdict.following), [verdict.following]);
   const [showPlan, setShowPlan] = useState(false);
 
   const breadcrumb = (
@@ -353,6 +365,33 @@ function Detail({ ns, name }: { ns: string; name: string }) {
       <PageSection>
         <div className="lw-stack">
           {op && <Awaiting ns={ns} r={r} op={op} />}
+          {verdict.following && (
+            <Content component="p" className="lw-subtle" role="status">
+              {VERDICT_PENDING_SENTENCE}
+            </Content>
+          )}
+          {verdict.stopped && (
+            <Alert
+              variant="info"
+              isInline
+              title="The verdict is still pending"
+              actionLinks={
+                <Button
+                  variant="link"
+                  isInline
+                  onClick={() => {
+                    verdict.again();
+                    void restore.refetch();
+                    void operation.refetch();
+                  }}
+                >
+                  Read it again
+                </Button>
+              }
+            >
+              {VERDICT_STOPPED_SENTENCE}
+            </Alert>
+          )}
           {r.operation.state === "queued" && <Alert variant="info" isInline title="Queued">{QUEUED_RUN_SENTENCE}</Alert>}
           <CreationStopped r={r} />
           {failed && (

@@ -4,7 +4,7 @@
 // never a pass, a narrowed restore is said as partial, a stopped creation step names
 // every topic it left, and a failed run offers a retry to a fresh target.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, render, screen, within } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, within } from "@testing-library/react";
 import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
@@ -36,7 +36,8 @@ import {
   verificationScopeSentence,
 } from "./words";
 import { When, exactUtc, relative } from "../../components/When";
-import { RestoreDetail } from "./RestoreDetail";
+import { RestoreDetail, VERDICT_PENDING_SENTENCE } from "./RestoreDetail";
+import { VERDICT_FOLLOW_MS, useVerdictFollow, verdictPending } from "../../api/restores";
 import { CheckStep } from "./WizardSteps";
 import { readinessRefusal, type Preflight } from "./model";
 
@@ -180,6 +181,78 @@ describe("a restore's page", () => {
     cleanup();
     showRestore(R(plainRestore), { ...op, verifiedSuccess: true, trust: { ...op.trust, state: "verified", basis: "Current" }, verification: { ...op.verification, state: "valid" } });
     await screen.findByText("Restored and verified");
+  });
+});
+
+describe("DUI-38: a finished restore whose verdict is still coming", () => {
+  // A complete restore into new topics, verified: its page offers Switch consumers over.
+  const verifiedRestore = (): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" } };
+  };
+  const pendingRestore = (): Restore => {
+    const r = verifiedRestore();
+    return { ...r, operation: { ...r.operation, verificationState: "pending", verifiedSuccess: false } };
+  };
+  const pendingOperation = (): OperationView => {
+    const op = O(subsetOperation);
+    return { ...op, verifiedSuccess: false, verification: { state: "pending" }, trust: { ...op.trust, state: "pending" } } as OperationView;
+  };
+
+  it("says Verifying while the verdict is pending, then shows it and Switch consumers over without a reload", async () => {
+    showRestore(pendingRestore(), pendingOperation());
+    await screen.findByText(VERDICT_PENDING_SENTENCE);
+    expect(screen.getAllByText("Verifying").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Done, not verified")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    // The controller verifies: the page is still reading, and shows it.
+    net.answers.set(`/namespaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
+    net.answers.set(`/namespaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
+    await screen.findByText("Restored and verified");
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+  });
+
+  it("a verdict that is not pending is not followed (the control): Done, not verified stays what it is", async () => {
+    const r = verifiedRestore();
+    showRestore({ ...r, operation: { ...r.operation, verificationState: "notAttempted", verifiedSuccess: false } }, { ...O(subsetOperation), verifiedSuccess: false, verification: { state: "notAttempted" } } as OperationView);
+    expect((await screen.findAllByText("Done, not verified")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+    expect(verdictPending(r.operation)).toBe(false);
+    expect(verdictPending({ ...r.operation, verificationState: "pending" })).toBe(true);
+    // A run still moving is followed as before, not by this rule.
+    expect(verdictPending({ ...r.operation, terminal: false, verificationState: "pending" })).toBe(false);
+  });
+});
+
+describe("DUI-38: the follow is bounded", () => {
+  function Probe({ pending }: { pending: boolean }) {
+    const v = useVerdictFollow(pending);
+    return (
+      <div>
+        <span>{v.following ? "following" : v.stopped ? "stopped" : "idle"}</span>
+        <button onClick={v.again}>again</button>
+      </div>
+    );
+  }
+  afterEach(() => vi.useRealTimers());
+
+  it("follows a pending verdict for two minutes, then stops until asked again", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<Probe pending />);
+    expect(screen.getByText("following")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(VERDICT_FOLLOW_MS - 1));
+    expect(screen.getByText("following")).toBeTruthy();
+    // The control: at the bound it stops.
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText("stopped")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "again" }));
+    expect(screen.getByText("following")).toBeTruthy();
+    // A verdict that lands ends the follow at once, and nothing stops later.
+    rerender(<Probe pending={false} />);
+    expect(screen.getByText("idle")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(VERDICT_FOLLOW_MS * 2));
+    expect(screen.getByText("idle")).toBeTruthy();
   });
 });
 

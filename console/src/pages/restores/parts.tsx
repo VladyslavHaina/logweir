@@ -31,6 +31,8 @@ export function RestoreStatus({ r }: { r: Pick<Restore, "operation" | "coverage"
   const title = `state ${op.state}; verification ${op.verificationState}`;
   if (r.coverage?.covered === false) return <StatusLabel tone="danger" text="Not covered" title={`${title}; complete coverage did not cover this restore`} />;
   if (op.state === "pending" && op.stateReason === "ApprovalNotVerified") return <StatusLabel tone="info" text="Awaiting approval" title={title} />;
+  // DUI-38: finished, its verdict still coming: verifying, never "Done, not verified".
+  if (op.terminal && op.state === "succeeded" && op.verificationState === "pending") return <StatusLabel tone="progress" text="Verifying" title={title} />;
   if (op.terminal && op.state === "succeeded" && !restoreVerified(r)) {
     return <StatusLabel tone="warning" text="Done, not verified" title={`${title}: ${summaryCase(op)}`} />;
   }

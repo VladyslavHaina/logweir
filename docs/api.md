@@ -266,6 +266,11 @@ member's rule is in its schema description. Beyond those:
 - A stage never overrides a terminal phase: `phase`, `exitCode` and `outcome`
   own the outcome. An `outcome` is the scorecard's claim until
   `verifiedSuccess`.
+- A terminal Restore whose scorecard an evidence-fetch Job reads has
+  `verification.state: pending` from its terminal write until the Job relays,
+  including the moment before the Job exists (both keys recorded, an evidence
+  destination named, no verdict yet). Follow it until the verdict lands; the
+  console does, for up to two minutes.
 - `teardown.deleted` and `lastEnforcement.deleted` are lists of names.
 - The Job name, pod name and container state are not published.
 
