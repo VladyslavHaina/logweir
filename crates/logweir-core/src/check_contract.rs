@@ -577,8 +577,11 @@ pub const CAPABILITY_CHECKS: [CheckId; 4] = [
 /// A backup asks its SOURCE three things: does it serve the engine's capture
 /// requests, can each selected topic's configuration be read, and can a
 /// consumer group be typed. A restore asks its TARGET one: does it serve the
-/// engine's replay requests. The other operations dial nothing an engine
-/// would, or name no topic, and ask nothing.
+/// engine's replay requests. A connection test (FX-46) asks the endpoint what
+/// it could be used for: the engine's capture requests (a backup source), its
+/// replay requests (a restore target), and the group types; it names no
+/// topic, so it has no configuration row. The other operations dial nothing
+/// an engine would, and ask nothing.
 #[must_use]
 pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
     match operation {
@@ -588,9 +591,12 @@ pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
             CheckId::ConnectionGroupTypes,
         ],
         CheckOperation::Restore => &[CheckId::TargetEngineProtocol],
-        CheckOperation::DestinationAccess
-        | CheckOperation::SourceConnection
-        | CheckOperation::Switchover => &[],
+        CheckOperation::SourceConnection => &[
+            CheckId::ConnectionEngineProtocol,
+            CheckId::TargetEngineProtocol,
+            CheckId::ConnectionGroupTypes,
+        ],
+        CheckOperation::DestinationAccess | CheckOperation::Switchover => &[],
     }
 }
 
@@ -1394,7 +1400,7 @@ pub struct SwitchoverReadinessRequest {
 
 /// `sourceConnection`.
 ///
-/// ONE FIELD, AND THE ABSENCES ARE THE CONTRACT. `deny_unknown_fields` on a
+/// A CONNECTION, AND THE ABSENCES ARE THE CONTRACT. `deny_unknown_fields` on a
 /// struct that holds a connection and nothing else makes "this check reads no
 /// destination, loads no signer and names no topic" a property of the TYPE. A
 /// plan that tried to smuggle a destination into a connectivity test is refused
@@ -1403,6 +1409,17 @@ pub struct SwitchoverReadinessRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SourceConnectionRequest {
     pub connection: ConnectionPlan,
+    /// FX-46: the capability rows this connection test answers
+    /// ([`capability_checks_for`] `SourceConnection`: whether the engine can
+    /// back up from this endpoint, restore into it, and whether its groups
+    /// can be typed), so the answer can say "usable as a source, not as a
+    /// target". Advisory on this kind: a connection test is not failed by
+    /// what the endpoint cannot be used for. Absent when empty, so a plan
+    /// without it is byte-identical to every plan rendered before the field
+    /// existed; an older runner refuses a plan that carries it
+    /// (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_checks: Vec<CheckId>,
 }
 
 /// `destinationAccess`.
@@ -1634,11 +1651,11 @@ impl CheckRequest {
         match self {
             Self::OperationReadiness(r) => &r.capability_checks,
             Self::RestorePreflight(r) => &r.capability_checks,
+            Self::SourceConnection(r) => &r.capability_checks,
             Self::TopicInventory(_)
             | Self::DestinationAccess(_)
             | Self::EvidenceFetch(_)
             | Self::CatalogSync(_)
-            | Self::SourceConnection(_)
             | Self::SwitchoverReadiness(_) => &[],
         }
     }
@@ -1802,6 +1819,12 @@ fn validate_capability_checks(request: &CheckRequest) -> Result<(), CheckPlanErr
                 CheckOperation::Restore,
                 &r.capability_checks,
                 &r.skip_checks,
+            ),
+            CheckRequest::SourceConnection(r) => (
+                "request.sourceConnection.capabilityChecks",
+                CheckOperation::SourceConnection,
+                &r.capability_checks,
+                &[],
             ),
             _ => return Ok(()),
         };

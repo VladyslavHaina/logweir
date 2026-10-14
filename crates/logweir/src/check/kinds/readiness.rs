@@ -311,7 +311,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 topics_ok = row.state == CheckState::Ready;
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
-            for row in capability_rows(
+            for mut row in capability_rows(
                 &capabilities,
                 &req.connection,
                 probe.as_ref(),
@@ -320,6 +320,12 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 deadline,
                 now,
             ) {
+                // A connection test's capability rows say what the endpoint
+                // could be used for, and never fail the test (FX-46), as on
+                // the `sourceConnection` kind.
+                if req.operation == CheckOperation::SourceConnection {
+                    row.gating = Gating::Advisory;
+                }
                 push(row.with_scope(scope.clone()), &skip, &mut checks);
             }
             if req.operation == CheckOperation::Backup

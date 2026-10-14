@@ -22,6 +22,15 @@
 //! `connection.clusterIdentity`, `configuration.policy` and the three pod rows
 //! from its own side, exactly as it does for a Backup.
 //!
+//! And (FX-46) the capability rows the plan lists in `capabilityChecks`:
+//! `connection.engineProtocol` (can the engine back up FROM this endpoint),
+//! `target.engineProtocol` (can it restore INTO it) and
+//! `connection.groupTypes`, over ONE ApiVersions observation of every broker
+//! the cluster lists. They are ADVISORY here, whatever the Backup and Restore
+//! catalogues say: a connection test answers "can this be reached, and what
+//! can it be used for", so Redpanda (Produce v0-v7) passes its test and says
+//! "usable as a source, not as a target" instead of failing it.
+//!
 //! `connection.topicsDescribable` IS NOT EMITTED, and that is the deliberate
 //! half. Its whole vocabulary is about NAMED topics — `TopicNotFound` is an
 //! existence fact about one name, `TopicNotAuthorized` a visibility fact about
@@ -35,12 +44,18 @@
 //! says so beside this one.
 
 use logweir_core::check_contract::{
-    CheckCode, CheckId, CheckPlanKind, CheckResult, CheckScope, ConnectionPlan,
-    SourceConnectionRequest,
+    CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, CheckScope, CheckState,
+    ConnectionPlan, Gating, SourceConnectionRequest,
 };
 
-use super::{from_broker_failure, runner_contract, Wiring};
+use super::{capability, from_broker_failure, runner_contract, Wiring};
 use crate::check::{catalogue, Deadline, Emission};
+
+/// A capability row as a connection test reports it: advisory (FX-46).
+fn advisory(mut row: CheckOutcome) -> CheckOutcome {
+    row.gating = Gating::Advisory;
+    row
+}
 
 /// The scope every row of this kind carries.
 ///
@@ -72,16 +87,44 @@ pub fn run(req: &SourceConnectionRequest, wiring: &dyn Wiring, deadline: Deadlin
     // that could ask for one would be a control that can report `ready`
     // without dialling.
     match wiring.broker(&req.connection, deadline.remaining()) {
-        Err(f) => checks
-            .push(from_broker_failure(CheckId::ConnectionAuthenticated, &f, now).with_scope(scope)),
+        Err(f) => {
+            checks.push(
+                from_broker_failure(CheckId::ConnectionAuthenticated, &f, now)
+                    .with_scope(scope.clone()),
+            );
+            for id in &req.capability_checks {
+                checks.push(advisory(
+                    capability::blocked(
+                        *id,
+                        "the connection did not authenticate, so this check did not run",
+                        now,
+                    )
+                    .with_scope(scope.clone()),
+                ));
+            }
+        }
         Ok(probe) => {
             let (row, _) = super::readiness::authenticated(
                 CheckId::ConnectionAuthenticated,
                 probe.as_ref(),
-                Some(scope),
+                Some(scope.clone()),
                 now,
             );
+            let authenticated = row.state == CheckState::Ready;
             checks.push(row);
+            // No topic is named, so `topics_ok` is the connection's own
+            // answer; the plan validation refuses a topic-reading row here.
+            for row in super::readiness::capability_rows(
+                &req.capability_checks,
+                &req.connection,
+                probe.as_ref(),
+                &[],
+                (authenticated, authenticated),
+                deadline,
+                now,
+            ) {
+                checks.push(advisory(row.with_scope(scope.clone())));
+            }
         }
     }
 

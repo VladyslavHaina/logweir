@@ -269,3 +269,46 @@ fn the_observed_ranges_are_what_the_cluster_answered() {
     assert!(!after.serves(0, 8), "as Redpanda v26.2.4 answers");
     assert_eq!(after.brokers(), 3);
 }
+
+/// **FX-46: the reader `logweir cluster-probe` dials names the advertised
+/// broker that did not answer**, as a value the probe acts on
+/// (`NotObserved::silent_brokers`), over a real librdkafka connection to the
+/// in-process mock: one broker of three slowed past the budget is broker 2,
+/// silent, and two of three answered. CONTROL: with the delay removed the
+/// reader's view is whole, three of three, and names nobody.
+#[test]
+fn the_probes_reader_names_the_advertised_broker_that_did_not_answer() {
+    use logweir_kafka::rdkafka_reader::RdKafkaReader;
+    use logweir_kafka::reader::{AuthConfig, ClusterReader};
+    let mock = mock_of(3);
+    let servers: Vec<String> = mock
+        .bootstrap_servers()
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    mock.broker_round_trip_time(2, Duration::from_secs(30))
+        .expect("the mock broker is slowed");
+    let reader = RdKafkaReader::connect(&servers, AuthConfig::Plaintext).expect("lazy");
+    let why = reader
+        .broker_view(Duration::from_secs(3))
+        .expect_err("broker 2 never answered");
+    let (answered, listed, silent) = why
+        .silent_brokers()
+        .unwrap_or_else(|| panic!("a listed broker is named silent: {why}"));
+    assert_eq!(
+        (
+            answered,
+            listed,
+            silent.iter().map(|b| b.id).collect::<Vec<_>>()
+        ),
+        (2, 3, vec![2]),
+        "{why}"
+    );
+
+    mock.broker_round_trip_time(2, Duration::ZERO)
+        .expect("the delay is removed");
+    let view = reader
+        .broker_view(Duration::from_secs(10))
+        .expect("all three answer");
+    assert_eq!(view.brokers(), 3);
+}

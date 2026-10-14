@@ -133,6 +133,11 @@ pub const CLUSTER_ID_PREFIX: &str = "cluster-id=";
 /// Interface **I14**'s second line, as a prefix. Matched by name.
 pub const REACHABLE_PREFIX: &str = "reachable=";
 
+/// FX-46's third line, `brokers-answered=<answered>/<listed>`: how many of
+/// the brokers the cluster lists answered the probe on their advertised
+/// addresses. Matched by name; absent from an older runner's log.
+pub const BROKERS_ANSWERED_PREFIX: &str = "brokers-answered=";
+
 /// The one condition type a `KafkaCluster` carries. Declared here rather than in
 /// [`crate::conditions`], which holds the exit-code vocabulary and the terminal
 /// states an execution can reach; a probe's condition is neither.
@@ -149,6 +154,13 @@ pub const REASON_PROBE_REPORTED_UNREACHABLE: &str = "ProbeReportedUnreachable";
 /// about the cluster is known either way.
 pub const REASON_PROBE_OUTPUT_UNREADABLE: &str = "ProbeOutputUnreadable";
 
+/// `Reachable=False` (FX-46): the bootstrap address answered and named the
+/// cluster, and a broker the cluster advertises did not answer the probe on
+/// its advertised address, so no run through this connection can reach every
+/// partition. The probe's `brokers-answered=` line says how many of how many
+/// did; its log names each silent broker.
+pub const REASON_ADVERTISED_BROKERS_UNREACHABLE: &str = "AdvertisedBrokersUnreachable";
+
 /// `Reachable=Unknown`. A probe Job exists and has not finished.
 ///
 /// Written on the creating pass: an empty status is indistinguishable from an
@@ -164,6 +176,7 @@ pub const PROBE_CONDITION_REASONS: &[&str] = &[
     REASON_REACHABLE,
     REASON_PROBE_REPORTED_UNREACHABLE,
     REASON_PROBE_OUTPUT_UNREADABLE,
+    REASON_ADVERTISED_BROKERS_UNREACHABLE,
     REASON_PROBE_RUNNING,
     // The last reading is too old to vouch for. A probe reason, not a terminal
     // state: the next probe that answers replaces it.
@@ -244,6 +257,10 @@ pub struct ProbeReport {
     /// this `KafkaCluster`. Read only beside `reachable=false`; it can never
     /// make a probe read as reachable.
     pub credential_binding_refused: bool,
+    /// FX-46's `brokers-answered=<answered>/<listed>`, when the line is there
+    /// and is two numbers with `answered <= listed`. Read only to NAME a
+    /// `reachable=false`; it never makes a probe read as reachable.
+    pub brokers_answered: Option<(u32, u32)>,
 }
 
 /// Read the two contract lines out of a pod log, by key name, from a bounded
@@ -276,6 +293,13 @@ pub fn probe_report(log: &str) -> ProbeReport {
         credential_binding_refused: runner_log::tail_lines(log)
             .iter()
             .any(|line| line.trim() == refused),
+        brokers_answered: runner_log::key_values(log, BROKERS_ANSWERED_PREFIX)
+            .pop()
+            .and_then(|v| {
+                let (a, l) = v.trim().split_once('/')?;
+                let (a, l) = (a.parse::<u32>().ok()?, l.parse::<u32>().ok()?);
+                (a <= l).then_some((a, l))
+            }),
     }
 }
 
@@ -293,6 +317,9 @@ pub struct Verdict {
     /// The value for `status.clusterId`, written only alongside
     /// `reachable: Some(true)`.
     pub cluster_id: Option<String>,
+    /// FX-46: how many of the advertised brokers answered, for the message of
+    /// an [`REASON_ADVERTISED_BROKERS_UNREACHABLE`] verdict.
+    pub brokers_answered: Option<(u32, u32)>,
 }
 
 /// The verdict for one finished probe, from its log alone.
@@ -310,6 +337,7 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
             reason: REASON_REACHABLE.to_string(),
             reachable: Some(true),
             cluster_id: report.cluster_id.clone(),
+            brokers_answered: report.brokers_answered,
         },
         // The probe refused the credential's binding and dialled nothing: the
         // named reason, not "unreachable".
@@ -318,19 +346,41 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
             reason: crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH.to_string(),
             reachable: Some(false),
             cluster_id: None,
+            brokers_answered: None,
         },
+        // FX-46: the bootstrap address answered and an advertised broker did
+        // not. Named, so an operator is sent to `advertised.listeners` rather
+        // than to the bootstrap address, the one thing that works.
+        Some(false)
+            if report
+                .brokers_answered
+                .is_some_and(|(answered, listed)| answered < listed) =>
+        {
+            Verdict {
+                status: "False",
+                reason: REASON_ADVERTISED_BROKERS_UNREACHABLE.to_string(),
+                reachable: Some(false),
+                // Not recorded: `status.clusterId` is written beside a
+                // reachable cluster only (Global Constraint 18's fourth rail
+                // compares it).
+                cluster_id: None,
+                brokers_answered: report.brokers_answered,
+            }
+        }
         Some(false) => Verdict {
             status: "False",
             reason: REASON_PROBE_REPORTED_UNREACHABLE.to_string(),
             reachable: Some(false),
             // Never carried over: an unreachable probe observed no cluster id.
             cluster_id: None,
+            brokers_answered: None,
         },
         None => Verdict {
             status: "Unknown",
             reason: REASON_PROBE_OUTPUT_UNREADABLE.to_string(),
             reachable: None,
             cluster_id: None,
+            brokers_answered: None,
         },
     }
 }
@@ -346,6 +396,7 @@ pub fn runner_older_verdict() -> Verdict {
         reason: crate::conditions::TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER.to_string(),
         reachable: None,
         cluster_id: None,
+        brokers_answered: None,
     }
 }
 
@@ -364,11 +415,32 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
             logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
         );
     }
+    if let (REASON_ADVERTISED_BROKERS_UNREACHABLE, Some((answered, listed))) =
+        (v.reason.as_str(), v.brokers_answered)
+    {
+        return format!(
+            "the bootstrap address answered and named the cluster, and only {answered} of the \
+             {listed} broker(s) the cluster advertises answered the probe on their advertised \
+             addresses (pod exit {exit_code}), so no backup or restore through this connection \
+             can reach every partition. Every broker must advertise a host and port the runner \
+             pods in this namespace can reach: check advertised.listeners for the listener the \
+             bootstrap address belongs to, or use a bootstrap address of a listener meant for \
+             this network. The probe Job's log names each broker that did not answer"
+        );
+    }
     match v.reachable {
-        Some(true) => format!(
-            "the probe reached a broker and read cluster id {} (pod exit {exit_code})",
-            v.cluster_id.as_deref().unwrap_or("<unnamed>")
-        ),
+        Some(true) => match v.brokers_answered {
+            Some((answered, listed)) => format!(
+                "the probe reached a broker, read cluster id {}, and {answered} of the {listed} \
+                 broker(s) the cluster advertises answered on their advertised addresses (pod \
+                 exit {exit_code})",
+                v.cluster_id.as_deref().unwrap_or("<unnamed>")
+            ),
+            None => format!(
+                "the probe reached a broker and read cluster id {} (pod exit {exit_code})",
+                v.cluster_id.as_deref().unwrap_or("<unnamed>")
+            ),
+        },
         Some(false) => format!(
             "the probe ran and printed `{REACHABLE_PREFIX}false` (pod exit {exit_code}); the \
              broker did not answer, or it refused the credential this cluster names"

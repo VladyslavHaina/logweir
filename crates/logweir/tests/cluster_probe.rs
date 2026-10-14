@@ -19,9 +19,10 @@ use logweir::cli;
 use logweir::exit::ExitCode;
 use logweir::probe::{
     auth_spec, bootstrap_servers, outcome, probe, write_outcome, ProbeArgs, ProbeOutcome,
-    AUTH_MODE_PLAINTEXT, AUTH_MODE_SCRAM_SHA_512, CLUSTER_ID_LINE, DIAL_TIMEOUT, REACHABLE_LINE,
-    SOURCE_PASSWORD_ENV,
+    AUTH_MODE_PLAINTEXT, AUTH_MODE_SCRAM_SHA_512, BROKERS_ANSWERED_LINE, CLUSTER_ID_LINE,
+    DIAL_TIMEOUT, REACHABLE_LINE, SOURCE_PASSWORD_ENV,
 };
+use logweir_kafka::api_versions::{ApiVersions, Broker, NotObserved, Partial};
 use logweir_kafka::reader::KafkaError;
 use support::doubles::Reader;
 
@@ -64,8 +65,31 @@ fn stub_reader(id: Result<String, KafkaError>) -> Reader {
         })
 }
 
+/// A cluster of one broker that answers on its advertised address.
 fn reachable() -> Reader {
     stub_reader(Ok(CLUSTER_ID.to_string()))
+        .on_broker_view(|| Ok(ApiVersions::of_cluster(&[(3, 0, 13)], 1, false)))
+}
+
+/// FX-46: the bootstrap address names the cluster, and the brokers the
+/// cluster lists answer `view`.
+fn bootstrap_only(
+    view: impl Fn() -> Result<ApiVersions, NotObserved> + Send + Sync + 'static,
+) -> Reader {
+    stub_reader(Ok(CLUSTER_ID.to_string())).on_broker_view(view)
+}
+
+/// The `confluent` profile's OFFNET listener, as the observation reads it:
+/// the cluster lists one broker, advertised as `127.0.0.1:1`, and it never
+/// answers.
+fn offnet() -> Result<ApiVersions, NotObserved> {
+    let broker = Broker::new(1, "127.0.0.1", 1);
+    Err(NotObserved::Partial(Partial::NotEveryone {
+        answered: 0,
+        listed: vec![broker.clone()],
+        silent: vec![broker],
+        silent_bootstrap: vec![],
+    }))
 }
 
 fn unreachable() -> Reader {
@@ -128,8 +152,11 @@ fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
     let (out, err) = streams(&o);
     assert_eq!(
         out,
-        format!("{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}true\n"),
-        "interface I14: `cluster-id=<id>` FIRST, `reachable=true` SECOND, and nothing else"
+        format!(
+            "{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}true\n{BROKERS_ANSWERED_LINE}1/1\n"
+        ),
+        "interface I14: `cluster-id=<id>` FIRST, `reachable=true` SECOND, then (FX-46) how \
+         many of the advertised brokers answered, and nothing else"
     );
     assert_eq!(o.code, ExitCode::Ok, "a reached broker is exit 0");
     assert!(
@@ -161,7 +188,9 @@ fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
     );
 }
 
-/// **Exactly two stdout lines, and a third is a defect.**
+/// **The contract lines, and nothing else on stdout.** Two lines when no
+/// broker was asked (no cluster id, or an observation that could not be
+/// made), three when the advertised brokers were (FX-46), and never another.
 ///
 /// Counted as `\n`-terminated lines rather than with `lines().count()`, which
 /// cannot tell a missing final newline from a present one — a runner whose last
@@ -171,23 +200,38 @@ fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
 /// The diagnostic is asserted to reach the STDERR sink, on the same outcome, so
 /// "nothing else on stdout" is proved against a run that had something to say.
 #[test]
-fn the_probe_prints_exactly_two_stdout_lines() {
-    for o in [probe(&reachable(), None), probe(&unreachable(), None)] {
+fn the_probe_prints_the_contract_lines_and_nothing_else() {
+    for (o, n) in [
+        (probe(&reachable(), None), 3),
+        (probe(&unreachable(), None), 2),
+        (probe(&bootstrap_only(offnet), None), 3),
+        (
+            probe(
+                &bootstrap_only(|| Err(NotObserved::Other("no log".into()))),
+                None,
+            ),
+            2,
+        ),
+    ] {
         let (out, err) = streams(&o);
         assert_eq!(
             out.matches('\n').count(),
-            2,
-            "interface I14 is exactly two `\\n`-terminated stdout lines; got {out:?}"
+            n,
+            "interface I14 is exactly {n} `\\n`-terminated stdout lines here; got {out:?}"
         );
         assert!(
             out.ends_with('\n'),
-            "the second line is terminated, so a line-oriented reader does not drop it: {out:?}"
+            "the last line is terminated, so a line-oriented reader does not drop it: {out:?}"
         );
         let lines: Vec<&str> = out.trim_end_matches('\n').split('\n').collect();
-        assert_eq!(lines.len(), 2, "no third line: {out:?}");
+        assert_eq!(lines.len(), n, "no other line: {out:?}");
         assert!(
-            lines[0].starts_with(CLUSTER_ID_LINE) && lines[1].starts_with(REACHABLE_LINE),
-            "the two lines are the two contract keys, in order: {lines:?}"
+            lines[0].starts_with(CLUSTER_ID_LINE)
+                && lines[1].starts_with(REACHABLE_LINE)
+                && lines[2..]
+                    .iter()
+                    .all(|l| l.starts_with(BROKERS_ANSWERED_LINE)),
+            "the lines are the contract keys, in order: {lines:?}"
         );
         // The diagnostic never appears on stdout, at either arm.
         if let Some(d) = o.diagnostic.as_deref() {
@@ -201,6 +245,88 @@ fn the_probe_prints_exactly_two_stdout_lines() {
             );
         }
     }
+}
+
+/// **FX-46: a cluster whose advertised broker does not answer is not
+/// reachable.** The `confluent` profile's OFFNET listener answers the bootstrap
+/// connection and advertises `127.0.0.1:1`: the probe used to read the cluster
+/// id and answer `reachable=true`, and every backup through it failed a
+/// minute later. Now the brokers the cluster lists are asked on their
+/// advertised addresses: `reachable=false`, exit 1, `brokers-answered=0/1`,
+/// and the diagnostic names the broker, its address and
+/// `advertised.listeners`. The cluster id it did read is printed.
+///
+/// CONTROLS: the same cluster with its broker answering is reachable, `1/1`;
+/// a silent BOOTSTRAP address beside brokers that all answered is reachable;
+/// an observation that could not be made leaves the bootstrap's answer
+/// (reachable, two lines) and says so on stderr: not observed is never
+/// "unreachable".
+///
+/// MUTANTS killed: `reachable=true` on a silent listed broker (the defect);
+/// a silent bootstrap address read as an unreachable cluster; "not observed"
+/// read as unreachable (every probe of a cluster whose log could not be read
+/// would flip `status.reachable`).
+#[test]
+fn a_cluster_whose_advertised_broker_does_not_answer_is_not_reachable() {
+    let o = probe(&bootstrap_only(offnet), None);
+    let (out, err) = streams(&o);
+    assert_eq!(
+        out,
+        format!(
+            "{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}false\n{BROKERS_ANSWERED_LINE}0/1\n"
+        )
+    );
+    assert_eq!(o.code, ExitCode::Operational);
+    assert!(
+        err.contains("the bootstrap address answered and named cluster ALLOWED0000000000000000")
+            && err.contains("1 of the 1 broker(s) it advertises did not answer")
+            && err.contains("broker 1 (127.0.0.1:1)")
+            && err.contains("advertised.listeners"),
+        "{err}"
+    );
+
+    // CONTROL: the broker answers.
+    let o = probe(&reachable(), None);
+    assert_eq!((o.code, o.diagnostic.as_deref()), (ExitCode::Ok, None));
+
+    // CONTROL: every listed broker answered; a bootstrap address did not.
+    let o = probe(
+        &bootstrap_only(|| {
+            let broker = Broker::new(1, "kafka", 9092);
+            Err(NotObserved::Partial(Partial::NotEveryone {
+                answered: 1,
+                listed: vec![broker],
+                silent: vec![],
+                silent_bootstrap: vec!["old-host:9092".into()],
+            }))
+        }),
+        None,
+    );
+    let (out, err) = streams(&o);
+    assert_eq!(
+        out,
+        format!(
+            "{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}true\n{BROKERS_ANSWERED_LINE}1/1\n"
+        )
+    );
+    assert_eq!(o.code, ExitCode::Ok);
+    assert!(err.contains("old-host:9092"), "{err}");
+
+    // CONTROL: not observed is not unreachable.
+    let o = probe(
+        &bootstrap_only(|| Err(NotObserved::Other("the queue refused".into()))),
+        None,
+    );
+    let (out, err) = streams(&o);
+    assert_eq!(
+        out,
+        format!("{CLUSTER_ID_LINE}{CLUSTER_ID}\n{REACHABLE_LINE}true\n")
+    );
+    assert_eq!(o.code, ExitCode::Ok);
+    assert!(
+        err.contains("was not established: the queue refused"),
+        "{err}"
+    );
 }
 
 /// **`--marker-topic` is accepted and never asserted.**

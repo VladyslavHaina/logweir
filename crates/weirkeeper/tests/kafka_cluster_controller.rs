@@ -30,9 +30,10 @@ use weirkeeper::controllers::kafka_cluster::{
     action_for, auth_mode_flag, being_deleted, crashed_status_patch, log_reconcile_error,
     name_limit_for_cluster, observed_at, observed_status_patch, probe_job_name, probe_report,
     probe_started_patch, reachable_is_stale, reconcile_cluster, refused_status_patch, runner_argv,
-    runner_job_spec, stale_status_patch, verdict, verdict_recorded, Deferred, KafkaClusterError,
-    ProbeReport, Requeue, CLUSTER_ID_PREFIX, CONDITION_REACHABLE, PROBE_CONDITION_REASONS,
-    PROBE_DEADLINE_SECONDS, PROBE_JOB_PREFIX, PROBE_TTL_SECONDS, REACHABLE_PREFIX,
+    runner_job_spec, stale_status_patch, verdict, verdict_message, verdict_recorded, Deferred,
+    KafkaClusterError, ProbeReport, Requeue, BROKERS_ANSWERED_PREFIX, CLUSTER_ID_PREFIX,
+    CONDITION_REACHABLE, PROBE_CONDITION_REASONS, PROBE_DEADLINE_SECONDS, PROBE_JOB_PREFIX,
+    PROBE_TTL_SECONDS, REACHABLE_PREFIX, REASON_ADVERTISED_BROKERS_UNREACHABLE,
     REASON_PROBE_OUTPUT_UNREADABLE, REASON_PROBE_REPORTED_UNREACHABLE, REASON_PROBE_RUNNING,
     REASON_PROBE_STALE, REASON_REACHABLE, REQUEUE_SECS, RE_PROBE_SECS, SOURCE_PASSWORD_ENV,
     SOURCE_PASSWORD_SECRET_KEY, STALE_AFTER_SECS, VERDICT_RECORDED_ANNOTATION,
@@ -1332,6 +1333,7 @@ fn the_two_lines_are_read_by_name_from_a_bounded_tail() {
         cluster_id: Some(CLUSTER_ID.to_string()),
         credential_binding_refused: false,
         reachable: Some(true),
+        brokers_answered: None,
     };
 
     // In the contract's order.
@@ -1377,6 +1379,74 @@ fn the_two_lines_are_read_by_name_from_a_bounded_tail() {
     assert_eq!(probe_report(&redrafted), expected);
 }
 
+/// **FX-46: a cluster whose advertised broker did not answer is named.** The
+/// probe's third line, `brokers-answered=0/1` beside `reachable=false`, is
+/// `AdvertisedBrokersUnreachable`, `Reachable=False`, `reachable: false`, and
+/// the message sends the operator to `advertised.listeners` with the counts.
+///
+/// CONTROLS: `reachable=false` with no third line (an older runner, or a
+/// bootstrap address that did not answer) is `ProbeReportedUnreachable`, as
+/// before; a malformed or impossible count is not read; and the third line
+/// never makes a probe reachable.
+#[test]
+fn a_cluster_whose_advertised_broker_did_not_answer_is_named() {
+    let log = format!(
+        "{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}false\n{BROKERS_ANSWERED_PREFIX}0/1\n"
+    );
+    let report = probe_report(&log_body(&log));
+    assert_eq!(report.brokers_answered, Some((0, 1)));
+    let v = verdict(&report);
+    assert_eq!(
+        (
+            v.status,
+            v.reason.as_str(),
+            v.reachable,
+            v.cluster_id.as_deref()
+        ),
+        (
+            "False",
+            REASON_ADVERTISED_BROKERS_UNREACHABLE,
+            Some(false),
+            None
+        )
+    );
+    let message = verdict_message(&v, 1);
+    assert!(
+        message.contains("only 0 of the 1 broker(s) the cluster advertises answered")
+            && message.contains("advertised.listeners"),
+        "{message}"
+    );
+    assert!(PROBE_CONDITION_REASONS.contains(&REASON_ADVERTISED_BROKERS_UNREACHABLE));
+
+    // CONTROLS.
+    let older = verdict(&probe_report(&format!(
+        "{CLUSTER_ID_PREFIX}\n{REACHABLE_PREFIX}false\n"
+    )));
+    assert_eq!(older.reason, REASON_PROBE_REPORTED_UNREACHABLE);
+    for bad in ["1/0", "a/b", "1", "-1/2", "", "2/1"] {
+        assert_eq!(
+            probe_report(&format!("{BROKERS_ANSWERED_PREFIX}{bad}\n")).brokers_answered,
+            None,
+            "`{bad}` is not a count of how many of how many"
+        );
+    }
+    let reached = verdict(&probe_report(&format!(
+        "{CLUSTER_ID_PREFIX}{CLUSTER_ID}\n{REACHABLE_PREFIX}true\n{BROKERS_ANSWERED_PREFIX}3/3\n"
+    )));
+    assert_eq!(
+        (reached.reason.as_str(), reached.reachable),
+        (REASON_REACHABLE, Some(true))
+    );
+    assert!(verdict_message(&reached, 0).contains("3 of the 3 broker(s)"));
+    let not_reachable_by_count = verdict(&probe_report(&format!(
+        "{REACHABLE_PREFIX}false\n{BROKERS_ANSWERED_PREFIX}3/3\n"
+    )));
+    assert_eq!(
+        not_reachable_by_count.reason, REASON_PROBE_REPORTED_UNREACHABLE,
+        "a whole count beside `reachable=false` is not this reason"
+    );
+}
+
 /// An EMPTY `cluster-id=` is an absence, and an unparseable `reachable=` is
 /// `None` — never `false`.
 #[test]
@@ -1416,6 +1486,7 @@ fn the_verdict_is_a_function_of_the_log_alone() {
         cluster_id: Some(CLUSTER_ID.to_string()),
         credential_binding_refused: false,
         reachable: Some(true),
+        brokers_answered: None,
     });
     assert_eq!(reachable.reachable, Some(true));
     assert_eq!(reachable.cluster_id.as_deref(), Some(CLUSTER_ID));
@@ -1424,6 +1495,7 @@ fn the_verdict_is_a_function_of_the_log_alone() {
         cluster_id: Some("STALE".to_string()),
         credential_binding_refused: false,
         reachable: Some(false),
+        brokers_answered: None,
     });
     assert_eq!(
         unreachable.cluster_id, None,
@@ -1657,6 +1729,7 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
                 cluster_id: Some(CLUSTER_ID.to_string()),
                 credential_binding_refused: false,
                 reachable: Some(true),
+                brokers_answered: None,
             }),
             0,
             now(),
@@ -1757,15 +1830,16 @@ fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     );
     assert_eq!(
         PROBE_CONDITION_REASONS.len(),
-        12,
-        "the five probe reasons — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
-         ProbeRunning and FX-19's ProbeStale — plus the four PLAT-07.1 saved-connection refusals this loop writes \
+        13,
+        "the six probe reasons — Reachable, ProbeReportedUnreachable, ProbeOutputUnreadable, \
+         FX-46's AdvertisedBrokersUnreachable, ProbeRunning and FX-19's ProbeStale — plus the \
+         four PLAT-07.1 saved-connection refusals this loop writes \
          before any Job exists, plus PROD-01.3's PlainWithoutTls (a resolver refusal) and \
          CredentialBindingMismatch (the probe's own refusal of an unbound credential), plus \
          FX-11's PodCreationForbidden for a probe pod refused at creation; the last seven are \
          the shared terminal states and not a second vocabulary"
     );
-    for r in PROBE_CONDITION_REASONS.iter().skip(5) {
+    for r in PROBE_CONDITION_REASONS.iter().skip(6) {
         assert!(
             TERMINAL_STATES.contains(r),
             "`{r}` is written as a condition reason here, so it must be one of the shared \

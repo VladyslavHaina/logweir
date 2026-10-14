@@ -2907,8 +2907,149 @@ fn source_connection_plan() -> CheckPlan {
     plan_of(CheckRequest::SourceConnection(
         logweir_core::check_contract::SourceConnectionRequest {
             connection: connection(),
+            capability_checks: Vec::new(),
         },
     ))
+}
+
+/// FX-46: [`source_connection_plan`] listing every capability row a
+/// connection test asks, as this build's controller renders it.
+fn source_connection_plan_with_capabilities() -> CheckPlan {
+    plan_of(CheckRequest::SourceConnection(
+        logweir_core::check_contract::SourceConnectionRequest {
+            connection: connection(),
+            capability_checks: logweir_core::check_contract::capability_checks_for(
+                logweir_core::check_contract::CheckOperation::SourceConnection,
+            )
+            .to_vec(),
+        },
+    ))
+}
+
+/// **FX-46: a connection test says what the endpoint can be used for.** On
+/// Redpanda v26.2.4's measured ranges (Produce v0-v7, ListGroups v0-v4) the
+/// test PASSES (the connection answers), and its rows say "usable as a
+/// source, not as a target": `connection.engineProtocol` ready,
+/// `target.engineProtocol` notReady naming Produce v8, `connection.groupTypes`
+/// notReady, all three ADVISORY, over one observation.
+///
+/// CONTROLS: Apache Kafka 4.3.1's ranges make all three ready; a plan that
+/// lists none (an older controller's) gets none and no observation; a
+/// connection that did not authenticate blocks them, `unknown`.
+///
+/// MUTANTS killed: the rows left blocking (a Redpanda connection test would
+/// FAIL); the rows emitted unlisted (an older controller would refuse the
+/// result); the source and target rows swapped (Redpanda would read
+/// "usable as a target").
+#[test]
+fn a_source_connection_check_says_what_the_endpoint_can_be_used_for() {
+    let redpanda = FakeProbe::new()
+        .with_topics(&[("orders", 6)])
+        .with_cluster_api_versions(&REDPANDA_26_2, 1, false);
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().with_probe(redpanda.clone()),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = [
+        "runner.contract",
+        "connection.authenticated",
+        "connection.engineProtocol",
+        "target.engineProtocol",
+        "connection.groupTypes",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        redpanda.api_versions_calls(),
+        1,
+        "one observation serves all three"
+    );
+    let source = run.row(CheckId::ConnectionEngineProtocol);
+    let target = run.row(CheckId::TargetEngineProtocol);
+    let groups = run.row(CheckId::ConnectionGroupTypes);
+    assert_eq!(
+        (source.state, source.code, source.gating),
+        (
+            CheckState::Ready,
+            CheckCode::EngineProtocolSupported,
+            Gating::Advisory
+        )
+    );
+    assert_eq!(
+        (target.state, target.code, target.gating),
+        (
+            CheckState::NotReady,
+            CheckCode::EngineProtocolUnsupported,
+            Gating::Advisory
+        )
+    );
+    assert!(
+        target.message.contains("Produce v8") && target.message.contains("Produce v0-v7"),
+        "{}",
+        target.message
+    );
+    assert_eq!(
+        (groups.state, groups.gating),
+        (CheckState::NotReady, Gating::Advisory)
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready,
+        "the connection answers: a test is not failed by what the endpoint cannot be used for"
+    );
+
+    // CONTROL: Apache Kafka 4.3.1.
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().with_probe(
+            FakeProbe::new()
+                .with_topics(&[("orders", 6)])
+                .with_cluster_api_versions(&KAFKA_4_3, 3, false),
+        ),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        assert_eq!(run.row(id).state, CheckState::Ready, "{id}");
+    }
+
+    // CONTROL: unlisted.
+    let unlisted = FakeProbe::new()
+        .with_topics(&[("orders", 6)])
+        .with_cluster_api_versions(&REDPANDA_26_2, 1, false);
+    let run = drive(
+        &mount(&source_connection_plan()),
+        &FakeWiring::default().with_probe(unlisted.clone()),
+    );
+    assert!(!run.has(CheckId::TargetEngineProtocol));
+    assert_eq!(unlisted.api_versions_calls(), 0);
+
+    // CONTROL: no connection.
+    let run = drive(
+        &mount(&source_connection_plan_with_capabilities()),
+        &FakeWiring::default().broker_fails(CheckCode::BrokerUnreachable, "connection refused"),
+    );
+    for id in [
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ] {
+        let row = run.row(id);
+        assert_eq!(
+            (row.state, row.code, row.gating),
+            (
+                CheckState::Unknown,
+                CheckCode::BlockedByPrerequisite,
+                Gating::Advisory
+            ),
+            "{id}"
+        );
+    }
 }
 
 #[test]

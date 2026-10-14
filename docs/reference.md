@@ -545,6 +545,10 @@ A run or check over a destination can also meet `DestinationRoleNotConfigured`
 ### `KafkaCluster`
 
 `Reachable`: `Reachable` (True); `ProbeReportedUnreachable` (False);
+`AdvertisedBrokersUnreachable` (False: the bootstrap address answered and a
+broker the cluster advertises did not answer the probe on its advertised
+address, FX-46; the probe prints `brokers-answered=<answered>/<listed>` and
+names each silent broker in its log);
 `ProbeOutputUnreadable`, `ProbeRunning`, `ProbeStale`, `PodCreationForbidden`,
 `NoExitCode` and the crash states (Unknown); and the configuration refusals
 `ConnectionConfigInvalid`, `CredentialNotRenderable`, `PlainWithoutTls`,
