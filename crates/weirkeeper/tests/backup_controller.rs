@@ -16019,3 +16019,130 @@ async fn dui5_an_exit_1_backup_says_why_from_its_sealed_failure_detail() {
         "{status}"
     );
 }
+
+/// **DUI-5, LIVE on a compose slot: an exit-1 backup's cause reaches its
+/// status.** The SHIPPED runner (`target/debug/logweir backup run`, given
+/// this Job's `--runner-line-token`) backs up the slot's `logweir.scratch`
+/// over its SCRAM listener with a password the broker refuses: an
+/// operational exit 1 that used to read only "the runner exited 1
+/// (operational)". Its real pod log, both streams, is then the log a Backup
+/// pass reads through `reconcile_backup` (the Kubernetes API is the mock;
+/// the runner and the broker are real). The terminal condition and
+/// `status.progress.message` carry the runner's last error.
+///
+/// CONTROL: the same run without the flag prints no `failure-detail=`, and
+/// its log gives the message no cause (the Job an FX-34 controller built).
+#[tokio::test]
+#[ignore = "needs a compose slot (`eval \"$(e2e/compose/stack-env.sh --slot N)\"`, \
+            `just e2e-up`) and `target/debug/logweir` (`cargo build -p logweir`); run by name"]
+async fn dui5_live_an_exit_1_backups_cause_reaches_its_status() {
+    let port = |var: &str| {
+        std::env::var(var).unwrap_or_else(|_| panic!("{var} is unset: eval stack-env.sh first"))
+    };
+    let (sasl, s3) = (port("LOGWEIR_E2E_SASL_PORT"), port("LOGWEIR_E2E_S3_PORT"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), std::path::PathBuf::from);
+    let bin = target.join("debug").join("logweir");
+    assert!(bin.exists(), "build the runner first: {}", bin.display());
+    let dir = std::env::temp_dir().join(format!("dui5-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = format!("dui5-live-{}", std::process::id());
+    std::fs::write(
+        dir.join("backup.yaml"),
+        format!(
+            "backup_id: {id}\nsource:\n  bootstrap_servers: [\"localhost:{sasl}\"]\n  topics: \
+             [logweir.scratch]\n  auth: {{mode: scramSha512, username: logweir, tls: false}}\n\
+             storage:\n  backend: s3\n  bucket: kafka-backups\n  prefix: {id}\n  region: \
+             us-east-1\n  endpoint: http://localhost:{s3}\n  path_style: true\n  allow_http: \
+             true\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("allowed.json"),
+        r#"{"allowed_cluster_ids": ["SCRATCH-CLUSTER-NOT-THE-SOURCE"]}"#,
+    )
+    .unwrap();
+    // One bounded run of the shipped runner; its pod log is both streams.
+    let run = |token: Option<&LineToken>| -> (Option<i32>, String) {
+        let mut c = std::process::Command::new(&bin);
+        c.args(["backup", "run", "--spec"])
+            .arg(dir.join("backup.yaml"))
+            .arg("--allowed-clusters")
+            .arg(dir.join("allowed.json"))
+            .arg("--signing-key")
+            .arg(root.join("e2e/fixtures/signed/signing.pem"))
+            .arg("--receipt-out")
+            .arg(dir.join("receipt.json"))
+            .env("AWS_EC2_METADATA_DISABLED", "true")
+            .env("AWS_ACCESS_KEY_ID", "minioadmin")
+            .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
+            .env("AWS_REGION", "us-east-1")
+            .env("LOGWEIR_SOURCE_PASSWORD", "dui5-not-the-broker-password")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(t) = token {
+            c.args([
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
+                t.expose_token(),
+            ]);
+        }
+        let mut child = c.spawn().expect("spawn the runner");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("the runner did not exit within 180 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let token = fx34_token();
+    let (code, log) = run(Some(&token));
+    assert_eq!(code, Some(1), "{log}");
+    assert!(!log.contains("dui5-not-the-broker-password"), "{log}");
+    let status = fx43_status(1, &log).await;
+    let message = fx34_message(&status);
+    eprintln!("DUI-5 live status message: {message}");
+    eprintln!(
+        "DUI-5 live progress message: {}",
+        status["progress"]["message"]
+    );
+    assert!(
+        message.starts_with("the runner exited 1 (operational); ")
+            && message.contains("; the runner's last error, cleaned and bounded: kafka: "),
+        "{message}"
+    );
+    assert!(
+        status["progress"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the runner's last error")),
+        "{status}"
+    );
+    assert_eq!(status["exitReason"], "operational");
+
+    // CONTROL: no flag, no detail, and no cause in the message.
+    let (code, log) = run(None);
+    assert_eq!(code, Some(1), "{log}");
+    assert!(!log.contains("failure-detail="), "{log}");
+    let (outcome, seen) = fx34_pass_over(
+        &frozen_backup(),
+        fx34_routes_for(1, 200, log_body(&log), Some(&token)),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    let status = patched_statuses(&seen).remove(0);
+    assert!(!fx34_message(&status).contains("last error"), "{status}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
