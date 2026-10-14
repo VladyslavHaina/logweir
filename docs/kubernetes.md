@@ -1389,8 +1389,8 @@ an ordinary restore only when it is `Available` and `Verified` or
   `spec.syncRequest` after a trust change.
 - `status.counts` does not sum to `total`: `unverified` folds `NotAttempted` and
   `NoEvidence`; `Partial`, `Revoked` and `VerifiedHistorical` are counted in the
-  `Synced` message. `catalog-counts` also carries `unreadableOverReadCap` and
-  `unreadableMalformed`.
+  `Synced` message. `catalog-counts` carries `unreadableOverReadCap` and
+  `unreadableMalformed` when non-zero.
 - A point whose record gave no facts is listed by its point id alone and is
   never selectable. A walk that never started relays nothing; the controller
   reads that as `ResultUnreadable` and keeps the previous view.
@@ -1542,12 +1542,21 @@ uid}`, `gating` (`blocking`, `advisory` or `executionOnly`) and its own
 `connection.topicsReadable` turns blocking `notReady`
 (`TopicAuthorizationFailed`) when the broker's authorized operations (KIP-430)
 say the principal may not READ a named topic, naming the topic and the grant
-(FX-45). Non-secret facts are rendered into
+(FX-45), and (`TopicNotFound`) when the broker does not hold a named topic and
+the principal may Describe the cluster: "topic `x` does not exist on the
+source" (DUI-5). Non-secret facts are rendered into
 the message as `[key=value; …]`; long lists go to the immutable `ConfigMap`
 `status.result.detailsRef`. Messages pass the redaction chokepoint: a credential
 value is removed under a key name at any length, and unkeyed at 40 characters
 and up, except a run of 64 or 128 hex characters, which reads like a digest.
-Print secrets under a key name. Every row code is in
+Print secrets under a key name. A Kafka name in a typed field is not free text:
+the secret-shape rules apply to it and the 40-character rule does not, so a long
+name arrives whole. That covers a legal topic name (`[a-zA-Z0-9._-]`, at most
+249) under a details line's `topic` or `mappedTopicExists`, a row's topic
+sample and a catalog entry's topic `name`, and a group id (printable ASCII, at
+most 255 bytes) under `group`, `target` or a catalog entry's `groupId`.
+Anything else under those keys, and every other string, is redacted as before.
+Every row code is in
 [reference.md](reference.md#preflight-rows).
 
 **Staleness.** `status.binding` records the plan hash, every referent's UID and

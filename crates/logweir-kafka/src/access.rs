@@ -65,7 +65,8 @@ impl ClusterAccess {
 /// name instead of failing in the engine with "kafka-backup backup exited 1".
 ///
 /// Three states, as for the cluster: the broker said yes, the broker said
-/// no, or nothing is known. "Nothing is known" is never read as either.
+/// no, or nothing is known. "Nothing is known" is never read as either. A
+/// fourth, [`TopicRead::Absent`], says the topic is not there at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopicRead {
     /// The broker reported the principal's operations on the topic, and READ
@@ -73,10 +74,17 @@ pub enum TopicRead {
     Granted,
     /// The broker refused it, and why.
     Denied(ReadDenied),
+    /// **The topic does not exist on the cluster** (DUI-5): DescribeTopics
+    /// answered `UNKNOWN_TOPIC_OR_PART` for the name, and DescribeCluster
+    /// reported Describe on the cluster for the same principal, so the answer
+    /// is the cluster's own and not a visibility artefact. A backup of it
+    /// would fail in the engine with "exited 1" and no cause.
+    Absent,
     /// Nothing is known, and why: no set reported (a broker that does not
     /// compute it), a set without DESCRIBE (not a computed answer), the topic
-    /// not found, another per-topic error, no answer for the name, or a
-    /// reader that does not ask.
+    /// not found by a principal not seen to Describe the cluster, another
+    /// per-topic error, no answer for the name, or a reader that does not
+    /// ask.
     Unknown(String),
 }
 
@@ -99,19 +107,54 @@ impl TopicRead {
     pub fn is_denied(&self) -> bool {
         matches!(self, TopicRead::Denied(_))
     }
+
+    /// Whether the broker said the topic does not exist ([`TopicRead::Absent`]).
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        matches!(self, TopicRead::Absent)
+    }
+}
+
+/// Whether any answer is `UNKNOWN_TOPIC_OR_PART`: the one case
+/// [`topic_read`] needs the principal's Describe on the cluster for, so a
+/// reader asks DescribeCluster only then.
+#[must_use]
+pub fn needs_cluster_describe(answers: &[crate::topic_ids::TopicAnswer]) -> bool {
+    answers.iter().any(|a| {
+        matches!(
+            a.error,
+            Some((crate::topic_ids::UNKNOWN_TOPIC_OR_PARTITION, _))
+        )
+    })
 }
 
 /// **One answer's READ verdict.** The error decides first: an entry with an
 /// error carries no operations. `TOPIC_AUTHORIZATION_FAILED` is a refusal;
-/// every other error says nothing about READ.
+/// `UNKNOWN_TOPIC_OR_PART` is [`TopicRead::Absent`] only when
+/// `describes_cluster` is `Some(true)` (DescribeCluster reported Describe on
+/// the cluster for this principal); every other error, and that one without
+/// the cluster's Describe, says nothing about READ (FX-45's review rule).
 #[must_use]
-pub fn topic_read(answer: &crate::topic_ids::TopicAnswer) -> TopicRead {
+pub fn topic_read(
+    answer: &crate::topic_ids::TopicAnswer,
+    describes_cluster: Option<bool>,
+) -> TopicRead {
     use crate::topic_ids::{TOPIC_AUTHORIZATION_FAILED, UNKNOWN_TOPIC_OR_PARTITION};
     match (&answer.error, &answer.operations) {
         (Some((TOPIC_AUTHORIZATION_FAILED, _)), _) => TopicRead::Denied(ReadDenied::NotDescribable),
-        (Some((UNKNOWN_TOPIC_OR_PARTITION, _)), _) => {
-            TopicRead::Unknown("the broker does not hold the topic".to_string())
-        }
+        (Some((UNKNOWN_TOPIC_OR_PARTITION, _)), _) => match describes_cluster {
+            Some(true) => TopicRead::Absent,
+            Some(false) => TopicRead::Unknown(
+                "the broker does not hold the topic, and this principal may not Describe the \
+                 cluster, so that is not taken as the topic's absence"
+                    .to_string(),
+            ),
+            None => TopicRead::Unknown(
+                "the broker does not hold the topic, and whether this principal may Describe the \
+                 cluster was not reported, so that is not taken as the topic's absence"
+                    .to_string(),
+            ),
+        },
         (Some((code, message)), _) => TopicRead::Unknown(format!(
             "DescribeTopics answered error {code} for the topic: {message}"
         )),
@@ -147,10 +190,12 @@ pub fn topic_read(answer: &crate::topic_ids::TopicAnswer) -> TopicRead {
 /// **Every requested name gets exactly one READ verdict**, in request order,
 /// as [`crate::topic_ids::join`] does for IDs: a name with no answer, or two,
 /// is [`TopicRead::Unknown`], never a grant and never a refusal.
+/// `describes_cluster` is [`topic_read`]'s.
 #[must_use]
 pub fn join_reads(
     requested: &[String],
     answers: &[crate::topic_ids::TopicAnswer],
+    describes_cluster: Option<bool>,
 ) -> Vec<(String, TopicRead)> {
     requested
         .iter()
@@ -159,7 +204,7 @@ pub fn join_reads(
                 .iter()
                 .filter(|a| a.name.as_deref() == Some(name.as_str()));
             let read = match (matching.next(), matching.next()) {
-                (Some(answer), None) => topic_read(answer),
+                (Some(answer), None) => topic_read(answer, describes_cluster),
                 (None, _) => {
                     TopicRead::Unknown("DescribeTopics returned no answer for the topic".into())
                 }
@@ -176,6 +221,13 @@ pub fn join_reads(
 mod tests {
     use super::*;
     use crate::topic_ids::TopicAnswer;
+
+    /// [`topic_read`] for a principal DescribeCluster reported Describe on
+    /// the cluster for: every FX-45 arm but the not-found one is unchanged by
+    /// it.
+    fn topic_read_described(a: &TopicAnswer) -> TopicRead {
+        topic_read(a, Some(true))
+    }
 
     fn answer(name: &str, error: Option<i32>, ops: Option<Vec<i32>>) -> TopicAnswer {
         TopicAnswer {
@@ -197,42 +249,42 @@ mod tests {
         // The measured sets: no authorizer gives every topic operation;
         // `Read` alone implies `Describe`; `Describe` alone is not `Read`.
         assert_eq!(
-            topic_read(&answer("t", None, Some(vec![3, 4, 5, 6, 7, 8, 10, 11]))),
+            topic_read_described(&answer("t", None, Some(vec![3, 4, 5, 6, 7, 8, 10, 11]))),
             TopicRead::Granted
         );
         assert_eq!(
-            topic_read(&answer("t", None, Some(vec![3, 8]))),
+            topic_read_described(&answer("t", None, Some(vec![3, 8]))),
             TopicRead::Granted
         );
         assert_eq!(
-            topic_read(&answer("t", None, Some(vec![8, 10]))),
+            topic_read_described(&answer("t", None, Some(vec![8, 10]))),
             TopicRead::Denied(ReadDenied::OperationsExcludeRead)
         );
         // No DESCRIBE in the set: not a computed answer (review M1).
         for set in [vec![], vec![10]] {
             assert!(
                 matches!(
-                    topic_read(&answer("t", None, Some(set.clone()))),
+                    topic_read_described(&answer("t", None, Some(set.clone()))),
                     TopicRead::Unknown(m) if m.contains("reported no Describe on it")
                 ),
                 "{set:?}"
             );
         }
         assert_eq!(
-            topic_read(&answer("t", Some(29), None)),
+            topic_read_described(&answer("t", Some(29), None)),
             TopicRead::Denied(ReadDenied::NotDescribable)
         );
         assert!(
-            matches!(topic_read(&answer("t", None, None)), TopicRead::Unknown(m) if m.contains("KIP-430"))
+            matches!(topic_read_described(&answer("t", None, None)), TopicRead::Unknown(m) if m.contains("KIP-430"))
         );
         assert!(
-            matches!(topic_read(&answer("t", Some(3), None)), TopicRead::Unknown(m) if m.contains("does not hold"))
+            matches!(topic_read(&answer("t", Some(3), None), None), TopicRead::Unknown(m) if m.contains("does not hold"))
         );
         assert!(
-            matches!(topic_read(&answer("t", Some(5), Some(vec![3]))), TopicRead::Unknown(m) if m.contains("error 5"))
+            matches!(topic_read_described(&answer("t", Some(5), Some(vec![3]))), TopicRead::Unknown(m) if m.contains("error 5"))
         );
         assert_eq!(
-            topic_read(&answer("t", None, Some(vec![2]))),
+            topic_read_described(&answer("t", None, Some(vec![2]))),
             TopicRead::Granted
         );
     }
@@ -245,7 +297,7 @@ mod tests {
             answer("a", None, Some(vec![3, 8])),
             answer("z", None, Some(vec![8])),
         ];
-        let got = join_reads(&requested, &answers);
+        let got = join_reads(&requested, &answers, Some(true));
         assert_eq!(got[0], ("a".to_string(), TopicRead::Granted));
         assert!(matches!(&got[1].1, TopicRead::Unknown(m) if m.contains("no answer")));
         assert_eq!(
@@ -261,6 +313,7 @@ mod tests {
                 answer("a", None, Some(vec![8])),
                 answer("a", None, Some(vec![8])),
             ],
+            Some(true),
         );
         assert!(matches!(&twice[0].1, TopicRead::Unknown(m) if m.contains("more than once")));
     }
@@ -285,5 +338,64 @@ mod tests {
         assert_eq!(ClusterAccess::Reported(vec![8]).describe(), Some(true));
         // DescribeConfigs (10) and ClusterAction (9) are not Describe.
         assert_eq!(ClusterAccess::Reported(vec![9, 10]).describe(), Some(false));
+    }
+
+    /// **DUI-5: a topic the broker does not hold is ABSENT only for a
+    /// principal that may Describe the cluster.** Then the backup is refused
+    /// by name before the engine. Without the cluster's Describe (refused, or
+    /// not reported) it stays unknown, as every other describe failure does
+    /// (FX-45's review rule), and the engine's own fetch answers.
+    ///
+    /// KILLS: absence without the cluster's Describe; another error code
+    /// read as absence; DescribeCluster asked when no answer needs it.
+    #[test]
+    fn dui5_a_missing_topic_is_absent_only_when_the_principal_describes_the_cluster() {
+        let missing = answer("nosuch", Some(3), None);
+        assert_eq!(topic_read(&missing, Some(true)), TopicRead::Absent);
+        assert!(TopicRead::Absent.is_absent() && !TopicRead::Absent.is_denied());
+        for (describes, why) in [
+            (Some(false), "may not Describe the cluster"),
+            (None, "was not reported"),
+        ] {
+            assert!(
+                matches!(topic_read(&missing, describes), TopicRead::Unknown(m)
+                    if m.contains("does not hold") && m.contains(why)),
+                "{describes:?}"
+            );
+        }
+        // Every other per-topic error stays unknown WITH the cluster's
+        // Describe (a leader change, a timeout, an unknown code).
+        for code in [5, 6, 7, 41, 100] {
+            assert!(
+                matches!(
+                    topic_read(&answer("t", Some(code), None), Some(true)),
+                    TopicRead::Unknown(_)
+                ),
+                "{code}"
+            );
+        }
+        // One verdict per name, the absent one among them.
+        let got = join_reads(
+            &["orders".to_string(), "nosuch".to_string()],
+            &[
+                answer("nosuch", Some(3), None),
+                answer("orders", None, Some(vec![3, 8])),
+            ],
+            Some(true),
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("orders".to_string(), TopicRead::Granted),
+                ("nosuch".to_string(), TopicRead::Absent)
+            ]
+        );
+        // DescribeCluster is needed only when a name answered "not held".
+        assert!(needs_cluster_describe(std::slice::from_ref(&missing)));
+        assert!(!needs_cluster_describe(&[
+            answer("t", Some(29), None),
+            answer("u", None, Some(vec![3, 8])),
+            answer("v", Some(5), None),
+        ]));
     }
 }

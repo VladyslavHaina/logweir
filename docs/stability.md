@@ -365,10 +365,12 @@ connection in flight across the upgrade (a check Job the older controller
 created) reports none of the three capability rows this controller expects,
 so that one `Preflight` reads `unknown`; run the test again.
 `connection.topicsReadable` may now be blocking `notReady`
-(`TopicAuthorizationFailed`), a code and a gating every controller reads.
+(`TopicAuthorizationFailed`, or `TopicNotFound` for a named topic the source
+does not hold), codes and a gating every controller reads.
 `backup run` and `drill run` refuse, by the row's name, what the broker
 reports the principal may not READ and what the endpoint was seen not to
-serve, before the engine; not observed is never a refusal. No signed document
+serve, before the engine (`backup run` also a named topic the source does not
+hold); not observed is never a refusal. No signed document
 changes.
 
 ### Values an older build cannot list (theme A): delete them before a rollback

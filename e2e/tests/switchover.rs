@@ -2390,3 +2390,170 @@ fn the_review_reads_every_position_before_the_switchover() {
         }),
     );
 }
+
+// ============================================================ DUI-26: long names
+
+/// A name of exactly 60 characters, unique to this run: `base` with the run's
+/// nonce, padded with `x`.
+fn sixty(base: &str, n: &str) -> String {
+    let mut s = format!("{base}-{n}-");
+    while s.len() < 60 {
+        s.push('x');
+    }
+    s.truncate(60);
+    s
+}
+
+/// **DUI-26, live: a 60-character consumer group over a 60-character topic is
+/// reviewed by name and switched over.** Each name is one run of the long-run
+/// rule's alphabet, which used to turn it into `[redacted]` in the review's
+/// details, so every plan the console built from them was refused
+/// `PlanDisagreesWithMapping`.
+///
+/// The review's details, through the controller's own pass over them
+/// (`redact_detail_lines`), name the group, its target and the restored topic
+/// byte for byte. The plan is then built FROM THE DETAILS, as the console's
+/// `planDocument` builds it (source, target, topic, every mapped offset,
+/// `expected: none`), and it equals the plan `logweir switchover plan` writes
+/// from the mapping. Approved and run, it applies, and the broker reads the
+/// mapped offsets back.
+///
+/// CONTROL: the free-text field of the same review still passes the
+/// redactor (the core row holds the secret-shaped case).
+#[test]
+#[ignore = "needs the compose stack; see the module doc"]
+fn dui26_a_sixty_character_group_and_topic_are_reviewed_and_switched_over() {
+    use logweir_core::check_contract::{redact_detail_lines, CheckId, Stream, REDACTED};
+    use logweir_core::switchover::{Expected, PlanGroup, PlanTopic};
+    let n = nonce();
+    let topic = sixty("dui26-settlement-ledger-eu-west-orders", &n);
+    let group = sixty("dui26-billing-reconciliation-consumer-eu-west-1", &n);
+    assert_eq!((topic.len(), group.len()), (60, 60));
+    make_topic(&topic, 2, &[]);
+    for p in 0..2 {
+        produce(&topic, p, 0, 50);
+    }
+    commit(&group, &[(&topic, 0, 40), (&topic, 1, 40)]);
+    let b = backup(&format!("dui26-{n}"), &topic, &[&group]);
+    let r = restore(
+        &restore_spec(&b, &topic, &format!("d26-{n}-"), true, ""),
+        "dui26",
+    );
+    assert_eq!(r.out.status.code(), Some(0), "{}", text(&r.out));
+    let target = restored_topic(&r, &topic);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
+
+    // The review, and the controller's pass over its details.
+    let (out, relay) = review(&review_plan(&r, &sc_key), "dui26-review");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let raw =
+        String::from_utf8(relay.stream(Stream::Details).expect("details").to_vec()).expect("utf-8");
+    let stored = redact_detail_lines(&raw);
+    assert!(!stored.contains(REDACTED), "{stored}");
+    let lines: Vec<Value> = stored
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{stored}");
+    assert_eq!(lines[0]["group"], group.as_str(), "{stored}");
+    assert_eq!(lines[0]["target"], group.as_str(), "{stored}");
+    assert_eq!(lines[0]["topic"], target.as_str(), "{stored}");
+    let gr = review_row(&relay, CheckId::SwitchoverGroups);
+    assert_eq!(
+        gr.facts.get("exact").map(String::as_str),
+        Some("2"),
+        "{}",
+        gr.message
+    );
+
+    // The plan, from a details line, as the console builds it.
+    let from_details = |line: &Value| {
+        let mut offsets = BTreeMap::new();
+        for p in line["positions"].as_array().expect("positions") {
+            assert_eq!(p["class"], "exact", "{p}");
+            offsets.insert(
+                u32::try_from(p["partition"].as_u64().unwrap()).unwrap(),
+                p["offset"].as_i64().unwrap(),
+            );
+        }
+        vec![PlanGroup {
+            source: line["group"].as_str().unwrap().to_string(),
+            target: line["target"].as_str().unwrap().to_string(),
+            topics: BTreeMap::from([(
+                line["topic"].as_str().unwrap().to_string(),
+                PlanTopic {
+                    offsets,
+                    approximate: Vec::new(),
+                    expected: Expected::none(),
+                },
+            )]),
+        }]
+    };
+    let cli = plan(&r, &sc_bytes, &[&group], "dui26-cli");
+
+    // CONTROL, the defect live: the controller's OLD pass (every rule over
+    // the whole document) names the group and the topic `[redacted]`, and a
+    // switchover planned from it is refused `PlanDisagreesWithMapping`,
+    // nothing committed.
+    let old = logweir_core::check_contract::apply_rules(
+        &raw,
+        logweir_core::check_contract::redaction_rules(),
+    );
+    let old_line: Value = serde_json::from_str(old.lines().next().unwrap()).unwrap();
+    assert_eq!(old_line["group"], REDACTED, "{old}");
+    assert_eq!(old_line["topic"], REDACTED, "{old}");
+    let mut redacted = cli.plan.clone();
+    redacted.groups = from_details(&old_line);
+    let bad = write_plan(&redacted, "dui26-redacted");
+    let bad_approval = approve(&bad.path, "Switchover", "dui26-redacted");
+    let refused = switchover(&r, &sc_key, &bad, &bad_approval);
+    assert_ne!(refused.out.status.code(), Some(0), "{}", text(&refused.out));
+    assert!(
+        text(&refused.out).contains("PlanDisagreesWithMapping"),
+        "{}",
+        text(&refused.out)
+    );
+    assert_eq!(committed(&group, &target, 2), vec![None, None]);
+
+    let from_details = from_details(&lines[0]);
+    assert_eq!(
+        from_details, cli.plan.groups,
+        "the plan the review's names build is the mapping's, byte for byte"
+    );
+    let mut built = cli.plan.clone();
+    built.groups = from_details;
+    let p = write_plan(&built, "dui26");
+    let approval = approve(&p.path, "Switchover", "dui26");
+    let run = switchover(&r, &sc_key, &p, &approval);
+    assert_eq!(run.out.status.code(), Some(0), "{}", text(&run.out));
+    let rec = run.record.as_ref().expect("a signed record");
+    assert_eq!(rec.outcome, "Succeeded", "{rec:?}");
+    assert_eq!(
+        outcomes(&run),
+        vec![(group.clone(), "applied".to_string(), None)]
+    );
+    let mapping = &r.mapping.as_ref().expect("a mapping").1;
+    let want: Vec<Option<i64>> = (0..2u32)
+        .map(|p| {
+            mapping.groups[&group]
+                .entries
+                .iter()
+                .find(|e| e.partition == p)
+                .and_then(|e| e.target_offset)
+        })
+        .collect();
+    assert_eq!(
+        committed(&group, &target, 2),
+        want,
+        "the broker reads the mapped offsets"
+    );
+    write_evidence(
+        "dui26",
+        &json!({
+            "group": group, "topic": topic, "restoredTopic": target,
+            "reviewDetails": lines, "record": rec,
+            "control": {"oldPassDetails": old_line, "exit": refused.out.status.code()},
+            "committed": committed(&group, &target, 2),
+        }),
+    );
+}

@@ -1118,4 +1118,59 @@ mod tests {
         assert_eq!(absent.code, CheckCode::RestoreEvidenceRefused);
         assert_eq!(absent.state, CheckState::NotReady);
     }
+
+    /// **DUI-26: the review's details carry a 60-character group and topic
+    /// whole**, through the one place the stream is assembled
+    /// (`restore::details_stream`), so a plan the console builds from them
+    /// names the mapping's groups and topics byte for byte. CONTROL: a
+    /// secret-shaped run in the line's free-text `message` is still
+    /// redacted.
+    ///
+    /// KILLS: the stream redacting the typed names as free text (the
+    /// defect: every name of 40 or more such characters read `[redacted]`).
+    #[test]
+    fn dui26_the_reviews_details_keep_long_names_and_redact_free_text() {
+        let group = format!(
+            "dui26-billing-reconciliation-consumer-eu-west-1-{}",
+            "g".repeat(12)
+        );
+        let topic = format!("dui26r-settlement-ledger-eu-west-orders-{}", "t".repeat(20));
+        assert_eq!((group.len(), topic.len()), (60, 60));
+        let secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+        let reading = GroupReading {
+            group: Selected {
+                source: group.clone(),
+                target: group.clone(),
+            },
+            refusal: Some((
+                "GroupActive".to_string(),
+                format!("the broker said {secret}"),
+            )),
+            classified: None,
+            absent: true,
+            already_applied: false,
+            topics: BTreeMap::from([(
+                topic.clone(),
+                vec![PositionReading {
+                    partition: 0,
+                    offset: Some(40),
+                    class: EXACT.to_string(),
+                    reason: None,
+                    committed: None,
+                }],
+            )]),
+        };
+        let stream = super::super::restore::details_stream(&detail_lines(&[reading]));
+        let text = String::from_utf8(stream).expect("utf-8");
+        let line: serde_json::Value = serde_json::from_str(text.trim_end()).expect("one JSON line");
+        assert_eq!(line["group"], group.as_str(), "{text}");
+        assert_eq!(line["target"], group.as_str(), "{text}");
+        assert_eq!(line["topic"], topic.as_str(), "{text}");
+        assert_eq!(line["positions"][0]["offset"], 40, "{text}");
+        assert_eq!(
+            line["message"],
+            format!("the broker said {}", logweir_core::check_contract::REDACTED),
+            "{text}"
+        );
+    }
 }

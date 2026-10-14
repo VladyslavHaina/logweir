@@ -959,6 +959,12 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
     // The claim outcome, carried to `exiting` so it is the LAST
     // stdout line — the only place a controller can read it (I9's argument).
     let failure_reason = outcome.as_ref().err().and_then(BackupError::failure_reason);
+    // DUI-5: the error an exit-1 run ended on, for its sealed
+    // `failure-detail=` line (`exiting`).
+    let failure_detail = match &outcome {
+        Err(e) if e.exit_code() == ExitCode::Operational => Some(e.to_string()),
+        _ => None,
+    };
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -988,6 +994,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         code,
         refusal_message.as_deref(),
         failure_reason,
+        failure_detail.as_deref(),
         evidence_keys,
         catalog_key,
         receipt_sha256,
@@ -1053,11 +1060,13 @@ fn summary_line(o: &BackupOutcome) -> String {
 /// `meaning` strings are the operator-facing description of what happened, and
 /// "the drill passed" / "a drill ran and did not pass" are false on this
 /// command.
+#[allow(clippy::too_many_arguments)]
 fn exiting(
     run_id: &str,
     code: ExitCode,
     refusal_message: Option<&str>,
     failure_reason: Option<&str>,
+    failure_detail: Option<&str>,
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
     receipt_sha256: Option<String>,
@@ -1112,6 +1121,12 @@ fn exiting(
             logweir_core::refusal_detail::RefusingRun::Backup,
             refusal_message.unwrap_or(""),
         );
+    }
+    // DUI-5: why an exit-1 run failed, SEALED only and first in the sealed
+    // block (`FinalLines::failure_detail`): the plain lines below are
+    // unchanged for an older controller.
+    if let (ExitCode::Operational, Some(error)) = (code, failure_detail) {
+        last.failure_detail(error);
     }
     // `failure-reason=` as the FINAL plain line of an exit 1 or 4 whose state
     // is more specific than its code, for the same reason I9's line is last.

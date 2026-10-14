@@ -211,7 +211,8 @@ is left out of the request hash when absent, so an old-shape retry replays.
 `expectedGeneration` (`PUT …/schedules/{name}`, `:update-access`) or
 `expectedResourceVersion` (`:set-suspension`, on the whole object, so a
 controller status write in between is `412 precondition_failed`: read and
-resend).
+resend). The precondition is checked before any field rule, so a stale write
+is always `412` and nothing is written.
 
 **Lists** default to `limit=50`, at most 200: `{items, page: {limit,
 nextCursor, snapshot}}`. A cursor is MAC-authenticated with the cursor key and
@@ -297,7 +298,7 @@ the schedule carries `RetentionReportWithdrawn`. Use a `RetentionPolicy`.
 and `topicSelection`, and **a field omitted is removed**. It changes the future
 only: an existing `Backup` keeps its copied policy and its Job.
 
-- `sourceRef` is refused before anything is read: `422`,
+- `sourceRef` is refused before anything is written: `422`,
   `sourceRef: field_immutable`. A different cluster is a different schedule.
 - A different current generation, or an edit landing between read and write, is
   `412 precondition_failed`. A console that sees `generation` absent asks for a
@@ -533,7 +534,10 @@ withdrawn in v1 (release-notes item 75).
 
 ### Destination access test
 
-`:test` probes every configured grant. With `writeProbe: createOnlyMarker` it
+`:test` with no `roles` probes every role a run uses this destination's
+credentials for: `archiveWrite`, `archiveRead` and `evidenceWrite` (unset, the
+last two use the `archiveWrite` credential, and the `archiveRead` list dials
+it), and `evidenceRead` when it is set. With `writeProbe: createOnlyMarker` it
 creates `logweir/readiness/<uid>.json` as the `evidenceWrite` grant, which
 answers `destination.evidenceWritable`; with `disabled` the row is
 `WriteNotProbed`. `destination.evidenceReadable` is the `evidenceRead` grant's

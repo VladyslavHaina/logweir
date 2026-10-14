@@ -38,7 +38,7 @@ Neither returns 2 or 4.
 |---|---|---|---|---|
 | 0 | `Succeeded` | `ok` | `Complete=True`, `Ok` | Archive captured, receipt signed |
 | 0 | `Succeeded` | `ok` | `Complete=True`, `EmptyCapture` | Every selected partition was empty; no `windowCovered`, not a recovery point |
-| 1 | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off the runner's `failure-reason=` line | `Failed=True`, `Operational` | Could not run or continue; no artifact. `ExecutionAlreadyClaimed`: an earlier run of this execution reached the engine, or its set already exists |
+| 1 | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off the runner's `failure-reason=` line | `Failed=True`, `Operational` | Could not run or continue; no artifact. The message ends with the runner's last error, off its sealed `failure-detail=` line. `ExecutionAlreadyClaimed`: an earlier run of this execution reached the engine, or its set already exists |
 | 2 | `Failed` | `drill-not-pass` | `Failed=True`, `DrillNotPass` | Not produced by `backup run`; one vocabulary across both paths |
 | 3 | `Failed` | the state on `refusal-reason=`, or `GuardRefusedUnknownReason` | `Failed=True`, `GuardRefused` | A guard refused; the message ends with the runner's reason |
 | 4 | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` | `Failed=True`, `SigningOrLock` | Nothing uploaded. `ExecutionClaimUnproven`: the store refused the claim, does not enforce conditional create, or the archive could not be read for a reason no retry changes |
@@ -123,6 +123,14 @@ it holds (`logweir_core::runner_line::one_line`).
   is not read.
 - **Retention** prints every `retention-*` line once, at the end, through the
   same block, and its error text on one line.
+- **`failure-detail=` is sealed only.** At exit 1 a `Backup` or `Restore`
+  runner prints why, sealed and FIRST in its final block, with no plain copy,
+  so the plain lines an older controller reads are unchanged. The sentence is
+  the error the run ended on (its first line and, for an engine failure, the
+  engine's last line saying "error"), cleaned and cut to 760 bytes as a
+  `refusal-detail=` message is. The controller reads it only under its
+  Job's `--runner-line-token`, cleans it again and appends it to the
+  `Failed` message; without the flag nothing is printed.
 
 - **The controller reads only the lines sealed with its Job's token**
   (`weirkeeper::runner_log::own_lines`, constant-time comparison), wherever
@@ -156,6 +164,7 @@ it holds (`logweir_core::runner_line::one_line`).
 | `catalog-key=<key>` | Exit 0, when the catalog record was written | — |
 | `receipt-sha256=sha256:<64 hex>` | Exit 0 | `status.evidence.receiptSha256` |
 | `receipt-key=<key>` then `sidecar-key=<key>` | Exit 0, the final two lines (interface I7) | `status.evidence.receiptKey`, `sidecarKey` |
+| `failure-detail=<sentence>` | Exit 1, sealed only, first in the final block; at most 760 bytes | The `Failed` message ("the runner's last error, cleaned and bounded: …") |
 | `failure-reason=ExecutionAlreadyClaimed` / `ExecutionClaimUnproven` | Exit 1 / exit 4, the final line | `status.exitReason` |
 | `refusal-detail={…}` then `refusal-reason=<State>` | Exit 3, the last two lines | The `Failed` message; `status.exitReason` |
 
@@ -171,6 +180,7 @@ it holds (`logweir_core::runner_line::one_line`).
 | `scorecard-key=logweir/drills/<run_id>.json` | Exit 0 and exit 2 | `status.evidence` |
 | `sidecar-key=logweir/drills/<run_id>.sig` | Exit 0 and exit 2 | `status.evidence` |
 | `offset-report-key=logweir/drills/<run_id>.offsets.json` | Exit 0 and 2, only when the engine wrote an offset report | `status.evidence` |
+| `failure-detail=<sentence>` | Exit 1, sealed only, first in the final block; at most 760 bytes | The `Failed` message ("the runner's last error, cleaned and bounded: …") |
 | `target-topics-appeared={…}` then `failure-reason=TargetTopicAppeared` / `CreatedTopicsLeft` | Exit 1 from a stopped creation step, the last two lines; at most 76 KB | `status.targetTopicsAppeared`, `status.exitReason` |
 | `refusal-detail={…}` then `refusal-reason=<State>` | Exit 3, the last two lines | The `Failed` message; `status.exitReason` |
 
@@ -638,7 +648,7 @@ also `skipped`. `authority` is `controller`, `checkJob` or `podStatus`.
 | `connection.authenticated` | blocking | The broker accepted the credential |
 | `connection.clusterIdentity` | blocking | The broker's cluster id is the recorded one; a backup source is not an allowlisted target |
 | `connection.topicsDescribable` | blocking | Every named topic exists and may be described |
-| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); otherwise `unknown`, proved only by the run, with what the broker reported |
+| `connection.topicsReadable` | execution-only; blocking when refused | The broker's authorized operations (KIP-430) for the principal include READ on every named topic. A topic it reports this principal may not READ (or may not even Describe) is `notReady` (`TopicAuthorizationFailed`), blocking, naming the topic and the grant (FX-45); a topic it does not hold, for a principal that may Describe the cluster, is `notReady` (`TopicNotFound`), blocking, naming it (DUI-5); otherwise `unknown`, proved only by the run, with what the broker reported |
 | `connection.engineProtocol` | blocking; advisory on a `SourceConnection` | The source serves the request versions the engine's backup sends |
 | `connection.topicConfigsReadable` | advisory | DescribeConfigs on the named topics |
 | `connection.groupTypes` | advisory | The group listing names group types (ListGroups v5) |

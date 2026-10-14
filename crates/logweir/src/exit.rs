@@ -109,11 +109,26 @@ pub fn print_refusal_to<W: std::io::Write>(
 /// line whatever it holds (a key built from a plan's storage prefix included).
 #[derive(Debug, Default)]
 pub struct FinalLines {
+    /// Sealed only, FIRST in the sealed block ([`FinalLines::failure_detail`]).
+    sealed_first: Vec<String>,
     lines: Vec<String>,
     vouched: Vec<String>,
 }
 
 impl FinalLines {
+    /// **Why an exit-1 run failed** (DUI-5): the sealed
+    /// `failure-detail=` line for `error`
+    /// (`logweir_core::runner_line::failure_detail_line`). Sealed only, and
+    /// FIRST in the sealed block, so a reader's place rule over the sealed
+    /// lines (a Restore's `failure-reason=` last, `target-topics-appeared=`
+    /// before it) still holds, and the plain lines an older controller reads
+    /// are byte for byte what they were. Without FX-43's token nothing is
+    /// printed: the error is already on stderr.
+    pub fn failure_detail(&mut self, error: &str) {
+        self.sealed_first
+            .extend(logweir_core::runner_line::failure_detail_line(error));
+    }
+
     /// One line a controller reads.
     pub fn push(&mut self, line: impl Into<String>) {
         self.lines.push(line.into());
@@ -140,13 +155,27 @@ impl FinalLines {
     /// The block's bytes for exit `code`: pure, for the tests.
     #[must_use]
     pub fn render(&self, code: ExitCode) -> String {
-        let sealed: Vec<String> = self.lines.iter().chain(&self.vouched).cloned().collect();
-        logweir_core::runner_line::final_block_with(
-            scoped_token(),
-            code as u8,
-            &sealed,
-            &self.lines,
-        )
+        self.render_with(scoped_token(), code)
+    }
+
+    /// [`FinalLines::render`] under `token` rather than this process's.
+    #[must_use]
+    pub fn render_with(
+        &self,
+        token: Option<(
+            &logweir_core::refusal_detail::LineToken,
+            logweir_core::runner_line::LineScope,
+        )>,
+        code: ExitCode,
+    ) -> String {
+        let sealed: Vec<String> = self
+            .sealed_first
+            .iter()
+            .chain(&self.lines)
+            .chain(&self.vouched)
+            .cloned()
+            .collect();
+        logweir_core::runner_line::final_block_with(token, code as u8, &sealed, &self.lines)
     }
 
     /// Print the block on stdout, in one write. `expect`-free: a closed stdout
@@ -314,6 +343,59 @@ fn scoped_token() -> Option<(
 /// process did not write (a plan's `source.backup`, a broker's error, an
 /// object key) can never START A LINE of the pod log a controller reads by key.
 pub use logweir_core::runner_line::one_line;
+
+#[cfg(test)]
+mod failure_detail_tests {
+    use super::{ExitCode, FinalLines};
+    use logweir_core::runner_line::{sealed, unseal, LineScope};
+
+    /// **DUI-5: an exit-1 block carries the sealed `failure-detail=` FIRST,
+    /// and nothing else changes.** A Restore's stopped creation step keeps its
+    /// place rule (`failure-reason=` the last sealed line,
+    /// `target-topics-appeared=` before it), and the plain lines are the ones
+    /// an older controller always read. CONTROL: without FX-43's token (none,
+    /// or FX-34's) the block is the plain lines alone, with no
+    /// `failure-detail=` anywhere.
+    ///
+    /// KILLS: the detail printed plain (an older reader's tail changes); the
+    /// detail sealed after `failure-reason=` (the Restore place rule breaks).
+    #[test]
+    fn dui5_the_failure_detail_is_sealed_only_and_first() {
+        let t = logweir_core::refusal_detail::LineToken::parse(&"3c".repeat(20))
+            .expect("forty hex digits");
+        let mut last = FinalLines::default();
+        last.failure_detail("engine: operational: exited 1\nstderr: ERROR the store refused");
+        last.push("target-topics-appeared={}");
+        last.push("failure-reason=CreatedTopicsLeft");
+        let block = last.render_with(Some((&t, LineScope::EveryLine)), ExitCode::Operational);
+        let own: Vec<&str> = block.lines().filter_map(|l| unseal(&t, l)).collect();
+        assert_eq!(
+            own,
+            vec![
+                "failure-detail=engine: operational: exited 1: ERROR the store refused",
+                "target-topics-appeared={}",
+                "failure-reason=CreatedTopicsLeft",
+                "runner-exit=1",
+            ]
+        );
+        let plain: Vec<&str> = block.lines().filter(|l| unseal(&t, l).is_none()).collect();
+        assert_eq!(
+            plain,
+            vec![
+                "target-topics-appeared={}",
+                "failure-reason=CreatedTopicsLeft"
+            ]
+        );
+        assert!(block.starts_with(&sealed(&t, own[0])));
+        for token in [None, Some((&t, LineScope::RefusalDetail))] {
+            let block = last.render_with(token, ExitCode::Operational);
+            assert_eq!(
+                block,
+                "target-topics-appeared={}\nfailure-reason=CreatedTopicsLeft\n"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod sealing_lines_tests {

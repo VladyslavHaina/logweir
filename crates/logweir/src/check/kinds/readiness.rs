@@ -233,13 +233,32 @@ pub const DETAIL_VALUE_MAX_CHARS: usize = 256;
 /// a whole key.
 #[must_use]
 fn sample_value(name: &str) -> String {
-    let redacted = crate::check::redact_path(name);
+    // DUI-26: a Kafka topic name, or `<topic>/<partition>`, is a NAME: it
+    // passes the secret-shape rules and not the long-run rule; anything else
+    // (a segment key) is redacted as a key path.
+    let redacted = if is_topic_sample(name) {
+        logweir_core::check_contract::redact_name(name)
+    } else {
+        crate::check::redact_path(name)
+    };
     if redacted.chars().count() <= DETAIL_VALUE_MAX_CHARS {
         return redacted;
     }
     let mut out: String = redacted.chars().take(DETAIL_VALUE_MAX_CHARS - 1).collect();
     out.push('…');
     out
+}
+
+/// Whether a sample is a legal Kafka topic name, or `<topic>/<partition>`
+/// over one (a selected partition's sample).
+fn is_topic_sample(value: &str) -> bool {
+    use logweir_core::check_contract::is_relayable_topic_name;
+    is_relayable_topic_name(value)
+        || value.rsplit_once('/').is_some_and(|(topic, partition)| {
+            is_relayable_topic_name(topic)
+                && !partition.is_empty()
+                && partition.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 /// Run one `operationReadiness`.
@@ -488,6 +507,10 @@ pub const READ_DENIED_REMEDY: &str =
 /// passed every Preflight and failed a minute later in the engine with
 /// "kafka-backup backup exited 1". Now:
 ///
+/// * a selected topic does not exist ([`logweir_kafka::access::TopicRead::Absent`]:
+///   `UNKNOWN_TOPIC_OR_PART` from a principal that may Describe the cluster):
+///   BLOCKING `notReady`, `TopicNotFound`, "topic `x` does not exist on the
+///   source" (DUI-5);
 /// * the broker REPORTS that READ is missing on a selected topic (its
 ///   authorized operations exclude READ, or it refuses to describe the topic
 ///   at all): BLOCKING `notReady`, `TopicAuthorizationFailed`, naming the
@@ -528,6 +551,40 @@ pub fn topics_readable(
             )
         }
     };
+    // DUI-5: a named topic the source does not hold, from a principal that
+    // may Describe the cluster. The strongest finding decides the row, as in
+    // `topics_describable`: a plan that cannot run before one that may not
+    // read.
+    let absent: Vec<String> = reads
+        .iter()
+        .filter(|(_, r)| r.is_absent())
+        .map(|(t, _)| t.clone())
+        .collect();
+    if !absent.is_empty() {
+        let which = if absent.len() == 1 {
+            format!("topic `{}` does not exist on the source", absent[0])
+        } else {
+            format!(
+                "{} of {} selected topic(s) do not exist on the source",
+                absent.len(),
+                topics.len()
+            )
+        };
+        return catalogue::outcome_gated(
+            CheckId::ConnectionTopicsReadable,
+            CheckState::NotReady,
+            CheckCode::TopicNotFound,
+            Gating::Blocking,
+            now,
+        )
+        .with_message(&format!(
+            "{which} (the broker answered UNKNOWN_TOPIC_OR_PARTITION, and this principal may \
+             Describe the cluster), so a backup of it would fail: `logweir backup run` refuses \
+             it by name before its engine starts"
+        ))
+        .with_remedy(remedy_for(CheckCode::TopicNotFound))
+        .with_detail(detail(&absent));
+    }
     let denied: Vec<String> = reads
         .iter()
         .filter(|(_, r)| r.is_denied())

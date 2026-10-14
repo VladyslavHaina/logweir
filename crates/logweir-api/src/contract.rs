@@ -2097,7 +2097,10 @@ pub struct UpdateDestinationAccessRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TestDestinationRequest {
-    /// The roles to exercise, 1 to 4. Absent means every configured role.
+    /// The roles to exercise, 1 to 4. Absent means every role a run uses this
+    /// destination's credentials for: `archiveWrite`, `archiveRead` and
+    /// `evidenceWrite` (unset, the last two use the archive-write credential),
+    /// and `evidenceRead` when it is configured.
     #[serde(default)]
     pub roles: Option<Vec<DestinationRoleDto>>,
 }

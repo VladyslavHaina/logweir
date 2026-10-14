@@ -572,9 +572,10 @@ pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiE
     let mut errors = Vec::new();
     validate_cadence_fields(&request.schedule, request.time_zone.as_deref(), &mut errors);
     if request.source_ref.is_some() {
-        // THE ONE IMMUTABLE FIELD, REFUSED BEFORE ANY READ OR WRITE. The CRD's
-        // R1 would refuse it too, and says the same sentence — this is the
-        // same rule answered a round trip earlier, with the CRD's own words.
+        // THE ONE IMMUTABLE FIELD, REFUSED BEFORE ANY WRITE (after the
+        // generation precondition). The CRD's R1 would refuse it too, and says
+        // the same sentence — this is the same rule answered a round trip
+        // earlier, with the CRD's own words.
         errors.push(FieldError::new(
             "sourceRef",
             "field_immutable",
@@ -716,21 +717,24 @@ pub async fn update(
     // would promise a replay this route cannot give.
     IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE, Some("expectedGeneration"))?;
     let request: UpdateSchedulePolicyRequest = read_json(body, MAX_JSON_BODY).await?;
-    validate_update(&request)?;
 
     let current = get_object::<BackupSchedule>(&state, &actor, &ns, &name).await?;
+    // THE PRECONDITION BEFORE ANY FIELD RULE (DUI-2): an edit written against
+    // an older generation is 412 whatever its fields say, so a stale tab is
+    // sent to read the schedule again, not to fix a field.
     let generation = current.metadata.generation.unwrap_or_default();
     if generation != request.expected_generation {
         actor.audit.set_failure("precondition_failed");
         return Err(ApiError::new(
             ProblemCode::PreconditionFailed,
             format!(
-                "expectedGeneration {} is not this schedule's current generation ({generation}); \
-                 read it again.",
+                "expectedGeneration {} is not this schedule's current generation ({generation}): \
+                 it changed since it was read, and nothing was written. Read it again.",
                 request.expected_generation
             ),
         ));
     }
+    validate_update(&request)?;
     let version = current
         .metadata
         .resource_version

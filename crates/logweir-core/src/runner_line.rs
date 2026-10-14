@@ -92,6 +92,52 @@ pub fn runner_exit_line(code: u8) -> String {
     format!("{RUNNER_EXIT_PREFIX}{code}")
 }
 
+/// **Why an exit-1 run failed** (DUI-5): `failure-detail=<sentence>`, the
+/// error the run ended on, cleaned and bounded as a `refusal-detail=`
+/// message is ([`crate::refusal_detail::clean_message`]). A Backup or
+/// Restore runner prints it at exit 1 SEALED only, first in its final block,
+/// so the plain lines an older controller reads (and their order) are
+/// unchanged; a controller reads it only sealed with the Job's token.
+pub const FAILURE_DETAIL_PREFIX: &str = "failure-detail=";
+
+/// The sentence of a [`FAILURE_DETAIL_PREFIX`] line for `error`, the run's
+/// error text: its first line (what failed), and, when the text carries more
+/// (an engine's captured `stdout:`/`stderr:`), the LAST of those lines that
+/// says "error", else the last one: the engine's own last word. Not cleaned
+/// ([`failure_detail_line`] cleans).
+#[must_use]
+pub fn failure_sentence(error: &str) -> String {
+    let mut lines = error.lines().map(str::trim).filter(|l| !l.is_empty());
+    let Some(head) = lines.next() else {
+        return String::new();
+    };
+    let rest: Vec<&str> = lines
+        .map(|l| {
+            l.strip_prefix("stdout:")
+                .or_else(|| l.strip_prefix("stderr:"))
+                .map_or(l, str::trim)
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    let cause = rest
+        .iter()
+        .rev()
+        .find(|l| l.to_ascii_lowercase().contains("error"))
+        .or_else(|| rest.last());
+    match cause {
+        Some(cause) => format!("{head}: {cause}"),
+        None => head.to_string(),
+    }
+}
+
+/// `failure-detail=<the cleaned, bounded sentence>` for `error`, or `None`
+/// when nothing printable is left of it.
+#[must_use]
+pub fn failure_detail_line(error: &str) -> Option<String> {
+    let sentence = crate::refusal_detail::clean_message(&failure_sentence(error));
+    (!sentence.trim().is_empty()).then(|| format!("{FAILURE_DETAIL_PREFIX}{sentence}"))
+}
+
 /// What a runner was told about its line token, by which flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineScope {
@@ -337,5 +383,48 @@ mod tests {
         ] {
             assert!(!holds_line_breaking_or_control(good), "{good:?}");
         }
+    }
+
+    /// **DUI-5: the `failure-detail=` sentence is the error the run ended
+    /// on**: an engine's failure keeps its first line and its own last error
+    /// line, not its whole capture; the line is one line, cleaned (a
+    /// credential shape removed) and bounded like a `refusal-detail=`
+    /// message. CONTROL: a one-line error is itself; nothing printable is no
+    /// line.
+    #[test]
+    fn dui5_a_failure_detail_is_the_last_error_cleaned_and_bounded() {
+        let engine = "engine: operational: kafka-backup backup exited 1\nstdout: starting\n\
+                      uploading segment 3\nstderr: WARN retrying\nERROR storage: connection \
+                      refused (os error 61) for http://127.0.0.1:1/bucket\nshutting down";
+        assert_eq!(
+            failure_sentence(engine),
+            "engine: operational: kafka-backup backup exited 1: ERROR storage: connection \
+             refused (os error 61) for http://127.0.0.1:1/bucket"
+        );
+        assert_eq!(
+            failure_sentence("operational: the archive is unreachable"),
+            "operational: the archive is unreachable"
+        );
+        // No line says "error": the engine's last line.
+        assert_eq!(
+            failure_sentence("engine: exited 1\nstdout: a\nstderr: b\nlast word"),
+            "engine: exited 1: last word"
+        );
+        let secret = format!("password={}", "s3cr3t".repeat(8));
+        let line = failure_detail_line(&format!("kafka: refused\nERROR auth {secret}")).unwrap();
+        assert!(line.starts_with(FAILURE_DETAIL_PREFIX), "{line}");
+        assert!(
+            !line.contains("s3cr3t"),
+            "a credential shape survived: {line}"
+        );
+        let long = failure_detail_line(&"word ".repeat(400)).unwrap();
+        assert!(
+            long.len()
+                <= FAILURE_DETAIL_PREFIX.len() + crate::refusal_detail::REASON_MESSAGE_MAX_BYTES,
+            "{}",
+            long.len()
+        );
+        assert!(!long.contains('\n'));
+        assert_eq!(failure_detail_line(" \n \n"), None);
     }
 }

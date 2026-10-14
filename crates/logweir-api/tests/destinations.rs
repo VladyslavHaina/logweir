@@ -750,10 +750,17 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
         stored["metadata"]["labels"]["logweir.dev/destination"],
         "primary"
     );
-    // The roles default to the ones the destination actually configures.
+    // The roles default to every role a run uses this destination's
+    // credentials for (DUI-1): `evidenceWrite` is not set on it and falls back
+    // to the archive-write credential, so it is tested too.
     assert_eq!(
         stored["spec"]["request"]["destinationAccess"]["roles"],
-        json!(["ArchiveWrite", "ArchiveRead", "EvidenceRead"])
+        json!([
+            "ArchiveWrite",
+            "ArchiveRead",
+            "EvidenceWrite",
+            "EvidenceRead"
+        ])
     );
     assert_eq!(
         stored["metadata"]["annotations"][ACTOR_ANNOTATION],
@@ -765,6 +772,134 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
         .get(&format!("/api/v1/namespaces/{NS_A}/destinations/primary"))
         .await;
     assert_eq!(read.json()["item"]["lastTest"]["preflightId"], id);
+    app.fake.assert_strict();
+}
+
+/// **DUI-1: with no role named, Test access exercises the roles that fall
+/// back to the archive-write credential.** A destination whose only grant is
+/// `archiveWrite` used to be tested for `ArchiveWrite` alone, a row no check
+/// may probe (Global Constraint 6), so a key the endpoint does not know read
+/// Ready. `ArchiveRead` is the row that dials with that credential.
+///
+/// KILLS: the default set built from the roles the destination SETS (the
+/// defect); `EvidenceRead` added with no grant to answer it. CONTROL: a named
+/// role set is sent as named.
+#[tokio::test]
+async fn dui1_a_default_test_exercises_the_roles_that_fall_back_to_the_archive_write_credential() {
+    let app = TestApp::new();
+    app.fake.seed(
+        "backupdestinations",
+        NS_A,
+        json!({
+            "metadata": {"name": "only-write", "generation": 1},
+            "spec": {
+                "storage": {"provider": "S3", "bucket": "kafka-backups", "prefix": "dui1", "endpoint": "http://minio:9000", "addressing": "PathStyle"},
+                "transport": {"security": "InsecureHTTP"},
+                "access": {"archiveWrite": {"mode": "SecretKeys", "secret": {"name": "lwd-only-write-archive-write", "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"}}},
+                "readiness": {"writeProbe": "CreateOnlyMarker"}
+            }
+        }),
+    );
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations/only-write:test");
+    let roles_of = |id: &str| {
+        app.fake.object("preflights", NS_A, id).unwrap()["spec"]["request"]["destinationAccess"]
+            ["roles"]
+            .clone()
+    };
+    let default = app.post(&path, Some("dui1-default-0001"), "{}").await;
+    assert_eq!(default.status.as_u16(), 202, "{}", default.text());
+    let id = default.json()["item"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        roles_of(&id),
+        json!(["ArchiveWrite", "ArchiveRead", "EvidenceWrite"]),
+        "the archive-write credential's fallbacks are tested, and EvidenceRead is not set"
+    );
+
+    // CONTROL: roles the operator names are the roles tested.
+    let named = app
+        .post(
+            &path,
+            Some("dui1-named-00001"),
+            &json!({"roles": ["archiveWrite"]}).to_string(),
+        )
+        .await;
+    assert_eq!(named.status.as_u16(), 202, "{}", named.text());
+    let id = named.json()["item"]["id"].as_str().unwrap().to_string();
+    assert_eq!(roles_of(&id), json!(["ArchiveWrite"]));
+    app.fake.assert_strict();
+}
+
+/// **DUI-2: a stale `:update-access` is 412 whatever its fields say.** Tab B
+/// read generation 3 and keeps every grant; tab A's rotation in between moved
+/// `archiveWrite` to a new Secret (generation 4). Tab B's "keep" names the
+/// replaced Secret, which at the CURRENT generation is a foreign one, and the
+/// route used to answer that field rule first: 422
+/// `existing_credential_refused` on a field the dialog does not show, while
+/// the real cause, the concurrent change, went unnamed.
+///
+/// KILLS: any field rule (shape or stored-Secret) evaluated before the
+/// generation. CONTROL: the same body at the current generation is the 422.
+#[tokio::test]
+async fn dui2_a_stale_rotation_is_412_before_any_field_rule() {
+    let app = TestApp::new();
+    let mut destination = seed_destination(&app.fake, NS_A, "primary");
+    destination["metadata"]["generation"] = json!(4);
+    destination["spec"]["access"]["archiveWrite"]["secret"]["name"] =
+        json!("lwd-primary-archive-write-ad97fa1a");
+    app.fake.seed("backupdestinations", NS_A, destination);
+    let before = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let keep = |generation: i64| {
+        json!({
+            "expectedGeneration": generation,
+            "access": {
+                "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+                "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+                "evidenceRead": {"mode": "archiveReadGrant"}
+            }
+        })
+    };
+    // A malformed field too: the precondition still answers first.
+    let mut malformed = keep(3);
+    malformed["access"]["archiveRead"]["secret"]["existing"]["name"] = json!("Not_A_Name");
+    for stale in [keep(3), malformed] {
+        app.fake.clear_requests();
+        let response = app.post(&path, None, &stale.to_string()).await;
+        response.assert_problem(412, "precondition_failed");
+        assert!(
+            response.text().contains("nothing was written"),
+            "{}",
+            response.text()
+        );
+        assert!(
+            !app.fake
+                .requests()
+                .iter()
+                .any(|r| r.method == "PATCH" || r.method == "POST"),
+            "a stale rotation wrote something"
+        );
+    }
+    assert_eq!(
+        app.fake
+            .object("backupdestinations", NS_A, "primary")
+            .unwrap(),
+        before
+    );
+
+    // CONTROL: at the current generation the field rule answers.
+    let current = app.post(&path, None, &keep(4).to_string()).await;
+    current.assert_problem(422, "destination_invalid");
+    assert_eq!(
+        current.json()["errors"][0]["field"],
+        "access.archiveWrite.secret.existing"
+    );
+    assert_eq!(
+        current.json()["errors"][0]["code"],
+        "existing_credential_refused"
+    );
     app.fake.assert_strict();
 }
 
