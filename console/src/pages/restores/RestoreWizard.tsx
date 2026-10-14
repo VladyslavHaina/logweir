@@ -2,7 +2,7 @@
 // Point, topics and time, target, readiness, review. The plan bytes are rendered in the
 // browser in the runner's grammar (./plan.ts, held to ui/'s goldens), hashed with
 // crypto.subtle, and sent unchanged; the hash on screen is the hash the approver signs.
-import { ApiError } from "../../api/client";
+import { ApiError, LocalRefusal } from "../../api/client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -439,7 +439,7 @@ function WizardBody({
     }
     const refusePolicy = policyRefusal(policy);
     if (refusePolicy) {
-      setSubmitError({ error: new Error(refusePolicy), unmatched: [] });
+      setSubmitError({ error: new LocalRefusal(refusePolicy), unmatched: [] });
       return;
     }
     setSubmitting(true);
@@ -449,25 +449,25 @@ function WizardBody({
         const fresh = await readPreflight(ns, readiness.result.id, reviewed.hash);
         setReadiness((r) => ({ ...r, result: fresh.stale || !r.result?.stale ? fresh : r.result }));
         const again = movedUnder ?? readinessRefusal(fresh, readiness.boundHash, reviewed.hash);
-        if (again) throw new Error(`Nothing was sent: ${again}`);
+        if (again) throw new LocalRefusal(`Nothing was sent: ${again}`);
       } else if (canCheck) {
-        throw new Error("Nothing was sent: run the readiness check for this plan first.");
+        throw new LocalRefusal("Nothing was sent: run the readiness check for this plan first.");
       }
       // The point's frozen destination, and the evidence destination, read again.
       if (ctx.point.destinationName) {
         const live = await readDestination(ns, ctx.point.destinationName);
         const moved = frozenDestinationProblem(ctx.point, live);
-        if (moved) throw new Error(`${moved}. Nothing was sent; the reviewed plan is still here.`);
+        if (moved) throw new LocalRefusal(`${moved}. Nothing was sent; the reviewed plan is still here.`);
         if (evidenceDestination && evidenceDestination.name !== ctx.point.destinationName) {
           const again = await readDestination(ns, evidenceDestination.name);
           if (!again || again.uid !== evidenceDestination.uid || again.locationDigest !== evidenceDestination.locationDigest) {
-            throw new Error(`Evidence destination ${evidenceDestination.name} was deleted, recreated or moved since it was read. Nothing was sent.`);
+            throw new LocalRefusal(`Evidence destination ${evidenceDestination.name} was deleted, recreated or moved since it was read. Nothing was sent.`);
           }
         }
       }
       // The bytes a click sends are the bytes that were on screen when it was clicked.
       const now = await preparePlanDocument(planFields(ctx, form.getValues()));
-      if (now !== reviewed) throw new Error(`The plan changed after it was displayed (the page showed ${reviewed.hash}, the values now hash to ${now.hash}). Review the plan shown now and submit again.`);
+      if (now !== reviewed) throw new LocalRefusal(`The plan changed after it was displayed (the page showed ${reviewed.hash}, the values now hash to ${now.hash}). Review the plan shown now and submit again.`);
       const request = restoreBody(ctx, form.getValues(), fields, reviewed, policy);
       const created = await create.mutateAsync({ body: request, key: restoreIdempotencyKey(ns, reviewed) });
       void navigate({ to: "/$ns/restores/$name", params: { ns, name: created.item.name } });

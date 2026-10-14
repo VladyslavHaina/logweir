@@ -151,8 +151,10 @@ export async function listAll<T>(
 }
 
 /** A failed write whose outcome is unknown: no answer, a timeout or a server failure. The
- *  object may or may not exist, and only resending the same Idempotency-Key can tell. */
+ *  object may or may not exist, and only resending the same Idempotency-Key can tell. A
+ *  refusal the page made before sending anything is known: nothing was sent. */
 export function outcomeUnknown(error: unknown): boolean {
+  if (error instanceof LocalRefusal) return false;
   return !(error instanceof ApiError) || error.status === 0 || error.status === 408 || error.status >= 500;
 }
 

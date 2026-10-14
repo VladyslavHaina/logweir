@@ -351,7 +351,9 @@ export type Outcome = "unknown" | "invalid" | "conflict" | "precondition" | "ref
 /** What a failed write means. No answer, a timeout or a 5xx is UNKNOWN: the
  *  object may or may not exist, and only resending the same request can tell. */
 export function outcomeOf(error: unknown): Outcome {
-  if (!(error instanceof ApiError) || outcomeUnknown(error)) return "unknown";
+  if (outcomeUnknown(error)) return "unknown";
+  // Not sent at all (a LocalRefusal): known, and the page says why.
+  if (!(error instanceof ApiError)) return "refused";
   if (error.status === 412) return "precondition";
   if (error.status === 409) return "conflict";
   if (error.status === 400 || error.status === 422) return "invalid";

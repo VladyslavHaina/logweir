@@ -1,7 +1,7 @@
 // The live client: the CSRF token on unsafe methods only, every failure an ApiError the
 // error state can show, every page of a list, the bounded session read, the sign-in hand-over.
 import { afterEach, describe, expect, it } from "vitest";
-import { ApiError, call, listAll, makeClient, readSession, setCsrfToken, signInHref, signOut } from "./client";
+import { ApiError, LocalRefusal, call, listAll, makeClient, outcomeUnknown, readSession, setCsrfToken, signInHref, signOut } from "./client";
 
 const BASE = "http://127.0.0.1:8484";
 
@@ -137,5 +137,15 @@ describe("sign-in", () => {
     expect(signInHref({ pathname: "/ui/", hash: "#/team-a/backups" })).toBe(
       "/auth/login?next=%2Fui%2F%23%2Fteam-a%2Fbackups",
     );
+  });
+});
+
+describe("what a failed write's outcome is", () => {
+  it("a request sent with no answer is unknown; a refusal the page made before sending is not", () => {
+    expect(outcomeUnknown(new ApiError(0, undefined))).toBe(true);
+    expect(outcomeUnknown(new ApiError(503, { code: "upstream_timeout" }))).toBe(true);
+    expect(outcomeUnknown(new LocalRefusal("Nothing was sent: run the readiness check for this plan first."))).toBe(false);
+    // Control: an answered refusal is known too.
+    expect(outcomeUnknown(new ApiError(422, { code: "validation_failed" }))).toBe(false);
   });
 });

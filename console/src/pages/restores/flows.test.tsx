@@ -210,6 +210,36 @@ describe("the restore wizard", () => {
     expect(keys[0]).toBe(keys[1]);
   });
 
+  it("a check that expired while the plan was reviewed refuses Create before sending, and says so", async () => {
+    let item: Record<string, unknown> | null = null;
+    let expired = false;
+    net.override = (path, method, body) => {
+      const answer = (status: number) =>
+        new Response(JSON.stringify({ item: expired ? { ...item, stale: true, staleReasons: [{ reason: "expired" }] } : item, requestId: "r" }), { status, headers: { "content-type": "application/json" } });
+      if (method === "GET" && /\/preflights\/pf-expiring$/.test(path)) return answer(200);
+      if (method !== "POST" || !path.endsWith("/preflights")) return null;
+      item = {
+        id: "pf-expiring", namespace: "team-a", uid: "u", resourceVersion: "1", operation: "restore", state: "unknown", terminal: true, applicable: true,
+        stale: false, staleBasis: ["expiry"], staleReasons: [], binding: { planHash: (body as S["CreatePreflightRequest"]).restore!.planHash, referents: [] },
+        warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+        checks: [
+          { id: "target.mappedTopics", code: "MappedTopicsAbsent", state: "ready", gating: "blocking" },
+          { id: "approval.state", code: "SubjectNotCreated", state: "skipped", gating: "blocking" },
+        ],
+      };
+      return answer(201);
+    };
+    renderAt("/team-a/restores/new");
+    await toReview({ prefix: "expiring-" });
+    expired = true;
+    fireEvent.click(screen.getByRole("button", { name: "Create restore" }));
+    await screen.findByText("The restore was not created");
+    expect(screen.getByText(/Nothing was sent: The readiness check no longer applies.*expired.*Run it again/)).toBeTruthy();
+    // Nothing was sent, so nothing reads as a lost answer (the row above is the sent case).
+    expect(screen.queryByText("The answer was lost")).toBeNull();
+    expect(posts()).toHaveLength(0);
+  });
+
   it("a check run for one plan does not let another plan through", async () => {
     renderAt("/team-a/restores/new");
     await toReview({ prefix: "first-" });
