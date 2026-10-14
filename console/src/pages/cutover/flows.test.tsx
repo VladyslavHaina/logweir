@@ -238,6 +238,28 @@ describe("confirm sends one create with the plan the page showed", () => {
     expect(body.planBytes).not.toContain("gap");
   });
 
+  it("a default group the operator unticks stays out of the plan", async () => {
+    serve({});
+    renderAt(FLOW);
+    await screen.findByText("4 consumer groups with mapped positions");
+    expect(include("app").checked).toBe(true);
+    fireEvent.click(include("app"));
+    expect(include("app").checked).toBe(false);
+    expect(screen.queryByRole("button", { name: /^Continue with/ })?.textContent ?? "").toMatch(/0 groups|^$/);
+    fireEvent.click(include("gap"));
+    // Control: a group the operator ticks is in; the unticked default stays out.
+    expect(include("gap").checked).toBe(true);
+    expect(include("app").checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Continue with 1 group" }));
+    await screen.findByText("Undoing a switchover has limits");
+    fireEvent.click(screen.getByLabelText(/stay stopped until the switchover finishes/));
+    fireEvent.click(screen.getByRole("button", { name: "Switch over 1 group" }));
+    await screen.findAllByText("Waiting for the run's result");
+    const body = posts("/namespaces/team-a/switchovers")[0]!.body as { planBytes: string };
+    expect(body.planBytes).toContain('"gap"');
+    expect(body.planBytes).not.toContain('"app"');
+  });
+
   it("an unknown outcome says so, and submitting again carries the same key and bytes", async () => {
     serve({ create: (_b, n) => (n === 1 ? json(503, { code: "upstream_timeout", detail: "the API server did not answer", requestId: "q" }) : json(200, { item: switchover(), replayed: true, requestId: "r" })) });
     await toConfirm();

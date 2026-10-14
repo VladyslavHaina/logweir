@@ -584,7 +584,9 @@ function CutoverFlow() {
   const [reviewId, setReviewId] = useState<string>();
   const [rounds, setRounds] = useState(0);
   const [step, setStep] = useState<Step>("review");
-  const [selected, setSelected] = useState<Set<string> | null>(null);
+  // The operator's choice, with the groups that were on screen when it was made: a default
+  // group the operator unticked stays unticked; one offered only since is added.
+  const [choice, setChoice] = useState<{ selected: Set<string>; seen: Set<string> } | null>(null);
   const started = useRef(false);
   const pf = usePreflight(ns, reviewId);
   const details = usePreflightDetails(ns, pf.data);
@@ -618,10 +620,12 @@ function CutoverFlow() {
   // The default choice: every group offered with every partition mapped. A re-check keeps
   // what was chosen and still offered, and adds what became offered since.
   const picked = useMemo(() => {
-    const base = new Set(groups.filter(chosenByDefault).map((g) => g.source));
-    if (!selected) return base;
-    return new Set([...selected, ...base].filter((s) => groups.some((g) => g.source === s && offered(g))));
-  }, [groups, selected]);
+    const base = groups.filter(chosenByDefault).map((g) => g.source);
+    if (!choice) return new Set(base);
+    const added = base.filter((s) => !choice.seen.has(s));
+    return new Set([...choice.selected, ...added].filter((s) => groups.some((g) => g.source === s && offered(g))));
+  }, [groups, choice]);
+  const setSelected = (next: Set<string>) => setChoice({ selected: next, seen: new Set(groups.map((g) => g.source)) });
   const chosen = groups.filter((g) => picked.has(g.source) && offered(g));
   const left = groups.filter((g) => !chosen.includes(g));
 
