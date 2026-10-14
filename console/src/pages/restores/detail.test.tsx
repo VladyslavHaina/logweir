@@ -59,6 +59,10 @@ describe("the words", () => {
     expect(coverageWords("sampled", "complete", null)).toBe("sampled");
     expect(coverageWords(null, "complete", null)).toBe("complete asked for; not recorded yet");
     expect(coverageWords(null, "sampled", null)).not.toMatch(/complete/);
+    // DUI-11: a finished run that recorded nothing will record nothing: no "yet" on a terminal row.
+    expect(coverageWords(null, "sampled", null, true)).toBe("sampled asked for; not recorded");
+    expect(coverageWords(null, "complete", null, true)).toBe("complete asked for; not recorded");
+    expect(coverageWords(null, "sampled", null, false)).toBe("sampled (not recorded yet)");
   });
   it("a narrowed restore is said as partial, naming the partitions, and never as everything", () => {
     const sel = R(subsetRestore).selection!;

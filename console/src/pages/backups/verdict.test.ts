@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import type { Backup, OperationView } from "../../api/backups";
 import {
+  backupSentence,
   CASES,
   GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
@@ -223,5 +224,19 @@ describe("check it yourself", () => {
     expect(moved.missing).toMatch(/is not where this run wrote/);
     // A legacy inline run reads its bucket off its own URL.
     expect(evidenceRoute({ archive: { url: "s3://kafka-backups/drill-demo" } }, undefined, null).bucket).toBe("kafka-backups");
+  });
+});
+
+describe("DUI-11: a backup's description", () => {
+  const b = { topics: ["orders", "payments"], sourceRef: { name: "conn-a" } };
+  it("is a sentence: a failed run with no window says so, never ', Not recorded.'", () => {
+    const failed = backupSentence({ ...b, windowCovered: undefined, operation: { terminal: true } } as never);
+    expect(failed).toBe("2 topics from conn-a; no covered window was recorded.");
+    expect(failed).not.toContain("Not recorded");
+    expect(backupSentence({ ...b, windowCovered: undefined, operation: { terminal: false } } as never)).toBe("2 topics from conn-a; the covered window is recorded when it finishes.");
+  });
+  it("names the window when one is recorded (the control)", () => {
+    const done = backupSentence({ ...b, topics: ["orders"], windowCovered: { fromMs: 0, toMs: 60_000 }, operation: { terminal: true } } as never);
+    expect(done).toBe("1 topic from conn-a, covering 1970-01-01 00:00:00 UTC to 1970-01-01 00:01:00 UTC.");
   });
 });

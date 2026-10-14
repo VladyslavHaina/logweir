@@ -12,7 +12,7 @@ import { SessionProvider } from "../../api/session";
 import { session } from "../../mock/data";
 import { ConnectionCheck } from "./ConnectionDetail";
 import { Discovery } from "./Discovery";
-import { CheckResult, ConnectionUsability, LastTestLine, ReasonText } from "./parts";
+import { CheckResult, ConnectionUsability, LastTestLine, ReasonText, advisoryRows, basisWords } from "./parts";
 
 type S = components["schemas"];
 const fixtures = import.meta.glob("../../../fixtures/console/*.json", { eager: true, import: "default" });
@@ -248,5 +248,49 @@ describe("topic discovery", () => {
     withClient(<Discovery ns="team-a" name="source" mayStart readable />);
     await screen.findByText(/this is not proof that the cluster is empty/);
     await waitFor(() => expect(text()).toContain("This is the end of the stored result."));
+  });
+});
+
+describe("DUI-7 and DUI-11: what a check's rows say", () => {
+  type Entry = Preflight["checks"][number];
+  const row = (id: string, gating: Entry["gating"], state: Entry["state"]): Entry => ({ id, gating, state, message: `${id} said ${state}` }) as Entry;
+
+  it("lists a ready advisory row from checks under Advisory, once, and never under Blocking", () => {
+    const p = preflight("preflight-ready.json");
+    p.checks = [row("connection.resolved", "blocking", "ready"), row("connection.engineProtocol", "advisory", "ready")];
+    p.warnings = [row("connection.groupTypes", "advisory", "notReady")];
+    expect(advisoryRows(p).map((r) => r.id)).toEqual(["connection.engineProtocol", "connection.groupTypes"]);
+    render(<CheckResult preflight={p} stopped="" />);
+    const advisory = screen.getByRole("grid", { name: "Advisory checks" });
+    expect(advisory.textContent).toContain("connection.engineProtocol");
+    expect(advisory.textContent).toContain("connection.groupTypes");
+    // The control: the blocking row stays in Blocking, and the advisory one is not there too.
+    const blocking = screen.getByRole("grid", { name: "Blocking checks" });
+    expect(blocking.textContent).toContain("connection.resolved");
+    expect(blocking.textContent).not.toContain("connection.engineProtocol");
+  });
+
+  it("does not list an advisory row twice when it is in checks and in warnings", () => {
+    const twice = row("connection.groupTypes", "advisory", "notReady");
+    expect(advisoryRows({ checks: [twice], warnings: [twice] })).toHaveLength(1);
+  });
+
+  it("puts the comparison basis in words, never the API's raw tokens", () => {
+    expect(["expiry", "planHash", "referents:2", "referents:1"].map(basisWords)).toEqual(["the expiry", "the plan hash", "2 referenced objects", "1 referenced object"]);
+    expect(basisWords("policyDigest:byController(the reconciler compares it each pass and downgrades the result)")).toBe(
+      "the installation policy, compared by the controller (the reconciler compares it each pass and downgrades the result)",
+    );
+    // A token this build does not know is shown as it came, with a space before its note.
+    expect(basisWords("future:thing(why)")).toBe("future:thing (why)");
+    const p = preflight("preflight-ready.json");
+    p.staleBasis = ["expiry", "referents:2", "policyDigest:byController(the reconciler compares it each pass and downgrades the result)"];
+    render(<CheckResult preflight={p} stopped="" />);
+    expect(text()).toContain("Compared: the expiry; 2 referenced objects; the installation policy, compared by the controller (the reconciler");
+    expect(text()).not.toContain("referents:2");
+  });
+
+  it("glosses a probe that reported the cluster unreachable with the controller's words", () => {
+    render(<ReasonText reason="ProbeReportedUnreachable" />);
+    expect(text()).toContain("the broker did not answer, or it refused the credential this connection names");
   });
 });
