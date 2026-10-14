@@ -50,6 +50,9 @@ impl From<Result<String, String>> for CheckResult {
 pub type Check<'a> = (&'static str, Box<dyn Fn() -> CheckResult + 'a>);
 
 pub fn run(args: &DoctorArgs) -> ExitCode {
+    // Check 8 is answered over check 7's one dial (`check_target`), so the
+    // target is dialled once; check 7's closure leaves check 8's answer here.
+    let engine: std::cell::RefCell<Option<CheckResult>> = std::cell::RefCell::new(None);
     let checks: Vec<Check> = vec![
         ("engine binary", Box::new(|| check_engine_present().into())),
         ("engine version", Box::new(|| check_engine_version().into())),
@@ -65,11 +68,19 @@ pub fn run(args: &DoctorArgs) -> ExitCode {
         ("storage", Box::new(|| check_storage(&args.spec))),
         (
             "target",
-            Box::new(|| check_target(&args.spec, &args.allowed_clusters)),
+            Box::new(|| {
+                let (target, target_engine) = check_target(&args.spec, &args.allowed_clusters);
+                *engine.borrow_mut() = target_engine;
+                target
+            }),
         ),
         (
             "target engine",
-            Box::new(|| check_target_engine(&args.spec)),
+            Box::new(|| {
+                engine.borrow_mut().take().unwrap_or_else(|| {
+                    CheckResult::Skipped("check 7 did not reach the target".to_string())
+                })
+            }),
         ),
     ];
     let mut skipped = 0usize;
@@ -414,42 +425,91 @@ fn with_prefix(base: String, prefix: &str) -> String {
 ///    facts phase 0 refuses on, checked before a drill is attempted. Always a
 ///    FAILURE, never a skip: an adopter with a firewall problem must read a
 ///    NAMED `target` failure, not "doctor failed" and nothing else.
-fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResult {
+///
+/// 8. `target.engineProtocol` (FX-45), over the SAME dial, once check 7
+///    passed: the target's own ApiVersions answer against every request the
+///    engine's restore sends at its one fixed version, the row a `Restore`
+///    Preflight and phase 0 answer ([`evaluate_target_engine`]). `None` when
+///    check 7 did not pass, so check 8 is never answered about a target check
+///    7 refused.
+fn check_target(
+    spec: &std::path::Path,
+    allowed: &std::path::Path,
+) -> (CheckResult, Option<CheckResult>) {
+    let failed = |why: String| (CheckResult::Failed(why), None);
     let sp = match parse_spec(spec) {
         Ok(sp) => sp,
-        Err(e) => return CheckResult::Failed(e),
+        Err(e) => return failed(e),
     };
     let t = match std::fs::read_to_string(allowed) {
         Ok(t) => t,
-        Err(e) => return CheckResult::Failed(e.to_string()),
+        Err(e) => return failed(e.to_string()),
     };
     let al: logweir_core::spec::AllowedClusters = match serde_json::from_str(&t) {
         Ok(al) => al,
-        Err(e) => return CheckResult::Failed(e.to_string()),
+        Err(e) => return failed(e.to_string()),
     };
-    match target_reader(&sp) {
-        Ok(r) => evaluate_target(&sp, &al, &r),
-        Err(failed) => failed,
+    // Interface I1: dial the target the way `drill run` will, or a SCRAM
+    // cluster that requires authentication reads as "target unreachable".
+    //
+    // Every failure here is a `CheckResult::Failed`, never an exit code:
+    // `doctor` reports, it does not refuse. So an unrenderable projected
+    // credential and an absent one both land in the same place, and the
+    // message says which — a `doctor` run is exactly where an operator wants
+    // to be told that the Secret is missing.
+    let target_tls_ca =
+        match crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR) {
+            Ok(ca) => ca,
+            Err(e) => return failed(e),
+        };
+    // The binding `drill run` will check.
+    if let Err(e) = crate::credential_binding::check_side(crate::tls_ca::Side::Target) {
+        return failed(e.to_string());
     }
+    // The `mtls` pair, as `drill run` will present it.
+    let target_client_certificate =
+        match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target) {
+            Ok(files) => files,
+            Err(e) => return failed(e),
+        };
+    let auth = match AuthConfig::from_spec(
+        &sp.target.auth,
+        match crate::drill::validated_password(crate::drill::TARGET_PASSWORD_VAR) {
+            Ok(p) => p,
+            Err(refusal) => return failed(refusal.to_string()),
+        },
+    )
+    .and_then(|auth| auth.with_tls_ca_file(target_tls_ca))
+    .and_then(|auth| auth.with_client_certificate(target_client_certificate))
+    {
+        Ok(a) => a,
+        Err(e) => {
+            return failed(
+                crate::drill::naming_the_password_var(e, crate::drill::TARGET_PASSWORD_VAR)
+                    .to_string(),
+            )
+        }
+    };
+    let r = match logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
+        &sp.target.bootstrap_servers,
+        auth,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return failed(format!(
+                "target unreachable at {:?}: {e}",
+                sp.target.bootstrap_servers
+            ))
+        }
+    };
+    let target = evaluate_target(&sp, &al, &r);
+    let engine = matches!(target, CheckResult::Passed(_)).then(|| evaluate_target_engine(&sp, &r));
+    (target, engine)
 }
 
-/// 8. `target.engineProtocol` (FX-45): the target's own ApiVersions answer
-///    against every request the engine's restore sends at its one fixed
-///    version, the row a `Restore` Preflight and phase 0 answer. An endpoint
-///    SEEN not to serve one is a named FAILURE; an answer that could not be
-///    observed is a SKIP, never `ok`.
-fn check_target_engine(spec: &std::path::Path) -> CheckResult {
-    let sp = match parse_spec(spec) {
-        Ok(sp) => sp,
-        Err(e) => return CheckResult::Failed(e),
-    };
-    match target_reader(&sp) {
-        Ok(r) => evaluate_target_engine(&sp, &r),
-        Err(failed) => failed,
-    }
-}
-
-/// The verdict of check 8 over any `ClusterReader`, so a double can drive it.
+/// The verdict of check 8 over any `ClusterReader`, so a double can drive it:
+/// an endpoint SEEN not to serve a request the restore sends is a named
+/// FAILURE; an answer that could not be observed is a SKIP, never `ok`.
 fn evaluate_target_engine(
     sp: &logweir_core::spec::DrillSpec,
     r: &dyn ClusterReader,
@@ -472,61 +532,6 @@ fn evaluate_target_engine(
             row.id, row.code, row.message
         )),
     }
-}
-
-/// The target's reader, dialled the way `drill run` will, or the named
-/// failure that stops it.
-fn target_reader(
-    sp: &logweir_core::spec::DrillSpec,
-) -> Result<logweir_kafka::rdkafka_reader::RdKafkaReader, CheckResult> {
-    // Interface I1: dial the target the way `drill run` will, or a SCRAM
-    // cluster that requires authentication reads as "target unreachable".
-    //
-    // Every failure here is a `CheckResult::Failed`, never an exit code:
-    // `doctor` reports, it does not refuse. So an unrenderable projected
-    // credential and an absent one both land in the same place, and the
-    // message says which — a `doctor` run is exactly where an operator wants
-    // to be told that the Secret is missing.
-    let target_tls_ca =
-        match crate::tls_ca::projected_ca_file(crate::tls_ca::TARGET_TLS_CA_FILE_VAR) {
-            Ok(ca) => ca,
-            Err(e) => return Err(CheckResult::Failed(e)),
-        };
-    // The binding `drill run` will check.
-    if let Err(e) = crate::credential_binding::check_side(crate::tls_ca::Side::Target) {
-        return Err(CheckResult::Failed(e.to_string()));
-    }
-    // The `mtls` pair, as `drill run` will present it.
-    let target_client_certificate =
-        match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target) {
-            Ok(files) => files,
-            Err(e) => return Err(CheckResult::Failed(e)),
-        };
-    let auth = match AuthConfig::from_spec(
-        &sp.target.auth,
-        match crate::drill::validated_password(crate::drill::TARGET_PASSWORD_VAR) {
-            Ok(p) => p,
-            Err(refusal) => return Err(CheckResult::Failed(refusal.to_string())),
-        },
-    )
-    .and_then(|auth| auth.with_tls_ca_file(target_tls_ca))
-    .and_then(|auth| auth.with_client_certificate(target_client_certificate))
-    {
-        Ok(a) => a,
-        Err(e) => {
-            return Err(CheckResult::Failed(
-                crate::drill::naming_the_password_var(e, crate::drill::TARGET_PASSWORD_VAR)
-                    .to_string(),
-            ))
-        }
-    };
-    logweir_kafka::rdkafka_reader::RdKafkaReader::connect(&sp.target.bootstrap_servers, auth)
-        .map_err(|e| {
-            CheckResult::Failed(format!(
-                "target unreachable at {:?}: {e}",
-                sp.target.bootstrap_servers
-            ))
-        })
 }
 
 /// The reachability/allow-list/marker-topic evaluation, factored out of

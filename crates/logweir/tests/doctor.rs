@@ -166,19 +166,28 @@ fn check_7_an_unreachable_target_is_named_as_a_target_problem() {
 #[test]
 #[ignore = "needs the stack's `redpanda` profile (e2e/compose/stack-env.sh --profiles redpanda)"]
 fn check_8_a_target_the_engine_cannot_restore_into_is_named() {
-    use logweir_kafka::reader::{AuthConfig, ClusterReader};
     let port =
         |var: &str, default: &str| std::env::var(var).unwrap_or_else(|_| default.to_string());
     let redpanda = format!("localhost:{}", port("LOGWEIR_E2E_REDPANDA_PORT", "9124"));
     let kafka = format!("localhost:{}", port("LOGWEIR_E2E_KAFKA_PORT", "9092"));
     let run = |bootstrap: &str| {
-        let id = logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
-            &[bootstrap.to_string()],
-            AuthConfig::Plaintext,
-        )
-        .expect("connect is lazy")
-        .cluster_id()
-        .unwrap_or_else(|e| panic!("{bootstrap}: {e}"));
+        // The cluster id, from the shipped probe (no client is built here).
+        let probed = Command::new(env!("CARGO_BIN_EXE_logweir"))
+            .args([
+                "cluster-probe",
+                "--bootstrap",
+                bootstrap,
+                "--auth-mode",
+                "plaintext",
+            ])
+            .output()
+            .unwrap();
+        let id = String::from_utf8_lossy(&probed.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("cluster-id="))
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| panic!("{bootstrap}: no cluster id: {probed:?}"))
+            .to_string();
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("archive");
         std::fs::create_dir_all(archive.join("b-0001")).unwrap();

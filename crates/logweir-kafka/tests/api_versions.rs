@@ -270,28 +270,22 @@ fn the_observed_ranges_are_what_the_cluster_answered() {
     assert_eq!(after.brokers(), 3);
 }
 
-/// **FX-46: the reader `logweir cluster-probe` dials names the advertised
-/// broker that did not answer**, as a value the probe acts on
+/// **FX-46: the observation `logweir cluster-probe` makes names the
+/// advertised broker that did not answer**, as a value the probe acts on
 /// (`NotObserved::silent_brokers`), over a real librdkafka connection to the
 /// in-process mock: one broker of three slowed past the budget is broker 2,
-/// silent, and two of three answered. CONTROL: with the delay removed the
-/// reader's view is whole, three of three, and names nobody.
+/// silent, and two of three answered. `RdKafkaReader::broker_view` is this
+/// call over the reader's own configuration. CONTROL: with the delay removed
+/// the view is whole, three of three, and names nobody.
 #[test]
-fn the_probes_reader_names_the_advertised_broker_that_did_not_answer() {
-    use logweir_kafka::rdkafka_reader::RdKafkaReader;
-    use logweir_kafka::reader::{AuthConfig, ClusterReader};
+fn the_probes_observation_names_the_advertised_broker_that_did_not_answer() {
+    use logweir_kafka::inventory::observe_broker_view;
     let mock = mock_of(3);
-    let servers: Vec<String> = mock
-        .bootstrap_servers()
-        .split(',')
-        .map(str::to_string)
-        .collect();
     mock.broker_round_trip_time(2, Duration::from_secs(30))
         .expect("the mock broker is slowed");
-    let reader = RdKafkaReader::connect(&servers, AuthConfig::Plaintext).expect("lazy");
-    let why = reader
-        .broker_view(Duration::from_secs(3))
-        .expect_err("broker 2 never answered");
+    let cfg = reaching(&mock, every_address);
+    let why =
+        observe_broker_view(&cfg, Duration::from_secs(3)).expect_err("broker 2 never answered");
     let (answered, listed, silent) = why
         .silent_brokers()
         .unwrap_or_else(|| panic!("a listed broker is named silent: {why}"));
@@ -307,8 +301,6 @@ fn the_probes_reader_names_the_advertised_broker_that_did_not_answer() {
 
     mock.broker_round_trip_time(2, Duration::ZERO)
         .expect("the delay is removed");
-    let view = reader
-        .broker_view(Duration::from_secs(10))
-        .expect("all three answer");
+    let view = observe_broker_view(&cfg, Duration::from_secs(10)).expect("all three answer");
     assert_eq!(view.brokers(), 3);
 }

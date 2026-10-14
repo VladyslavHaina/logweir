@@ -773,7 +773,13 @@ controller that understands the object clears them with no edit; for a `Backup`
 or `Restore` that references it, every refusal is terminal.
 
 **Reachability.** The probe Job's verdict sets `Reachable` and
-`status.reachable`. A probe that crashed, could not be read
+`status.reachable`. Reachable means the bootstrap address named the cluster
+AND every broker the cluster advertises answered the probe on its advertised
+address (FX-46). When the bootstrap answers and an advertised broker does not
+(an `advertised.listeners` entry this namespace cannot reach), the reason is
+`AdvertisedBrokersUnreachable` (`Reachable=False`), the message gives how many
+of how many answered, and the probe Job's log names each silent broker. A
+probe that crashed, could not be read
 (`ProbeOutputUnreadable`), was refused at creation (`PodCreationForbidden`) or is
 older than 630 s (`ProbeStale`) clears `reachable`, keeps `clusterId` and
 `observedAt`, and is probed again on the 315 s cadence. A `Restore` admits a
