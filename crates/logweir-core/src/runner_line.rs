@@ -395,11 +395,11 @@ mod tests {
     fn dui5_a_failure_detail_is_the_last_error_cleaned_and_bounded() {
         let engine = "engine: operational: kafka-backup backup exited 1\nstdout: starting\n\
                       uploading segment 3\nstderr: WARN retrying\nERROR storage: connection \
-                      refused (os error 61) for http://127.0.0.1:1/bucket\nshutting down";
+                      refused (os error 61) for http://minio.invalid/bucket\nshutting down";
         assert_eq!(
             failure_sentence(engine),
             "engine: operational: kafka-backup backup exited 1: ERROR storage: connection \
-             refused (os error 61) for http://127.0.0.1:1/bucket"
+             refused (os error 61) for http://minio.invalid/bucket"
         );
         assert_eq!(
             failure_sentence("operational: the archive is unreachable"),
