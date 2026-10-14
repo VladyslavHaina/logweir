@@ -263,9 +263,11 @@ fn archive_side(
             );
             continue;
         }
-        // Under the stored cap: an object over it is not read, and the
-        // partition is not compared (FX-30), never a pass and never exit 1.
-        let bytes = match store.get_capped(&seg.key, SEGMENT_STORED_CAP) {
+        // Under the stored cap (`SEGMENT_STORED_CAP`, the table's
+        // `caps::SEGMENT`, named here as `capped.rs` requires of every read):
+        // an object over it is not read, and the partition is not compared
+        // (FX-30), never a pass and never exit 1.
+        let bytes = match store.get_capped(&seg.key, caps::SEGMENT) {
             Ok((bytes, _)) => bytes,
             Err(StoreError::NotFound(_)) => {
                 side.failed.push(seg.key.clone());
