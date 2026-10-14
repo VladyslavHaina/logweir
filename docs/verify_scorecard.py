@@ -6029,8 +6029,10 @@ def main(
     # 1.34.0 (L1): ONE `PUBLIC KEY` block, then nothing but whitespace, as the
     # Rust reader takes it (RFC 7468's explanatory text BEFORE the block is
     # ignored by both). `load_pem_public_key` alone would also skip text after
-    # the block, which `logweir drill verify` refuses.
-    pem_text = pubkey_bytes.rstrip(b" \t\r\n\v\f")
+    # the block, which `logweir drill verify` refuses. The whitespace is
+    # exactly Rust's `is_ascii_whitespace` (space, \t, \n, \f, \r): a
+    # trailing vertical tab is text, refused by both (review L-3).
+    pem_text = pubkey_bytes.rstrip(b" \t\n\f\r")
     if (
         not pem_text.endswith(b"-----END PUBLIC KEY-----")
         or pem_text.count(b"-----BEGIN") != 1

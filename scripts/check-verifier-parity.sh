@@ -3032,6 +3032,10 @@ cp "$FIX/public.pem" "$tmp/keys/plain.pem"
 { cat "$FIX/public.pem"; printf '\n \t\n\n'; } > "$tmp/keys/trailing-blank.pem"
 { printf 'a note\n'; cat "$FIX/public.pem"; } > "$tmp/keys/text-before.pem"
 { cat "$FIX/public.pem"; printf 'a note\n'; } > "$tmp/keys/text-after.pem"
+# The whitespace set is Rust's `is_ascii_whitespace` on both sides (review
+# L-3): a form feed is whitespace, a vertical tab is not.
+{ cat "$FIX/public.pem"; printf '\f\n'; } > "$tmp/keys/trailing-formfeed.pem"
+{ cat "$FIX/public.pem"; printf '\v\n'; } > "$tmp/keys/trailing-vtab.pem"
 key_cases=0
 while IFS=' ' read -r keyname want; do
     [ -n "$keyname" ] || continue
@@ -3056,6 +3060,8 @@ while IFS=' ' read -r keyname want; do
 done <<< "plain accept
 trailing-blank accept
 text-before accept
-text-after refuse"
-[ "$key_cases" -eq 4 ] || fail "walked $key_cases key-file cases, expected 4"
+text-after refuse
+trailing-formfeed accept
+trailing-vtab refuse"
+[ "$key_cases" -eq 6 ] || fail "walked $key_cases key-file cases, expected 6"
 echo "check-verifier-parity: both readers agree on all $key_cases key-file shapes"
