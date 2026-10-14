@@ -666,7 +666,7 @@ pub fn run_with_original_name(
     // refused by the row's name, exit 3, instead of failing in the engine
     // with "early eof" after a scratch topic exists. Not observed is a
     // warning, never a refusal.
-    refuse_a_target_the_engine_cannot_restore_into(spec, reader)?;
+    refuse_a_target_the_engine_cannot_restore_into(spec, reader, now)?;
 
     // Original-name conditions 3 and 4, after the absence refusal above
     // (condition 2, the same refusal every restore gets) and BEFORE G-TS,
@@ -736,6 +736,7 @@ pub fn run_with_original_name(
 fn refuse_a_target_the_engine_cannot_restore_into(
     spec: &DrillSpec,
     reader: &dyn ClusterReader,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), DrillError> {
     use crate::check::kinds::capability;
     use logweir_core::check_contract::{CheckId, CheckState};
@@ -743,7 +744,7 @@ fn refuse_a_target_the_engine_cannot_restore_into(
         CheckId::TargetEngineProtocol,
         &reader.api_versions(capability::STANDALONE_BUDGET),
         capability::spec_uses_sasl(&spec.target.auth),
-        chrono::Utc::now(),
+        now,
     );
     if let Some(why) = capability::refusal_of(&row) {
         return Err(GuardRefusal(format!(
