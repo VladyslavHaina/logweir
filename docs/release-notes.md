@@ -2715,9 +2715,14 @@ the last two use the archive-write credential), and Evidence read when it is
 set. It used to test only the grants the destination set. A destination with
 only an archive-write key was then tested for that grant alone, which no check
 dials, so a key the endpoint did not know read **Ready**; it now reads **Not
-ready**, `destination.archiveListable` `InvalidCredentials`. The list is one
-function the API uses, and the console's help text says the same. `:update-access` and
-`PUT …/schedules/{name}` now check `expectedGeneration` before any field rule:
+ready**, `destination.archiveListable` `InvalidCredentials`. No test writes
+with the archive-write grant itself: it is dialled through Archive read or
+Evidence write when they fall back to it, else only the run checks it (a
+destination with its own `archiveRead` and `evidenceWrite` credentials, or the
+write probe off). A destination whose `archiveRead` and `archiveWrite` are two
+different workload identities, with `evidenceWrite` unset and the write probe
+on, now gets `ExecutionContextConflict` from the default test; ticking grants
+still works. `:update-access` and `PUT …/schedules/{name}` now check `expectedGeneration` before any field rule:
 a request written against an older generation is `412 precondition_failed`
 ("…it changed since it was read, and nothing was written. Read it again."),
 whatever its fields say. A stale *Rotate access* used to get
@@ -2869,11 +2874,10 @@ no `owners` list; nothing stored changes.
   reads "Submitted", and both approval pages write the server's instants in
   words.
 
-**Do:** nothing for a chart install, which sets neither `oidc.scopes` nor
-`oidc.displayNameClaim`: its sessions show the provider-verified email, else
-the subject. A `logweir-api` run from its own configuration file may set
-`oidc.displayNameClaim` to show a name. See *Required operator actions* for
-the `email` scope.
+**Do:** nothing. A chart install takes the API's defaults: `email` is now
+requested, and no name claim is read, so its sessions show the
+provider-verified email, else the subject. See *Required operator actions*
+for the `email` scope.
 **Scope:** the API rows: a tampered email (signature kept), and a display
 signed for another plan hash or approval name, each not served and flagged
 (control: a valid display is served); the email shape (a zero-width space,
@@ -3057,12 +3061,10 @@ In addition to the next entry's six, in its order.
   both together or the controller first.
 - **Roll the console with the controller and the runner** (items 33, 38 and
   56).
-- **Let the identity provider serve the `email` scope** (item 112): the console
-  now asks for `openid profile email groups`, and a provider that refuses a
-  scope refuses the sign-in. `email` is a standard OpenID Connect scope. The
-  chart sets no `oidc.scopes`; a `logweir-api` run from its own configuration
-  file may set `oidc.scopes` without `email`, and its requesters are then
-  named by the signed principal.
+- **Let the identity provider serve the `email` scope** (item 112): a chart
+  install takes the API's defaults, and `email` is now requested
+  (`openid profile email groups`). A provider that refuses a scope refuses the
+  sign-in; `email` is a standard OpenID Connect scope.
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35). A standalone CLI install
   replaces its engine with Logweir's build and exports
