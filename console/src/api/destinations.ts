@@ -366,6 +366,42 @@ export function destinationField(path: string): DestinationField | undefined {
   return `grants.${role}.source`;
 }
 
+/** The grant input each credential source shows; every other grant input is hidden for it. */
+const SHOWN_FOR: Partial<Record<GrantSource, readonly string[]>> = {
+  existing: ["secret"],
+  new: ["accessKeyId", "secretAccessKey"],
+  workloadIdentity: ["serviceAccount"],
+};
+
+/**
+ * DUI-2: where a placed field error can be SEEN. A grant's Secret, keys or ServiceAccount
+ * are rendered only for the source that uses them, so an error the API raised about one
+ * that is hidden (a stale tab rotating with "keep", answered about `secret.existing`) is
+ * marked on the grant's Credential select; otherwise "fix the fields marked below"
+ * pointed at nothing. Messages that land on one control are joined.
+ */
+/** Each grant's source alone: what decides which inputs show, and nothing typed. */
+export function sourcesOf(grants: Grants): Record<GrantRole, Pick<GrantValues, "source">> {
+  return Object.fromEntries(GRANT_ROLES.map((r) => [r, { source: grants[r].source }])) as Record<GrantRole, Pick<GrantValues, "source">>;
+}
+
+export function onScreen<F extends string>(
+  fields: Partial<Record<F, string>>,
+  grants: Record<GrantRole, Pick<GrantValues, "source">>,
+): Partial<Record<F | GrantField, string>> {
+  const out: Partial<Record<string, string>> = {};
+  for (const [field, message] of Object.entries(fields) as [string, string][]) {
+    const m = /^grants\.(archiveWrite|archiveRead|evidenceWrite|evidenceRead)\.(\w+)$/.exec(field);
+    let at = field;
+    if (m && m[2] !== "source") {
+      const role = m[1] as GrantRole;
+      if (!(SHOWN_FOR[grants[role].source] ?? []).includes(m[2]!)) at = `grants.${role}.source`;
+    }
+    out[at] = out[at] ? `${out[at]} ${message}` : message;
+  }
+  return out as Partial<Record<F | GrantField, string>>;
+}
+
 // ------------------------------------------------------------- the rotation
 
 export interface RotateValues {

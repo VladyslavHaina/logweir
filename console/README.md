@@ -72,6 +72,14 @@ five seconds, and renders one of four pages:
 
 A namespace the session holds no role in says "You hold no role in `<ns>`".
 
+Once the console is up it stays up (`src/app/SessionClock.tsx`). The session is
+capped (`sessionMaxAgeSeconds`); about two minutes before the session's
+`expiresAt` a warning offers **Sign in again in a new tab**, which renews the
+cookie this tab shares. When the service later answers 401, a blocking dialog
+("Your session ended: sign in again in a new tab, then continue here") keeps the
+page and what was typed on it, with no browser storage, until a read of the
+session succeeds again (Continue here, or coming back to the tab).
+
 ## Running it
 
 Use Node 22 or 24. `npm ci` installs exactly `package-lock.json`, with install
@@ -120,7 +128,9 @@ They check the page's headers, the landing, every page the navigation offers,
 the wizard up to its target step and the refusals, each screen with 0 console
 errors, 0 CSP violations, 0 requests off the origin and 0 axe violations. A
 shared-mode console needs a signed-in browser state in
-`LOGWEIR_CONSOLE_STORAGE_STATE`. The journeys that need a cluster (sign-in
+`LOGWEIR_CONSOLE_STORAGE_STATE`. A console whose certificate the host does not
+trust (the PoC's local CA) needs `LOGWEIR_E2E_IGNORE_HTTPS_ERRORS=1`; it is off
+by default, so a run against a real install checks the certificate. The journeys that need a cluster (sign-in
 through the identity provider, Back up now, a restore to Verified, approvals)
 are run on the PoC.
 
