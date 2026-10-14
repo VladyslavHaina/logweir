@@ -1792,7 +1792,7 @@ S3 server.
 - Copyright: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>
 - Copyright source: `authors` field
 
-### rustls@0.23.45
+### rustls@0.23.46
 
 - SPDX: `Apache-2.0 OR ISC OR MIT`
 - Copyright: Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
