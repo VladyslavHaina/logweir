@@ -43,6 +43,9 @@ import { readinessRefusal, type Preflight } from "./model";
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 30_000 });
 
+/** Kafka's Long.MAX "no limit", as JSON.parse reads it: no Date can hold it. */
+const LONG_MAX = Number("9223372036854775807");
+
 const R = (raw: unknown) => (raw as { item: Restore }).item;
 const O = (raw: unknown) => (raw as { item: OperationView }).item;
 
@@ -150,7 +153,7 @@ describe("a restore's page", () => {
   });
   it("DUI-16: a finished restore whose target sets no timestamp bound (Long.MAX) renders, and says so", async () => {
     const r = R(subsetRestore);
-    showRestore({ ...r, topicPreflight: { ...r.topicPreflight!, timestampBound: 9223372036854775807 } }, O(subsetOperation));
+    showRestore({ ...r, topicPreflight: { ...r.topicPreflight!, timestampBound: LONG_MAX } }, O(subsetOperation));
     await screen.findByText("Restored and verified");
     expect(screen.getByText("Any age: the broker sets no bound (its default)")).toBeTruthy();
     expect(screen.queryByText(/Oldest timestamp accepted/)).toBeNull();
@@ -319,16 +322,16 @@ describe("theme A's D6: the restore readiness check on an older runner", () => {
 
 describe("DUI-16: a value that is not a time never throws", () => {
   it("prints an out-of-range instant as not a time, and a real one as a time (the control)", () => {
-    expect(exactUtc(9223372036854775807)).toBe("not a time");
-    expect(relative(9223372036854775807)).toBe("not a time");
+    expect(exactUtc(LONG_MAX)).toBe("not a time");
+    expect(relative(LONG_MAX)).toBe("not a time");
     expect(exactUtc("garbage")).toBe("not a time");
     expect(exactUtc(Date.parse("2026-10-14T13:35:23Z"))).toBe("2026-10-14 13:35 UTC");
-    render(<When value={9223372036854775807} exact />);
+    render(<When value={LONG_MAX} exact />);
     expect(screen.getByText("Not a time")).toBeTruthy();
   });
 
   it("reads the timestamp bound as a duration, never as an instant", () => {
-    expect(timestampBoundWords(9223372036854775807)).toBe("Any age: the broker sets no bound (its default)");
+    expect(timestampBoundWords(LONG_MAX)).toBe("Any age: the broker sets no bound (its default)");
     expect(timestampBoundWords(7 * 86_400_000)).toBe("Up to 7 days old (604,800,000 ms); an older record is refused or rewritten");
     expect(timestampBoundWords(null)).toBe("Not recorded");
   });
