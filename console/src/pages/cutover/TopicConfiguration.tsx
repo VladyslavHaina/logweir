@@ -273,7 +273,9 @@ function Keys({ values, empty = "None" }: { values: Record<string, string>; empt
     <ul className="lw-keys">
       {entries.map(([k, v]) => (
         <li key={k}>
-          {k}={msValue(k, v)}
+          {/* A narrow column breaks after the "=" first, never inside a setting's name. */}
+          {k}=<wbr />
+          {msValue(k, v)}
         </li>
       ))}
     </ul>

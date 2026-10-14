@@ -844,9 +844,9 @@ body {
 /* PatternFly gives every body cell `overflow-wrap: break-word` at a higher
    specificity than `.lw-break`, and break-word does not lower a column's minimum
    width: one long token (an image digest, a cluster id) then widened its table
-   past the card. On a cell, and on code inside any cell, it is `anywhere`. */
-.pf-v6-c-table tr > :where(td, th).lw-break,
-.pf-v6-c-table tr > :where(td, th) code {
+   past the card. On a cell marked .lw-break it is `anywhere`, and the code in it inherits
+   that; other cells keep their words whole, so a table with room never breaks one. */
+.pf-v6-c-table tr > :where(td, th).lw-break {
   overflow-wrap: anywhere;
 }
 /* Column headers wrap between words rather than end in an ellipsis
