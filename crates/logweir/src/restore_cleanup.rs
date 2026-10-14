@@ -140,9 +140,13 @@ pub fn finish(
                 DrillError::Operational(m) => m.clone(),
                 other => other.to_string(),
             };
+            // Cleaned before it is printed, as a refusal's detail is: the
+            // controller cleans again, and relies on its own pass.
             let report = CloneCleanupReport {
                 run_id: run_id.to_string(),
-                error: Some(crate::exit::one_line(&why)),
+                error: Some(logweir_core::refusal_detail::clean_message(
+                    &crate::exit::one_line(&why),
+                )),
                 ..CloneCleanupReport::default()
             };
             let _ = writeln!(out, "{}", report.line());

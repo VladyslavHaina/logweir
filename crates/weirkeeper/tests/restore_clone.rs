@@ -847,7 +847,7 @@ async fn an_older_suspended_cleanup_job_is_replaced_not_resumed() {
 }
 
 /// **D4's way out: a `RemovalFailed` clone whose last cleanup Job an older
-/// controller built gets ONE more attempt with this build's grants**, built
+/// controller built is re-armed with this build's grants**, built
 /// from attempt 1's Job; the clone is `Removing` on attempt 4 and the old
 /// reason is cleared. CONTROL: when the last Job is this build's own (it
 /// names the read grant), the clone holds: nothing is created and nothing
@@ -920,5 +920,119 @@ async fn a_removal_failed_clone_an_older_job_left_gets_one_more_attempt() {
             );
         }
         assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+    }
+}
+
+/// **HIGH-1 of the fix round's review: a clone `Removing` when the upgrade
+/// lands.** Its attempt-1 Job, built by an older controller (no
+/// `--evidence-read-grant`, image `runner:old`), failed exit 1. The new
+/// controller, configured with `runner:new`, builds attempt 2 from it: the
+/// template is rewired, so attempt 2 runs THIS controller's image, never the
+/// copied one (an older runner refuses the flag the rewire adds, and the clone
+/// would hold for good). CONTROL: a failed attempt whose template carries the
+/// flag is copied with its own image.
+///
+/// KILLS: the rewire path taking the failed Job's image (the review's probe).
+#[tokio::test]
+async fn a_rewired_retry_runs_this_controllers_image_and_a_copy_keeps_its_own() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z", "phase": "Removing",
+                  "attempts": 1, "jobRef": {"name": CLEANUP_JOB}}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    let line = "clone-cleanup={\"runId\":\"01J9X2QK7C4V0R8YB3ZP6MTS5A\",\"deleted\":[],\
+                \"alreadyAbsent\":[],\"left\":[]}";
+    let pods = json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [{
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "cleanup-pod", "namespace": NS,
+            "labels": {"batch.kubernetes.io/job-name": CLEANUP_JOB, "job-name": CLEANUP_JOB},
+            "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job", "name": CLEANUP_JOB,
+                "uid": CLEANUP_JOB_UID, "controller": true}]},
+        "spec": {"containers": []},
+        "status": {"phase": "Failed", "containerStatuses": [{"name": "runner", "ready": false,
+            "restartCount": 0, "image": "x", "imageID": "x",
+            "state": {"terminated": {"exitCode": 1}}}]}}]});
+    for older in [true, false] {
+        let mut failed: Value =
+            serde_json::from_str(&suspended_cleanup_job(CLEANUP_JOB, 1, !older)).unwrap();
+        failed["spec"]["suspend"] = json!(false);
+        failed["status"] = json!({"conditions": [{"type": "Failed", "status": "True",
+                                     "lastTransitionTime": "2026-10-13T11:00:00Z"}]});
+        let (client, _rec, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/restores/{NAME}")),
+                status: 200,
+                body: value.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/jobs/{}", cleanup_name(2))),
+                status: 404,
+                body: not_found(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/jobs/{CLEANUP_JOB}")),
+                status: 200,
+                body: failed.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/pods",
+                status: 200,
+                body: pods.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/log",
+                status: 200,
+                body: format!("starting\n{line}\n"),
+            },
+            Route {
+                method: "POST",
+                path_suffix: "/jobs",
+                status: 201,
+                body: run_job(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/restores/{NAME}/status")),
+                status: 200,
+                body: value.to_string(),
+            },
+        ]);
+        around(
+            &restore(&value),
+            &client,
+            now(),
+            Some("runner:new"),
+            async { Ok(outcome()) },
+        )
+        .await
+        .unwrap();
+        let posted = bodies_of(&bodies, "POST", "/jobs");
+        assert_eq!(posted.len(), 1, "attempt 2 is built");
+        assert_eq!(posted[0]["metadata"]["name"], cleanup_name(2).as_str());
+        let c = &posted[0]["spec"]["template"]["spec"]["containers"][0];
+        assert!(
+            c["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--evidence-read-grant"),
+            "attempt 2 names the read grant"
+        );
+        if older {
+            assert_eq!(
+                c["image"], "runner:new",
+                "a rewired template runs this build"
+            );
+        } else {
+            assert_eq!(
+                c["image"], "runner:old",
+                "a copy keeps the failed attempt's image"
+            );
+        }
     }
 }

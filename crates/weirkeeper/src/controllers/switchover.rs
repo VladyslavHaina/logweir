@@ -338,6 +338,10 @@ pub struct Access {
     /// The grant the evidence is read with, as a failure names it
     /// (`--evidence-read-grant`).
     pub evidence_read_grant: Option<String>,
+    /// The restore's own immutable plan `ConfigMap`, mounted at `/plan`: it
+    /// holds the CA bundles the restore froze (`evidence-ca.pem`), which the
+    /// store environment's `LOGWEIR_*_CA_FILE` name.
+    pub plan_config_map: Option<String>,
 }
 
 /// What an inline restore's Job reads and writes its evidence with: the
@@ -394,6 +398,7 @@ pub fn restore_access(
                 .map_or(INLINE_READ_GRANT, |e| e.read_grant.as_str())
                 .to_string(),
         ),
+        plan_config_map: Some(super::restore::plan_config_map_name(&restore.name_any())),
     };
     access.secret_mounts.extend(projection.secret_mounts);
     access.secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
@@ -552,7 +557,7 @@ pub fn job_spec(sw: &Switchover, access: Access, scorecard_key: &str, v2: bool) 
         config_map_mounts,
         env_from_secret: access.env_from_secret,
         env_literal: access.env_literal,
-        plan_config_map: None,
+        plan_config_map: access.plan_config_map,
         image: None,
         image_pull_policy: None,
         resources: None,

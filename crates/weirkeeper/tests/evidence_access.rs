@@ -332,8 +332,13 @@ evidence: {backend: s3, bucket: kafka-backups, prefix: logweir/, region: us-east
 ///
 /// KILLS: `restore_access` projecting the source destination's archive grant
 /// (the read would use it); `runner_argv` without the flag.
-#[test]
-fn the_switchover_job_reads_with_the_read_grant_and_names_it() {
+/// The `Restore`, its plan, its target and a `Switchover` over it.
+fn switchover_fixture() -> (
+    weirkeeper::crds::restore::Restore,
+    logweir_core::spec::RestoreSpec,
+    weirkeeper::crds::kafka_cluster::KafkaCluster,
+    weirkeeper::crds::switchover::Switchover,
+) {
     let restore: weirkeeper::crds::restore::Restore = serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
         "metadata": {"name": "incident", "namespace": NS, "uid": "r-uid"},
@@ -362,6 +367,12 @@ fn the_switchover_job_reads_with_the_read_grant_and_names_it() {
                  "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 600}
     }))
     .expect("a Switchover");
+    (restore, plan, cluster, sw)
+}
+
+#[test]
+fn the_switchover_job_reads_with_the_read_grant_and_names_it() {
+    let (restore, plan, cluster, sw) = switchover_fixture();
     let access = poc_access();
     let spec = job_spec(
         &sw,
@@ -463,4 +474,117 @@ fn a_cleanup_that_deleted_nothing_names_its_cause_and_no_list() {
     };
     assert!(report.is_some());
     assert!(removal_failed_reason(&why, 3, report.as_ref()).contains("status.teardown.failed"));
+}
+
+/// **MEDIUM-1 of the fix round's review: a cause relayed from a cleanup's
+/// line is cleaned before it reaches `status.clone.reason`.** An attestation
+/// PUT refused by S3 carries the error body, and on AWS an
+/// `InvalidAccessKeyId` body names the access key id. The reason keeps the
+/// exit and the class (`<Code>`) and drops the key and the body. CONTROL: a
+/// cause with nothing to clean reaches the reason whole.
+///
+/// KILLS: `ended` copying the cause raw.
+#[test]
+fn a_relayed_cause_is_cleaned_before_it_reaches_the_reason() {
+    let key = format!("{}{}", "AKIA", "Z7Q4XWERT2PLMNB8");
+    let raw = format!(
+        "the attestation could not be put: storage: Server returned non-2xx status code: \
+         403 Forbidden: <?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>\
+         InvalidAccessKeyId</Code><Message>The AWS Access Key Id you provided does not \
+         exist.</Message><AWSAccessKeyId>{key}</AWSAccessKeyId><RequestId>X</RequestId></Error>"
+    );
+    let report = logweir_core::target_creation::CloneCleanupReport {
+        run_id: "R".into(),
+        error: Some(raw),
+        ..Default::default()
+    };
+    let Ended::Failed(why, _) = ended(Some(4), Some(report)) else {
+        panic!("a failure");
+    };
+    assert!(why.starts_with("the cleanup Job exited 4: "), "{why}");
+    assert!(!why.contains(&key), "the access key id is removed: {why}");
+    assert!(!why.contains("<Message>"), "the S3 body is removed: {why}");
+    assert!(why.contains("InvalidAccessKeyId"), "the class stays: {why}");
+
+    // CONTROL: nothing to clean.
+    let plain = logweir_core::target_creation::CloneCleanupReport {
+        run_id: "R".into(),
+        error: Some("EvidenceUnreadable: could not read logweir/drills/R.json".into()),
+        ..Default::default()
+    };
+    let Ended::Failed(why, _) = ended(Some(1), Some(plain)) else {
+        panic!("a failure");
+    };
+    assert_eq!(
+        why,
+        "the cleanup Job exited 1: EvidenceUnreadable: could not read logweir/drills/R.json"
+    );
+}
+
+/// **MEDIUM-2 of the fix round's review: the `Switchover` Job mounts the
+/// restore's plan `ConfigMap` at `/plan`**, where the restore froze its
+/// destinations' CA bundles, so a destination with a `caBundle` builds its
+/// stores: both `LOGWEIR_*_CA_FILE` resolve under the mount.
+///
+/// KILLS: the Job built with no plan `ConfigMap` (the CA path names nothing).
+#[test]
+fn the_switchover_job_mounts_the_restores_plan_and_its_ca_resolves_there() {
+    let (restore, plan, cluster, sw) = switchover_fixture();
+    let mut value = serde_json::to_value(poc_destination(
+        json!({"mode": "SecretKeys", "secret": {"name": "poc-evidence"}}),
+    ))
+    .unwrap();
+    value["spec"]["transport"] = json!({"security": "TLS",
+        "caBundle": {"configMapName": "poc-ca", "key": "ca.crt"}});
+    value["spec"]["storage"]["endpoint"] = json!("https://minio.example:9000");
+    let dest: BackupDestination = serde_json::from_value(value).unwrap();
+    let access = evidence_access_env(
+        &resolved(&dest, DestinationRole::EvidenceWrite),
+        Some(&resolved(&dest, DestinationRole::EvidenceRead)),
+    )
+    .expect("renders");
+    let spec = job_spec(
+        &sw,
+        restore_access(&restore, &plan, &cluster, Some(&access)).expect("resolves"),
+        "logweir/drills/R.json",
+        false,
+    );
+    assert_eq!(spec.plan_config_map.as_deref(), Some("incident-plan"));
+    let job = weirkeeper::job::build(&spec);
+    let pod = job.spec.unwrap().template.spec.unwrap();
+    let volume = pod
+        .volumes
+        .unwrap_or_default()
+        .into_iter()
+        .find(|v| {
+            v.config_map
+                .as_ref()
+                .is_some_and(|c| c.name == "incident-plan")
+        })
+        .expect("the plan ConfigMap is a volume");
+    let container = &pod.containers[0];
+    let mount = container
+        .volume_mounts
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|m| m.name == volume.name)
+        .expect("and is mounted");
+    assert_eq!(mount.mount_path, weirkeeper::job::PLAN_MOUNT_PATH);
+    let literal = |name: &str| {
+        container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == name)
+            .and_then(|v| v.value.clone())
+    };
+    for ca in ["LOGWEIR_ARCHIVE_CA_FILE", "LOGWEIR_EVIDENCE_CA_FILE"] {
+        let path = literal(ca).unwrap_or_else(|| panic!("{ca} is set"));
+        assert!(
+            path.starts_with(&format!("{}/", mount.mount_path)),
+            "{ca}={path} resolves under the mount"
+        );
+    }
 }

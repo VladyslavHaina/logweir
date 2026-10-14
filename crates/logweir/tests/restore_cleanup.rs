@@ -509,3 +509,52 @@ fn an_unreadable_id_alone_is_retried() {
     let mut out = Vec::new();
     assert_eq!(finish(RUN, Ok(cleaned), &mut out) as u8, 1);
 }
+
+/// **MEDIUM-1 of the fix round's review: the cleanup cleans its own error
+/// before it prints it.** An attestation PUT refused by S3 carries the error
+/// body, which on AWS names the access key id; the `clone-cleanup=` line
+/// keeps the class (`<Code>`) and drops the key and the body. CONTROL: an
+/// error with nothing to clean is printed whole.
+///
+/// KILLS: `finish` printing the error raw.
+#[test]
+fn the_cleanups_error_is_cleaned_before_it_is_printed() {
+    let line = |e: logweir::drill::DrillError| {
+        let mut out = Vec::new();
+        assert_eq!(finish(RUN, Err(e), &mut out) as u8, 1);
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("clone-cleanup="))
+            .and_then(logweir_core::target_creation::CloneCleanupReport::parse)
+            .expect("the line")
+            .error
+            .expect("the error is on the line")
+    };
+    let key = format!("{}{}", "AKIA", "Z7Q4XWERT2PLMNB8");
+    let error = line(logweir::drill::DrillError::Operational(format!(
+        "the attestation could not be put: storage: 403 Forbidden: <?xml version=\"1.0\" \
+         encoding=\"UTF-8\"?><Error><Code>InvalidAccessKeyId</Code><Message>The AWS Access \
+         Key Id you provided does not exist.</Message><AWSAccessKeyId>{key}</AWSAccessKeyId>\
+         </Error>"
+    )));
+    assert!(
+        !error.contains(&key),
+        "the access key id is removed: {error}"
+    );
+    assert!(
+        !error.contains("<Message>"),
+        "the S3 body is removed: {error}"
+    );
+    assert!(
+        error.contains("InvalidAccessKeyId"),
+        "the class stays: {error}"
+    );
+
+    // CONTROL: nothing to clean.
+    let plain = format!("EvidenceUnreadable: could not read logweir/drills/{RUN}.json");
+    assert_eq!(
+        line(logweir::drill::DrillError::Operational(plain.clone())),
+        plain
+    );
+}

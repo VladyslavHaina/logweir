@@ -45,10 +45,11 @@
 //! carries that flag was built this way; one that does not was built by an
 //! older controller and is never started: a suspended one is replaced by the
 //! next attempt, built this way, and a clone whose last attempt was such a Job
-//! and ended `RemovalFailed` gets ONE more attempt, built this way
-//! ([`Step::Hold`]'s re-arm). That is the way out for a clone an older build's
-//! grant could not clean; any other `RemovalFailed` keeps its finalizer for
-//! the operator.
+//! and ended `RemovalFailed` is re-armed into one more attempt, built this
+//! way ([`Step::Hold`]'s re-arm), which is retried as any other while fewer
+//! than [`MAX_ATTEMPTS`] have run. That is the way out for a clone an older
+//! build's grant could not clean; any other `RemovalFailed` keeps its
+//! finalizer for the operator.
 //!
 //! THE CONTROLLER DELETES NO TOPIC. It starts a runner Job; the runner
 //! deletes only what the run's signed scorecard records, on the cluster it
@@ -586,8 +587,15 @@ pub enum Ended {
 #[must_use]
 pub fn ended(exit_code: Option<i32>, report: Option<CloneCleanupReport>) -> Ended {
     let failed = |how: String, r: Option<CloneCleanupReport>| {
+        // The runner's cause is relayed text (a store's or a broker's answer
+        // may ride in it), so it is cleaned as every relayed message is:
+        // access key ids, S3 error bodies and URL queries never reach
+        // `status.clone.reason`.
         let why = match r.as_ref().and_then(|r| r.error.as_deref()) {
-            Some(cause) => format!("{how}: {cause}"),
+            Some(cause) => format!(
+                "{how}: {}",
+                logweir_core::refusal_detail::clean_message(cause)
+            ),
             None => how,
         };
         let acted = r.filter(|r| {
@@ -876,7 +884,8 @@ async fn advance(
         Step::Keep(expires_at) => {
             // The suspended attempt-1 Job, built now while the run Job is
             // certainly still there.
-            let built = build_attempt(restore, client, &jobs, &uid, 1, true, image, now).await?;
+            let built =
+                build_attempt(restore, client, &jobs, &uid, 1, true, (image, image), now).await?;
             let mut clone = json!({
                 "ttlSeconds": ttl_i64,
                 "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -919,7 +928,17 @@ async fn advance(
             let started = if attempt == 1 {
                 resume(&jobs, &cleanup_job_name(&uid, 1)).await?
             } else {
-                build_attempt(restore, client, &jobs, &uid, attempt, false, image, now).await?
+                build_attempt(
+                    restore,
+                    client,
+                    &jobs,
+                    &uid,
+                    attempt,
+                    false,
+                    (image, image),
+                    now,
+                )
+                .await?
             };
             match started {
                 Ok(job_name) => {
@@ -946,7 +965,7 @@ async fn advance(
                 }
             }
         }
-        Step::Watch => watch(restore, client, namespace, now).await,
+        Step::Watch => watch(restore, client, namespace, now, image).await,
     }
 }
 
@@ -956,6 +975,7 @@ async fn watch(
     client: &kube::Client,
     namespace: &str,
     now: DateTime<Utc>,
+    current_image: Option<&str>,
 ) -> Result<Requeue, RestoreError> {
     let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
@@ -1104,6 +1124,8 @@ async fn watch(
                 .and_then(|s| s.template.spec.as_ref())
                 .and_then(|p| p.containers.first())
                 .and_then(|c| c.image.clone());
+            // A copied attempt keeps the failed one's image; a rewired one
+            // (its template an older controller's) gets this controller's.
             let started = build_attempt(
                 restore,
                 client,
@@ -1111,7 +1133,7 @@ async fn watch(
                 &uid,
                 attempts + 1,
                 false,
-                image.as_deref(),
+                (image.as_deref(), current_image),
                 now,
             )
             .await?;
@@ -1132,9 +1154,13 @@ async fn watch(
 /// **The way out of a `RemovalFailed` an older build caused** (D1, the
 /// PoC's D4): when the clone's last cleanup Job was built by an older
 /// controller ([`carries_read_grant`] is false), its failure says nothing
-/// about this build's grants, so ONE more attempt is built with them. Its
-/// own Job carries the flag, so a failure of it holds for good, as every
-/// other `RemovalFailed` does: the finalizer stays for the operator.
+/// about this build's grants, so attempt `attempts + 1` is built with them.
+/// It counts against the same budget: a failure of it is retried while fewer
+/// than [`MAX_ATTEMPTS`] have run (so an older build's hold at attempt 1 gets
+/// up to two more, one at attempt 3 exactly one). Its own Job carries the
+/// flag, so once the budget is spent, or the attempt is refused, the clone
+/// holds for good, as every other `RemovalFailed` does: the finalizer stays
+/// for the operator.
 async fn rearm(
     restore: &Restore,
     client: &kube::Client,
@@ -1162,13 +1188,24 @@ async fn rearm(
     let attempt = attempts + 1;
     let restores: Api<Restore> =
         Api::namespaced(client.clone(), &restore.namespace().unwrap_or_default());
-    match build_attempt(restore, client, jobs, uid, attempt, false, image, now).await? {
+    match build_attempt(
+        restore,
+        client,
+        jobs,
+        uid,
+        attempt,
+        false,
+        (image, image),
+        now,
+    )
+    .await?
+    {
         Ok(job_name) => {
             tracing::info!(
                 restore = %restore.name_any(),
                 job = %job_name,
-                "a RemovalFailed clone whose last cleanup Job an older controller built gets one \
-                 more attempt with this build's grants"
+                "a RemovalFailed clone whose last cleanup Job an older controller built is \
+                 re-armed with this build's grants"
             );
             patch_clone(
                 &restores,
@@ -1189,7 +1226,10 @@ async fn rearm(
 /// first cleanup Job (later attempts, once the run Job may be gone). A
 /// template that does not carry this build's grants ([`carries_read_grant`]:
 /// the run Job, or a cleanup Job an older controller built) is
-/// [`rewire`]d, with `current_image`; one that does is copied with `image`.
+/// [`rewire`]d, with `current_image` (this controller's configured runner
+/// image, or [`crate::job::RUNNER_IMAGE`]): an older template's image would
+/// be an older runner, which refuses the flag the rewire adds. One that does
+/// carry them is copied with `image`. `images` is `(image, current_image)`.
 /// The inner `Err` is a reason the clone records: nothing to copy, no run
 /// id, or an evidence destination that no longer resolves.
 #[allow(clippy::too_many_arguments)]
@@ -1200,9 +1240,10 @@ async fn build_attempt(
     uid: &str,
     attempt: i64,
     suspend: bool,
-    image: Option<&str>,
+    images: (Option<&str>, Option<&str>),
     now: DateTime<Utc>,
 ) -> Result<Result<String, String>, RestoreError> {
+    let (image, current_image) = images;
     let name = cleanup_job_name(uid, attempt);
     if let Some(existing) = jobs.get_opt(&name).await.map_err(RestoreError::Api)? {
         return Ok(
@@ -1275,7 +1316,11 @@ async fn build_attempt(
             Ok(w) => w,
             Err(why) => return Ok(Err(why)),
         };
-        job = rewire(job, &wiring, image.unwrap_or(crate::job::RUNNER_IMAGE));
+        job = rewire(
+            job,
+            &wiring,
+            current_image.unwrap_or(crate::job::RUNNER_IMAGE),
+        );
     }
     // FX-43: a fresh line token for this attempt's Job (the argv was built
     // fresh, so the run Job's token is not copied).
