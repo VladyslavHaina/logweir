@@ -441,7 +441,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
       decision = (
         <>
           <Content component="p" id="approve-sentence">
-            {request.approve.sentence}
+            <Prose text={request.approve.sentence} />
           </Content>
           <div className="lw-decision">
             <Button variant="primary" id="approve" isLoading={approve.isPending} isDisabled={approve.isPending} onClick={() => approve.mutate(view, { onSuccess: setWritten })}>
@@ -457,7 +457,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
         <Refusal title={readerOnly ? "Not offered to you" : (REFUSAL_TITLE[request.approve.refusal ?? ""] ?? "Not offered to you")} id="approve-not-offered">
           {readerOnly
             ? "This login may read the request and not approve it: that needs the approver role in this namespace, held by someone other than the requester."
-            : request.approve.sentence || "This login is not offered an approval for this request."}
+            : <Prose text={request.approve.sentence || "This login is not offered an approval for this request."} />}
         </Refusal>
       );
     }
@@ -487,7 +487,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
               <ScopeCard scope={scope} />
             ) : (
               <Refusal title="What this request approves cannot be shown in full" id="scope-incomplete">
-                {request.scopeSentence || "What this request approves could not be shown in full, so it cannot be approved here."}
+                <Prose text={request.scopeSentence || "What this request approves could not be shown in full, so it cannot be approved here."} />
               </Refusal>
             )}
           </StackItem>

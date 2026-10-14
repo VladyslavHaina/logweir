@@ -186,6 +186,8 @@ export const REFUSAL_GLOSS: Record<string, string> = {
 export const LATER_PROBE_GLOSS: Record<string, string> = {
   NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
   ProbeOutputUnreadable: "the latest probe's output could not be read",
+  // DUI-31.6: a re-probe in flight beside an earlier reading.
+  ProbeRunning: "a new probe is running now",
 };
 const VERDICT_OWN_REASONS = ["Reachable", "ProbeReportedUnreachable", "AdvertisedBrokersUnreachable"];
 
@@ -233,8 +235,7 @@ export function probeState(r: Reachability | undefined, now = Date.now(), freshS
   const later =
     (verdict === "reachable" || verdict === "unreachable") &&
     reason.length > 0 &&
-    !VERDICT_OWN_REASONS.includes(reason) &&
-    reason !== PROBE_RUNNING_REASON;
+    !VERDICT_OWN_REASONS.includes(reason);
   return {
     verdict,
     reason,

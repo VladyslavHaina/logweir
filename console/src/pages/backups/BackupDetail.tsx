@@ -45,11 +45,16 @@ import { CaptureStatus, StatusLabel } from "../../components/Status";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { When, count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
+import { ConsumerGroups } from "../../components/ConsumerGroups";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { BackupStatus, Commands, Term, Value, VerdictLabel, useFlags } from "./parts";
 import { Trigger } from "./BackupList";
 import "./evidence.css";
 import {
+  BASIS_WORDS,
+  SIGNATURE_WORDS,
+  TRUST_BASIS_NOT_OBSERVED,
+  TRUST_WORDS,
   HISTORICAL_SUFFIX,
   NO_EVIDENCE_KEYS,
   NO_REVISION,
@@ -420,11 +425,15 @@ function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView 
         </div>
         <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl">
           <Term term="Signature">
-            <Value value={v.state} />
+            <span title={v.state}>{SIGNATURE_WORDS[v.state] ?? <Value value={v.state} />}</span>
           </Term>
           <Term term="Trust">
-            <Value value={trust?.state} />
-            {trust?.basis && <span className="lw-reason"> basis {trust.basis}</span>}
+            <span title={trust ? `${trust.state}; basis ${trust.basis ?? "not recorded"}` : undefined}>
+              {trust ? (TRUST_WORDS[trust.state] ?? <Value value={trust.state} />) : <Value value={null} />}
+            </span>
+            {trust?.basis && trust.basis !== TRUST_BASIS_NOT_OBSERVED && (
+              <span className="lw-subtle"> {BASIS_WORDS[trust.basis] ?? <>basis <span className="lw-reason">{trust.basis}</span></>}</span>
+            )}
           </Term>
 {recorded && (
             <>
@@ -663,6 +672,12 @@ export function BackupDetail() {
                         </Label>
                       ))}
                     </LabelGroup>
+                  </Term>
+                  <Term term="Consumer groups">
+                    <ConsumerGroups
+                      groups={b.consumerGroups}
+                      each="This run records where these groups stand. Each group's outcome is under Recovery point and consumer groups once the catalog has read the run."
+                    />
                   </Term>
                   <Term term="Records">{b.operation.terminal ? count(b.records) : "Counting while it runs"}</Term>
                   <Term term="Covers">{windowWords(b)}</Term>

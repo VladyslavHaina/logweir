@@ -285,7 +285,17 @@ export const CATALOG_BINDING_SENTENCE =
   "This plan is bound to the recovery point itself (source.point): the runner re-reads that receipt and the manifest it attests before it contacts any broker, and refuses a mismatch (PointBindingMismatch).";
 
 export const POINT_UNBOUND_SENTENCE =
-  "This plan is not bound to a recovery point: it names the backup set only, so the run reads no backup receipt and its signed scorecard reports each topic's timestamp type and configuration as not recorded.";
+  "This plan is not bound to a recovery point: it names the backup set only, so the run reads no backup receipt and its signed scorecard reports each topic's timestamp type and configuration as not recorded. It maps no consumer group's position either, so this restore cannot be switched over.";
+
+/** DUI-25: a bound point that publishes no consumer positions. */
+export const NO_POSITIONS_SENTENCE =
+  "This point publishes no consumer positions: its backup selected no consumer group, or the catalog has not read them. The restore maps none, so it cannot be switched over.";
+
+/** What the wizard says about the point's binding, and about the consumer positions it can map. */
+export function bindingSentence(catalog: { entry: { consumerPositions?: unknown } } | null): string {
+  if (!catalog) return POINT_UNBOUND_SENTENCE;
+  return catalog.entry.consumerPositions ? CATALOG_BINDING_SENTENCE : `${CATALOG_BINDING_SENTENCE} ${NO_POSITIONS_SENTENCE}`;
+}
 
 export const CATALOG_TOPICS_SENTENCE =
   "Name the topics to restore, separated by commas. The readiness check reads the point's manifest for exactly these names, and the runner restores nothing the backup set does not hold.";

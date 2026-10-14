@@ -14,6 +14,7 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { count } from "../../components/When";
 import { plural } from "./parts";
 import "./cutover.css";
+import { Prose } from "../../components/Prose";
 
 const INCOMPLETE: Record<string, string> = {
   tooManyGroups: "it names more groups than one request can show",
@@ -99,8 +100,12 @@ export function SwitchoverApprovalSummary({ request }: { request: SwitchoverAppr
   return (
     <div>
       <Content component="p">
-        {request.scopeSentence ??
-          `Approving lets the controller commit ${plural(s.positionsCount, "position")} for ${plural(s.groupsCount, "consumer group")} on restore ${s.restore.name}'s target.`}{" "}
+        <Prose
+          text={
+            request.scopeSentence ??
+            `Approving lets the controller commit ${plural(s.positionsCount, "position")} for ${plural(s.groupsCount, "consumer group")} on restore ${s.restore.name}'s target.`
+          }
+        />{" "}
         Each is committed only to a group with no members, and only where the group holds exactly what is listed first.
       </Content>
       <DescriptionList isCompact className="lw-dl lw-gap-top" orientation={{ sm: "vertical", md: "horizontal" }}>

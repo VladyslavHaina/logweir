@@ -2,11 +2,13 @@
 // under one idempotency intent. A double click, a retry after no answer, or a
 // second confirm all resend that intent and get the same run back; only
 // "Back up again" starts a second one.
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Alert, Button, Checkbox, Content, Modal, ModalBody, ModalFooter, ModalHeader, ModalVariant } from "@patternfly/react-core";
 import { ApiError } from "../../api/client";
 import { mintIntent, useRunFromSchedule, type ManualBackupResponse, type Schedule } from "../../api/schedules";
+import { keys } from "../../api/queries";
 import { WriteAlert } from "./parts";
 
 /** What a 409 on this route means, and that its only answer is a new intent. */
@@ -27,6 +29,13 @@ export function conflictWords(error: unknown): string | null {
 
 export function BackUpNow({ ns, schedule, open, onClose }: { ns: string; schedule: Schedule; open: boolean; onClose: () => void }) {
   const run = useRunFromSchedule(ns);
+  // DUI-31.7: the revision this offers is read again when the dialog opens, so an edit made
+  // elsewhere (kubectl, another tab) shows before the click and not as a 409 after it.
+  const client = useQueryClient();
+  useEffect(() => {
+    if (open) void client.invalidateQueries({ queryKey: keys.list("schedules", ns) });
+  }, [open, client, ns]);
+  const reading = useIsFetching({ queryKey: keys.list("schedules", ns) }) > 0;
   const [intent, setIntent] = useState(() => mintIntent("manual"));
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<ManualBackupResponse | null>(null);
@@ -47,8 +56,9 @@ export function BackUpNow({ ns, schedule, open, onClose }: { ns: string; schedul
       <ModalHeader title={`Back up ${schedule.name} now`} labelId="bun-title" />
       <ModalBody id="bun-body">
         <Content component="p">
-          One backup, right now, of the topics, archive and deadline of revision g{schedule.generation ?? "?"}. It does not
-          move the schedule: no slot is used and the next scheduled run stays as it was.
+          One backup, right now, of the topics, archive and deadline of revision g{schedule.generation ?? "?"}
+          {reading ? " (reading the schedule again)" : ""}. It does not move the schedule: no slot is used and the next scheduled
+          run stays as it was.
         </Content>
         {schedule.suspended && !result && (
           <Alert isInline variant="warning" title="This schedule is suspended">
@@ -96,7 +106,7 @@ export function BackUpNow({ ns, schedule, open, onClose }: { ns: string; schedul
           </>
         ) : (
           <>
-            <Button variant="primary" onClick={send} isLoading={run.isPending} isDisabled={run.isPending || (schedule.suspended && !confirmed) || Boolean(conflict)}>
+            <Button variant="primary" onClick={send} isLoading={run.isPending} isDisabled={run.isPending || reading || (schedule.suspended && !confirmed) || Boolean(conflict)}>
               Back up now
             </Button>
             <Button variant="link" onClick={onClose}>

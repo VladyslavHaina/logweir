@@ -7,7 +7,7 @@ import connectionsList from "../../fixtures/console/connections-list.json";
 import policiesList from "../../fixtures/console/protection-policies-list.json";
 import type { Backup, Connection, PointView, ProtectionPolicy, Restore } from "../api/types";
 import { newestFirst } from "../api/queries";
-import { attentionItems, failedLastDay, pointAgeSeconds } from "../app/attention";
+import { attentionItems, failedLastDay, failedRunsLink, pointAgeSeconds } from "../app/attention";
 import { activity, backupDay, freshestPoint, newestPoint, protectionCount, scheduleOf, strip } from "./overviewData";
 
 const BACKUP = backupsList.items[0] as unknown as Backup;
@@ -157,7 +157,8 @@ describe("needs attention", () => {
   it("says why a policy is past its objective, and how many runs failed", () => {
     const stale = { ...HEALTHY, health: "Stale", consecutiveFailedRuns: 2 };
     const [item] = attentionItems("team-a", [stale], [], [], NOW + HOUR);
-    expect([item!.title, item!.to]).toEqual(["protect-healthy is past its objective", "/team-a/backups"]);
+    // DUI-31.3: its failed runs lead to the last one the policy names.
+    expect([item!.title, item!.to]).toEqual(["protect-healthy is past its objective", `/team-a/backups/${HEALTHY.lastAttempt!.backupRef!.name}`]);
     expect(item!.detail).toBe("The newest recovery point is 62 min old; the objective is 5 min. 2 backups in a row failed; the objective allows 1.");
     // A policy not evaluated yet is not an item; one that could not be evaluated is.
     expect(attentionItems("team-a", [{ ...HEALTHY, health: null }], [], [], NOW)).toEqual([]);
@@ -187,5 +188,17 @@ describe("the newest recovery point (DUI-3)", () => {
     // HEALTHY's point is under two minutes old: newer than a one-hour-old run, so the policy (and its objective) speaks.
     const fromPolicy = newestPoint([HEALTHY], [run("old", 60, "succeeded")], [], NOW)!;
     expect([fromPolicy.kind, fromPolicy.kind === "policy" && fromPolicy.withinObjective]).toEqual(["policy", true]);
+  });
+});
+
+describe("DUI-31.3: where a policy's failed runs lead", () => {
+  it("opens the policy's last failed run, else the runs that did not verify, else the policy", () => {
+    expect(failedRunsLink("team-a", { consecutiveFailedRuns: 2, lastAttempt: { backupRef: { name: "orders-hourly-b" }, phase: "Failed" } })).toEqual({
+      to: "/team-a/backups/orders-hourly-b",
+      action: "Open the last failed run",
+    });
+    expect(failedRunsLink("team-a", { consecutiveFailedRuns: 2 })).toEqual({ to: "/team-a/backups?filter=unverified", action: "See the runs that did not verify" });
+    // CONTROL: no failed run leads to the policy, whatever its last attempt was.
+    expect(failedRunsLink("team-a", { consecutiveFailedRuns: 0, lastAttempt: { backupRef: { name: "x" } } })).toEqual({ to: "/team-a/protection", action: "Open protection" });
   });
 });

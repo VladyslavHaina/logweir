@@ -42,6 +42,7 @@ import { ErrorState, LoadingRows } from "../../components/States";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When, count } from "../../components/When";
 import { Ident } from "../../components/Ident";
+import { ConsumerGroups } from "../../components/ConsumerGroups";
 import { BackUpNow } from "./BackUpNow";
 import { RetentionCard } from "./Retention";
 import { cadenceWords, latestPoint, outcomeOf, runsOf, zoneOf } from "./model";
@@ -257,6 +258,9 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
             ))}
           </LabelGroup>
         )}
+      </Term>
+      <Term term="Consumer groups">
+        <ConsumerGroups groups={s.consumerGroups} each="Each run records where these groups stand, so a restore of the run can map their positions." />
       </Term>
       <Term term="Written to">
         {s.destinationRef ? (
@@ -508,7 +512,7 @@ export function ScheduleDetail() {
         title={s.name}
         breadcrumb={breadcrumb}
         status={<ScheduleStatus schedule={s} />}
-        description={`${cadenceWords(s.preset, s.schedule)} (${zoneOf(s)}) · ${s.allUserTopics ? "all user topics" : `${s.topics.length} topics`} from ${s.sourceRef.name}`}
+        description={`${cadenceWords(s.preset, s.schedule)} (${zoneOf(s)}) · ${s.allUserTopics ? "all user topics" : `${s.topics.length} ${s.topics.length === 1 ? "topic" : "topics"}`} from ${s.sourceRef.name}`}
         actions={
           <Flex gap={{ default: "gapSm" }}>
             {grant?.manualBackupCreate && (

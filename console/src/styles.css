@@ -518,6 +518,13 @@ body {
   display: block;
   font-size: var(--pf-t--global--font--size--sm);
   color: var(--pf-t--global--text--color--subtle);
+  /* DUI-29: a long object name in the meta line wraps inside its column; unbroken, it
+     ran under the status label at phone width. */
+  overflow-wrap: anywhere;
+}
+/* A link inside the meta sentence (Review again) is told from its text by more than colour. */
+.lw-list .lw-list__meta a {
+  text-decoration-line: underline;
 }
 .lw-list__end {
   flex: none;

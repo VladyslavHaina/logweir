@@ -30,6 +30,7 @@ import {
   Radio,
   Skeleton,
   Switch,
+  TextArea,
   TextInput,
   Title,
 } from "@patternfly/react-core";
@@ -499,6 +500,50 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
             <TextField control={control} name="excludeTopics" label="Leave out these topics" help="Exact names, comma separated. Internal topics are always left out." />
             <TextField control={control} name="excludePrefixes" label="Leave out topics starting with" help="Literal prefixes, comma separated: dev- leaves out dev-orders, not orders-dev." />
           </>
+        )}
+        {/* DUI-25: the groups whose positions each run records, so a restore maps them and a switchover can move them. */}
+        {editing ? (
+          <Field
+            id="sf-consumerGroups"
+            label="Consumer groups"
+            help={
+              saved.consumerGroups?.length
+                ? "Set when the schedule was created; saving keeps them. kubectl changes spec.consumerGroups."
+                : "None: runs record no consumer positions, so no restore of them can switch consumers over. Set when the schedule was created; kubectl changes spec.consumerGroups."
+            }
+          >
+            <TextArea
+              id="sf-consumerGroups"
+              value={(saved.consumerGroups ?? []).join("\n")}
+              readOnlyVariant="default"
+              autoResize
+              aria-describedby="sf-consumerGroups-helper"
+            />
+          </Field>
+        ) : (
+          <Controller
+            control={control}
+            name="consumerGroups"
+            render={({ field, fieldState }) => (
+              <Field
+                id="sf-consumerGroups"
+                label="Consumer groups (optional)"
+                error={fieldState.error?.message}
+                help="One group id per line, exactly as your clients name it; never a pattern. Each run records where these groups stand, so a restore maps their positions and Switch consumers over can move them. Empty records none."
+              >
+                <TextArea
+                  id="sf-consumerGroups"
+                  value={field.value}
+                  onChange={(_e, v) => field.onChange(v)}
+                  onBlur={field.onBlur}
+                  placeholder={"orders-service\nbilling-reconciler"}
+                  autoResize
+                  validated={fieldState.error ? "error" : "default"}
+                  aria-describedby="sf-consumerGroups-helper"
+                />
+              </Field>
+            )}
+          />
         )}
       </FormSection>
 

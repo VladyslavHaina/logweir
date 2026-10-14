@@ -54,7 +54,7 @@ import {
   type WizardValues,
 } from "./model";
 import {
-  CATALOG_BINDING_SENTENCE,
+  bindingSentence,
   CATALOG_TOPICS_SENTENCE,
   COMPLETE_COVERAGE_COST,
   COVERAGE_BOUND_HELP,
@@ -62,7 +62,6 @@ import {
   ORIGINAL_NAME_NO_OWNER_STATEMENT,
   ORIGINAL_NAME_SENTENCE,
   ORIGINAL_NAME_TYPED_SENTENCE,
-  POINT_UNBOUND_SENTENCE,
   READINESS_CAVEAT_SENTENCE,
   READINESS_NOT_RUN_WARNING,
   REPLICATION_DIFFERS_NOTE,
@@ -343,7 +342,7 @@ export function Resolution({
         ]}
       />
       <Content component="p" className="lw-subtle lw-small">
-        {point.catalog ? CATALOG_BINDING_SENTENCE : POINT_UNBOUND_SENTENCE}
+        {bindingSentence(point.catalog)}
       </Content>
     </div>
   );

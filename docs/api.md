@@ -586,8 +586,10 @@ No response carries a credential. An archive credential is published by name
 (`legacyArchive.credentialRef`), a deletion credential as
 `credentialConfigured: true`, and every archive URL without userinfo.
 `/signers` offers no trust button: an administrator adds a key with
-`kubectl apply`. The API neither sets nor shows `spec.consumerGroups`; set it
-with `kubectl`. Retention and catalog members are described in the OpenAPI
+`kubectl apply`. A schedule's `spec.consumerGroups` is set by the schedule
+create's `consumerGroups` (refused by field as the runner would refuse it) and
+shown on the schedule and on each run; an edit leaves it alone, and `kubectl`
+changes it. Retention and catalog members are described in the OpenAPI
 document; nothing in a retention evaluation was deleted.
 
 ### Trust

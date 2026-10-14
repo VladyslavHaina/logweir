@@ -72,7 +72,7 @@ export function SwitchoverApprovalPage() {
                     </Alert>
                   ) : request.approve.offered && request.confirmationSha256 ? (
                     <>
-                      <Content component="p">{request.approve.sentence}</Content>
+                      <Content component="p"><Prose text={request.approve.sentence} /></Content>
                       <div className="lw-decision">
                         <Button variant="primary" id="approve-switchover" isLoading={approve.isPending} isDisabled={approve.isPending} onClick={() => approve.mutate(request.confirmationSha256!)}>
                           Approve
@@ -82,7 +82,7 @@ export function SwitchoverApprovalPage() {
                     </>
                   ) : (
                     <Refusal title={REFUSAL_TITLE[request.approve.refusal ?? ""] ?? "Not offered to you"} id="approve-not-offered">
-                      {request.approve.sentence || "This login is not offered an approval for this request."}
+                      <Prose text={request.approve.sentence || "This login is not offered an approval for this request."} />
                     </Refusal>
                   )}
                   {approve.error &&

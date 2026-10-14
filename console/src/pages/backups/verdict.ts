@@ -31,6 +31,33 @@ export function basisAllowsGreen(basis: unknown): boolean {
   return GREEN_BASES.includes(basis);
 }
 
+/** The Evidence card's words for the API's two states and its basis (DUI-31.4). The API's own
+ *  word stays in the title; a word this build does not know is shown as it is. */
+export const SIGNATURE_WORDS: Record<string, string> = {
+  pending: "Pending",
+  valid: "Valid",
+  invalid: "Invalid",
+  notAttempted: "Not attempted",
+  noEvidence: "No signed document recorded",
+  unknown: "Unknown",
+};
+export const TRUST_WORDS: Record<string, string> = {
+  pending: "Pending",
+  verified: "Trusted",
+  verifiedHistorical: "Trusted, by a historical key",
+  untrusted: "Untrusted signer",
+  invalid: "Invalid",
+  notAttempted: "Not attempted",
+  notApplicable: "Not applicable: there is no signed document",
+};
+/** `None` (TRUST_BASIS_NOT_OBSERVED) is no basis observed, and the card says nothing for it. */
+export const BASIS_WORDS: Record<string, string> = {
+  Current: "on a current key",
+  Historical: "on a historical key",
+  RecordedBeforeRevocation: "recorded before the key was revoked",
+  Unverified: "on an unverified basis",
+};
+
 /** The cases that are not green, each named by what it is a claim about. */
 export const CASES = {
   untrusted: "Untrusted signer: the bytes are authentic and this installation does not accept the key.",

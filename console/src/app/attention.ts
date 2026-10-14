@@ -75,6 +75,15 @@ export function unreachableConsequence(role: string): string {
   return "Backups from it and restores to it fail until it is reachable.";
 }
 
+/** Where a policy's attention item leads: its failed run, the runs that did not verify, or the policy. */
+export function failedRunsLink(ns: string, p: Pick<ProtectionPolicy, "consecutiveFailedRuns" | "lastAttempt">): { to: string; action: string } {
+  if ((p.consecutiveFailedRuns ?? 0) === 0) return { to: `/${ns}/protection`, action: "Open protection" };
+  const last = p.lastAttempt?.backupRef?.name;
+  return last
+    ? { to: `/${ns}/backups/${encodeURIComponent(last)}`, action: "Open the last failed run" }
+    : { to: `/${ns}/backups?filter=unverified`, action: "See the runs that did not verify" };
+}
+
 export function attentionItems(
   ns: string,
   policies: ProtectionPolicy[],
@@ -101,8 +110,8 @@ export function attentionItems(
       tone: health.tone,
       title: `${p.name} ${health.says}`,
       detail: policyDetail(p, now),
-      to: (p.consecutiveFailedRuns ?? 0) > 0 ? `/${ns}/backups` : `/${ns}/protection`,
-      action: (p.consecutiveFailedRuns ?? 0) > 0 ? "See the failed runs" : "Open protection",
+      // DUI-31.3: the policy's own last run when it names one, else the runs that did not verify.
+      ...failedRunsLink(ns, p),
     });
   }
   const retried = failedLastDay(backups, now).filter((b) =>

@@ -27,6 +27,7 @@ import {
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ShieldAltIcon from "@patternfly/react-icons/dist/esm/icons/shield-alt-icon";
 import { useProtection } from "../../api/queries";
+import { grantOf, useSessionDoc } from "../../api/session";
 import { ApiError } from "../../api/client";
 import { useProtectionPolicy, type ProtectionPolicy } from "../../api/schedules";
 import { ageVsObjective, historyTooLarge, newestPointWords } from "../../app/policyAge";
@@ -111,6 +112,9 @@ function scheduleWords(p: ProtectionPolicy): string {
 
 export function ProtectionList() {
   const { ns } = useParams({ from: "/$ns/protection" });
+  // A localAdmin console holds no roles: its one actor is the installation's administrator.
+  const session = useSessionDoc();
+  const administers = session.authenticationMode === "localAdmin" || grantOf(session, ns)?.roles.includes("administrator") === true;
   const policies = useProtection(ns);
   const narrow = useNarrow();
   const rows = policies.data ?? [];
@@ -130,8 +134,11 @@ export function ProtectionList() {
             <ErrorState error={policies.error} onRetry={() => void policies.refetch()} />
           ) : rows.length === 0 ? (
             <Empty title="No protection policy" icon={ShieldAltIcon}>
-              Nothing here is checking whether a recoverable backup exists or how old it is. Protection policies are set by
-              whoever administers Logweir for {ns}; this console reads them and does not create them.
+              Nothing here is checking whether a recoverable backup exists or how old it is.{" "}
+              {/* DUI-31.11: an administrator is the one who sets it, so it is not told to ask one. */}
+              {administers
+                ? `This console reads protection policies and does not create them: as an administrator of ${ns}, you add one with kubectl, as a ProtectionPolicy in ${ns} that names its schedules and objectives.`
+                : `Protection policies are set by whoever administers Logweir for ${ns}; this console reads them and does not create them.`}
             </Empty>
           ) : narrow ? (
             <CompactList

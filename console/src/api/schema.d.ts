@@ -1368,6 +1368,8 @@ export interface components {
             archive: components["schemas"]["ArchiveView"];
             /** @description The archive backup ID. */
             backupId?: string | null;
+            /** @description The consumer groups whose positions this run records (`spec.consumerGroups`, copied from its schedule). ABSENT selects none: the run records no positions (DUI-25). What each group's outcome was is the receipt's, on the recovery point. */
+            consumerGroups?: string[] | null;
             /**
              * Format: date-time
              * @description When the object was created.
@@ -2462,6 +2464,12 @@ export interface components {
              * @default null
              */
             concurrencyPolicy?: components["schemas"]["ConcurrencyPolicy"];
+            /**
+             * @description The consumer groups whose positions every run records, by exact id (`spec.consumerGroups`): never a pattern, never "all groups". A restore maps them, and a switchover moves them (DUI-25).
+             *
+             *     Optional and additive: ABSENT (or empty) selects no group and the schedule is the one this route always created, its request hash included. A blank, repeated or control-character id, one over 255 bytes, more than 100 ids, or a selection whose receipt summary could be over its cap is refused here by the rule the runner applies (`consumer_positions::refuse_selection`), before any write. The edit route leaves the stored selection as it is.
+             */
+            consumerGroups?: string[] | null;
             /** @description A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body. */
             destinationRef?: components["schemas"]["NameRef"];
             /**
@@ -4646,6 +4654,8 @@ export interface components {
             catchUpPolicy?: components["schemas"]["CatchUpPolicy"];
             /** @description `Forbid` or `Allow`. */
             concurrencyPolicy: components["schemas"]["ConcurrencyPolicy"];
+            /** @description The consumer groups whose positions every run records (`spec.consumerGroups`), as stored. ABSENT selects none: the runs record no positions, so no restore of them maps any (DUI-25). */
+            consumerGroups?: string[] | null;
             /**
              * Format: date-time
              * @description When the object was created.

@@ -2552,9 +2552,13 @@ A partition with no committed offset is counted, never offset 0.
   refused before any Job, `ExecutionSpecInvalid` naming
   `ConsumerGroupSelectedTwice`, `ConsumerGroupIdInvalid` or
   `ConsumerGroupSelectionTooLarge`; a schedule carrying one is `Ready=False`.
-- **Set only with `kubectl`.** The API's create bodies refuse
-  `consumerGroups`, and the console neither sets nor shows it; a console edit
-  leaves a `kubectl`-set selection alone.
+- **Set when a schedule is created, or with `kubectl`.** The schedule create
+  (`POST .../schedules`, the console's *Create a schedule*) takes
+  `consumerGroups` and refuses a selection by the rules above, by field, before
+  anything is stored; an empty list is none. The schedule's and each run's
+  views show it, as the console's schedule and run pages do. An edit through
+  the API or the console leaves the stored selection alone; `kubectl` changes
+  it. An ad-hoc run from the API selects none.
 - **Nothing here resets a group.** A restore maps the positions; only a
   [`Switchover`](#switching-consumer-groups-over) applies them. To read
   positions with the source gone, see

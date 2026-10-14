@@ -11,6 +11,8 @@ import {
   draftValues,
   editBody,
   fieldOf,
+  groupList,
+  lastRunAt,
   latestPoint,
   missingRead,
   movesLocation,
@@ -314,5 +316,40 @@ describe("FX-45: a READ grant the broker reports missing", () => {
     expect(missingRead({ ...denied, state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: "the broker reports READ for this principal on all 14 selected topic(s)" })).toBeNull();
     expect(missingRead({ ...denied, gating: "executionOnly" })).toBeNull();
     expect(missingRead({ ...denied, id: "connection.topicsDescribable" })).toBeNull();
+  });
+});
+
+describe("DUI-25: the consumer groups a schedule's runs record", () => {
+  it("a create sends one id per line, as typed, and an edit never sends them", () => {
+    const v = draft({ consumerGroups: "orders-billing\r\n  dui3-billing-reconciliation-consumer-eu-west-1 \n\n group, with a comma" });
+    expect(groupList(v.consumerGroups)).toEqual(["orders-billing", "dui3-billing-reconciliation-consumer-eu-west-1", "group, with a comma"]);
+    expect(createBody(v, "0 2 * * *").consumerGroups).toEqual(["orders-billing", "dui3-billing-reconciliation-consumer-eu-west-1", "group, with a comma"]);
+    expect(issues(v).consumerGroups).toBeUndefined();
+    // CONTROLS: none typed sends no key at all; the edit route has no such field.
+    expect("consumerGroups" in createBody(draft(), "0 2 * * *")).toBe(false);
+    expect("consumerGroups" in editBody(v, "0 2 * * *", 3)).toBe(false);
+  });
+
+  it("refuses by field what the runner would refuse before any Job", () => {
+    expect(issues(draft({ consumerGroups: "a\na" })).consumerGroups).toBe("a is listed twice; name each group once.");
+    expect(issues(draft({ consumerGroups: "g".repeat(256) })).consumerGroups).toMatch(/longer than 255 bytes/);
+    expect(issues(draft({ consumerGroups: Array.from({ length: 101 }, (_, i) => `g${i}`).join("\n") })).consumerGroups).toBe("At most 100 consumer groups; this names 101.");
+    expect(issues(draft({ consumerGroups: "a\u0007b" })).consumerGroups).toMatch(/control character/);
+    // CONTROL: 100 distinct ids of 255 bytes are within the runner's bounds.
+    expect(issues(draft({ consumerGroups: Array.from({ length: 100 }, (_, i) => `${i}`.padEnd(255, "g")).join("\n") })).consumerGroups).toBeUndefined();
+    expect(fieldOf("consumerGroups")).toBe("consumerGroups");
+  });
+});
+
+describe("DUI-31.2: a schedule's last run", () => {
+  const s = { name: "orders-hourly", uid: "u-1", status: { lastFireTime: "2026-10-14T10:00:00Z" } } as unknown as Schedule;
+  const run = (createdAt: string, uid = "u-1") => ({ name: `r-${createdAt}`, createdAt, schedule: "orders-hourly", scheduleRef: { name: "orders-hourly", uid } }) as unknown as Backup;
+  it("is the newest run of either kind: a Back up now run after the last slot is the last run", () => {
+    expect(lastRunAt(s, [run("2026-10-14T10:20:00Z")])).toBe("2026-10-14T10:20:00Z");
+    expect(lastRunAt({ ...s, status: {} } as unknown as Schedule, [run("2026-10-14T10:20:00Z")])).toBe("2026-10-14T10:20:00Z");
+    // CONTROLS: an older manual run, another schedule's run (a recreated one's uid) and no runs leave the slot.
+    expect(lastRunAt(s, [run("2026-10-14T09:00:00Z")])).toBe("2026-10-14T10:00:00Z");
+    expect(lastRunAt(s, [run("2026-10-14T10:20:00Z", "u-0")])).toBe("2026-10-14T10:00:00Z");
+    expect(lastRunAt(s, undefined)).toBe("2026-10-14T10:00:00Z");
   });
 });

@@ -11,6 +11,17 @@ import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { PhaseLabel } from "./status";
 import { plural } from "./parts";
+import { useCan } from "../../api/session";
+
+/** DUI-28: from an ended switchover back to a new review of its restore (the cutover page
+ *  reads the restore again and says why when it cannot be switched over). */
+function ReviewAgain({ ns, s }: { ns: string; s: Switchover }) {
+  return (
+    <Link to="/$ns/restores/$name/cutover" params={{ ns, name: s.restore.name }} search={{}} aria-label={`Review again: restore ${s.restore.name}`}>
+      Review again
+    </Link>
+  );
+}
 
 /** "2 applied, 1 refused" from the reported groups; the phase's words before that. */
 export function groupSummary(s: Switchover): string {
@@ -35,6 +46,8 @@ export function SwitchoverList() {
   const { ns } = useParams({ from: "/$ns/switchovers" });
   const list = useSwitchovers(ns);
   const narrow = useNarrow();
+  // DUI-30: a review is a write; only a role that may create a restore here is offered one.
+  const canWrite = useCan(ns, "restoreCreate");
   const header = (
     <PageHeader
       title="Switchovers"
@@ -79,7 +92,17 @@ export function SwitchoverList() {
                   key: s.uid || s.name,
                   href: `#/${ns}/switchovers/${s.name}`,
                   title: s.name,
-                  meta: `${s.restore.name} · ${groupSummary(s)}`,
+                  meta: (
+                    <>
+                      {s.restore.name} · {groupSummary(s)}
+                      {canWrite && isTerminal(s) && (
+                        <>
+                          {" · "}
+                          <ReviewAgain ns={ns} s={s} />
+                        </>
+                      )}
+                    </>
+                  ),
                   status: <PhaseLabel sw={s} />,
                 }))}
               />
@@ -91,7 +114,8 @@ export function SwitchoverList() {
                   <Th width={25}>Switchover</Th>
                   <Th width={25}>Restore</Th>
                   <Th width={20}>Status</Th>
-                  <Th width={30}>Groups</Th>
+                  <Th width={canWrite ? 20 : 30}>Groups</Th>
+                  {canWrite && <Th width={10} screenReaderText="Next" />}
                 </Tr>
               </Thead>
               <Tbody>
@@ -115,6 +139,7 @@ export function SwitchoverList() {
                       {groupSummary(s)}
                       {s.groups.length > 0 && <div className="lw-subtle lw-small">{plural(s.groups.reduce((n, g) => n + g.partitions, 0), "partition")}</div>}
                     </Td>
+                    {canWrite && <Td dataLabel="Next">{isTerminal(s) && <ReviewAgain ns={ns} s={s} />}</Td>}
                   </Tr>
                 ))}
               </Tbody>

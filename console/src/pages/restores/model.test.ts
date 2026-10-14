@@ -566,3 +566,13 @@ describe("recovery points", () => {
     }
   });
 });
+
+describe("DUI-25: what the wizard says a point maps", () => {
+  it("says no consumer position is mapped when the plan is bound to the backup set only, or the point publishes none", async () => {
+    const { bindingSentence, CATALOG_BINDING_SENTENCE, NO_POSITIONS_SENTENCE } = await import("./words");
+    expect(bindingSentence(null)).toMatch(/It maps no consumer group's position either, so this restore cannot be switched over\.$/);
+    expect(bindingSentence({ entry: {} })).toBe(`${CATALOG_BINDING_SENTENCE} ${NO_POSITIONS_SENTENCE}`);
+    // CONTROL: a bound point that publishes positions says only how it is bound.
+    expect(bindingSentence({ entry: { consumerPositions: { listing: "complete", groups: [] } } })).toBe(CATALOG_BINDING_SENTENCE);
+  });
+});

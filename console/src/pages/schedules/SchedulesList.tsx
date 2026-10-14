@@ -5,14 +5,14 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Button, Card, PageSection } from "@patternfly/react-core";
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import OutlinedClockIcon from "@patternfly/react-icons/dist/esm/icons/outlined-clock-icon";
-import { useSchedules } from "../../api/queries";
+import { useBackups, useSchedules } from "../../api/queries";
 import { useSetSuspension, type Schedule } from "../../api/schedules";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When } from "../../components/When";
 import { BackUpNow } from "./BackUpNow";
-import { cadenceWords, zoneOf } from "./model";
+import { cadenceWords, lastRunAt, zoneOf } from "./model";
 import { ScheduleStatus, WriteAlert, useGrant } from "./parts";
 
 function nextAt(s: Schedule): string | null | undefined {
@@ -38,7 +38,7 @@ function useRowSuspension(ns: string, s: Schedule, onFailure: (f: Failure) => vo
 
 type Failure = { name: string; error: unknown; verb: string };
 
-function Row({ ns, s, onBackUp, onFailure }: { ns: string; s: Schedule; onBackUp: (s: Schedule) => void; onFailure: (f: Failure) => void }) {
+function Row({ ns, s, lastRun, onBackUp, onFailure }: { ns: string; s: Schedule; lastRun: string | undefined; onBackUp: (s: Schedule) => void; onFailure: (f: Failure) => void }) {
   const navigate = useNavigate();
   const grant = useGrant(ns);
   const suspension = useRowSuspension(ns, s, onFailure);
@@ -68,7 +68,7 @@ function Row({ ns, s, onBackUp, onFailure }: { ns: string; s: Schedule; onBackUp
       <Td dataLabel="Written to">{writtenTo(s)}</Td>
       <Td dataLabel="Next run">{s.suspended ? <span className="lw-subtle">Suspended</span> : <When value={nextAt(s)} />}</Td>
       <Td dataLabel="Last run">
-        <When value={s.status.lastFireTime} />
+        <When value={lastRun} />
       </Td>
       <Td isActionCell>
         <ActionsColumn items={actions} />
@@ -81,6 +81,8 @@ export function SchedulesList() {
   const { ns } = useParams({ from: "/$ns/schedules" });
   const navigate = useNavigate();
   const schedules = useSchedules(ns);
+  // The runs, for each schedule's last run of either kind (DUI-31.2); one cache with Backups.
+  const backups = useBackups(ns);
   const grant = useGrant(ns);
   const narrow = useNarrow();
   const [backUp, setBackUp] = useState<string | null>(null);
@@ -170,7 +172,7 @@ export function SchedulesList() {
               </Thead>
               <Tbody>
                 {rows.map((s) => (
-                  <Row key={s.name} ns={ns} s={s} onBackUp={(x) => setBackUp(x.name)} onFailure={setFailure} />
+                  <Row key={s.name} ns={ns} s={s} lastRun={lastRunAt(s, backups.data)} onBackUp={(x) => setBackUp(x.name)} onFailure={setFailure} />
                 ))}
               </Tbody>
             </Table>

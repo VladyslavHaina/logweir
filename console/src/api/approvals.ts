@@ -16,6 +16,7 @@ import { useMemo } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LocalRefusal as Refusal, api, call, listAll, LIST_PAGE_SIZE, outcomeUnknown } from "./client";
 import { keys, useRestores } from "./queries";
+import { awaitingSwitchoverApproval, useSwitchoverApprovalRequests, useSwitchovers, type SwitchoverApprovalRequest } from "./switchovers";
 import { useCan, useSessionDoc } from "./session";
 import type { components } from "./schema";
 import type { Restore, Session } from "./types";
@@ -299,17 +300,17 @@ export function recordState(approval: Approval): Found {
 }
 
 /**
- * Where one Approval stands for one Restore. The three states that bind another
- * subject, run or plan are checked before the verdict: a verdict about something
- * else is not a verdict about this Restore.
+ * Where one Approval stands for one Restore (or, with `kind`, one Switchover). The
+ * three states that bind another subject, run or plan are checked before the
+ * verdict: a verdict about something else is not a verdict about this subject.
  */
-export function approvalState(approval: Approval | null, subject: Subject): Found {
+export function approvalState(approval: Approval | null, subject: Subject, kind: "Restore" | "Switchover" = SUBJECT_KIND): Found {
   if (approval === null) return { state: "absent" };
-  if (approval.subjectRef.kind !== SUBJECT_KIND || approval.subjectRef.name !== subject.name) {
+  if (approval.subjectRef.kind !== kind || approval.subjectRef.name !== subject.name) {
     return { state: "foreign-subject", detail: `${approval.subjectRef.kind}/${approval.subjectRef.name}` };
   }
   const bound = approval.verifiedSubject;
-  if (bound && (bound.uid !== subject.uid || bound.name !== subject.name || bound.kind !== SUBJECT_KIND || bound.namespace !== subject.namespace)) {
+  if (bound && (bound.uid !== subject.uid || bound.name !== subject.name || bound.kind !== kind || bound.namespace !== subject.namespace)) {
     return { state: "foreign-execution", detail: bound.uid };
   }
   if (subject.planHash && approval.planHash !== subject.planHash) return { state: "plan-mismatch", detail: approval.planHash };
@@ -451,6 +452,12 @@ export function waitingForYou(requests: (ApprovalRequest | null | undefined)[]):
   return requests.filter((r) => r?.state === "pending" && r.approve.offered === true && scopeShowable(r) !== null).length;
 }
 
+/** The same for switchover requests (DUI-27): pending, offered to this session, and
+ *  showing the whole scope, which is what its page's Approve button needs. */
+export function switchoversWaitingForYou(requests: (SwitchoverApprovalRequest | null | undefined)[]): number {
+  return requests.filter((r) => r?.state === "pending" && r.approve.offered === true && r.scopeComplete === true && !!r.confirmationSha256).length;
+}
+
 /** The navigation's Approvals count, or undefined when nothing waits for you. */
 export function approvalsNavCount(n: number): NavCount | undefined {
   return n > 0 ? { n, tone: "brand", text: `${n} ${n === 1 ? "request waits" : "requests wait"} for you` } : undefined;
@@ -590,6 +597,13 @@ export function useWaitingRestores(ns: string, enabled = true) {
   return { ...all, data: waiting } as typeof all;
 }
 
+/** Every Switchover held for its approval (DUI-27): the Switchovers list, filtered. */
+export function useWaitingSwitchovers(ns: string, enabled = true) {
+  const all = useSwitchovers(ns, enabled);
+  const waiting = useMemo(() => all.data?.filter(awaitingSwitchoverApproval), [all.data]);
+  return { ...all, data: waiting } as typeof all;
+}
+
 /** One Restore, with its plan bytes; null when it does not exist. */
 export function useSubjectRestore(ns: string, name: string, enabled = true) {
   return useQuery({
@@ -653,10 +667,11 @@ export function useApprovalRequests(ns: string, restores: string[], enabled = tr
 }
 
 /**
- * The navigation's Approvals count: requests waiting for THIS session. Only a
- * two-person namespace on a console that takes approvals has any (record §4.1):
- * under confirm nothing waits for anyone, and a strict request has no
- * server-side "offered to you" view, so it is listed on the page and not counted.
+ * The navigation's Approvals count: requests waiting for THIS session, a
+ * restore's and a switchover's alike (DUI-27). Only a two-person namespace on a
+ * console that takes approvals has any (record §4.1): under confirm nothing waits
+ * for anyone, and a strict request has no server-side "offered to you" view, so
+ * it is listed on the page and not counted.
  * R1 wires it into the Shell: `approvals: useApprovalsNavCount(ns)` in useNavCounts.
  */
 export function useApprovalsNavCount(ns: string): NavCount | undefined {
@@ -669,7 +684,15 @@ export function useApprovalsNavCount(ns: string): NavCount | undefined {
     (restores.data ?? []).map((r) => r.name),
     twoPerson,
   );
-  return twoPerson ? approvalsNavCount(waitingForYou(requests.map((q) => q.data))) : undefined;
+  const switchovers = useWaitingSwitchovers(ns, twoPerson && grant.restoresRead);
+  const switchoverRequests = useSwitchoverApprovalRequests(
+    ns,
+    (switchovers.data ?? []).map((s) => s.name),
+    twoPerson,
+  );
+  return twoPerson
+    ? approvalsNavCount(waitingForYou(requests.map((q) => q.data)) + switchoversWaitingForYou(switchoverRequests.map((q) => q.data)))
+    : undefined;
 }
 
 // ------------------------------------------------------- writes

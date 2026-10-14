@@ -97,6 +97,14 @@ interface World {
   create?: (body: Record<string, unknown>, n: number) => Response;
   switchover?: Switchover;
   request?: Record<string, unknown>;
+  /** The session's grant in team-a; the fixture's (every flag) when absent. */
+  viewer?: boolean;
+}
+
+/** A viewer's grant: it reads restores and switchovers and creates nothing (DUI-30). */
+function viewerSession() {
+  const ns = sessionFixture.namespaces[0]!;
+  return { ...sessionFixture, namespaces: [{ ...ns, roles: ["viewer"], capabilities: { ...ns.capabilities, restoreCreate: false, approvalSubmit: false } }] };
 }
 
 const CONFIRM = { namespace: "team-a", name: "default-confirm-v1", mode: "ordinary", operatorMode: "confirm", legacy: false, basis: "freshInstall", requireDistinctPrincipal: false, ordinaryConfirmationAvailable: true, consoleApprovalAvailable: false, ticketRequired: false, installationDigest: sha("9") };
@@ -105,7 +113,7 @@ function serve(w: World) {
   let creates = 0;
   net.answer = async (r, path) => {
     const ok = (item: unknown) => json(200, { item, requestId: "r" });
-    if (path === "/session") return json(200, sessionFixture);
+    if (path === "/session") return json(200, w.viewer ? viewerSession() : sessionFixture);
     if (path === "/namespaces/team-a/approval-policy") return ok(w.policy ?? CONFIRM);
     if (path === "/namespaces/team-a/restores/orders-recovery") return ok(w.restore ?? RESTORE);
     if (r.method === "POST" && path === "/namespaces/team-a/preflights") return json(202, { item: w.review ?? review(), requestId: "r" });
@@ -126,7 +134,7 @@ function serve(w: World) {
   };
 }
 
-function renderAt(path: string) {
+function renderAt(path: string, prime?: (client: QueryClient) => void) {
   const root = createRootRoute({ component: Outlet });
   const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
   const router = createRouter({
@@ -134,6 +142,7 @@ function renderAt(path: string) {
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  prime?.(client);
   render(
     <QueryClientProvider client={client}>
       <SessionGate>{() => <RouterProvider router={router} />}</SessionGate>
@@ -463,5 +472,75 @@ describe("the switchover's approval (R6's Approvals, subject kind Switchover)", 
     await screen.findByText("You cannot approve your own request");
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(posts("/namespaces/team-a/switchovers/swo-1/console-approval")).toHaveLength(0);
+  });
+});
+
+describe("round 4: the way back to a review, and who may start one", () => {
+  it("DUI-28: the cutover reads the restore again on arrival and does not refuse from a copy cached while it ran", async () => {
+    serve({});
+    // The copy a page cached as the run ended, before its verdict was written: terminal and
+    // not yet verified, so not switchable, and (terminal) no longer polled.
+    const running = { ...RESTORE, operation: { ...RESTORE.operation, verificationState: "pending", verifiedSuccess: false } };
+    // As the console's own client keeps a read fresh for 10 s (app/queryClient.ts), so a revisit would not read it.
+    const cached = (client: QueryClient) => {
+      client.setDefaultOptions({ queries: { retry: false, staleTime: 10_000 } });
+      client.setQueryData(["restores", "team-a", "orders-recovery"], running);
+    };
+    renderAt(FLOW, cached);
+    await screen.findByText("4 consumer groups with mapped positions");
+    expect(screen.queryByText("This restore cannot be switched over")).toBeNull();
+    expect(posts("/namespaces/team-a/preflights")).toHaveLength(1);
+    // CONTROL: when the server's answer is that same restore, the page refuses and starts no review.
+    cleanup();
+    net.sent = [];
+    serve({ restore: running });
+    renderAt(FLOW, cached);
+    await screen.findByText("This restore cannot be switched over");
+    expect(posts("/namespaces/team-a/preflights")).toHaveLength(0);
+  });
+
+  it("DUI-28: a Succeeded switchover offers Review again on its page and in the list, which open a new review", async () => {
+    serve({ switchover: switchover({ phase: "Succeeded", reason: "Succeeded", groups: [{ source: "app", target: "app", outcome: "applied", created: true, partitions: 2 }] }) });
+    const router = renderAt("/team-a/switchovers/swo-1");
+    const again = await screen.findByRole("button", { name: "Review again" });
+    fireEvent.click(again);
+    await waitFor(() => expect(router.state.location.pathname).toBe(FLOW));
+    await screen.findByText("4 consumer groups with mapped positions");
+    cleanup();
+    renderAt("/team-a/switchovers");
+    const link = await screen.findByRole("link", { name: "Review again: restore orders-recovery" });
+    expect(link.getAttribute("href")).toContain("/team-a/restores/orders-recovery/cutover");
+  });
+
+  it("DUI-30: a viewer is offered no Review again and no review, and the cutover sends no POST", async () => {
+    serve({ viewer: true, switchover: switchover({ phase: "PartiallyApplied", reason: "PartiallyApplied", groups: [{ source: "app", target: "app", outcome: "refused", reason: "GroupActive", created: false, partitions: 2 }] }) });
+    renderAt("/team-a/switchovers/swo-1");
+    // Once the restore is read (its target is named), the page has all it decides from.
+    await screen.findByText(/mapped consumer positions on orders-dr\./);
+    expect(screen.queryByRole("button", { name: "Review again" })).toBeNull();
+    cleanup();
+    renderAt("/team-a/switchovers");
+    await screen.findByRole("link", { name: "swo-1" });
+    expect(screen.queryByRole("link", { name: /^Review again/ })).toBeNull();
+    cleanup();
+    renderAt(FLOW);
+    await screen.findByText("Your role does not switch consumers over");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(net.sent.filter((x) => x.method === "POST")).toHaveLength(0);
+    // CONTROL: the same page for an operator starts its review (one POST).
+    cleanup();
+    net.sent = [];
+    serve({});
+    renderAt(FLOW);
+    await screen.findByText("4 consumer groups with mapped positions");
+    expect(posts("/namespaces/team-a/preflights")).toHaveLength(1);
+  });
+
+  it("DUI-31.8: the Switchover page asks for its restore only by the name it reads, never an empty one", async () => {
+    serve({ switchover: switchover({ phase: "Succeeded", reason: "Succeeded" }) });
+    renderAt("/team-a/switchovers/swo-1");
+    await screen.findByText("Outcome per group");
+    await waitFor(() => expect(net.sent.some((x) => x.path === "/namespaces/team-a/restores/orders-recovery")).toBe(true));
+    expect(net.sent.some((x) => x.path === "/namespaces/team-a/restores/" || x.path.startsWith("/namespaces/team-a/restores/?"))).toBe(false);
   });
 });

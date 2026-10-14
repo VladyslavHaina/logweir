@@ -336,6 +336,14 @@ export function Shell() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [rail, setRail] = useState(false);
 
+  // DUI-24: a new page opens at its top. The main region is the scroller, not the window,
+  // so nothing else resets it; a change of search alone (a filter, a tab) keeps the place.
+  useEffect(() => {
+    const main = document.getElementById("lw-main");
+    if (main) main.scrollTop = 0;
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+  }, [pathname]);
+
   // The drawer: Escape closes it and gives focus back to the menu button; the
   // page behind it is inert while it is open, so focus stays in the menu.
   const drawer = mobile && drawerOpen;

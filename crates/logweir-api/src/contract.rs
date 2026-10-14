@@ -531,6 +531,19 @@ pub struct CreateScheduleRequest {
     /// same `validate_selection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
+    /// The consumer groups whose positions every run records, by exact id
+    /// (`spec.consumerGroups`): never a pattern, never "all groups". A
+    /// restore maps them, and a switchover moves them (DUI-25).
+    ///
+    /// Optional and additive: ABSENT (or empty) selects no group and the
+    /// schedule is the one this route always created, its request hash
+    /// included. A blank, repeated or control-character id, one over 255
+    /// bytes, more than 100 ids, or a selection whose receipt summary could be
+    /// over its cap is refused here by the rule the runner applies
+    /// (`consumer_positions::refuse_selection`), before any write. The edit
+    /// route leaves the stored selection as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where backups are written. Exactly one of `archive` or
     /// `destinationRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +705,11 @@ pub struct Schedule {
     /// Dynamic selection, when the schedule uses it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
+    /// The consumer groups whose positions every run records
+    /// (`spec.consumerGroups`), as stored. ABSENT selects none: the runs
+    /// record no positions, so no restore of them maps any (DUI-25).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where backups are written. With `destinationRef` this is the CRD's
     /// sentinel URL and the console should render the destination instead.
     pub archive: ArchiveView,
@@ -971,6 +989,12 @@ pub struct Backup {
     pub source_ref: NameRef,
     /// Named topics.
     pub topics: Vec<String>,
+    /// The consumer groups whose positions this run records
+    /// (`spec.consumerGroups`, copied from its schedule). ABSENT selects
+    /// none: the run records no positions (DUI-25). What each group's outcome
+    /// was is the receipt's, on the recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where the archive is written. With `destinationRef` this is the CRD's
     /// sentinel URL `logweir-destination://<name>` and carries no credential;
     /// a console renders the destination instead of the URL.

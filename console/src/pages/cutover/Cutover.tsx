@@ -38,9 +38,11 @@ import {
   TextInput,
 } from "@patternfly/react-core";
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
+import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
+import { useCan } from "../../api/session";
 import { useRestore } from "../../api/queries";
 import { ApiError } from "../../api/client";
-import type { ApprovalPolicy } from "../../api/approvals";
+import { useApprovalPolicy, type ApprovalPolicy } from "../../api/approvals";
 import {
   EVIDENCE_UNREADABLE_WORDS,
   UNKNOWN_OUTCOME,
@@ -59,7 +61,6 @@ import {
   reviewGroups,
   reviewState,
   unavailablePositions,
-  useApprovalPolicy,
   useCreateSwitchover,
   usePreflight,
   usePreflightDetails,
@@ -523,9 +524,16 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
               {policy.data?.operatorMode === "two-person"
                 ? "A second person approves it in Approvals, seeing every group and position. Nothing runs before that."
                 : "An approver signs it with their personal key and uploads the signature in Approvals. Nothing runs before that."}{" "}
-              <Link to="/$ns/approvals" params={{ ns }}>
-                Approvals
-              </Link>
+              {policy.data?.operatorMode === "two-person" ? (
+                // DUI-27: its own approval page, which the second person opens from Approvals too.
+                <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: s.name }}>
+                  Open its approval
+                </Link>
+              ) : (
+                <Link to="/$ns/approvals" params={{ ns }}>
+                  Approvals
+                </Link>
+              )}
             </Alert>
           )}
           {s.phase === "Refused" && (
@@ -596,7 +604,12 @@ function CutoverFlow() {
   const { ns, name } = useParams({ from: "/$ns/restores/$name/cutover" });
   const search = useSearch({ from: "/$ns/restores/$name/cutover" });
   const navigate = useNavigate();
-  const restore = useRestore(ns, name);
+  // Read again on every visit (DUI-28): a copy cached while the run was going would refuse
+  // a restore that has since succeeded.
+  const restore = useRestore(ns, name, { fresh: true });
+  // DUI-30: a review is a write (POST preflights), and so is a switchover. A role that may
+  // not create a restore here starts neither and is offered neither.
+  const canWrite = useCan(ns, "restoreCreate");
   const start = useStartReview(ns);
   const [reviewId, setReviewId] = useState<string>();
   const [rounds, setRounds] = useState(0);
@@ -609,7 +622,7 @@ function CutoverFlow() {
   const details = usePreflightDetails(ns, pf.data);
   const switchoverName = search.switchover;
   const sw = useSwitchover(ns, switchoverName);
-  const r = restore.data;
+  const r = restore.isFetchedAfterMount ? restore.data : undefined;
   const refusal = r ? cutoverRefusal(r) : null;
 
   const beginReview = () => {
@@ -625,11 +638,11 @@ function CutoverFlow() {
     );
   };
   useEffect(() => {
-    if (r && !refusal && !switchoverName && !started.current) {
+    if (r && !refusal && !switchoverName && canWrite && !started.current) {
       started.current = true;
       beginReview();
     }
-  }, [r, refusal, switchoverName]);
+  }, [r, refusal, switchoverName, canWrite]);
 
   const state = pf.data ? reviewState(pf.data) : null;
   const read = useMemo(() => (details.data ? reviewGroups(details.data) : null), [details.data]);
@@ -650,20 +663,28 @@ function CutoverFlow() {
     <Breadcrumb className="lw-breadcrumb">
       <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
       <BreadcrumbItem render={() => <Link to="/$ns/restores/$name" params={{ ns, name }}>{name}</Link>} />
-      <BreadcrumbItem isActive>Switch consumers over</BreadcrumbItem>
+      {switchoverName ? (
+        <>
+          {/* DUI-28: the way back to a new review of this restore. */}
+          <BreadcrumbItem render={() => <Link to="/$ns/restores/$name/cutover" params={{ ns, name }} search={{}}>Switch consumers over</Link>} />
+          <BreadcrumbItem isActive>{switchoverName}</BreadcrumbItem>
+        </>
+      ) : (
+        <BreadcrumbItem isActive>Switch consumers over</BreadcrumbItem>
+      )}
     </Breadcrumb>
   );
   const header = (description?: string) => <PageHeader title="Switch consumers over" breadcrumb={breadcrumb} description={description} />;
 
-  if (restore.isPending || restore.isError) {
+  if (restore.isError || !r) {
     return (
       <>
         {header()}
-        <PageSection>{restore.isPending ? <LoadingRows rows={6} /> : <ErrorState error={restore.error} onRetry={() => void restore.refetch()} />}</PageSection>
+        <PageSection>{restore.isError ? <ErrorState error={restore.error} onRetry={() => void restore.refetch()} /> : <LoadingRows rows={6} />}</PageSection>
       </>
     );
   }
-  const target = r!.target.clusterRef.name;
+  const target = r.target.clusterRef.name;
 
   if (switchoverName) {
     return (
@@ -674,7 +695,8 @@ function CutoverFlow() {
         </PageSection>
         <PageSection>
           <SwitchoverResult ns={ns} name={switchoverName} restore={r} />
-          {sw.data && isTerminal(sw.data) && sw.data.phase !== "Succeeded" && !refusal && (
+          {/* DUI-28: after any outcome, a Succeeded one included, a new review is one click. */}
+          {sw.data && isTerminal(sw.data) && !refusal && canWrite && (
             <Flex className="lw-gap-top" gap={{ default: "gapMd" }}>
               <FlexItem>
                 <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name }, search: {} })}>
@@ -703,6 +725,30 @@ function CutoverFlow() {
               }
             >
               {refusal.body} <span className="lw-reason">{refusal.word}</span>
+            </Empty>
+          </Card>
+        </PageSection>
+      </>
+    );
+  }
+
+  if (!canWrite) {
+    return (
+      <>
+        {header()}
+        <PageSection>
+          <Card>
+            <Empty
+              title="Your role does not switch consumers over"
+              icon={LockIcon}
+              actions={
+                <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns, name } })}>
+                  Back to the restore
+                </Button>
+              }
+            >
+              Your sign-in reads restores and switchovers in {ns}. Reviewing the positions and switching consumers over is for a role that
+              may create restores here, such as operator. Nothing was sent.
             </Empty>
           </Card>
         </PageSection>
@@ -788,7 +834,7 @@ function CutoverFlow() {
         <PageSection>{body}</PageSection>
       ) : step === "review" ? (
         <Review
-          restore={r!}
+          restore={r}
           pf={pf.data!}
           groups={groups}
           notes={notes}
@@ -799,7 +845,7 @@ function CutoverFlow() {
           onContinue={() => setStep("confirm")}
         />
       ) : (
-        <Confirm ns={ns} restore={r!} pf={pf.data!} chosen={chosen} left={left} attempt={`r${rounds}-${pf.data!.id}`} onBack={() => setStep("review")} />
+        <Confirm ns={ns} restore={r} pf={pf.data!} chosen={chosen} left={left} attempt={`r${rounds}-${pf.data!.id}`} onBack={() => setStep("review")} />
       )}
     </>
   );

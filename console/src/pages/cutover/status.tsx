@@ -12,7 +12,9 @@ export function PhaseLabel({ sw }: { sw: Pick<Switchover, "phase" | "reason"> })
   switch (sw.phase) {
     case null:
     case undefined:
-      return <StatusLabel tone="neutral" text="Not started" title={title} />;
+      // DUI-31.10: just created, before the controller writes a phase (seconds later it
+      // reads "Waiting for approval" or "Starting"); "Not started" read as a stop.
+      return <StatusLabel tone="progress" text="Submitted" title={title} />;
     case "Pending":
       return sw.reason === "ApprovalNotVerified" ? (
         <StatusLabel tone="neutral" text="Waiting for approval" title={title} />

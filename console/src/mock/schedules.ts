@@ -243,6 +243,10 @@ async function createSchedule(ns: string, request: Request): Promise<Response> {
     } as unknown as Schedule,
     body,
   );
+  // DUI-25: the groups each run records, as the API stores them (an empty list is none).
+  if (Array.isArray((body as { consumerGroups?: string[] }).consumerGroups) && (body as { consumerGroups: string[] }).consumerGroups.length) {
+    created.consumerGroups = (body as { consumerGroups: string[] }).consumerGroups;
+  }
   created.status.policy = { generation: 1, effectiveSince: String(created.createdAt), evaluatedAt: String(created.createdAt), runPolicySha256: "", timeZone: "UTC", tzdb: TZDB };
   schedules.push(created);
   scheduleKeys.set(key, { name, body: text });
@@ -303,9 +307,9 @@ async function backUpNow(ns: string, request: Request): Promise<Response | null>
   const answer = (await made.json()) as { item: Backup };
   const stored = backups.find((b) => b.name === answer.item.name);
   const ref = s ? { name: s.name, uid: s.uid, generation: s.generation ?? 1, runPolicySha256: digest(s) } : undefined;
-  if (stored && ref) Object.assign(stored, { scheduleRef: ref, schedule: s!.name, topics: s!.topics });
+  if (stored && ref) Object.assign(stored, { scheduleRef: ref, schedule: s!.name, topics: s!.topics, consumerGroups: s!.consumerGroups });
   manualKeys.set(key, { name: answer.item.name, body: text });
-  return json(201, { item: { ...answer.item, scheduleRef: ref, schedule: s?.name, topics: s?.topics ?? answer.item.topics }, replayed: false, schedule: context, requestId: requestId() });
+  return json(201, { item: { ...answer.item, scheduleRef: ref, schedule: s?.name, topics: s?.topics ?? answer.item.topics, consumerGroups: s?.consumerGroups }, replayed: false, schedule: context, requestId: requestId() });
 }
 
 function preview(url: URL): Response {

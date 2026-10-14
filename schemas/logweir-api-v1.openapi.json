@@ -6226,6 +6226,14 @@
             "type": "string",
             "nullable": true
           },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions this run records (`spec.consumerGroups`, copied from its schedule). ABSENT selects none: the run records no positions (DUI-25). What each group's outcome was is the receipt's, on the recovery point.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
           "createdAt": {
             "description": "When the object was created.",
             "type": "string",
@@ -8495,6 +8503,14 @@
             "description": "`Forbid` (default) or `Allow`.",
             "default": null,
             "$ref": "#/components/schemas/ConcurrencyPolicy",
+            "nullable": true
+          },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions every run records, by exact id (`spec.consumerGroups`): never a pattern, never \"all groups\". A restore maps them, and a switchover moves them (DUI-25).\n\nOptional and additive: ABSENT (or empty) selects no group and the schedule is the one this route always created, its request hash included. A blank, repeated or control-character id, one over 255 bytes, more than 100 ids, or a selection whose receipt summary could be over its cap is refused here by the rule the runner applies (`consumer_positions::refuse_selection`), before any write. The edit route leaves the stored selection as it is.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           },
           "destinationRef": {
@@ -13547,6 +13563,14 @@
           "concurrencyPolicy": {
             "description": "`Forbid` or `Allow`.",
             "$ref": "#/components/schemas/ConcurrencyPolicy"
+          },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions every run records (`spec.consumerGroups`), as stored. ABSENT selects none: the runs record no positions, so no restore of them maps any (DUI-25).",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
           },
           "createdAt": {
             "description": "When the object was created.",
