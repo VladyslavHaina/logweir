@@ -407,6 +407,9 @@ describe("FX-45: the backup readiness check", () => {
     const note = "the broker reports READ for this principal on all 2 selected topic(s)";
     render(<Verdict preflight={check([{ id: "connection.topicsReadable", state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: note }], [{ id: "connection.topicsReadable", note }])} />);
     expect(screen.queryByText(/Missing READ/)).toBeNull();
-    expect(document.body.textContent).toContain(`Only the run itself can answer: ${note}`);
+    // DUI-11: one item per note, so two notes never run together.
+    const list = screen.getByRole("list", { name: "Only the run itself can answer" });
+    expect(list.querySelectorAll("li")).toHaveLength(1);
+    expect(list.textContent).toBe(`connection.topicsReadable ${note}`);
   });
 });

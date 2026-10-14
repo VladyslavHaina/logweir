@@ -13,6 +13,7 @@ import {
 } from "@patternfly/react-core";
 import ExclamationCircleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon";
 import { ApiError } from "../api/client";
+import { ErrorText } from "./Prose";
 
 export function LoadingRows({ rows = 5, label = "Loading" }: { rows?: number; label?: string }) {
   return (
@@ -39,7 +40,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   return (
     <EmptyState titleText={headline} headingLevel="h2" icon={ExclamationCircleIcon} status="danger" variant="sm">
       <EmptyStateBody>
-        {error instanceof Error ? error.message : String(error)}
+        <ErrorText error={error} />
         {api && (
           <span className="lw-error-meta">
             {api.status} {api.code}

@@ -76,6 +76,7 @@ import {
   TIME_BASIS_OPTED_WARNING,
   modeMeaning,
 } from "./words";
+import { ErrorText } from "../../components/Prose";
 
 type Errors = Partial<Record<string, { message?: string }>>;
 const err = (errors: Errors, name: string) => errors[name]?.message;
@@ -310,7 +311,7 @@ export function Resolution({
   if (error) {
     return (
       <Alert variant="danger" isInline title="The chosen point could not be read" className="lw-gap-top">
-        {error instanceof Error ? error.message : String(error)}
+        <ErrorText error={error} />
       </Alert>
     );
   }
@@ -790,7 +791,7 @@ export function CheckStep({
           )}
           {readiness.error !== null && readiness.error !== undefined && (
             <Alert variant="danger" isInline title="The check could not be started or read">
-              {readiness.error instanceof Error ? readiness.error.message : String(readiness.error)}
+              <ErrorText error={readiness.error} />
             </Alert>
           )}
           {r && refusal && !running && (

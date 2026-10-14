@@ -559,7 +559,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                         r.coverage?.recorded ?? scope?.coverage ? (
                           <Claim value={coverageWords(r.coverage?.recorded ?? scope?.coverage, r.coverage?.requested, scope?.complete ?? { covered: r.coverage?.covered ?? undefined })} verified={signed} />
                         ) : (
-                          coverageWords(null, r.coverage?.requested, null)
+                          coverageWords(null, r.coverage?.requested, null, r.operation.terminal)
                         ),
                     },
                     selectionWords(selection) ? { term: "Restored (signed)", value: <Claim value={selectionWords(selection)} verified={signed} /> } : null,

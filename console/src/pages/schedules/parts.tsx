@@ -18,6 +18,7 @@ import { StatusLabel } from "../../components/Status";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When } from "../../components/When";
 import { ADJUSTMENT_WORDS, localWords, outcomeOf, scheduleState } from "./model";
+import { ErrorText } from "../../components/Prose";
 
 /** What the signed-in actor may do in `ns`, from the session; undefined without a grant there. */
 export function useGrant(ns: string) {
@@ -183,7 +184,7 @@ export function WriteAlert({
       actionLinks={onRetry ? <AlertActionLink onClick={onRetry}>{retryText}</AlertActionLink> : undefined}
     >
       {outcome === "unknown" && <p>It may or may not have happened. {UNKNOWN[kind]}</p>}
-      {outcome !== "unknown" && error instanceof Error && <p>{error.message}</p>}
+      {outcome !== "unknown" && error instanceof Error && <p><ErrorText error={error} /></p>}
       {unmatched.length > 0 && (
         <ul>
           {unmatched.map((m) => (

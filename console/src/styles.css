@@ -240,7 +240,8 @@ body {
   font-family: var(--pf-t--global--font--family--mono);
   font-size: var(--pf-t--global--font--size--sm);
 }
-.lw-break {
+.lw-break,
+.lw-prose code {
   overflow-wrap: anywhere;
 }
 .lw-min0 {
@@ -839,6 +840,29 @@ body {
 }
 .pf-v6-c-page__main-container {
   min-width: 0;
+}
+/* PatternFly gives every body cell `overflow-wrap: break-word` at a higher
+   specificity than `.lw-break`, and break-word does not lower a column's minimum
+   width: one long token (an image digest, a cluster id) then widened its table
+   past the card. On a cell, and on code inside any cell, it is `anywhere`. */
+.pf-v6-c-table tr > :where(td, th).lw-break,
+.pf-v6-c-table tr > :where(td, th) code {
+  overflow-wrap: anywhere;
+}
+/* Column headers wrap between words rather than end in an ellipsis
+   ("Reco…") while the table has room: a header's words claim their width. */
+.pf-v6-c-table thead:where(.pf-v6-c-table__thead) {
+  --pf-v6-c-table--cell--MaxWidth: none;
+  --pf-v6-c-table--cell--Overflow: visible;
+  --pf-v6-c-table--cell--TextOverflow: clip;
+  --pf-v6-c-table--cell--WhiteSpace: normal;
+}
+/* An expandable section's toggle is a PatternFly button, which never wraps:
+   a long toggle text ("Separate credentials for restores and evidence") set the
+   minimum width of its whole form, so at 390 px every field ran off the edge. */
+.pf-v6-c-expandable-section__toggle .pf-v6-c-button {
+  white-space: normal;
+  text-align: start;
 }
 /* PatternFly's visually hidden text has no size, so a long hidden value (a full
    hash behind a shortened one) widens a card on a phone. Give it the usual 1 px. */

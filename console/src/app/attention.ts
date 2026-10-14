@@ -68,6 +68,13 @@ function policyDetail(p: ProtectionPolicy, now: number): string {
   return parts.join(" ");
 }
 
+/** What an unreachable connection stops, by its role: a target's owner restores to it (DUI-6). */
+export function unreachableConsequence(role: string): string {
+  if (role === "source") return "Backups from it fail until it is reachable.";
+  if (role === "target") return "Restores to it fail until it is reachable.";
+  return "Backups from it and restores to it fail until it is reachable.";
+}
+
 export function attentionItems(
   ns: string,
   policies: ProtectionPolicy[],
@@ -81,9 +88,9 @@ export function attentionItems(
       key: `conn-${c.name}`,
       tone: "danger",
       title: `${c.name} is unreachable`,
-      detail: `The controller could not reach its brokers (${c.reachability.reason ?? "no reason given"}). Backups from it fail until it is reachable.`,
-      to: `/${ns}/connections`,
-      action: "Open connections",
+      detail: `The controller could not reach its brokers (${c.reachability.reason ?? "no reason given"}). ${unreachableConsequence(c.role)}`,
+      to: `/${ns}/connections/${c.name}`,
+      action: "Open the connection",
     });
   }
   for (const p of policies) {

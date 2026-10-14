@@ -33,6 +33,7 @@ import { Commands, Term, Value, useFlags } from "../backups/parts";
 import { RESTORE_NEEDS_ROLE } from "../backups/verdict";
 import "../backups/evidence.css";
 import { ReadyStatus, whereFrom } from "./CatalogList";
+import { Prose } from "../../components/Prose";
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
   CATALOG_WINDOW_SENTENCE,
@@ -53,6 +54,8 @@ import {
   schemaDependentTopics,
   truncatedWords,
   viewIsUsable,
+  catalogSentence,
+  duplicateOf,
   viewIsWindow,
 } from "./model";
 
@@ -71,6 +74,7 @@ const COUNTS: [keyof Catalog["counts"], string][] = [
 
 function ViewCard({ c }: { c: Catalog }) {
   const usable = viewIsUsable(c);
+  const duplicate = duplicateOf(c);
   const days = (c.histogram ?? []).slice(-14);
   const most = Math.max(1, ...days.map((d) => d.points));
   return (
@@ -79,7 +83,13 @@ function ViewCard({ c }: { c: Catalog }) {
         <CardTitle component="h2">The view</CardTitle>
       </CardHeader>
       <CardBody className="lw-ev-stack">
-        {!usable && <Alert isInline variant="warning" title="The view is not usable" children={VIEW_EXPIRED_SENTENCE} />}
+        {duplicate ? (
+          <Alert isInline variant="warning" title="This catalog duplicates another one and never syncs">
+            <Prose text={duplicate} />
+          </Alert>
+        ) : (
+          !usable && <Alert isInline variant="warning" title="The view is not usable" children={VIEW_EXPIRED_SENTENCE} />
+        )}
         <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl">
           <Term term="Synced">
             <When value={c.syncedAt} exact />
@@ -502,7 +512,7 @@ export function CatalogDetail() {
         title={c.name}
         breadcrumb={breadcrumb}
         status={<ReadyStatus c={c} />}
-        description={`A read-only view over ${c.destinationRef ? `destination ${c.destinationRef.name}` : "an inline archive"}: ${count(c.counts.available)} of ${count(c.counts.total)} points available at the last sync.`}
+        description={catalogSentence(c)}
       />
       <PageSection>
         <Grid hasGutter>

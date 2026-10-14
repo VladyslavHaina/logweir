@@ -23,7 +23,7 @@ export function restoreFacts(r: Restore): string {
       : r.target.originalName
         ? "original names"
         : `prefix ${r.target.topicPrefix}`;
-  const coverage = coverageWords(r.coverage?.recorded, r.coverage?.requested, { covered: r.coverage?.covered ?? undefined });
+  const coverage = coverageWords(r.coverage?.recorded, r.coverage?.requested, { covered: r.coverage?.covered ?? undefined }, r.operation.terminal);
   const partial = selectionWords(r.selection) ? " · partial" : "";
   return `${kind} · ${coverage}${partial}`;
 }

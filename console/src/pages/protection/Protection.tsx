@@ -22,6 +22,7 @@ import {
   ProgressMeasureLocation,
   ProgressSize,
   Stack,
+  Title,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ShieldAltIcon from "@patternfly/react-icons/dist/esm/icons/shield-alt-icon";
@@ -43,8 +44,16 @@ const PROBLEM_WORDS: Record<string, string> = {
   Staleness: "The newest point is older than the objective",
   ArchiveUnavailable: "The catalog cannot find the point in storage",
   RehearsalFailure: "A rehearsal failed, or has not run for too long",
-  RecoveryCompleted: "A recovery finished",
 };
+
+/** The ledger's informational kind: a finished recovery, recorded resolved when it happens. Not a problem (DUI-12). */
+export const RECOVERY_COMPLETED = "RecoveryCompleted";
+
+/** The ledger split in two: what went wrong, and the recoveries it recorded. */
+export function ledgerOf(p: Pick<ProtectionPolicy, "alerts">) {
+  const alerts = p.alerts ?? [];
+  return { problems: alerts.filter((a) => a.kind !== RECOVERY_COMPLETED), recoveries: alerts.filter((a) => a.kind === RECOVERY_COMPLETED) };
+}
 
 const EVIDENCE_WORDS: Record<string, string> = {
   Valid: "Verified",
@@ -56,7 +65,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
 
 /** Open problems in the policy's ledger. */
 export function openProblems(p: ProtectionPolicy): number {
-  return (p.alerts ?? []).filter((a) => a.state === "Open").length;
+  return ledgerOf(p).problems.filter((a) => a.state === "Open").length;
 }
 
 /** `Protected` has three statuses, kept apart: Unknown is not rounded down to False. */
@@ -213,7 +222,7 @@ export function ProtectionDetail() {
   const met = protectedWords(p);
   const behind = typeof p.generation === "number" && typeof p.observedGeneration === "number" && p.observedGeneration < p.generation;
   const schedules = p.schedules ?? [];
-  const alerts = p.alerts ?? [];
+  const { problems: alerts, recoveries } = ledgerOf(p);
   return (
     <>
       <PageHeader
@@ -410,8 +419,23 @@ export function ProtectionDetail() {
                       </Tbody>
                     </Table>
                   )}
+                  {recoveries.length > 0 && (
+                    <>
+                      <Title headingLevel="h3" size="md" className="lw-gap-top">
+                        Recoveries recorded
+                      </Title>
+                      <ul className="lw-plain-list" aria-label="Recoveries recorded">
+                        {recoveries.map((a) => (
+                          <li key={a.key}>
+                            A recovery from this policy's source finished <When value={a.openedAt} />
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                   <Content component="p" className="lw-subtle lw-small lw-gap-top">
-                    A ledger of what was found, open until it clears. Nothing is sent anywhere: alert delivery is not part of v1.
+                    A ledger of what was found, open until it clears. A finished recovery is recorded beside it, not as a problem. Nothing is sent
+                    anywhere: alert delivery is not part of v1.
                   </Content>
                 </CardBody>
               </Card>

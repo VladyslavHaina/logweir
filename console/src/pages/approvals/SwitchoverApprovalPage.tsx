@@ -12,6 +12,7 @@ import { SwitchoverApprovalSummary } from "../cutover/SwitchoverApprovalSummary"
 import { REFUSAL_TITLE } from "./ApprovalPage";
 import { Refusal, RequestStatus } from "./parts";
 import "./approvals.css";
+import { ErrorText } from "../../components/Prose";
 
 export function SwitchoverApprovalPage() {
   const { ns, name } = useParams({ from: "/$ns/approvals/switchover/$name" });
@@ -78,7 +79,7 @@ export function SwitchoverApprovalPage() {
                       </Alert>
                     ) : (
                       <Refusal title="Not approved" id="approve-refused">
-                        {approve.error.message}
+                        <ErrorText error={approve.error} />
                       </Refusal>
                     ))}
                 </CardBody>

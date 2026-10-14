@@ -74,6 +74,7 @@ import { StatusLabel } from "../../components/Status";
 import { ApprovalFilesForm, CountersignForm } from "./forms";
 import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, ScopeCard, Term } from "./parts";
 import "./approvals.css";
+import { ErrorText } from "../../components/Prose";
 
 /** The sha256 of the Restore's plan bytes, computed here; undefined while it computes. */
 function usePlanHash(restore: Restore | null | undefined): string | undefined {
@@ -461,7 +462,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
         </Alert>
       ) : (
         <Refusal title="Not approved" id="approve-refused">
-          {approve.error.message}
+          <ErrorText error={approve.error} />
         </Refusal>
       )
     ) : null;

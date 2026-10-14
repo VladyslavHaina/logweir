@@ -242,6 +242,13 @@ export function windowWords(b: Pick<Backup, "windowCovered" | "operation">): str
   return `${t(b.windowCovered.fromMs)} to ${t(b.windowCovered.toMs)}`;
 }
 
+/** A backup page's one-line description: its topics, its source and its window, as a sentence. */
+export function backupSentence(b: Pick<Backup, "windowCovered" | "operation" | "topics" | "sourceRef">): string {
+  const topics = `${b.topics.length} ${b.topics.length === 1 ? "topic" : "topics"} from ${b.sourceRef.name}`;
+  if (b.windowCovered) return `${topics}, covering ${windowWords(b)}.`;
+  return `${topics}; ${b.operation.terminal ? "no covered window was recorded" : "the covered window is recorded when it finishes"}.`;
+}
+
 /** The covered window as the list shows it: hours and minutes only. */
 export function windowShort(b: Pick<Backup, "windowCovered" | "operation">, now = Date.now()): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";

@@ -81,13 +81,20 @@ export function summaryCase(op: Restore["operation"]): string {
 // ------------------------------------------------------- coverage and selection
 
 /** One restore's coverage in a few words: `recorded` is the signed claim (absent is not
- *  recorded, never complete), `requested` what the Restore asked for. */
-export function coverageWords(recorded: string | null | undefined, requested: string | null | undefined, complete: { covered?: boolean } | null | undefined): string {
+ *  recorded, never complete), `requested` what the Restore asked for. A finished run
+ *  (`terminal`) with nothing recorded will record nothing more: no "yet". */
+export function coverageWords(
+  recorded: string | null | undefined,
+  requested: string | null | undefined,
+  complete: { covered?: boolean } | null | undefined,
+  terminal = false,
+): string {
   if (recorded === "complete") {
     if (notCovered(complete)) return "complete, not covered: not a pass";
     return complete?.covered === true ? "complete, covered" : "complete, counts not read";
   }
   if (recorded === "sampled") return "sampled";
+  if (terminal) return requested === "complete" ? "complete asked for; not recorded" : "sampled asked for; not recorded";
   return requested === "complete" ? "complete asked for; not recorded yet" : "sampled (not recorded yet)";
 }
 

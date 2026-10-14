@@ -42,6 +42,7 @@ import { StatusLabel } from "../../components/Status";
 import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
+import { ErrorText } from "../../components/Prose";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -124,7 +125,7 @@ export function ErrorLine({ error }: { error: unknown }) {
   const api = error instanceof ApiError ? error : null;
   return (
     <span className="lw-error-meta">
-      {error instanceof Error ? error.message : String(error)}
+      <ErrorText error={error} />
       {api && ` (${api.status} ${api.code}${api.requestId ? ` · request ${api.requestId}` : ""})`}
     </span>
   );

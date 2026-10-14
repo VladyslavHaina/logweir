@@ -15,6 +15,7 @@ import { keys } from "../api/queries";
 import { SessionProvider } from "../api/session";
 import type { Session } from "../api/types";
 import { Logo } from "./Logo";
+import { ErrorText } from "../components/Prose";
 
 export function useSessionQuery() {
   return useQuery({
@@ -70,7 +71,7 @@ export function Unavailable({ error, onRetry }: { error: unknown; onRetry: () =>
     <FullPage>
       <EmptyState titleText="Can't reach the Logweir service" headingLevel="h1" icon={ExclamationCircleIcon} status="danger" variant="sm">
         <EmptyStateBody>
-          {error instanceof Error ? error.message : String(error)}
+          <ErrorText error={error} />
           {api && (
             <span className="lw-error-meta">
               {api.status || "no answer"} {api.code}

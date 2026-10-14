@@ -66,6 +66,7 @@ import {
   restoreOffer,
   revisionWords,
   triggerWords,
+  backupSentence,
   windowWords,
 } from "./verdict";
 
@@ -586,7 +587,7 @@ export function BackupDetail() {
         title={b.name}
         breadcrumb={breadcrumb}
         status={b.operation.state === "succeeded" ? <VerdictLabel verdict={verdict} /> : <BackupStatus b={b} />}
-        description={`${b.topics.length} ${b.topics.length === 1 ? "topic" : "topics"} from ${b.sourceRef.name}, ${windowWords(b)}.`}
+        description={backupSentence(b)}
         actions={offer.offer ? restoreButton : <Tooltip content={offer.reason}>{restoreButton}</Tooltip>}
       />
       {mismatch && (

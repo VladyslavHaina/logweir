@@ -80,6 +80,7 @@ import { useNarrow } from "../../components/CompactList";
 import { Legend, OutcomeCounts, OutcomeTable, PlanBlock, ReviewCards, ReviewTable, RollbackCard, planCounts, plural } from "./parts";
 import { PhaseLabel } from "./status";
 import "./cutover.css";
+import { ErrorText } from "../../components/Prose";
 
 /** Why this restore cannot be switched over, from the restore alone (§3.4's admission). */
 export function cutoverRefusal(r: Restore): { word: string; title: string; body: string } | null {
@@ -454,7 +455,7 @@ function Confirm({
             )}
             {err && !outcomeUnknown(err) && (
               <Alert isInline variant="danger" title={reasonWords(err.message) ? "Refused" : "The service refused the switchover"}>
-                {err.message}
+                <ErrorText error={err} />
                 {fieldErrors.filter((f) => f.field !== "ticket").map((f) => (
                   <div key={f.field + f.code} className="lw-small">
                     <span className="lw-mono">{f.field}</span>: {f.message}

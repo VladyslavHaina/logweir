@@ -9,6 +9,7 @@
 // 4. The view is a WINDOW and says so: an expired view is a missing view, not a
 //    missing archive.
 import type { Catalog, PointPage, PointView } from "../../api/backups";
+import { count } from "../../components/When";
 
 type Condition = { type: string; status: string; reason?: string | null; message?: string | null };
 
@@ -19,6 +20,41 @@ export function conditionOf(conditions: Condition[] | undefined, type: string): 
 /** Whether the catalog's view is one the page can list from: the controller's `Ready`, never the browser's clock. */
 export function viewIsUsable(c: Pick<Catalog, "conditions">): boolean {
   return conditionOf(c.conditions, "Ready")?.status === "True";
+}
+
+/** The controller's reason when another catalog already indexes this destination (`recovery_catalog.rs`). */
+export const DUPLICATE_CATALOG = "DuplicateCatalog";
+
+/**
+ * DUI-10: `Ready=False/DuplicateCatalog`: one destination has one catalog per namespace, so
+ * this newer one runs no sync and publishes no view. Its message, which names the catalog
+ * to use, or null for any other catalog.
+ */
+export function duplicateOf(c: Pick<Catalog, "conditions">): string | null {
+  const ready = conditionOf(c.conditions, "Ready");
+  if (ready?.status !== "False" || ready.reason !== DUPLICATE_CATALOG) return null;
+  return ready.message || "Another catalog already indexes this destination in this namespace.";
+}
+
+/** The catalog's point counts in a few words, or why it has none to count. */
+export function countsWords(c: Pick<Catalog, "conditions" | "counts" | "syncedAt">): string {
+  if (duplicateOf(c)) return "no view: it duplicates another catalog and never syncs";
+  if (typeof c.counts.total !== "number" && !c.syncedAt) return "not synced yet";
+  return `${count(c.counts.available)} of ${count(c.counts.total)} available`;
+}
+
+/** The catalog page's one-line description. */
+export function catalogSentence(c: Pick<Catalog, "conditions" | "counts" | "syncedAt" | "destinationRef">): string {
+  const over = `A read-only view over ${c.destinationRef ? `destination ${c.destinationRef.name}` : "an inline archive"}`;
+  if (duplicateOf(c)) return `${over}. Another catalog already indexes it, so this one runs no sync and publishes no view.`;
+  if (typeof c.counts.total !== "number" && !c.syncedAt) return `${over}: not synced yet.`;
+  return `${over}: ${count(c.counts.available)} of ${count(c.counts.total)} points available at the last sync.`;
+}
+
+/** The catalog in this namespace that already indexes `destination`, if one does (what makes a new one a duplicate). */
+export function catalogOf(catalogs: Pick<Catalog, "name" | "destinationRef">[] | undefined, destination: string): string | null {
+  if (!destination) return null;
+  return catalogs?.find((c) => c.destinationRef?.name === destination)?.name ?? null;
 }
 
 export const CATALOG_WINDOW_SENTENCE =

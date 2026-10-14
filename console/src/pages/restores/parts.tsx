@@ -21,6 +21,7 @@ import { When } from "../../components/When";
 import { outcomeUnknown } from "../../api/client";
 import type { Restore } from "../../api/restores";
 import { restoreVerified, summaryCase } from "./words";
+import { ErrorText } from "../../components/Prose";
 
 /** A restore's status: green only by the restore badge rule, and a complete verification
  *  that did not cover is never green whatever the summary says. */
@@ -136,7 +137,7 @@ export function WriteProblem({ error, title, unmatched = [] }: { error: unknown;
   const api = error instanceof ApiError ? error : null;
   return (
     <Alert variant="danger" isInline title={title}>
-      <p>{error instanceof Error ? error.message : String(error)}</p>
+      <p><ErrorText error={error} /></p>
       {error instanceof ApiError && unmatched.length > 0 && (
         <ul className="lw-plain-list">
           {unmatched.map((u) => (
