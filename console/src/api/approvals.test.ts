@@ -271,6 +271,9 @@ describe("the two-person offer", () => {
     expect(afterwardsWords("newTopic", "delete")).toContain("stay on the target cluster");
     expect(afterwardsWords("scratch", "delete")).toBe("The topics this run creates are deleted.");
     expect(afterwardsWords("scratch", "keep")).toBe("Nothing is deleted (teardown keep).");
+    // A clone (teardown ttl): deleted at its expiry, never "nothing is deleted".
+    expect(afterwardsWords("scratch", "ttl", 86_400)).toBe("A clone: the topics this run creates are kept, then deleted 24 h after the run. A run that does not pass deletes them at once.");
+    expect(afterwardsWords("scratch", "ttl", null)).toContain("deleted when the clone expires");
   });
 });
 

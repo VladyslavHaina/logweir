@@ -21,6 +21,7 @@ import type { components } from "./schema";
 import type { Restore, Session } from "./types";
 import type { NavCount } from "../app/attention";
 import { sha256 } from "../components/hash";
+import { duration } from "../components/When";
 
 type S = components["schemas"];
 export type Approval = S["Approval"];
@@ -489,11 +490,33 @@ export function instantText(value: string | null | undefined): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, at % 1000 === 0 ? 19 : 23)} UTC`;
 }
 
-/** What happens to the topics afterwards, as the runner acts (a newTopic restore never deletes). */
-export function afterwardsWords(mode: string, teardown: string): string {
+/** What happens to the topics afterwards, as the runner acts (a newTopic restore never deletes;
+ *  a clone's topics are deleted at its expiry, `teardown: ttl` with `teardownAfterSeconds`). */
+export function afterwardsWords(mode: string, teardown: string, ttlSeconds?: number | null): string {
+  if (mode === "scratch" && (teardown === "ttl" || (typeof ttlSeconds === "number" && ttlSeconds > 0))) {
+    const when = typeof ttlSeconds === "number" && ttlSeconds > 0 ? `${duration(ttlSeconds)} after the run` : "when the clone expires";
+    return `A clone: the topics this run creates are kept, then deleted ${when}. A run that does not pass deletes them at once.`;
+  }
   if (mode === "scratch" && teardown === "delete") return "The topics this run creates are deleted.";
   if (mode === "newTopic") return "The topics this run creates stay on the target cluster: a newTopic restore never deletes them (teardown applies to scratch drills only).";
   return `Nothing is deleted (teardown ${teardown}).`;
+}
+
+/** The plan's topic configuration choice (`target.topic_configuration`), as the approver signs it. */
+export function topicConfigurationWords(tc: S["ScopeTopicConfigurationView"] | null | undefined): string {
+  if (!tc) return "The target's defaults: topics are created as a restore always did.";
+  const settings =
+    tc.transition === "afterVerification"
+      ? "created from the recovery point's configuration; the settings held during the restore are set to the source's once it passes verification"
+      : tc.transition === "none"
+        ? "created from the recovery point's configuration; the source's held settings are reported, not applied"
+        : `created from the recovery point's configuration (transition ${tc.transition})`;
+  const owners = !tc.owners
+    ? ""
+    : tc.owners.length === 0
+      ? " The requester states that no topic has a declarative owner."
+      : ` Declared owners: ${tc.owners.map((o) => `${o.topic} (${o.kind} ${o.reference})`).join(", ")}.`;
+  return `The source's: ${settings}.${owners}`;
 }
 
 // ------------------------------------------------------- reads

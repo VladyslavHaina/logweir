@@ -161,7 +161,7 @@ export function verificationScopeSentence(scope: S["VerificationScopeView"] | nu
 /** What a restore's target mode means, from the moment it exists. */
 export const TARGET_MODE_MEANING: Record<string, string> = {
   newTopic: "Restores into NEW topics. Logweir writes nothing to the original topics and moves no consumer.",
-  scratch: "A REHEARSAL into a scratch cluster: its topics are deleted by teardown when it finishes, so nothing an application depends on may be pointed at them.",
+  scratch: "A REHEARSAL into a scratch cluster: its topics are deleted by teardown when it finishes, or at its expiry when it is kept as a clone, so nothing an application depends on may be pointed at them.",
 };
 
 /** What a restore IS, by its mode and naming: a restore under the original names is
@@ -185,7 +185,7 @@ export function completionGuidance(mode: string, originalName: boolean): string 
 export const COMPLETION_GUIDANCE: Record<string, string> = {
   newTopic:
     "Consumers are not moved. Logweir wrote nothing to the original topics. Consumer group offsets were not restored; the engine's offset report is informational only. Point applications at the new names and validate reads before retiring anything.",
-  scratch: "These topics are a rehearsal and are deleted by teardown; never point an application at them.",
+  scratch: "These topics are a rehearsal and are deleted by teardown (a clone's at its expiry); never point an application at them.",
 };
 
 export const COMPLETION_NOT_VERIFIED =

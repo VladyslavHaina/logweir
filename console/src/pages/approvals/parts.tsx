@@ -18,6 +18,7 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import BanIcon from "@patternfly/react-icons/dist/esm/icons/ban-icon";
 import {
   afterwardsWords,
+  topicConfigurationWords,
   approvalSubjectWords,
   instantText,
   OWNER_WORDS,
@@ -268,7 +269,10 @@ export function ScopeCard({ scope }: { scope: ApprovalScope }) {
           </Term>
           <Term term="Topic prefix">{t.topicPrefix ? <code className="lw-mono">{t.topicPrefix}</code> : "None: every topic is written under its own name"}</Term>
           <Term term="Afterwards">
-            <span id="scope-afterwards">{afterwardsWords(t.mode, t.teardown)}</span>
+            <span id="scope-afterwards">{afterwardsWords(t.mode, t.teardown, t.teardownAfterSeconds)}</span>
+          </Term>
+          <Term term="Topic configuration">
+            <span id="scope-topic-configuration">{topicConfigurationWords(t.topicConfiguration)}</span>
           </Term>
           <Term term="Verification">
             {scope.verification.coverage} over <Instant value={scope.verification.windowStart} /> to <Instant value={scope.verification.windowEnd} />

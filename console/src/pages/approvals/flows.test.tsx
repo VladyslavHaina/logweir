@@ -163,6 +163,27 @@ describe("two-person: the second person's page", () => {
     expect(posts()[0]!.key).toBeNull();
   });
 
+  it("a clone's request shows when its topics are deleted and the topic configuration the approver signs for", async () => {
+    const base = pending() as { scope: { target: Record<string, unknown> } } & Record<string, unknown>;
+    const clone = {
+      ...base,
+      scope: {
+        ...base.scope,
+        target: { ...base.scope.target, mode: "scratch", teardown: "ttl", teardownAfterSeconds: 3600, topicConfiguration: { transition: "afterVerification", owners: [] } },
+      },
+    };
+    serve({ policy: TWO_PERSON, request: clone });
+    renderAt("/team-a/approvals/restore-x");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("scope-afterwards")!.textContent).toBe(
+      "A clone: the topics this run creates are kept, then deleted 60 min after the run. A run that does not pass deletes them at once.",
+    );
+    expect(document.getElementById("scope-topic-configuration")!.textContent).toMatch(
+      /^The source's: created from the recovery point's configuration; the settings held during the restore are set to the source's once it passes verification\. The requester states that no topic has a declarative owner\.$/,
+    );
+    expect(screen.queryByText(/Nothing is deleted/)).toBeNull();
+  });
+
   it("refuses self-approval in the server's words, as a refusal and not an error", async () => {
     const own = { ...pending(), approve: { offered: false, refusal: "requester", sentence: "You requested this restore. A two-person approval needs a second person, and no role changes that." } };
     serve({ policy: TWO_PERSON, request: own });
