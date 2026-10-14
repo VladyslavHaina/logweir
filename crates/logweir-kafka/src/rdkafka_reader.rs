@@ -698,6 +698,24 @@ impl ClusterReader for RdKafkaReader {
         self.read_topic_ids(topics)
     }
 
+    fn topic_read_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, crate::access::TopicRead)>, KafkaError> {
+        self.read_topic_access(topics)
+    }
+
+    /// The check's own observation ([`crate::inventory::observe_broker_view`]),
+    /// over the connection this reader dialled: the same transport, trust
+    /// anchor and credential, on a handle of its own that is closed when it
+    /// returns.
+    fn broker_view(
+        &self,
+        within: Duration,
+    ) -> Result<crate::api_versions::ApiVersions, crate::api_versions::NotObserved> {
+        crate::inventory::observe_broker_view(self.base_config(), within)
+    }
+
     fn replication_factors(&self, topics: &[String]) -> Result<BTreeMap<String, u32>, KafkaError> {
         if topics.is_empty() {
             return Ok(BTreeMap::new());

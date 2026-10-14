@@ -83,6 +83,10 @@ pub struct TopicAnswer {
     pub halves: Option<(i64, i64)>,
     /// The per-topic error, as `(code, message)`.
     pub error: Option<(i32, String)>,
+    /// The caller's authorized operations on the topic (KIP-430), when the
+    /// call asked for them and the broker reported a set; `None` otherwise
+    /// ([`crate::access::topic_read`] reads it, [`classify`] never does).
+    pub operations: Option<Vec<i32>>,
 }
 
 /// **One answer's verdict** (the table in the module doc). The error decides
@@ -171,6 +175,7 @@ mod tests {
             name: Some(name.to_string()),
             halves,
             error: error.map(|c| (c, format!("code {c}"))),
+            operations: None,
         }
     }
 
@@ -259,6 +264,7 @@ mod tests {
                 name: None,
                 halves: Some(HALVES),
                 error: None,
+                operations: None,
             },
         ];
         let got = join(&requested, &answers);

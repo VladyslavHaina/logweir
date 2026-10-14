@@ -247,10 +247,14 @@ pub fn outcome(
 
 /// The same, with the gating overridden.
 ///
-/// ONE caller: `destination.evidenceWritable`, which D2 §6.3 makes
-/// "**B** if `writeProbe: CreateOnlyMarker`, else **E**". It is the only row
-/// in the catalogue whose gating is a function of the plan, and spelling it as
-/// an override keeps the table static for every other row.
+/// Three callers, each a row whose gating is a function of the plan or of
+/// the answer, which keeps the table static for every other row:
+/// `destination.evidenceWritable`, which D2 §6.3 makes "**B** if
+/// `writeProbe: CreateOnlyMarker`, else **E**"; `connection.topicsReadable`,
+/// execution-only until the broker REPORTS that the principal may not READ a
+/// selected topic, which blocks (FX-45); and the capability rows of a
+/// `sourceConnection` check, which are advisory there (FX-46: a connection
+/// test says what an endpoint can be used for, and is not failed by it).
 #[must_use]
 pub fn outcome_gated(
     id: CheckId,
@@ -261,12 +265,17 @@ pub fn outcome_gated(
 ) -> CheckOutcome {
     let mut out = outcome(id, state, code, now);
     out.gating = gating;
-    if gating == Gating::ExecutionOnly {
-        // `CheckOutcome::new` forces an execution-only row to `unknown`; an
-        // override applied afterwards has to do the same or the row would
-        // claim a verdict it is not allowed to have.
-        out.state = CheckState::Unknown;
-    }
+    // `CheckOutcome::new` forces an execution-only row to `unknown`, in
+    // either direction: an override TO execution-only has to do the same or
+    // the row would claim a verdict it may not have, and an override FROM it
+    // (`connection.topicsReadable` when the broker reported a refusal, FX-45)
+    // has to restore the state the caller asked for, or a refusal would read
+    // `unknown`.
+    out.state = if gating == Gating::ExecutionOnly {
+        CheckState::Unknown
+    } else {
+        state
+    };
     out
 }
 

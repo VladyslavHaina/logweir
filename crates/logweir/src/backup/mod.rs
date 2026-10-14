@@ -600,6 +600,13 @@ fn execute_with_signer(
         &inputs.allowed,
         reader,
     )?;
+    // FX-45: READ on every selected topic, and the capability rows, before
+    // the signer, the claim and the engine.
+    phase_minus1_admit::source_capabilities(
+        reader,
+        &inputs.spec,
+        !selected_groups(args, &inputs.spec).is_empty(),
+    )?;
 
     // Resolve the signing prerequisite before making the first call on the
     // engine. `run` already did this before constructing its real clients and

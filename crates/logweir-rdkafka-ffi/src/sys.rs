@@ -85,4 +85,16 @@ extern "C" {
         result: *const rd::rd_kafka_DescribeCluster_result_t,
         cntp: *mut usize,
     ) -> *const c_int;
+
+    /// `const rd_kafka_AclOperation_t *rd_kafka_TopicDescription_authorized_operations(topicdesc, size_t *cntp)`:
+    /// the caller's operations on one described topic, as for the cluster.
+    /// NULL means "not requested or not reported", and so does every entry
+    /// that carries an error (`rd_kafka_TopicDescription_new_error` stores
+    /// none); a non-NULL pointer with a count of 0 means "none"
+    /// (`rdkafka_admin.c:9050-9055`, `:9168-9182`).
+    #[link_name = "rd_kafka_TopicDescription_authorized_operations"]
+    pub(crate) fn topic_authorized_operations(
+        topicdesc: *const rd::rd_kafka_TopicDescription_t,
+        cntp: *mut usize,
+    ) -> *const c_int;
 }

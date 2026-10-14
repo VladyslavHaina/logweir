@@ -64,6 +64,16 @@ pub struct DescribedTopic {
     /// Describe. The ID beside an error is whatever the broker sent and means
     /// nothing.
     pub error: Option<RawError>,
+    /// The CALLER's authorized operations on this topic (KIP-430), as
+    /// `rd_kafka_AclOperation_t` integers (Read is 3, Describe 8), when the
+    /// call asked for them ([`describe_topic_access`]).
+    ///
+    /// `None` means NOT REPORTED: not asked for, a broker that sent KIP-430's
+    /// `INT32_MIN`, or an entry that carries an [`error`](Self::error).
+    /// `Some(vec![])` means the broker reported that the caller may do
+    /// nothing on the topic. The two must never be confused, exactly as for
+    /// the cluster ([`crate::cluster::ClusterDescription`]).
+    pub authorized_operations: Option<Vec<i32>>,
 }
 
 /// The names a call sends, refused before anything is sent when the list is
@@ -168,7 +178,27 @@ pub fn describe_topics<C: ClientContext>(
     // The bound is checked here too, before `send` creates the collection, so
     // a refused timeout creates no librdkafka object at all.
     crate::raw::timeout_ms(timeout)?;
-    send(client, &request, timeout)
+    send(client, &request, timeout, false)
+}
+
+/// **Describes the named topics AND asks for the caller's authorized
+/// operations on each** (KIP-430): [`describe_topics`]'s one Metadata
+/// request with `include_topic_authorized_operations` set, so each entry
+/// carries [`DescribedTopic::authorized_operations`]. What a backup asks
+/// before its engine starts: whether the principal may READ each topic it is
+/// about to consume (FX-45).
+///
+/// # Errors
+///
+/// As [`describe_topics`].
+pub fn describe_topic_access<C: ClientContext>(
+    client: &Client<C>,
+    names: &[&str],
+    timeout: Duration,
+) -> Result<Vec<DescribedTopic>, CallError> {
+    let request = describe_request(names)?;
+    crate::raw::timeout_ms(timeout)?;
+    send(client, &request, timeout, true)
 }
 
 /// The call itself, over names already validated (or deliberately not, by
@@ -177,6 +207,7 @@ pub(crate) fn send<C: ClientContext>(
     client: &Client<C>,
     names: &[CString],
     timeout: Duration,
+    authorized_operations: bool,
 ) -> Result<Vec<DescribedTopic>, CallError> {
     let collection = Collection::of(names)?;
     run(
@@ -184,7 +215,13 @@ pub(crate) fn send<C: ClientContext>(
         rd::rd_kafka_admin_op_t::RD_KAFKA_ADMIN_OP_DESCRIBETOPICS,
         rd::RD_KAFKA_EVENT_DESCRIBETOPICS_RESULT,
         timeout,
-        |_| Ok(()),
+        |options| {
+            if authorized_operations {
+                options.include_authorized_operations()
+            } else {
+                Ok(())
+            }
+        },
         |rk, options, queue| {
             // SAFETY: `rk` is the handle `client` borrows for the whole of
             // `run`; `options` and `queue` are live guards owned by `run`
@@ -238,11 +275,17 @@ fn read_descriptions(event: &Event) -> Result<Vec<DescribedTopic>, CallError> {
         // are read as `i64`; the partition accessor writes the count (the
         // array it returns is not read); the error is owned by the
         // description, copied by `raw_error` with its code read as an integer
-        // (T12), and not destroyed here.
+        // (T12), and not destroyed here. The operations accessor writes the
+        // count and returns NULL or an array of that many C enums the
+        // description owns, read as `c_int` (T12) and copied while `event`
+        // is borrowed (`array` never reads the one-byte placeholder of an
+        // empty set: a zero length is an empty slice).
         let topic = unsafe {
             let id = rd::rd_kafka_TopicDescription_topic_id(d);
             let mut partitions = 0usize;
             let _ = rd::rd_kafka_TopicDescription_partitions(d, &mut partitions);
+            let mut n_ops = 0usize;
+            let ops = crate::sys::topic_authorized_operations(d, &mut n_ops);
             DescribedTopic {
                 name: text(event, rd::rd_kafka_TopicDescription_name(d)),
                 topic_id: (!id.is_null()).then(|| TopicUuid {
@@ -252,6 +295,7 @@ fn read_descriptions(event: &Event) -> Result<Vec<DescribedTopic>, CallError> {
                 partition_count: partitions,
                 is_internal: rd::rd_kafka_TopicDescription_is_internal(d) != 0,
                 error: raw_error(event, rd::rd_kafka_TopicDescription_error(d)),
+                authorized_operations: (!ops.is_null()).then(|| array(event, ops, n_ops).to_vec()),
             }
         };
         out.push(topic);
@@ -356,6 +400,31 @@ mod tests {
         assert!(started.elapsed() < t + crate::POLL_MARGIN);
     }
 
+    /// The operations-asking call is bounded the same way: with no broker it
+    /// returns within its timeout plus the margin, a transport failure.
+    #[test]
+    fn describe_topic_access_is_bounded_without_a_broker() {
+        let p = offline_client();
+        let t = Duration::from_secs(1);
+        let started = Instant::now();
+        let e = describe_topic_access(p.client(), &["pa-orders"], t).expect_err("no broker");
+        assert!(
+            matches!(
+                e,
+                CallError::Call {
+                    code: code::TIMED_OUT,
+                    ..
+                }
+            ),
+            "{e}"
+        );
+        assert!(started.elapsed() < t + crate::POLL_MARGIN);
+        assert!(matches!(
+            describe_topic_access(p.client(), &["a", "a"], t),
+            Err(CallError::InvalidInput(_))
+        ));
+    }
+
     /// librdkafka's own immediate answers, no broker needed: a repeated name
     /// is refused for the whole call with `_INVALID_ARG`, and an empty
     /// collection is answered at once with no topic. The second is the
@@ -366,8 +435,8 @@ mod tests {
         let p = offline_client();
         let a = CString::new("pa-orders").expect("no NUL");
         let started = Instant::now();
-        let e =
-            send(p.client(), &[a.clone(), a], Duration::from_secs(1)).expect_err("a repeated name");
+        let e = send(p.client(), &[a.clone(), a], Duration::from_secs(1), false)
+            .expect_err("a repeated name");
         assert!(
             matches!(
                 e,
@@ -378,7 +447,7 @@ mod tests {
             ),
             "{e}"
         );
-        let none = send(p.client(), &[], Duration::from_secs(1)).expect("an empty answer");
+        let none = send(p.client(), &[], Duration::from_secs(1), false).expect("an empty answer");
         assert!(none.is_empty(), "{none:?}");
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -402,10 +471,11 @@ mod tests {
         let twice = [id.clone(), id];
         let call = |i: usize| {
             if i % 2 == 0 {
-                let none = send(client, &[], Duration::from_secs(1)).expect("an empty answer");
+                let none =
+                    send(client, &[], Duration::from_secs(1), i % 4 == 0).expect("an empty answer");
                 assert!(none.is_empty());
             } else {
-                match send(client, &twice, Duration::from_secs(1)) {
+                match send(client, &twice, Duration::from_secs(1), i % 4 == 1) {
                     Err(CallError::Call { code: c, message }) => {
                         assert_eq!(c, code::INVALID_ARG, "{}", message.display());
                         assert!(

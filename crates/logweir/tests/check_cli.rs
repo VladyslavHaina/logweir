@@ -53,6 +53,7 @@ use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
 };
 use logweir_engine_oso::storage::{PutOutcome, StoreError};
+use logweir_kafka::access::{ReadDenied, TopicRead};
 use logweir_kafka::api_versions::ApiVersions;
 use logweir_kafka::inventory::{
     CheckFailure, InventoryProbe, ListedTopic, Listing, TopicCreateOutcome, TopicPresence,
@@ -531,6 +532,10 @@ struct ProbeState {
     /// Topics whose DescribeConfigs fails, and how.
     topic_config_faults: BTreeMap<String, (CheckCode, String)>,
     topic_config_calls: Vec<String>,
+    /// FX-45: what the broker's authorized operations say about READ, per
+    /// topic. A topic not named here gets the trait's own default (unknown).
+    topic_reads: BTreeMap<String, TopicRead>,
+    topic_read_calls: usize,
 }
 
 #[derive(Clone, Default)]
@@ -587,6 +592,20 @@ impl FakeProbe {
 
     fn api_versions_calls(&self) -> usize {
         self.state.lock().unwrap().api_versions_calls
+    }
+
+    /// FX-45: the broker's READ answer for `topic`.
+    fn with_topic_read(self, topic: &str, read: TopicRead) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .topic_reads
+            .insert(topic.to_string(), read);
+        self
+    }
+
+    fn topic_read_calls(&self) -> usize {
+        self.state.lock().unwrap().topic_read_calls
     }
 
     fn failing_topic_configs(self, topic: &str, code: CheckCode, message: &str) -> Self {
@@ -732,6 +751,25 @@ impl InventoryProbe for FakeProbe {
                 "this probe does not observe the endpoint's ApiVersions answer",
             )),
         }
+    }
+
+    fn topic_read_access(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, TopicRead)>, CheckFailure> {
+        let mut s = self.state.lock().unwrap();
+        s.topic_read_calls += 1;
+        Ok(topics
+            .iter()
+            .map(|t| {
+                let read = s.topic_reads.get(t).cloned().unwrap_or_else(|| {
+                    TopicRead::Unknown(
+                        "this probe does not ask the broker for authorized operations".into(),
+                    )
+                });
+                (t.clone(), read)
+            })
+            .collect())
     }
 
     fn validate_create_topics(
@@ -3121,6 +3159,131 @@ fn a_readiness_check_reports_every_row_it_owns() {
     assert_eq!(
         auth.expires_at.unwrap() - auth.observed_at.unwrap(),
         chrono::Duration::minutes(15)
+    );
+}
+
+// 4b. FX-45: `connection.topicsReadable`, from the broker's own report of
+// what this principal may do on each selected topic (KIP-430).
+
+fn readable_wiring(probe: FakeProbe) -> FakeWiring {
+    capability_wiring(probe)
+}
+
+/// **A principal the broker says may not READ a selected topic blocks the
+/// Backup Preflight, by name.** The row was execution-only, so such a backup
+/// passed its Preflight and failed in the engine a minute later.
+///
+/// MUTANTS killed: the row left execution-only (it would read `unknown` and
+/// never block); the refusal read as `unknown`; a topic the principal may not
+/// even Describe left out (the measured `acl` case: Read removed, so Describe
+/// is gone too); the remedy not naming READ.
+#[test]
+fn a_topic_the_broker_says_this_principal_may_not_read_blocks_the_backup_by_name() {
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_presence("payments", TopicPresence::Present { partitions: 3 })
+        .with_presence("audit", TopicPresence::Present { partitions: 1 })
+        .with_topic_read("orders", TopicRead::Granted)
+        .with_topic_read(
+            "payments",
+            TopicRead::Denied(ReadDenied::OperationsExcludeRead),
+        )
+        .with_topic_read("audit", TopicRead::Denied(ReadDenied::NotDescribable));
+    let run = drive(
+        &mount(&capability_plan(
+            vec!["orders", "payments", "audit"],
+            Vec::new(),
+        )),
+        &readable_wiring(probe.clone()),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::NotReady,
+            Gating::Blocking,
+            CheckCode::TopicAuthorizationFailed
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .contains("may not READ 2 of 3 selected topic(s)")
+            && row.message.contains("1 of them it may not even Describe"),
+        "{}",
+        row.message
+    );
+    assert!(
+        row.remedy.starts_with("Grant READ on each named topic"),
+        "{}",
+        row.remedy
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["payments", "audit"])
+    );
+    assert_eq!(probe.topic_read_calls(), 1, "one request for every topic");
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady,
+        "the Backup Preflight is notReady, before any backup runs"
+    );
+}
+
+/// **CONTROLS: what the broker does not refuse stays what it was.** READ
+/// reported on every topic, and READ not known (a broker that computes no
+/// authorized operations), are both the execution-only row, `unknown`,
+/// excluded from the aggregate, with a message saying which. A connection
+/// that did not authenticate asks nothing.
+#[test]
+fn a_topic_the_broker_does_not_refuse_leaves_the_row_execution_only() {
+    let present =
+        || FakeProbe::new().with_presence("orders", TopicPresence::Present { partitions: 6 });
+    for (probe, says) in [
+        (
+            present().with_topic_read("orders", TopicRead::Granted),
+            "the broker reports READ for this principal on all 1 selected topic(s)",
+        ),
+        (
+            present().with_topic_read("orders", TopicRead::Unknown("no set reported".into())),
+            "whether it may READ 1 of 1 selected topic(s) is not known before the run (no set \
+             reported)",
+        ),
+    ] {
+        let run = drive(
+            &mount(&capability_plan(vec!["orders"], Vec::new())),
+            &readable_wiring(probe),
+        );
+        let row = run.row(CheckId::ConnectionTopicsReadable);
+        assert_eq!(
+            (row.state, row.gating, row.code),
+            (
+                CheckState::Unknown,
+                Gating::ExecutionOnly,
+                CheckCode::ReadVerifiedOnlyAtExecution
+            ),
+            "{row:?}"
+        );
+        assert!(row.message.contains(says), "{}", row.message);
+        assert_eq!(
+            logweir_core::check_contract::aggregate(&run.result().checks),
+            logweir_core::check_contract::OverallState::Ready
+        );
+    }
+    let probe = present().with_topic_read("orders", TopicRead::Denied(ReadDenied::NotDescribable));
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(probe.clone()).broker_fails(CheckCode::BrokerUnreachable, "down"),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating),
+        (CheckState::Unknown, Gating::ExecutionOnly)
+    );
+    assert_eq!(
+        probe.topic_read_calls(),
+        0,
+        "nothing is asked of a broker nobody reached"
     );
 }
 
