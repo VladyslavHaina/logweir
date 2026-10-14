@@ -2108,7 +2108,11 @@ bounded broker; settings never applied listed; an owned topic exported and its
 neighbour transitioned; a partial transition naming what was not applied, read
 back. Unit rows and 13 mutants on the stage table, the compare, the factor, the
 cap, the class rule, the pass gate and the read-back, all killed.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K6.]
+**Scope (PoC):** row P6 of `poc-v2a` (build `sha-4db6e5bb`, 2026-10-14): a
+compacted three-partition topic restored with `transition: afterVerification`
+reports RF `{1, 1, sourceFactor}`, `before` holding Logweir's during-restore
+set and `after` the source's settings, which the broker then reads exactly;
+both readers accept the 1.11.0 scorecard.
 **Rollback:** an older runner ignores `target.topic_configuration`, creates its
 topics as before and signs no block, so nothing is claimed; an older
 controller ignores `status.topicConfiguration`. Scorecards that carry the
@@ -2132,7 +2136,13 @@ plan and its argv, and the core's owner rule reads them back to one owner; a
 403, an unserved resource and an unlisted namespace are each
 `OwnerDetectionFailed`, the last before any read; no `spec.strimzi`, nothing
 listed.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K10 with only the `KafkaTopic` CRD installed.]
+**Scope (PoC):** row P10 of `poc-v2a` (build `sha-4db6e5bb`, 2026-10-14), with
+only Strimzi 0.45.0's `KafkaTopic` CRD installed: the controller's Role and
+RoleBinding in the listed namespace only; the receipt records owner `strimzi`
+for the managed topic and none for its neighbour; the restore exports the
+owned topic's YAML (its digest the scorecard's) and applies the neighbour.
+Controls: a `spec.strimzi.namespace` outside the list, and the values off, are
+each `OwnerDetectionFailed` with no Job.
 **Rollback:** a controller older than this field refuses such a frozen plan
 (`PlanConfigMapConflict`); let those runs finish first. An older controller
 prunes `spec.strimzi`, and a restore with the plan block and no owner
@@ -2159,7 +2169,13 @@ to run, and could sign a pass with a record left out, is now refused; use the
 point the refusal names. Roll the controller with the runner.
 **Scope:** the three record-semantics rows and the stated-start row on compose
 (Kafka 4.3.1, engine `0.23.3+logweir.3`), orchestrator rows, 11 mutants.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K3.]
+**Scope (PoC):** rows P11 to P13 of `poc-v2a` (build `sha-4db6e5bb`,
+2026-10-14): an out-of-order point is refused `PointInTimeSelectionIncomplete`
+naming the segment and the point that reads it, with no topic and no
+scorecard, and the control point restores every record, the older one
+included (P11); the floor restores the record older than its segment's first
+(P12); a point taken before the upgrade, in order, restores as before (P13,
+standing in for the withdrawn `RehearsalSchedule` row).
 **Rollback:** an older runner selects by first and last record again; an
 older controller shows `exitReason: PointInTimeSelectionIncomplete` without
 the runner's sentence.
@@ -2202,10 +2218,16 @@ mapping rule, the compare, the admission and the apply were killed; the API's
 approval gates are held to the restore's by a parity table.
 [UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K5 and K9.]
 **Rollback:** an older controller ignores `Switchover` objects, so nothing is
-applied, and a Helm rollback leaves the CRD and its objects inert. An older
-verifier ignores the mapping block and refuses the `switchover-record` payload
-type. Positions already committed stay committed: a switchover record's
-`rollback-plan` reverses them.
+applied, and a Helm rollback leaves the CRD and its objects inert. **But an
+`Approval` naming a `Switchover`, or a `Preflight` with operation `Switchover`,
+fails an older build's whole list of that kind** (`unknown variant`): every
+new `Restore` then stays `ApprovalNotVerified`, or no `Preflight` is
+reconciled. Record and delete both before rolling back (the next entry's
+rollback step; [the commands](kubernetes.md#rolling-back)); pending switchovers
+then need a new approval after rolling forward. An older verifier ignores the
+mapping block and refuses the `switchover-record` payload type. Positions
+already committed stay committed: a switchover record's `rollback-plan`
+reverses them.
 
 #### 96. Every runner line a controller acts on is sealed with the Job's token, and a runner older than the controller is named (FX-43)
 
@@ -2251,7 +2273,13 @@ released runner's real refusal of the flag (Restore, Backup, probe, check,
 retention), and the binary's sealed block. 32 mutants were killed. The
 Switchover and cleanup Jobs' wiring is compile-checked and covered by their
 existing rows only.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs FX-43's K-rows.]
+**Scope (PoC):** rows P14 to P23 of `poc-v2a` (build `sha-4db6e5bb`,
+2026-10-14): a `Backup`, a `Restore`, a refused restore, the probe, the
+client-log escape, a check's end frame and a retention run each act on their
+sealed lines only, the plain copies last (P14 to P21; a bootstrap entry with a
+control character refused by the CRD pattern, P17); a runner older than the
+controller is named `RunnerOlderThanController` on two Backups (no retry), the
+probe, a `Preflight` and a retention run (nothing deleted) (P22, P23).
 
 **Rollback:** roll both together, or the controller first. An older
 controller reads this runner as before: FX-34's `--line-token` gets FX-34's
@@ -2509,7 +2537,20 @@ rollback steps:
    chart's `crds/` (`kubectl apply --server-side --force-conflicts -f
    charts/logweir/crds/`) before rolling the controller back; Helm does not
    re-create it.
-7. **Roll the chart, the CRDs, the controller, the runner and the console back
+7. **Delete every `Approval` whose `subjectRef.kind` is `Switchover`, and every
+   `Preflight` whose `spec.request.operation` is `Switchover`** (item 95),
+   after recording them:
+   `kubectl get approvals -A -o json | jq '[.items[] | select(.spec.subjectRef.kind == "Switchover")]' > switchover-approvals.json`,
+   then the delete pipeline in [kubernetes.md](kubernetes.md#rolling-back).
+   An older controller and console decode both kinds as closed sets: one such
+   object fails the whole list, so no `Approval` is verified (every new
+   `Restore` stays `Pending`, `ApprovalNotVerified`, while the controller logs
+   ``unknown variant `Switchover` ``) and no `Preflight` is reconciled. It loses
+   the approvals of switchovers not yet admitted. Let every `Backup` whose
+   `KafkaCluster` sets `spec.strimzi` finish too (item 93: an older controller
+   refuses its frozen plan), and every TTL clone settle or have its topics
+   deleted and its finalizer removed (item 91).
+8. **Roll the chart, the CRDs, the controller, the runner and the console back
    together** (items 28, 33, 60, 61, 65, 67, 74, 78 and 82). After the roll an
    older runner accepts more than 1,000 topics again and an older controller
    reads a receipt under 1 MiB again, so a backup of about 300 topics or more
@@ -2523,11 +2564,11 @@ rollback steps:
    first. The bound Secrets keep working (items 33 and 38). After the roll,
    write each `ProtectionPolicy` route again if you need the older alert sinks:
    the API server dropped their contents (item 74).
-8. **To roll back only the engine** (item 35), use the one-release rollback
+9. **To roll back only the engine** (item 35), use the one-release rollback
    image (`ENGINE_SOURCE=oso`, linux/amd64;
    [install.md](install.md#rolling-the-engine-back)) rather than an older
    runner; its documents say which engine ran.
-9. **Roll the verifiers back last** (items 33, 51 and 68): an older reader
+10. **Roll the verifiers back last** (items 33, 51 and 68): an older reader
    refuses a 1.4.0/1.5.0 document that names a new auth mode (item 33), the
    2.0.0 scorecards a subset restore signed (item 51) and an empty capture's
    receipt (item 68).

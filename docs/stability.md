@@ -338,9 +338,35 @@ the runner image at least as new as the controller. A controller from before it
 ignores `status.clone` and the finalizer: after a rollback, a clone is never
 cleaned up and deleting its `Restore` waits until the finalizer is removed by
 hand ([the steps](kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
+Upward, a cleanup Job an older controller built (it reads the scorecard with
+the run's write grant) is never started by this one: the next attempt is built
+with this release's grants, and a clone such a Job left `RemovalFailed` gets
+one more attempt.
 Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
 subset), carrying `target.creation`; older readers accept it and ignore the
 block.
+
+### Values an older build cannot list (theme A): delete them before a rollback
+
+An older controller and console decode every kind as a closed Rust type, so a
+new enum value in a LISTED object fails the whole list, not the one object
+(measured on the PoC, 2026-10-14: `helm rollback` to v0.2.0 with eight
+`Switchover`-kind `Approval`s left every new `Restore` `ApprovalNotVerified`).
+What this release writes, and what an older build makes of it:
+
+| Object and field | New in this release | An older build |
+|---|---|---|
+| `Approval.spec.subjectRef.kind` | `Switchover` | **fails the `Approval` list**: delete them first ([how](kubernetes.md#rolling-back)) |
+| `Preflight.spec.request.operation` | `Switchover` (and `spec.request.switchover`) | **fails the `Preflight` list**: delete them first ([how](kubernetes.md#rolling-back)) |
+| `Preflight.status.result.checks[]` | the `switchover.*` rows and their codes | strings: read |
+| `Restore.status.clone`, `.topicConfiguration` | optional blocks | ignored (no CRD type denies unknown fields) |
+| `Restore.metadata.finalizers` | `logweir.dev/clone-cleanup` | never released: remove it by hand ([the steps](kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)) |
+| `Restore.spec.planBytes` | `target.teardown: {ttl_seconds}`, `target.topic_configuration` | an opaque string to the list; an older controller refuses such a plan if it is not finished: drain restores first |
+| `Restore.spec.target.mode` | no new mode (still `scratch`, `newTopic`) | read |
+| the scorecard's `target.creation`, `target.topic_configuration`, `positions_mapping` | optional blocks (object storage, not a listed object) | an older verifier ignores them |
+| `KafkaCluster.spec.strimzi` | optional block | ignored |
+| a `Backup`'s frozen inputs | `kafka_topic_resources` | refused (`PlanConfigMapConflict`) for a run in flight: let it finish |
+| `Switchover` | a new kind | not watched; inert |
 
 ### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
 
