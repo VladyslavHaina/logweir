@@ -157,16 +157,19 @@ pub struct BoundSet {
 /// receipt's configuration capture coverage, and carries the pin note when
 /// the receipt's pin could not be checked in this bucket.
 ///
-/// # The three answers, and why they are not one code
+/// # The answers, and why they are not one code
 ///
-/// * **missing / unreadable** — exit 1. The archive did not answer. That may
+/// * **a receipt key outside the plan's own set** — exit 3 before any read
+///   ([`confine_receipt_key`], FX-36).
+/// * **unreadable** — exit 1. The archive did not answer. That may
 ///   be a rotated credential, a denied prefix or a bucket that is briefly
 ///   unavailable, and Global Constraint 11 reserves exit 3 for a refusal of
 ///   the PLAN. Recording a transient storage failure as "the plan was refused"
 ///   would tell an operator to change an approved document to fix an outage.
-/// * **digest mismatch** — exit 3, the tampered-bundle case exactly: the bytes
-///   the archive holds are not the bytes the approver signed a binding to.
-///   Never retryable, never a warning.
+/// * **absent, digest mismatch or over the read cap** — exit 3, ONE answer
+///   (FX-36, FX-14's rule): the archive does not hold the bytes the approver
+///   signed a binding to, the tampered-bundle case exactly, and which of the
+///   three it was is not said. Never retryable, never a warning.
 /// * **agreement** — the run continues, having touched no broker.
 /// * **agreement over a pin this bucket cannot check**: the receipt
 ///   pins a manifest version this bucket does not hold, as every copy of the
@@ -184,6 +187,9 @@ pub fn verify_point_binding(
         return Ok(None);
     };
     check_point_shape(point)?;
+    // FX-36: WHAT THE PLAN MAY MAKE THIS RUN READ, decided from the plan
+    // alone and before any store call: one receipt of the plan's own set.
+    confine_receipt_key(plan, point)?;
     // THE TRUST ANCHOR BEFORE ANY ARCHIVE READ. A point-bound plan with no
     // evidence keyring could only be run unverified, and that is the run D3
     // §5.5 step 6 exists to prevent.
@@ -196,12 +202,11 @@ pub fn verify_point_binding(
     let qualified = point.receipt_key.clone();
     let receipt_bytes = match archive.get_capped(&qualified, caps::SIGNED_DOCUMENT) {
         Ok((bytes, _)) => bytes,
-        Err(StoreError::NotFound(_)) => {
-            return Err(DrillError::Operational(format!(
-                "the plan is bound to recovery point {} but its receipt {qualified} is not in \
-                 the archive; no data operation was started",
-                point.point_id
-            )))
+        // FX-36: ABSENT and OVER THE CAP are the answer of "not these bytes":
+        // one refusal, one message, one read (FX-14's rule, the restore
+        // preflight's `judge_bound_point`).
+        Err(StoreError::NotFound(_) | StoreError::TooLarge { .. }) => {
+            return Err(receipt_not_held(point))
         }
         Err(error) => {
             return Err(DrillError::Operational(format!(
@@ -216,15 +221,11 @@ pub fn verify_point_binding(
     // read out of the receipt below is trustworthy only because these bytes are
     // the bytes the approval covers: the plan is signed, the plan names this
     // digest, and this line proves the archive's object hashes to it. Parsing
-    // first and comparing afterwards would act on unverified bytes.
-    let actual = logweir_core::ids::sha256_prefixed(&receipt_bytes);
-    if actual != point.receipt_sha256 {
-        return Err(refuse(format!(
-            "{POINT_BINDING_MISMATCH}. The plan is bound to recovery point {} whose receipt must \
-             hash to {}, but {qualified} hashes to {actual}. The archive does not hold the point \
-             this plan was approved for; no data operation was started.",
-            point.point_id, point.receipt_sha256
-        )));
+    // first and comparing afterwards would act on unverified bytes. The
+    // refusal is the one an absent receipt gets, and names no digest of the
+    // bytes found.
+    if logweir_core::ids::sha256_prefixed(&receipt_bytes) != point.receipt_sha256 {
+        return Err(receipt_not_held(point));
     }
     // The identity is content-derived (D3 §5.1), so it is RE-DERIVED here and
     // never taken from the document. A point id that had to be believed would
@@ -407,6 +408,72 @@ pub fn verify_point_binding(
         source_cluster_id: receipt.source.cluster_id.clone(),
         owners: receipt_owners(&receipt),
     }))
+}
+
+/// **FX-36: the receipt key a plan names, confined before any read.** FX-14's
+/// confinement of the restore preflight (`check::kinds::restore`,
+/// `confine_bound_point`), where the approved plan is executed.
+///
+/// `source.point.receipt_key` is text an approver signed, and a runner that
+/// fetched whatever it names would turn the namespace's archive credential
+/// into a probe of the whole bucket: does this object exist, do its bytes hash
+/// to the bound digest. In a bucket shared by prefix that reaches other
+/// tenants' objects. So the key must be, byte for byte, the key `backup run`
+/// writes the PLAN'S OWN set's receipt at
+/// (`logweir/backups/<source.backup>/<run id>.receipt.json`,
+/// [`crate::catalog::record::receipt_run_id`]); the signature sidecar is
+/// derived from it, and the manifest is read only at the key the engine reads
+/// under the plan's storage, so every object this binding reads is confined
+/// by this one check.
+///
+/// Two refusals, both exit 3 and both before any store call:
+/// * the key is a receipt of ANOTHER set: the plan binds a point of one set
+///   and restores another ([`POINT_BINDING_SET_MISMATCH`], the refusal the
+///   binding gave after the read before FX-36, with the same text);
+/// * anything else (another prefix, a relative or nested path, an object
+///   that is not a receipt): [`POINT_BINDING_MISMATCH`], saying it was not
+///   read.
+pub(crate) fn confine_receipt_key(
+    plan: &DrillSpec,
+    point: &PointBinding,
+) -> Result<(), DrillError> {
+    use crate::catalog::record::{receipt_run_id, RECEIPTS_PREFIX, RECEIPT_SUFFIX};
+    let set = plan.source.backup.as_str();
+    let key = point.receipt_key.as_str();
+    if receipt_run_id(key, set).is_some() {
+        return Ok(());
+    }
+    let receipt_of = key
+        .strip_prefix(RECEIPTS_PREFIX)
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(other, _)| other)
+        .filter(|other| receipt_run_id(key, other).is_some());
+    if let Some(other) = receipt_of {
+        return Err(refuse(plan_set_refusal(&point.point_id, other, set)));
+    }
+    Err(refuse(format!(
+        "{POINT_BINDING_MISMATCH}. The plan's source.point.receipt_key `{key}` is not a receipt \
+         of set `{set}` (`{RECEIPTS_PREFIX}{set}/<run id>{RECEIPT_SUFFIX}`); it was not read, and \
+         no data operation was started."
+    )))
+}
+
+/// **FX-36: one answer for "absent", "not these bytes" and "over the read
+/// cap"** (FX-14's rule). Either way the archive does not hold the point the
+/// plan was approved for, and a difference would tell the plan's author
+/// whether an object exists at a key they chose. Exit 3: retention or a
+/// rewrite removed the point, and no retry brings it back. A store FAILURE
+/// keeps its own answer (exit 1).
+fn receipt_not_held(point: &PointBinding) -> DrillError {
+    refuse(format!(
+        "{POINT_BINDING_MISMATCH}. This archive does not hold the receipt the plan binds as \
+         recovery point {} at {}: it is absent, its bytes do not hash to the bound {}, or it is \
+         larger than the {}-byte read cap for a receipt; no data operation was started.",
+        point.point_id,
+        point.receipt_key,
+        point.receipt_sha256,
+        caps::SIGNED_DOCUMENT
+    ))
 }
 
 /// The binding's refusal of a plan whose `source.backup` is not the
@@ -1601,13 +1668,35 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             "{message}"
         );
 
-        let own = archive_at(
-            "logweir/a",
-            "logweir/a/receipts/run-1.receipt.json",
-            nested,
-            &[],
+        // The receipt sits at the WRITER's key (FX-36 confines the binding to
+        // it), outside the handle's own prefix, as on a real destination: the
+        // versioned double's handle writes there, the store does not.
+        let (store, bucket) = Store::in_memory_versioned("logweir/a");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let receipt_bytes =
+            serde_json::to_vec(&receipt(nested, &manifest_sha256)).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        let sidecar = sign_detached(
+            &signer,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            &receipt_bytes,
+        )
+        .expect("sign");
+        bucket.overwrite(RECEIPT_KEY, &receipt_bytes);
+        bucket.overwrite(
+            &crate::catalog::cli::sidecar_key_of(RECEIPT_KEY),
+            &serde_json::to_vec(&sidecar).expect("serialises"),
         );
-        let verified = check(&plan_with(Some(own.binding.clone())), &own.store, &own.keys)
+        bucket.overwrite(nested, &manifest);
+        let own = PointBinding {
+            point_id: crate::catalog::record::point_id(&receipt_bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+            manifest_sha256,
+        };
+        let own_keys = evidence_keys(vec![(&signer, trusted(&signer))]);
+        let verified = check(&plan_with(Some(own)), &store, &own_keys)
             .expect("the same point under the prefix it was written under")
             .expect("bound");
         assert_eq!(verified.set.manifest_key, nested);
@@ -2046,25 +2135,168 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    /// A missing point is exit 1, NOT exit 3: the archive did not answer, and
-    /// telling an operator to change an approved plan would be wrong.
+    /// **FX-36: one answer for a receipt that is absent, has other bytes or
+    /// is over the read cap**, at the same single read. Each is exit 3 with
+    /// the SAME message (the key and the bound digest, which the plan's
+    /// author wrote, and nothing about what was found), so the refusal does
+    /// not tell whether an object exists at the key. A store that does not
+    /// answer is still exit 1 (the control: an `Io` is not folded in).
+    ///
+    /// KILLS: absent answered apart (exit 1, or another message); the digest
+    /// mismatch naming the digest found; `TooLarge` reaching the store-failure
+    /// arm; a second read before the refusal.
     #[test]
-    fn a_missing_receipt_is_operational_and_not_a_plan_refusal() {
-        let store = Store::in_memory(ARCHIVE_PREFIX);
-        let signer = SigningKey::generate_ed25519();
-        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
-        let binding = PointBinding {
-            point_id: format!("lwp1-{}", "c".repeat(32)),
-            receipt_key: "logweir/backups/gone/run-1.receipt.json".into(),
-            receipt_sha256: format!("sha256:{}", "d".repeat(64)),
-            manifest_sha256: format!("sha256:{}", "e".repeat(64)),
+    fn an_absent_altered_or_oversized_receipt_gets_one_answer_at_one_read() {
+        let a = archive();
+        // One binding, whose digest no object below hashes to.
+        let mut bound = a.binding.clone();
+        bound.receipt_sha256 = format!("sha256:{}", "0".repeat(64));
+        let refusal = |store: &Store| -> (String, Vec<String>) {
+            let (store, log) = store.logging_reads();
+            let error = check(&plan_with(Some(bound.clone())), &store, &a.keys)
+                .expect_err("not the bound receipt");
+            assert_eq!(
+                error.exit_code(),
+                crate::exit::ExitCode::GuardRefused,
+                "{error}"
+            );
+            let DrillError::Guard(GuardRefusal(message)) = error else {
+                panic!("a refusal, got {error}")
+            };
+            (message, log.reads())
         };
-        let error = check(&plan_with(Some(binding)), &store, &keys)
-            .expect_err("a missing point is refused");
-        assert_eq!(error.exit_code(), crate::exit::ExitCode::Operational);
+        // Absent: an archive that holds nothing at the key.
+        let (absent, absent_reads) = refusal(&Store::in_memory(ARCHIVE_PREFIX));
+        // Other bytes at the key.
+        let (altered, altered_reads) = refusal(&a.store);
+        // Over the cap: a store that reports the receipt larger than the cap.
+        let (big, meter) =
+            Store::in_memory_misreporting_size(ARCHIVE_PREFIX, caps::SIGNED_DOCUMENT + 1);
+        big.put_create_only(RECEIPT_KEY, b"{}").expect("written");
+        let (oversized, oversized_reads) = refusal(&big);
+        assert_eq!(meter.streamed(), 0, "refused on the reported size");
+
+        assert_eq!(absent, altered, "one answer");
+        assert_eq!(altered, oversized, "one answer");
         assert!(
-            error.to_string().contains("is not in the archive"),
-            "{error}"
+            altered.starts_with(&format!("{POINT_BINDING_MISMATCH}. ")),
+            "{altered}"
+        );
+        assert!(
+            !altered.contains(&a.binding.receipt_sha256) && !altered.contains("hashes to sha256"),
+            "no digest of what was found: {altered}"
+        );
+        let one = vec![format!("get {RECEIPT_KEY}")];
+        assert_eq!(absent_reads, one);
+        assert_eq!(altered_reads, one);
+        assert_eq!(oversized_reads, one);
+    }
+
+    /// **FX-36: the confinement, and NO store read.** A plan may name any text
+    /// as its receipt key. Every key that is not the key `backup run` writes
+    /// THIS plan's set's receipt at — another tenant's prefix, another set, a
+    /// relative or nested path, an object that is not a receipt — is refused
+    /// by name, exit 3, with the archive untouched: not the receipt, not its
+    /// signature, not the manifest. Every key under `logweir/` HOLDS the bound
+    /// receipt's bytes and their signature in this fixture, so a build that
+    /// read them would find the digest it was told to expect and go on.
+    ///
+    /// CONTROL: the writer's own key, in the same fixture, is read (the
+    /// receipt, its sidecar, the manifest) and the point is proven.
+    ///
+    /// KILLS: the confinement removed (`confine_receipt_key` not called: the
+    /// planted keys are read and proven); the confinement moved after the
+    /// receipt read (the read log is no longer empty).
+    #[test]
+    fn a_receipt_key_outside_the_plans_own_set_is_refused_with_no_store_read() {
+        let a = archive();
+        let receipt_bytes = a
+            .store
+            .get_capped(RECEIPT_KEY, caps::SIGNED_DOCUMENT)
+            .expect("the fixture's receipt")
+            .0;
+        let sidecar_bytes = a
+            .store
+            .get_capped(
+                &crate::catalog::cli::sidecar_key_of(RECEIPT_KEY),
+                caps::SIDECAR,
+            )
+            .expect("its sidecar")
+            .0;
+        let not_a_receipt = [
+            // another tenant's prefix, in a bucket shared by prefix
+            "tenant-b/logweir/backups/nightly-7/run-1.receipt.json",
+            "tenant-b/kafka-backups/nightly-7/manifest.json",
+            // an absolute spelling
+            "/logweir/backups/nightly-7/run-1.receipt.json",
+            // relative and nested paths
+            "logweir/backups/nightly-7/../nightly-8/run-1.receipt.json",
+            "logweir/backups/nightly-7/../../../tenant-b/private.receipt.json",
+            "logweir/backups/nightly-7/nested/run-1.receipt.json",
+            // objects that are not a receipt
+            "logweir/backups/nightly-7/run-1.receipt.sig",
+            "logweir/backups/nightly-7/run-1.consumer-positions.json",
+            "logweir/catalog/v1/points/lwp1-00000000000000000000000000000000/record.json",
+            "logweir/drills/run-1.receipt.json",
+            "logweir/nightly-7/manifest.json",
+            "kafka-backups/nightly-7/topics/orders/partition=0/segment-0.bin",
+        ];
+        for key in not_a_receipt {
+            if key.starts_with(logweir_engine_oso::storage::LOGWEIR_ROOT) && key != MANIFEST_KEY {
+                let _ = a.store.put_create_only(key, &receipt_bytes);
+                let _ = a
+                    .store
+                    .put_create_only(&crate::catalog::cli::sidecar_key_of(key), &sidecar_bytes);
+            }
+        }
+        let (store, log) = a.store.logging_reads();
+        for key in not_a_receipt {
+            let mut binding = a.binding.clone();
+            binding.receipt_key = key.to_string();
+            let before = log.reads().len();
+            let error = check(&plan_with(Some(binding)), &store, &a.keys)
+                .expect_err("a key outside the plan's own set is refused");
+            let DrillError::Guard(GuardRefusal(rendered)) = error else {
+                panic!("{key}: a refusal, got {error}")
+            };
+            assert!(
+                rendered.starts_with(&format!("{POINT_BINDING_MISMATCH}. "))
+                    && rendered.contains("it was not read"),
+                "{key}: {rendered}"
+            );
+            assert!(log.reads()[before..].is_empty(), "{key}: {:?}", log.reads());
+        }
+
+        // Another set's receipt, named in full: the plan restores `nightly-7`
+        // and binds a point of `nightly-8`. The set refusal, still with
+        // nothing read.
+        let mut binding = a.binding.clone();
+        binding.receipt_key = "logweir/backups/nightly-8/run-1.receipt.json".into();
+        let _ = a
+            .store
+            .put_create_only(&binding.receipt_key, &receipt_bytes);
+        let before = log.reads().len();
+        let message = set_mismatch(check(&plan_with(Some(binding)), &store, &a.keys));
+        assert!(
+            message.contains("backup set `nightly-8`") && message.contains("names set `nightly-7`"),
+            "{message}"
+        );
+        assert!(log.reads()[before..].is_empty(), "{:?}", log.reads());
+
+        // CONTROL: the writer's key is read, and the point is proven.
+        let before = log.reads().len();
+        let id = a.binding.point_id.clone();
+        assert_eq!(
+            check(&plan_with(Some(a.binding.clone())), &store, &a.keys).expect("proven"),
+            proven(id, None)
+        );
+        assert_eq!(
+            log.reads()[before..],
+            [
+                format!("get {RECEIPT_KEY}"),
+                format!("get {}", crate::catalog::cli::sidecar_key_of(RECEIPT_KEY)),
+                format!("get {MANIFEST_KEY}"),
+            ]
         );
     }
 
