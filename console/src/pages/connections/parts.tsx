@@ -477,7 +477,7 @@ export function ConnectionUsability({ preflight }: { preflight: Preflight }) {
       <Title headingLevel="h4" size="md">
         {u.summary}
       </Title>
-      <ul className="lw-plain-list">
+      <ul className="lw-plain-list lw-usable">
         {u.lines.map((l) => (
           <li key={l.id}>
             {l.label}: <StatusLabel tone={USABLE[l.state].tone} text={USABLE[l.state].text} title={`${l.id} ${l.state}`} />
@@ -485,7 +485,7 @@ export function ConnectionUsability({ preflight }: { preflight: Preflight }) {
           </li>
         ))}
       </ul>
-      <Content component="p" className="lw-subtle lw-small">
+      <Content component="p" className="lw-subtle lw-small lw-gap-top">
         Advisory: these lines never change the check's verdict, and a backup or restore still runs every guard.
       </Content>
     </section>

@@ -662,6 +662,10 @@ body {
   margin: 0;
   padding: 0;
 }
+/* A Test connection's three usability lines (FX-46): one line each, apart. */
+.lw-usable li + li {
+  margin-top: var(--pf-t--global--spacer--sm);
+}
 .lw-kv-table td,
 .lw-kv-table th {
   vertical-align: top;

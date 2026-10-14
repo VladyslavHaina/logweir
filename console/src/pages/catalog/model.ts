@@ -36,8 +36,8 @@ export function viewIsWindow(c: Pick<Catalog, "conditions">): boolean {
  */
 export function truncatedWords(c: Pick<Catalog, "truncated" | "conditions">): string {
   if (!c.truncated) return "Not truncated";
-  const why = conditionOf(c.conditions, "Synced")?.message?.replace(/`/g, "");
-  return `Not known to be the whole archive: ${why ? `the Synced condition says "${why}"` : "the catalog has not said why (no Synced message)"}`;
+  const why = conditionOf(c.conditions, "Synced")?.message;
+  return `Not known to be the whole archive; ${why ? "the Synced condition says why" : "the catalog has not said why (no Synced message)"}`;
 }
 
 /** FX-38: a points page with `incomplete: true`. */

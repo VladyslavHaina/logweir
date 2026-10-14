@@ -425,7 +425,8 @@ describe("FX-38: one catalog's page says what its view does not prove", () => {
     const doc = copy(catalogDoc);
     doc.item.conditions = doc.item.conditions.map((c) => (c.type === "Synced" ? { ...c, message: "the walk completed; the newest 4 of 4 points are materialised across 1 page(s). 1 entr(y/ies) did not fit the view's 1 page(s) and are not listed" } : c));
     show(doc, catalogPoints);
-    await screen.findByText(/^Not known to be the whole archive: the Synced condition says/);
+    await screen.findByText("Not known to be the whole archive; the Synced condition says why");
+    expect(document.body.textContent).toContain("1 entr(y/ies) did not fit the view's 1 page(s) and are not listed");
     expect(document.body.textContent).not.toContain(windowSentence);
     expect(document.body.textContent).not.toMatch(/the archive holds more points than the view carries/);
   });

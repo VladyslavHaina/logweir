@@ -203,10 +203,10 @@ describe("FX-36, FX-38: what a catalog's view does not prove", () => {
     const synced = (message: string) => ({ truncated: true, conditions: [{ type: "Synced", status: "True", reason: "Synced", message }] });
     const window = synced("the walk completed; the newest 500 of 900 points are materialised across 3 page(s). The view is a WINDOW: points beyond it are counted and histogrammed here and listed by `logweir catalog list` against the archive");
     expect(viewIsWindow(window)).toBe(true);
-    expect(truncatedWords(window)).toMatch(/^Not known to be the whole archive: the Synced condition says "the walk completed;.*listed by logweir catalog list/);
+    expect(truncatedWords(window)).toBe("Not known to be the whole archive; the Synced condition says why");
     const space = synced("the walk completed; the newest 400 of 400 points are materialised across 3 page(s). 4 entr(y/ies) did not fit the view's 3 page(s) and are not listed");
     expect(viewIsWindow(space)).toBe(false);
-    expect(truncatedWords({ truncated: true, conditions: [] })).toBe("Not known to be the whole archive: the catalog has not said why (no Synced message)");
+    expect(truncatedWords({ truncated: true, conditions: [] })).toBe("Not known to be the whole archive; the catalog has not said why (no Synced message)");
     expect(truncatedWords({ truncated: true, conditions: [] })).not.toMatch(/holds more/);
     // CONTROL: a whole view is said whole.
     expect(truncatedWords({ truncated: false, conditions: [] })).toBe("Not truncated");
