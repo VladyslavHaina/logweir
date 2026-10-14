@@ -588,6 +588,70 @@ async fn the_login_state_the_cookie_and_the_pkce_verifier_are_all_checked() {
 /// the `state` single-use against someone who kept a copy is the replica's
 /// record of redeemed states, with the provider's single-use code behind it,
 /// asserted in `tests/sign_in_state.rs`.
+/// DUI-41.7: a second "Sign in again in a new tab" replaced the first sign-in, and
+/// the first tab's callback showed a bare JSON 401 with no way back. A browser
+/// navigation (Accept text/html) that fails the state check now reads a page that
+/// says the sign-in expired or was replaced, with a link to the console. The check
+/// itself is unchanged: 401, no session, the login cookie cleared, no token request.
+///
+/// CONTROL: the same refusal without `Accept: text/html` is the JSON problem it was.
+#[tokio::test]
+async fn dui41_a_browser_whose_sign_in_was_replaced_reads_a_page_and_stays_signed_out() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = app(&idp);
+    let (_, started) = start_login(&app, "").await;
+    let started = started.expect("login redirects");
+    let wrong = |accept: Option<&str>| {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/auth/callback?code=code-1&state=someone-elses-state")
+            .header("host", SHARED_HOST)
+            .header("cookie", &started.cookie);
+        if let Some(accept) = accept {
+            request = request.header("accept", accept);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+
+    let page = app
+        .app
+        .send(wrong(Some(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )))
+        .await;
+    assert_eq!(page.status.as_u16(), 401);
+    assert!(
+        page.header("content-type")
+            .is_some_and(|t| t.starts_with("text/html")),
+        "{:?}",
+        page.headers
+    );
+    let text = page.text();
+    assert!(
+        text.contains("expired, or a newer sign-in replaced it") && text.contains("href=\"/ui/\""),
+        "{text}"
+    );
+    assert!(text.contains("state_mismatch"), "{text}");
+    assert!(
+        session_cookie_of(&page).is_none(),
+        "no session from a refused state"
+    );
+    assert!(
+        login_cookie_clear_of(&page).is_some(),
+        "the attempt is over: its login cookie is cleared"
+    );
+    assert_eq!(idp.token_calls(), 0, "refused before any token request");
+
+    // CONTROL: an API client gets the problem document, unchanged.
+    let json = app.app.send(wrong(None)).await;
+    assert_eq!(json.status.as_u16(), 401);
+    assert_eq!(json.json()["code"], "unauthenticated");
+    assert_eq!(json.json()["detail"], "The sign-in state does not match.");
+    assert!(session_cookie_of(&json).is_none());
+    assert_eq!(idp.token_calls(), 0);
+}
+
 #[tokio::test]
 async fn a_consumed_login_cookie_is_cleared() {
     let key = TestKey::ec("k-ec-1");

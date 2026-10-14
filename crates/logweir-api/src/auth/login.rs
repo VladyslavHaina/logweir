@@ -340,6 +340,63 @@ pub async fn login(State(state): State<AppState>, request: axum::extract::Reques
     redirect(&url, &[session::set_login_cookie(keys, &login_state)])
 }
 
+/// Whether the request is a browser navigation: its `Accept` names `text/html`.
+fn wants_html(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| v.split(',').any(|t| t.trim().starts_with("text/html")))
+}
+
+/// Text for an HTML body: `&`, `<`, `>` and `"` as entities.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The refusals a sign-in that expired, or was replaced by a newer one in another
+/// tab, ends in.
+const REPLACED_OR_EXPIRED: &[&str] = &[
+    "state_mismatch",
+    "login_state_absent",
+    "login_state_invalid",
+    "login_state_replayed",
+];
+
+/// A refused callback as a small page for a browser (DUI-41.7): 401, fixed text
+/// only (the refusal's own `&'static` sentence, never a query parameter or a
+/// provider's words), and a link back to the console.
+fn refused_sign_in_page(code: &'static str, detail: &'static str) -> Response {
+    let lead = if REPLACED_OR_EXPIRED.contains(&code) {
+        "This sign-in expired, or a newer sign-in replaced it (for example one started in another \
+         tab), so it was not completed. If you signed in in another tab, that sign-in is the one \
+         that counts."
+    } else {
+        "This sign-in was not completed."
+    };
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" \
+         content=\"width=device-width, initial-scale=1\"><title>Sign-in not completed</title></head>\
+         <body><main><h1>Sign-in not completed</h1><p>{lead}</p><p>{detail} ({code})</p>\
+         <p><a href=\"/ui/\">Back to the Logweir console</a></p></main></body></html>",
+        detail = escape_html(detail),
+    );
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response();
+    response.extensions_mut().insert(crate::http::BrowserPage);
+    response
+}
+
 /// `GET /auth/callback` — finish a login.
 pub async fn callback(State(state): State<AppState>, request: axum::extract::Request) -> Response {
     let (parts, _) = request.into_parts();
@@ -354,9 +411,17 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
     }
     audit.set_action("auth.callback", Decision::Deny);
 
+    // DUI-41.7: a browser that followed the provider's redirect here reads a page,
+    // not a JSON problem with no way back. Only the wording changes: the refusal,
+    // its status and the cleared login cookie are the same for every caller.
+    let browser = wants_html(&parts.headers);
     let refuse = |code: &'static str, detail: &'static str| -> Response {
         audit.set_failure(code);
-        let mut response = ApiError::new(ProblemCode::Unauthenticated, detail).into_response();
+        let mut response = if browser {
+            refused_sign_in_page(code, detail)
+        } else {
+            ApiError::new(ProblemCode::Unauthenticated, detail).into_response()
+        };
         // Whatever went wrong, the login attempt is over: clear its cookie so
         // a retry starts a fresh `state`/`nonce`/verifier.
         if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(session::LOGIN_COOKIE)) {

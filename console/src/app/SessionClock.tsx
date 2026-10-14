@@ -67,10 +67,25 @@ function useSecondTick(): number {
 }
 
 /** A link that opens the sign-in round trip in a new tab: this tab is never navigated away. */
+/**
+ * DUI-41.7: a sign-in tab this page opened. A second click started a second sign-in, which
+ * replaced the first, so the first tab ended on "the sign-in state does not match". Until the
+ * person comes back to this tab, the link is held.
+ */
+const SignInContext = createContext<{ pending: boolean; opened: () => void }>({ pending: false, opened: () => undefined });
+
 function SignInNewTab({ variant }: { variant: "primary" | "link" }) {
   const href = useSignInHref();
+  const { pending, opened } = useContext(SignInContext);
+  if (pending) {
+    return (
+      <Button variant={variant} isInline={variant === "link"} isAriaDisabled>
+        Sign-in open in another tab
+      </Button>
+    );
+  }
   return (
-    <Button component="a" href={href} target="_blank" rel="noopener noreferrer" variant={variant} isInline={variant === "link"}>
+    <Button component="a" href={href} target="_blank" rel="noopener noreferrer" variant={variant} isInline={variant === "link"} onClick={opened}>
       Sign in again in a new tab
     </Button>
   );
@@ -130,6 +145,20 @@ export function SessionClock({
   const remaining = Number.isFinite(expires) ? expires - now : Infinity;
   const [dismissed, setDismissed] = useState<number | null>(null);
   const [asked, setAsked] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  // Back in this tab: the other tab's sign-in is done or abandoned, so the link is offered again.
+  useEffect(() => {
+    if (!signingIn) return undefined;
+    const back = () => {
+      if (document.visibilityState === "visible") setSigningIn(false);
+    };
+    window.addEventListener("focus", back);
+    document.addEventListener("visibilitychange", back);
+    return () => {
+      window.removeEventListener("focus", back);
+      document.removeEventListener("visibilitychange", back);
+    };
+  }, [signingIn]);
   const firstActor = useRef({ id: session.actor.id, name: session.actor.displayName || shortSubject(session.actor.subject) });
   const otherActor = session.actor.id !== firstActor.current.id;
 
@@ -175,14 +204,16 @@ export function SessionClock({
     void reread.current();
   };
   return (
-    <WarningContext.Provider value={warning}>
-      {children}
-      {otherActor ? (
-        <OtherActor was={firstActor.current.name} now={session.actor.displayName || shortSubject(session.actor.subject)} />
-      ) : ended ? (
-        <Ended asked={asked} onContinue={onContinue} />
-      ) : null}
-    </WarningContext.Provider>
+    <SignInContext.Provider value={{ pending: signingIn, opened: () => setSigningIn(true) }}>
+      <WarningContext.Provider value={warning}>
+        {children}
+        {otherActor ? (
+          <OtherActor was={firstActor.current.name} now={session.actor.displayName || shortSubject(session.actor.subject)} />
+        ) : ended ? (
+          <Ended asked={asked} onContinue={onContinue} />
+        ) : null}
+      </WarningContext.Provider>
+    </SignInContext.Provider>
   );
 }
 

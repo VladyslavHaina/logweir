@@ -275,6 +275,21 @@ describe("DUI-4: the session's end", () => {
     expect(screen.getByRole("heading", { name: "Overview", level: 1 })).toBeTruthy();
   });
 
+  it("DUI-41.7: holds the sign-in link while the tab it opened is out, so a second click starts no second sign-in", async () => {
+    read.mockResolvedValue(withExpiry(90_000));
+    renderAt("/team-a");
+    const link = await screen.findByRole("link", { name: "Sign in again in a new tab" });
+    fireEvent.click(link);
+    const held = await screen.findByRole("button", { name: "Sign-in open in another tab" });
+    expect(held.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.queryByRole("link", { name: "Sign in again in a new tab" })).toBeNull();
+    // Control: back in this tab, the link is offered again.
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(await screen.findByRole("link", { name: "Sign in again in a new tab" })).toBeTruthy();
+  });
+
   it("puts the words of the time left in minutes and seconds", () => {
     expect([leftWords(100_000), leftWords(45_000), leftWords(120_000), leftWords(-5)]).toEqual(["1 min 40 s", "45 s", "2 min", "0 s"]);
   });

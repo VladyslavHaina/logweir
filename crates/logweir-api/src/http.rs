@@ -300,6 +300,12 @@ pub fn check_login_rate(state: &AppState, parts: &Parts) -> Result<(), ApiError>
     }
 }
 
+/// A refusal written as a page for a browser on purpose (the sign-in callback's,
+/// DUI-41.7): layer 1 leaves it as it is instead of re-rendering it as a problem
+/// document. Only a handler can attach it, and only to fixed text.
+#[derive(Clone, Copy, Debug)]
+pub struct BrowserPage;
+
 /// Layer 1. See the module documentation.
 pub async fn request_context(mut req: Request, next: Next) -> Response {
     let started = Instant::now();
@@ -318,7 +324,9 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
 
     if let Some(PendingProblem(error)) = response.extensions_mut().remove::<PendingProblem>() {
         response = rerender(&response, &error, &request_id);
-    } else if response.status().is_client_error() || response.status().is_server_error() {
+    } else if (response.status().is_client_error() || response.status().is_server_error())
+        && response.extensions().get::<BrowserPage>().is_none()
+    {
         let is_problem = response
             .headers()
             .get(header::CONTENT_TYPE)
