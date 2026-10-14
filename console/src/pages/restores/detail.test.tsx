@@ -39,6 +39,8 @@ import { When, exactUtc, relative } from "../../components/When";
 import { RestoreDetail, VERDICT_PENDING_SENTENCE } from "./RestoreDetail";
 import { VERDICT_FOLLOW_MS, useVerdictFollow, verdictPending } from "../../api/restores";
 import { CheckStep } from "./WizardSteps";
+import { NO_GROUPS_CAPTURED, cutoverRefusal } from "../cutover/Cutover";
+import backupDoc from "../../../fixtures/console/backup.json";
 import { readinessRefusal, type Preflight } from "./model";
 
 configure({ asyncUtilTimeout: 10_000 });
@@ -118,7 +120,7 @@ vi.mock("../../mock/fetch", () => ({
     const path = new URL(request.url).pathname.replace(/^.*?\/api\/v1/, "");
     const body = net.answers.get(path);
     if (path === "/session") {
-      const caps = { restoreCreate: true, operationsRead: true, restoresRead: true };
+      const caps = { restoreCreate: true, operationsRead: true, restoresRead: true, backupsRead: true };
       return new Response(JSON.stringify({ actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: caps, namespaces: [{ name: "t", roles: ["operator"], capabilities: caps }], requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (body === undefined) return new Response(JSON.stringify({ status: 404, code: "not_found", title: "x", detail: `no ${path}`, requestId: "r" }), { status: 404, headers: { "content-type": "application/problem+json" } });
@@ -126,8 +128,9 @@ vi.mock("../../mock/fetch", () => ({
   },
 }));
 
-function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null) {
+function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null, extra: Record<string, unknown> = {}) {
   net.answers.clear();
+  for (const [path, body] of Object.entries(extra)) net.answers.set(path, body);
   net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
   net.answers.set("/namespaces/t/approval-policy", { item: policy, requestId: "r" });
@@ -222,6 +225,35 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     expect(verdictPending({ ...r.operation, verificationState: "pending" })).toBe(true);
     // A run still moving is followed as before, not by this rule.
     expect(verdictPending({ ...r.operation, terminal: false, verificationState: "pending" })).toBe(false);
+  });
+});
+
+describe("DUI-42: a restore of a point that captured no consumer group", () => {
+  const restore = (): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" } };
+  };
+  const source = (consumerGroups?: string[]) => ({
+    items: [{ ...(backupDoc.item as object), name: "orders-hourly-x", backupId: restore().backupSetRef, ...(consumerGroups ? { consumerGroups } : {}) }],
+    page: { limit: 200 },
+    requestId: "r",
+  });
+
+  it("offers no switchover and says there is nothing to switch over", async () => {
+    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source() });
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(NO_GROUPS_CAPTURED))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    expect(screen.queryByText(/your consumer groups still point at their old positions/)).toBeNull();
+  });
+
+  it("offers it when the point's backup recorded groups (the control)", async () => {
+    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toContain(NO_GROUPS_CAPTURED);
+    // An unknown source (no Backup carries the set id any more) refuses nothing: the review decides.
+    expect(cutoverRefusal(restore(), null)).toBeNull();
+    expect(cutoverRefusal(restore(), { consumerGroups: [] })?.word).toBe("NoPositionsMapping");
   });
 });
 

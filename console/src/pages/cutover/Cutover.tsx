@@ -40,7 +40,7 @@ import {
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import { useCan } from "../../api/session";
-import { useRestore } from "../../api/queries";
+import { useRestore, useSourceBackup } from "../../api/queries";
 import { ApiError } from "../../api/client";
 import { useApprovalPolicy, type ApprovalPolicy } from "../../api/approvals";
 import {
@@ -85,11 +85,20 @@ import { ErrorText, Prose, checkMessage } from "../../components/Prose";
 import { Revealed } from "../../components/Revealed";
 import { exactUtc } from "../../components/When";
 
-/** Why this restore cannot be switched over, from the restore alone (§3.4's admission). */
-export function cutoverRefusal(r: Restore): { word: string; title: string; body: string } | null {
+/** The words for a restore whose point captured no consumer group (DUI-42). */
+export const NO_GROUPS_CAPTURED = "This point captured no consumer group, so there is nothing to switch over.";
+
+/**
+ * Why this restore cannot be switched over (§3.4's admission), from the restore and, when it
+ * is known, the Backup its point came from (`useSourceBackup`): a point whose backup selected
+ * no consumer group maps no position, and the review would refuse `NoPositionsMapping`.
+ * An unknown source (`undefined` or `null`) refuses nothing: the review decides.
+ */
+export function cutoverRefusal(r: Restore, source?: { consumerGroups?: string[] | null } | null): { word: string; title: string; body: string } | null {
   if (r.target.mode === "scratch") return { word: "RestoreIsScratch", title: "A clone cannot be switched over", body: "This restore is a clone (scratch mode): its topics are deleted when it expires, so consumers are never moved onto them." };
   if (!r.operation.terminal) return { word: "RestoreNotSucceeded", title: "The restore has not finished", body: "Positions are mapped when the restore passes its complete verification. Come back when it is verified." };
   if (r.operation.state !== "succeeded" || !r.operation.verifiedSuccess) return { word: "RestoreNotSucceeded", title: "This restore cannot be switched over", body: "Only a restore that succeeded with a verified scorecard has positions to apply." };
+  if (source && !source.consumerGroups?.length) return { word: "NoPositionsMapping", title: "Nothing to switch over", body: NO_GROUPS_CAPTURED };
   if (r.coverage.recorded !== "complete" || r.coverage.covered === false) {
     return { word: "VerificationNotComplete", title: "No positions to switch over", body: "This restore was not verified completely. Positions are mapped only by a complete verification of every partition; restore again with complete verification to switch consumers over." };
   }
@@ -635,7 +644,8 @@ function CutoverFlow() {
   const switchoverName = search.switchover;
   const sw = useSwitchover(ns, switchoverName);
   const r = restore.isFetchedAfterMount ? restore.data : undefined;
-  const refusal = r ? cutoverRefusal(r) : null;
+  const source = useSourceBackup(ns, r?.backupSetRef);
+  const refusal = r ? cutoverRefusal(r, source) : null;
 
   const beginReview = () => {
     if (!r) return;

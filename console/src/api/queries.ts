@@ -107,6 +107,18 @@ export function useRestore(ns: string, name: string, { fresh = false, follow = f
   });
 }
 
+/**
+ * DUI-42: the Backup a restore's set id names (`spec.backupSetRef` is its `backupId`), whose
+ * `consumerGroups` are the groups its point recorded: absent selects none, so no position is
+ * mapped and nothing can be switched over. `undefined` while unknown (the list unread, or not
+ * readable to this role); `null` when no Backup carries that id any more.
+ */
+export function useSourceBackup(ns: string, backupSetRef: string | undefined): Backup | null | undefined {
+  const backups = useBackups(ns);
+  if (!backupSetRef || !backups.data) return undefined;
+  return backups.data.find((b) => b.backupId === backupSetRef) ?? null;
+}
+
 /** One run's operation view. While `streaming` (stream.ts holds the run's event stream
  *  open) the stream writes this key and the poll stands down. `follow` keeps reading a
  *  terminal run while its verdict is pending (DUI-38). */

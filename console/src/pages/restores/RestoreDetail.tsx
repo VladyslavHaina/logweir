@@ -53,6 +53,7 @@ import { CloneStatus } from "../cutover/CloneLifetime";
 import { TopicConfigurationResult } from "../cutover/TopicConfiguration";
 import { SwitchoverEntry } from "../cutover/SwitchoverEntry";
 import { cutoverRefusal } from "../cutover/Cutover";
+import { useSourceBackup } from "../../api/queries";
 import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
 import { approvalRoute } from "./model";
 import {
@@ -298,6 +299,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && (!restore.data.operation.terminal || follow));
   const operation = useRestoreOperation(ns, name, streaming, follow);
   const verdict = useVerdictFollow(verdictPending(restore.data?.operation) || verdictPending(operation.data));
+  const source = useSourceBackup(ns, restore.data?.backupSetRef);
   useEffect(() => setFollow(verdict.following), [verdict.following]);
   const [showPlan, setShowPlan] = useState(false);
 
@@ -335,7 +337,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const signed = op ? evidenceVerified(op) : verified;
   const failed = r.operation.terminal && (r.operation.state === "failed" || r.operation.state === "refused");
   // Theme A: a restore verified completely has positions to switch over (the review decides the rest).
-  const switchable = cutoverRefusal(r) === null;
+  const switchable = cutoverRefusal(r, source) === null;
   const complete = r.coverage?.requested === "complete";
   const scope = op?.verificationScope;
   const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
@@ -741,7 +743,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                 </CardBody>
               </Card>
             ) : (
-              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} />
+              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} source={source} />
             )}
           </GridItem>
           {r.topicConfiguration && (
