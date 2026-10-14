@@ -7,6 +7,7 @@ import {
   COVERAGE_COMPLETE,
   MAX_REPLICATION_FACTOR,
   cloneTtlError,
+  parseOwnerLines,
   topicConfigurationPlan,
   type TopicConfigurationValue,
   TIME_BASIS_PRODUCER_TIME,
@@ -419,7 +420,7 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
       replicationFactor: choice.value,
       teardown: "delete",
       ...(v.scratch && v.cloneTtl !== null ? { teardownTtlSeconds: v.cloneTtl } : {}),
-      ...(topicConfigurationPlan(v.topicConfiguration) ? { topicConfiguration: topicConfigurationPlan(v.topicConfiguration)! } : {}),
+      ...(topicConfigurationPlan(v.topicConfiguration) ? { topicConfiguration: topicConfigurationPlan(v.topicConfiguration, selectedTopics(p, v))! } : {}),
       ...(original ? { originalName: true, originalNameNoOwner: v.noOwner } : {}),
     },
     sample: {
@@ -439,6 +440,33 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
 
 export type Problems = Partial<Record<keyof WizardValues | "archive" | "point", string>>;
 
+/** Whether the point's backup looked for the topics' declarative owners itself (its catalog row's
+ *  `ownerDetection` names a place). Unknown, or looked nowhere, and the plan must say (DUI-17). */
+export function ownersLooked(point: RecoveryPoint): boolean {
+  return (point.catalog?.entry.ownerDetection?.length ?? 0) > 0;
+}
+
+/**
+ * DUI-17: the source's configuration from a point whose backup did not look for owners is
+ * refused by the runner (`TopicOwnerNotChecked`) unless the plan states them. The wizard
+ * asks, as the original-names path does, and refuses Next until it is answered.
+ */
+export function topicOwnersProblem(point: RecoveryPoint, v: WizardValues): string | null {
+  const tc = v.topicConfiguration;
+  if (!tc.transition) return null;
+  if (tc.owners === null) {
+    return ownersLooked(point)
+      ? null
+      : "say whether a declarative owner (a Strimzi KafkaTopic, a GitOps or Terraform definition) manages these topics: none, or name them";
+  }
+  if (tc.owners === "named") {
+    const parsed = parseOwnerLines(tc.ownerLines, selectedTopics(point, v));
+    if (parsed.problem) return parsed.problem;
+    if (parsed.owners.length === 0) return "name at least one owner, or say that none manages these topics";
+  }
+  return null;
+}
+
 /** The page's own refusals, by input, before anything is sent. */
 export function validate(ctx: WizardContext, v: WizardValues, f: PlanFields, destinationProblem: string | null): Problems {
   const out: Problems = {};
@@ -454,6 +482,8 @@ export function validate(ctx: WizardContext, v: WizardValues, f: PlanFields, des
   const ttl = v.scratch ? cloneTtlError(v.cloneTtl) : null;
   if (ttl) out.cloneTtl = ttl;
   if (originalNameChosen(v) && !v.noOwner) out.noOwner = "state that no declarative owner manages these names, or restore under a prefix";
+  const owners = topicOwnersProblem(ctx.point, v);
+  if (owners) out.topicConfiguration = owners;
   if (ctx.point.destinationName) {
     if (!evidenceStoreOf(ctx.evidence)) out.evidenceDestination = "choose the saved destination the evidence is written to";
   } else {

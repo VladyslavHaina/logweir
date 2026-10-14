@@ -840,6 +840,75 @@ async fn dynamic_selection_is_copied_whole() {
     app.fake.assert_strict();
 }
 
+/// **DUI-25: a run copies its schedule's consumer groups, and the run's view
+/// names them**, so the run page can say which groups it records.
+///
+/// KILLS: projecting a run's `spec.consumerGroups` as absent; a manual run that
+/// drops the schedule's selection (it would record no positions while the
+/// schedule's page lists groups).
+#[tokio::test]
+async fn a_run_copies_and_shows_its_schedules_consumer_groups() {
+    let app = TestApp::new();
+    let groups = json!(["orders-billing", "orders-shipping"]);
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        json!({
+            "metadata": {"name": "grouped", "generation": 3},
+            "spec": {
+                "schedule": "0 2 * * *",
+                "sourceRef": {"name": "source"},
+                "topics": ["orders"],
+                "consumerGroups": groups,
+                "archive": {"url": "s3://kafka-backups/logweir"},
+                "suspend": false
+            }
+        }),
+    );
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some(KEY),
+            &json!({"scheduleRef": {"name": "grouped"}}).to_string(),
+        )
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    assert_eq!(backups(&app)[0]["spec"]["consumerGroups"], groups);
+    let name = response.json()["item"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let read = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/backups/{name}"))
+        .await;
+    assert_eq!(read.status, 200, "{}", read.text());
+    assert_eq!(read.json()["item"]["consumerGroups"], groups);
+
+    // CONTROL: a schedule that selects none makes a run whose view names none.
+    seed_schedule(&app.fake, "nightly", false);
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some("back-up-now-0003"),
+            &from_schedule(),
+        )
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    let name = response.json()["item"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let read = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/backups/{name}"))
+        .await;
+    assert!(
+        read.json()["item"].get("consumerGroups").is_none(),
+        "{}",
+        read.text()
+    );
+    app.fake.assert_strict();
+}
+
 /// **The shipped sample is the object this route creates — driven through the
 /// route and compared byte for byte.**
 ///

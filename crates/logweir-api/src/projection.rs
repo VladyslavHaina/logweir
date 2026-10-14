@@ -118,6 +118,12 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
     }
 }
 
+/// A stored `spec.consumerGroups`, as the views carry it: an empty list
+/// selects no group, exactly as an absent one does, so both read absent.
+fn selected_groups(groups: Option<&Vec<String>>) -> Option<Vec<String>> {
+    groups.filter(|g| !g.is_empty()).cloned()
+}
+
 /// A `BackupSchedule` as a schedule.
 #[must_use]
 pub fn schedule(object: &BackupSchedule) -> Schedule {
@@ -135,6 +141,7 @@ pub fn schedule(object: &BackupSchedule) -> Schedule {
         source_ref: name_ref(&object.spec.source_ref),
         topics: object.spec.topics.clone(),
         all_user_topics: object.spec.all_user_topics.as_ref().map(all_user_topics),
+        consumer_groups: selected_groups(object.spec.consumer_groups.as_ref()),
         archive: archive_view(&object.spec.archive),
         destination_ref: object.spec.destination_ref.as_ref().map(name_ref),
         concurrency_policy: match object.spec.concurrency_policy {
@@ -348,6 +355,7 @@ pub fn backup(object: &BackupCr) -> Backup {
         created_at: created_at(object),
         source_ref: name_ref(&object.spec.source_ref),
         topics: object.spec.topics.clone(),
+        consumer_groups: selected_groups(object.spec.consumer_groups.as_ref()),
         archive: archive_view(&object.spec.archive),
         destination_ref,
         location_digest,

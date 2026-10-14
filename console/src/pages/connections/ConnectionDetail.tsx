@@ -19,6 +19,7 @@ import {
   PageSection,
 } from "@patternfly/react-core";
 import {
+  AUTH_PHRASE,
   AUTH_WORDS,
   CONNECTION_REFUSAL_REASONS,
   PROBE_FRESH_SECONDS,
@@ -264,7 +265,7 @@ function ConnectionPage({ ns, name }: { ns: string; name: string }) {
         status={<ProbeLabels state={probeState(c.reachability)} />}
         description={`${c.role === "target" ? "Target" : c.role === "source" ? "Source" : c.role} connection to ${c.bootstrapServers.length} bootstrap ${
           c.bootstrapServers.length === 1 ? "server" : "servers"
-        }, ${AUTH_WORDS[c.auth.mode]}${c.auth.tls ? " over TLS" : ""}.`}
+        }, ${AUTH_PHRASE[c.auth.mode]}${c.auth.tls ? " over TLS" : ""}.`}
       />
       <PageSection>
         <Grid hasGutter>

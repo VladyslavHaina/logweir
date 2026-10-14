@@ -42,6 +42,7 @@ import { StatusLabel } from "../../components/Status";
 import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
+import { ErrorText } from "../../components/Prose";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -66,6 +67,8 @@ export function ApprovalStatus({ found, waiting = false }: { found: Found; waiti
       return <StatusLabel tone="progress" text={STATE_WORDS["awaiting-verification"]} title={title} />;
     case "verified":
       return <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />;
+    case "request-recorded":
+      return <StatusLabel tone="neutral" text={STATE_WORDS["request-recorded"]} title="the console's record of a request: it authorises nothing until a second person approves" />;
     case "revoked-after-use":
       return <StatusLabel tone="danger" text={STATE_WORDS["revoked-after-use"]} title={REVOKED_AFTER_USE_WORDS} />;
     default:
@@ -99,15 +102,79 @@ export function Principal({ id, grant }: { id: string | null | undefined; grant:
   );
 }
 
-/** A list's short form of `<issuer>#<subject>`: the issuer's host and the subject, the full value on hover. */
-export function principalShort(id: string, grant: ApprovalGrant): string {
+export const UNVERIFIED_NAME = "(name as given to the identity provider, not verified)";
+export const DETAILS_NOT_VERIFIED = "The requester details on this request could not be verified and are not shown.";
+
+/**
+ * DUI-21, after its security review: who asked, the VERIFIED identifier first. That
+ * is the email the identity provider verified (`requesterEmail`), or else the signed
+ * principal in full, never shortened. A name from a claim the install opted into
+ * (`requesterName`) may follow, labelled unverified: at most providers the person sets
+ * it, so it is never bold and never in place of the identifier. The signed principal
+ * stays visible. "you" is decided on the signed principal alone.
+ */
+export function Requester({
+  id,
+  email,
+  name,
+  detailsNotVerified = false,
+  grant,
+}: {
+  id: string | null | undefined;
+  /** Served by the API only when its own signature over it verifies for this request. */
+  email?: string | null;
+  name?: string | null;
+  /** The request carried requester details the API could not verify, so none is shown. */
+  detailsNotVerified?: boolean;
+  grant: ApprovalGrant;
+}) {
+  if (!id) return <NotRecorded />;
   const you = youOf(id, grant);
-  if (you) return you;
-  const at = id.indexOf("#");
-  if (at === -1) return id;
-  const host = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(id.slice(0, at))?.[1] ?? id.slice(0, at);
-  const subject = id.slice(at + 1);
-  return `${host} · ${subject.length > 20 ? `${subject.slice(0, 6)}…${subject.slice(-12)}` : subject}`;
+  const refused = detailsNotVerified ? (
+    <span className="lw-small lw-block lw-tone-warning" data-details-not-verified>
+      {DETAILS_NOT_VERIFIED}
+    </span>
+  ) : null;
+  const unverified = name ? (
+    <span className="lw-subtle lw-small lw-block" data-unverified-name>
+      {name} {UNVERIFIED_NAME}
+    </span>
+  ) : null;
+  return (
+    <span className="lw-principal">
+      {you && <strong>{you} · </strong>}
+      {email ? (
+        <>
+          <span className="lw-break" data-verified-identifier>
+            {email}
+          </span>{" "}
+          <span className="lw-subtle lw-small">(email verified by the identity provider)</span>
+          {unverified}
+          <span className="lw-subtle lw-small lw-block">
+            Signed as <code className="lw-mono lw-break">{id}</code>
+          </span>
+        </>
+      ) : (
+        <>
+          <code className="lw-mono lw-break" data-verified-identifier>
+            {id}
+          </code>
+          {unverified}
+        </>
+      )}
+      {refused}
+    </span>
+  );
+}
+
+/**
+ * A list's principal (DUI-21's review): in FULL, never shortened, since the list
+ * names who approved. "you (…)" first when it is the signed-in actor's own,
+ * decided on the principal alone.
+ */
+export function principalText(id: string, grant: ApprovalGrant): string {
+  const you = youOf(id, grant);
+  return you ? `${you} · ${id}` : id;
 }
 
 /** A refusal: what was not done and why, in the server's words. Not an error. */
@@ -124,7 +191,7 @@ export function ErrorLine({ error }: { error: unknown }) {
   const api = error instanceof ApiError ? error : null;
   return (
     <span className="lw-error-meta">
-      {error instanceof Error ? error.message : String(error)}
+      <ErrorText error={error} />
       {api && ` (${api.status} ${api.code}${api.requestId ? ` · request ${api.requestId}` : ""})`}
     </span>
   );

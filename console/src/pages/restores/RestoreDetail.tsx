@@ -61,6 +61,7 @@ import {
   SCORECARD_CLAIM_SENTENCE,
   completionGuidance,
   coverageWords,
+  timestampBoundWords,
   modeMeaning,
   evidenceCase,
   evidenceVerified,
@@ -78,6 +79,7 @@ import {
   verificationScopeSentence,
 } from "./words";
 import "./restores.css";
+import { Prose } from "../../components/Prose";
 
 const STAGES: { stage: OperationStage; title: string; desc: string }[] = [
   { stage: "admission", title: "Admitted", desc: "Plan checked and approved" },
@@ -176,7 +178,7 @@ function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) 
     return (
       <Alert variant="info" isInline title="Waiting for a second person to approve" id="awaiting-approval">
         <p>
-          {req?.stateSentence ?? "The console recorded your request; a second person, signed in as an approver and not you, approves it."}{" "}
+          {req?.stateSentence ? <Prose text={req.stateSentence} /> : "The console recorded your request; a second person, signed in as an approver and not you, approves it."}{" "}
           {req?.expiresAt ? (
             <>
               It expires <Instant value={req.expiresAt} />.
@@ -188,11 +190,27 @@ function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) 
       </Alert>
     );
   }
+  if (route === "confirm" || route === "confirm-unavailable") {
+    // DUI-18: a one-person namespace needs nobody else. Creating the restore confirmed it;
+    // the controller verifies that confirmation, then the run starts.
+    return (
+      <Alert variant="info" isInline title="The controller is verifying your confirmation" id="awaiting-approval">
+        <p>
+          This namespace needs no second person: creating the restore confirmed it ({r.approvalRef.name}). The run starts once the
+          controller has verified that confirmation, usually within half a minute.
+        </p>
+      </Alert>
+    );
+  }
   return (
     <Alert variant="info" isInline title="Waiting for an approval" id="awaiting-approval">
       <p>
-        No Job runs until the controller verifies an approval of this plan ({r.approvalRef.name}). An approver who is not you
-        {route === "strict" ? " countersigns the console's confirmation with their own key and submits it." : " signs this plan with their own key, out of band."}
+        No Job runs until the controller verifies an approval of this plan ({r.approvalRef.name}).
+        {route === "strict"
+          ? " An approver who is not you countersigns the console's confirmation with their own key and submits it."
+          : route === "legacy"
+            ? " An approver who is not you signs this plan with their own key, out of band."
+            : ""}
       </p>
       <p>{approvals}</p>
     </Alert>
@@ -401,7 +419,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                       items={[
                         { term: "State", value: `${op.state}${op.stateReason ? ` (${op.stateReason})` : ""}` },
                         { term: "Stage", value: shown(op.stage) },
-                        op.message ? { term: "Message", value: op.message } : null,
+                        op.message ? { term: "Message", value: <Prose text={op.message} /> } : null,
                         op.stale ? { term: "Status", value: <StatusLabel tone="warning" text="Too old to believe" /> } : null,
                         { term: "Last update", value: <Instant value={op.lastUpdatedAt} /> },
                       ]}
@@ -419,7 +437,11 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                               <Instant value={c.lastTransitionTime} />
                             </FlexItem>
                           </Flex>
-                          {c.message && <div>{c.message}</div>}
+                          {c.message && (
+                            <div>
+                              <Prose text={c.message} />
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ol>
@@ -429,7 +451,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                         <ul className="lw-plain-list" aria-label="Diagnoses">
                           {op.diagnostics!.map((d) => (
                             <li key={`${d.code}-${d.lastSeen}`} className="lw-gap-bottom">
-                              <StatusLabel tone={d.severity === "Error" ? "danger" : "warning"} text={d.code} /> {d.message}
+                              <StatusLabel tone={d.severity === "Error" ? "danger" : "warning"} text={d.code} /> <Prose text={d.message ?? ""} />
                               <div className="lw-subtle lw-small">
                                 {d.object ? `${d.object.kind} ${d.object.name}` : ""}
                                 {d.count && d.count > 1 ? ` · ${d.count} times` : ""} · last <Instant value={d.lastSeen} />
@@ -442,7 +464,9 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     <Content component="p" className="lw-subtle lw-small lw-gap-top">
                       {op.terminal
                         ? "This run is final."
-                        : "Following this restore by re-reading it every second; you can leave this page and come back. Leaving cancels nothing."}
+                        : streaming
+                          ? "Following this restore through its event stream as it moves; you can leave this page and come back. Leaving cancels nothing."
+                          : "Following this restore by re-reading it every second (no event stream is open for this session); you can leave this page and come back. Leaving cancels nothing."}
                     </Content>
                   </>
                 ) : (
@@ -559,7 +583,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                         r.coverage?.recorded ?? scope?.coverage ? (
                           <Claim value={coverageWords(r.coverage?.recorded ?? scope?.coverage, r.coverage?.requested, scope?.complete ?? { covered: r.coverage?.covered ?? undefined })} verified={signed} />
                         ) : (
-                          coverageWords(null, r.coverage?.requested, null)
+                          coverageWords(null, r.coverage?.requested, null, r.operation.terminal)
                         ),
                     },
                     selectionWords(selection) ? { term: "Restored (signed)", value: <Claim value={selectionWords(selection)} verified={signed} /> } : null,
@@ -637,7 +661,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     items={[
                       { term: "Target timestamp type", value: shown(r.topicPreflight.timestampType) },
                       { term: "Target retention.ms", value: shown(r.topicPreflight.retentionMs) },
-                      { term: "Oldest timestamp accepted", value: typeof r.topicPreflight.timestampBound === "number" ? exactUtc(r.topicPreflight.timestampBound) : shown(null) },
+                      { term: "Record age the target accepts", value: timestampBoundWords(r.topicPreflight.timestampBound) },
                     ]}
                   />
                 )}

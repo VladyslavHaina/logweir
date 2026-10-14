@@ -368,3 +368,14 @@ describe("choosing a saved connection", () => {
     expect(resolveSelection(list(), held).state).toBe("selected");
   });
 });
+
+describe("DUI-31.6: a re-probe beside an earlier reading", () => {
+  it("keeps the reading and says a new probe is running, never a bare ProbeRunning", () => {
+    const p = probeState({ state: "reachable", reason: "ProbeRunning", observedAt: new Date(NOW - 60_000).toISOString() }, NOW);
+    expect(p.verdict).toBe("reachable");
+    expect(p.laterReason).toBe("ProbeRunning");
+    expect(p.laterGloss).toBe("a new probe is running now; the reachable reading is from an earlier probe");
+    // CONTROL: with no earlier reading it is a probe in flight, not a later reason.
+    expect(probeState({ state: "unknown", reason: "ProbeRunning" }, NOW)).toMatchObject({ verdict: "probing", laterReason: "" });
+  });
+});

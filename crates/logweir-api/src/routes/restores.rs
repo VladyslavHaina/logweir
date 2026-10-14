@@ -1184,6 +1184,33 @@ pub(crate) async fn authorize_submission(
     let sidecar = key
         .sign(&bytes)
         .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?;
+    // DUI-21: who asked, in a document THIS console signs and binds to this
+    // request (approval name, requester, plan hash): the provider-verified
+    // email, and a name only when the install opted into a name claim (the
+    // display name is then neither the email nor the subject). Beside the
+    // signed request, never in it; served only if the signature verifies.
+    let configured_name = actor.verified_email.as_deref() != Some(actor.display_name.as_str())
+        && actor.display_name != actor.subject;
+    let display = approval::requester_display(
+        key,
+        approval_name,
+        &doc.requester.principal_id(),
+        &doc.plan_hash,
+        actor.verified_email.as_deref(),
+        configured_name.then_some(actor.display_name.as_str()),
+    )
+    .map_err(|reason| ApiError::new(ProblemCode::InternalError, reason))?
+    .map(|(document, signature)| {
+        [
+            (approval::REQUESTER_DISPLAY_ANNOTATION.to_string(), document),
+            (
+                approval::REQUESTER_DISPLAY_SIGNATURE_ANNOTATION.to_string(),
+                signature,
+            ),
+        ]
+    })
+    .into_iter()
+    .flatten();
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(target.clone()),
@@ -1198,9 +1225,10 @@ pub(crate) async fn authorize_submission(
                         "logweir.dev/approval-policy".to_string(),
                         policy.name.clone(),
                     ),
-                    ("logweir.dev/requester".to_string(), actor.id()),
+                    (approval::REQUESTER_ANNOTATION.to_string(), actor.id()),
                 ]
                 .into_iter()
+                .chain(display)
                 .collect(),
             ),
             ..Default::default()

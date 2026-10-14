@@ -137,7 +137,7 @@ describe("TopicConfigurationPreview (R5's wizard)", () => {
 
 describe("TopicConfigurationChoice (R5's wizard)", () => {
   function Harness({ asked }: { asked?: boolean }) {
-    const [v, setV] = useState<TopicConfigurationValue>({ transition: null, noOwners: false });
+    const [v, setV] = useState<TopicConfigurationValue>({ transition: null, owners: null, ownerLines: "" });
     return (
       <>
         <TopicConfigurationChoice value={v} onChange={setV} target="orders-dr" ownersAsked={asked} />
@@ -154,6 +154,17 @@ describe("TopicConfigurationChoice (R5's wizard)", () => {
     expect(screen.getByTestId("plan").textContent).toBe('{"transition":"none"}');
     fireEvent.click(screen.getByLabelText(/No topic here is managed by an owner/));
     expect(screen.getByTestId("plan").textContent).toBe('{"transition":"none","owners":[]}');
+    // DUI-17: or the owners are named, one per line, and only those the runner would accept reach the plan.
+    fireEvent.click(screen.getByLabelText("Some are: name them"));
+    fireEvent.change(screen.getByLabelText(/Owners, one per line/), { target: { value: "orders strimzi kafka/orders\npayments terraform x" } });
+    expect(screen.getByTestId("plan").textContent).toBe('{"transition":"none","owners":[{"topic":"orders","kind":"strimzi","reference":"kafka/orders"}]}');
+  });
+
+  it("asks nothing about owners when the point's backup looked for them (the control)", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByLabelText("The source's, from the recovery point"));
+    expect(screen.queryByLabelText(/No topic here is managed by an owner/)).toBeNull();
+    expect(screen.getByTestId("plan").textContent).toBe('{"transition":"afterVerification"}');
   });
 });
 

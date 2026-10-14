@@ -150,6 +150,9 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
             "must be a Kubernetes object name",
         ));
     }
+    if let Some(groups) = &request.consumer_groups {
+        validate_consumer_groups(groups, &mut errors);
+    }
     validate_policy_fields(
         &PolicyFields {
             selection_prefix: "",
@@ -167,6 +170,25 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
         Ok(())
     } else {
         Err(ApiError::validation(errors))
+    }
+}
+
+/// `consumerGroups` by the runner's own rule (DUI-25), so a selection the
+/// run would refuse with `ExecutionSpecInvalid` is refused here, by field,
+/// before anything is stored.
+fn validate_consumer_groups(groups: &[String], errors: &mut Vec<FieldError>) {
+    use logweir_core::consumer_positions::{
+        refuse_selection, SELECTION_ID_INVALID, SELECTION_REPEATED,
+    };
+    if let Some(why) = refuse_selection(groups) {
+        let code = if why.starts_with(SELECTION_ID_INVALID) {
+            "invalid_consumer_group"
+        } else if why.starts_with(SELECTION_REPEATED) {
+            "duplicate"
+        } else {
+            "count_out_of_range"
+        };
+        errors.push(FieldError::new("consumerGroups", code, why));
     }
 }
 
@@ -227,10 +249,10 @@ pub fn build(
             // documented default: UTC, a one-hour starting deadline, no catch-up, no
             // retries and a 3600 s run deadline.
             all_user_topics,
-            // The console's create form selects no consumer group;
-            // `kubectl` sets `spec.consumerGroups`, and an edit through this
-            // API is a merge patch that leaves it as it is.
-            consumer_groups: None,
+            // The create form names the groups (DUI-25); an empty list selects
+            // none and is stored absent. An edit through this API is a merge
+            // patch that leaves the stored selection as it is.
+            consumer_groups: request.consumer_groups.clone().filter(|g| !g.is_empty()),
             time_zone: request.time_zone.clone(),
             starting_deadline_seconds: request.starting_deadline_seconds,
             catch_up_policy: request.catch_up_policy.map(|c| match c {

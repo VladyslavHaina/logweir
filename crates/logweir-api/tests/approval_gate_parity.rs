@@ -230,6 +230,7 @@ fn session_as(app: &SharedApp, subject: &str, groups: &[&str]) -> Session {
         issuer: ISSUER.to_string(),
         subject: subject.to_string(),
         display_name: subject.to_string(),
+        verified_email: None,
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         auth_time: now,
     };

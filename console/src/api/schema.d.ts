@@ -1204,7 +1204,7 @@ export interface components {
         };
         /** @description Where a two-person request stands. */
         ApprovalRequestState: "pending" | "approved" | "expired" | "notConfirmed";
-        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata. */
+        /** @description PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterEmail` and `requesterName`, which say so and decide nothing. */
         ApprovalRequestView: {
             /** @description The Approval the Restore references (`spec.approvalRef.name`), which a click creates. */
             approvalName: string;
@@ -1243,6 +1243,12 @@ export interface components {
             policyDigest: string;
             /** @description Who asked, `<issuer>#<subject>`, as the console attested them. */
             requester?: string | null;
+            /** @description DUI-21: `true` when the request carries requester details that this console's signature does not verify for this request (changed after it was made, or copied from another): neither `requesterEmail` nor `requesterName` is served. ABSENT otherwise. */
+            requesterDetailsNotVerified?: boolean | null;
+            /** @description DUI-21: the requester's email, verified by the identity provider (`email_verified: true`) when the request was made, exactly as received (printable ASCII, `local@domain`, at most 254 bytes), and served only when this console's own signature over the document that carries it verifies and binds this request (its approval name, `requester` and plan hash). Not part of the signed request. Show it with `requester`, never instead of it. ABSENT when the provider vouched for no such address and on a request made before it was recorded. */
+            requesterEmail?: string | null;
+            /** @description DUI-21: the requester's name from the claim the install opted into (`oidc.displayNameClaim`); not part of the signed request. Self-asserted at most identity providers: show it as unverified, after the identifier, never in its place. ABSENT unless a name claim is configured, and as `requesterEmail` is. Cleaned of control and invisible formatting characters, at most 128 characters. */
+            requesterName?: string | null;
             /** @description The Restore the request is for. */
             restore: string;
             /** @description That Restore's UID, now. */
@@ -1362,6 +1368,8 @@ export interface components {
             archive: components["schemas"]["ArchiveView"];
             /** @description The archive backup ID. */
             backupId?: string | null;
+            /** @description The consumer groups whose positions this run records (`spec.consumerGroups`, copied from its schedule). ABSENT selects none: the run records no positions (DUI-25). What each group's outcome was is the receipt's, on the recovery point. */
+            consumerGroups?: string[] | null;
             /**
              * Format: date-time
              * @description When the object was created.
@@ -2456,6 +2464,12 @@ export interface components {
              * @default null
              */
             concurrencyPolicy?: components["schemas"]["ConcurrencyPolicy"];
+            /**
+             * @description The consumer groups whose positions every run records, by exact id (`spec.consumerGroups`): never a pattern, never "all groups". A restore maps them, and a switchover moves them (DUI-25).
+             *
+             *     Optional and additive: ABSENT (or empty) selects no group and the schedule is the one this route always created, its request hash included. A blank, repeated or control-character id, one over 255 bytes, more than 100 ids, or a selection whose receipt summary could be over its cap is refused here by the rule the runner applies (`consumer_positions::refuse_selection`), before any write. The edit route leaves the stored selection as it is.
+             */
+            consumerGroups?: string[] | null;
             /** @description A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body. */
             destinationRef?: components["schemas"]["NameRef"];
             /**
@@ -4640,6 +4654,8 @@ export interface components {
             catchUpPolicy?: components["schemas"]["CatchUpPolicy"];
             /** @description `Forbid` or `Allow`. */
             concurrencyPolicy: components["schemas"]["ConcurrencyPolicy"];
+            /** @description The consumer groups whose positions every run records (`spec.consumerGroups`), as stored. ABSENT selects none: the runs record no positions, so no restore of them maps any (DUI-25). */
+            consumerGroups?: string[] | null;
             /**
              * Format: date-time
              * @description When the object was created.
@@ -5136,6 +5152,12 @@ export interface components {
             policy: string;
             policyDigest: string;
             requester?: string | null;
+            /** @description DUI-21: as `ApprovalRequestView.requesterDetailsNotVerified`. */
+            requesterDetailsNotVerified?: boolean | null;
+            /** @description DUI-21: the requester's provider-verified email; not part of the signed request (as `ApprovalRequestView.requesterEmail`). */
+            requesterEmail?: string | null;
+            /** @description DUI-21: the requester's name from an opted-in claim, unverified; not part of the signed request (as `ApprovalRequestView.requesterName`). */
+            requesterName?: string | null;
             /** @description Present exactly when `scopeComplete`. */
             scope?: components["schemas"]["SwitchoverScopeView"];
             /** @description Whether `scope` is everything a second person approves, in full. */

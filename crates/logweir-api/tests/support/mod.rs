@@ -1866,7 +1866,7 @@ impl SharedApp {
                 allowed_algorithms: options.allowed_algorithms.clone(),
                 scopes: vec!["openid".into(), "profile".into(), "groups".into()],
                 groups_claim: "groups".into(),
-                display_name_claim: "name".into(),
+                display_name_claim: Some("name".into()),
                 token_auth_method: TokenAuthMethod::ClientSecretBasic,
             },
             http,
@@ -1951,6 +1951,7 @@ impl SharedApp {
             issuer: ISSUER.to_string(),
             subject: subject.to_string(),
             display_name: display_name.to_string(),
+            verified_email: None,
             groups: groups.iter().map(|g| (*g).to_string()).collect(),
             auth_time: self.app.clock.now(),
         };

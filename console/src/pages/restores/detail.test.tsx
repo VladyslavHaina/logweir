@@ -32,14 +32,19 @@ import {
   selectionWords,
   signedTimeBasisText,
   teardownLeftWords,
+  timestampBoundWords,
   verificationScopeSentence,
 } from "./words";
+import { When, exactUtc, relative } from "../../components/When";
 import { RestoreDetail } from "./RestoreDetail";
 import { CheckStep } from "./WizardSteps";
 import { readinessRefusal, type Preflight } from "./model";
 
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 30_000 });
+
+/** Kafka's Long.MAX "no limit", as JSON.parse reads it: no Date can hold it. */
+const LONG_MAX = Number("9223372036854775807");
 
 const R = (raw: unknown) => (raw as { item: Restore }).item;
 const O = (raw: unknown) => (raw as { item: OperationView }).item;
@@ -59,6 +64,10 @@ describe("the words", () => {
     expect(coverageWords("sampled", "complete", null)).toBe("sampled");
     expect(coverageWords(null, "complete", null)).toBe("complete asked for; not recorded yet");
     expect(coverageWords(null, "sampled", null)).not.toMatch(/complete/);
+    // DUI-11: a finished run that recorded nothing will record nothing: no "yet" on a terminal row.
+    expect(coverageWords(null, "sampled", null, true)).toBe("sampled asked for; not recorded");
+    expect(coverageWords(null, "complete", null, true)).toBe("complete asked for; not recorded");
+    expect(coverageWords(null, "sampled", null, false)).toBe("sampled (not recorded yet)");
   });
   it("a narrowed restore is said as partial, naming the partitions, and never as everything", () => {
     const sel = R(subsetRestore).selection!;
@@ -116,11 +125,11 @@ vi.mock("../../mock/fetch", () => ({
   },
 }));
 
-function showRestore(restore: Restore, operation?: OperationView) {
+function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null) {
   net.answers.clear();
   net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
-  net.answers.set("/namespaces/t/approval-policy", { item: null, requestId: "r" });
+  net.answers.set("/namespaces/t/approval-policy", { item: policy, requestId: "r" });
   const root = createRootRoute({ component: Outlet });
   const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
   const tree = root.addChildren([ns.addChildren([createRoute({ getParentRoute: () => ns, path: "restores/$name", component: RestoreDetail })])]);
@@ -141,6 +150,13 @@ describe("a restore's page", () => {
     expect(screen.getAllByText("Not covered").length).toBeGreaterThan(0);
     expect(screen.queryByText("Restored and verified")).toBeNull();
     expect(screen.getByRole("button", { name: /Retry to a fresh target/ })).toBeTruthy();
+  });
+  it("DUI-16: a finished restore whose target sets no timestamp bound (Long.MAX) renders, and says so", async () => {
+    const r = R(subsetRestore);
+    showRestore({ ...r, topicPreflight: { ...r.topicPreflight!, timestampBound: LONG_MAX } }, O(subsetOperation));
+    await screen.findByText("Restored and verified");
+    expect(screen.getByText("Any age: the broker sets no bound (its default)")).toBeTruthy();
+    expect(screen.queryByText(/Oldest timestamp accepted/)).toBeNull();
   });
   it("a narrowed, verified restore is green and still says partial", async () => {
     showRestore(R(subsetRestore), O(subsetOperation));
@@ -235,6 +251,23 @@ describe("v1.1: a restore's page", () => {
   });
 });
 
+describe("DUI-18: a restore waiting for its approval", () => {
+  const policy = (over: Record<string, unknown>) => ({ namespace: "t", name: "p", mode: "ordinary", operatorMode: "confirm", legacy: false, basis: "binding", requireDistinctPrincipal: false, ordinaryConfirmationAvailable: true, consoleApprovalAvailable: false, ticketRequired: false, installationDigest: "sha256:00", ...over });
+  const waiting = () => ({ ...O(subsetOperation), terminal: false, state: "pending" as const, verifiedSuccess: false, awaitingApproval: true });
+
+  it("in a confirm namespace says the controller is verifying the confirmation, never that an approver must sign", async () => {
+    showRestore(R(subsetRestore), waiting(), policy({}));
+    expect(await screen.findByText("The controller is verifying your confirmation")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/out of band|An approver who is not you/);
+  });
+
+  it("in a strict namespace still asks for the approver's countersignature (the control)", async () => {
+    showRestore(R(subsetRestore), waiting(), policy({ mode: "governed", operatorMode: "strict" }));
+    expect(await screen.findByText(/countersigns the console's confirmation with their own key/)).toBeTruthy();
+    expect(screen.getByText("Waiting for an approval")).toBeTruthy();
+  });
+});
+
 describe("FX-38: the restore readiness check", () => {
   it("a catalog point the controller could not find for an unreadable view line shows its message, and is not ready", () => {
     const MESSAGE =
@@ -262,7 +295,9 @@ describe("FX-38: the restore readiness check", () => {
       />,
     );
     const list = screen.getByRole("list", { name: "Readiness checks" });
-    expect(list.textContent).toContain(MESSAGE);
+    // DUI-22: the point id is shown as code, without the API's Markdown backticks.
+    expect(list.textContent).toContain(MESSAGE.replace(/`/g, ""));
+    expect(list.querySelector("code")?.textContent).toBe("lwp1-0123456789abcdef0123456789abcdef");
     expect(list.textContent).toContain("CatalogPointViewUnavailable");
     expect(list.textContent).toContain("Request a catalog sync and run this check again once the view is published.");
     expect(screen.getByText("Not ready", { selector: ".pf-v6-c-label__text" })).toBeTruthy();
@@ -301,5 +336,22 @@ describe("theme A's D6: the restore readiness check on an older runner", () => {
     expect(image.textContent).toContain("Not ready");
     expect(pod.textContent).toContain("Passed");
     expect(pod.textContent).toContain("the check pod ran and its runner exited 1");
+  });
+});
+
+describe("DUI-16: a value that is not a time never throws", () => {
+  it("prints an out-of-range instant as not a time, and a real one as a time (the control)", () => {
+    expect(exactUtc(LONG_MAX)).toBe("not a time");
+    expect(relative(LONG_MAX)).toBe("not a time");
+    expect(exactUtc("garbage")).toBe("not a time");
+    expect(exactUtc(Date.parse("2026-10-14T13:35:23Z"))).toBe("2026-10-14 13:35 UTC");
+    render(<When value={LONG_MAX} exact />);
+    expect(screen.getByText("Not a time")).toBeTruthy();
+  });
+
+  it("reads the timestamp bound as a duration, never as an instant", () => {
+    expect(timestampBoundWords(LONG_MAX)).toBe("Any age: the broker sets no bound (its default)");
+    expect(timestampBoundWords(7 * 86_400_000)).toBe("Up to 7 days old (604,800,000 ms); an older record is refused or rewritten");
+    expect(timestampBoundWords(null)).toBe("Not recorded");
   });
 });

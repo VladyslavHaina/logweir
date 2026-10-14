@@ -16,6 +16,7 @@
 // document, NotAttempted the controller, Untrusted the signer (D3 section 7.4).
 import { hasShape, s3Arg, shellArg } from "../../lib/shell";
 import type { Backup, OperationSummary, OperationView } from "../../api/backups";
+import { NOT_A_TIME, utcIso } from "../../components/When";
 
 /** The two combined trust words a green badge may carry (the API's own vocabulary). */
 export const GREEN_TRUST_STATES: readonly string[] = ["verified", "verifiedHistorical"];
@@ -29,6 +30,33 @@ export function basisAllowsGreen(basis: unknown): boolean {
   if (typeof basis !== "string" || basis === TRUST_BASIS_NOT_OBSERVED) return true;
   return GREEN_BASES.includes(basis);
 }
+
+/** The Evidence card's words for the API's two states and its basis (DUI-31.4). The API's own
+ *  word stays in the title; a word this build does not know is shown as it is. */
+export const SIGNATURE_WORDS: Record<string, string> = {
+  pending: "Pending",
+  valid: "Valid",
+  invalid: "Invalid",
+  notAttempted: "Not attempted",
+  noEvidence: "No signed document recorded",
+  unknown: "Unknown",
+};
+export const TRUST_WORDS: Record<string, string> = {
+  pending: "Pending",
+  verified: "Trusted",
+  verifiedHistorical: "Trusted, by a historical key",
+  untrusted: "Untrusted signer",
+  invalid: "Invalid",
+  notAttempted: "Not attempted",
+  notApplicable: "Not applicable: there is no signed document",
+};
+/** `None` (TRUST_BASIS_NOT_OBSERVED) is no basis observed, and the card says nothing for it. */
+export const BASIS_WORDS: Record<string, string> = {
+  Current: "on a current key",
+  Historical: "on a historical key",
+  RecordedBeforeRevocation: "recorded before the key was revoked",
+  Unverified: "on an unverified basis",
+};
 
 /** The cases that are not green, each named by what it is a claim about. */
 export const CASES = {
@@ -238,14 +266,22 @@ export const QUEUED_RUN_SENTENCE =
 /** The covered window, both ends as UTC instants (end exclusive), or what is true instead. */
 export function windowWords(b: Pick<Backup, "windowCovered" | "operation">): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";
-  const t = (ms: number) => new Date(ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const t = (ms: number) => utcIso(ms)?.replace("T", " ").replace(/\.\d{3}Z$/, " UTC") ?? NOT_A_TIME;
   return `${t(b.windowCovered.fromMs)} to ${t(b.windowCovered.toMs)}`;
+}
+
+/** A backup page's one-line description: its topics, its source and its window, as a sentence. */
+export function backupSentence(b: Pick<Backup, "windowCovered" | "operation" | "topics" | "sourceRef">): string {
+  const topics = `${b.topics.length} ${b.topics.length === 1 ? "topic" : "topics"} from ${b.sourceRef.name}`;
+  if (b.windowCovered) return `${topics}, covering ${windowWords(b)}.`;
+  return `${topics}; ${b.operation.terminal ? "no covered window was recorded" : "the covered window is recorded when it finishes"}.`;
 }
 
 /** The covered window as the list shows it: hours and minutes only. */
 export function windowShort(b: Pick<Backup, "windowCovered" | "operation">, now = Date.now()): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";
   const { fromMs, toMs } = b.windowCovered;
+  if (utcIso(fromMs) === null || utcIso(toMs) === null) return NOT_A_TIME;
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const hm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
   const md = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });

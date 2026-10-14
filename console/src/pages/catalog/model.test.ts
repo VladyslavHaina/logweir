@@ -6,8 +6,13 @@
 import { describe, expect, it } from "vitest";
 import type { Catalog, PointView } from "../../api/backups";
 import {
+  catalogOf,
   catalogPointOffer,
+  catalogSentence,
   connectFieldOf,
+  countsWords,
+  duplicateOf,
+  windowedCatalogs,
   consumerPositionsWords,
   isMintedSetId,
   redactedBindingReason,
@@ -210,5 +215,48 @@ describe("FX-36, FX-38: what a catalog's view does not prove", () => {
     expect(truncatedWords({ truncated: true, conditions: [] })).not.toMatch(/holds more/);
     // CONTROL: a whole view is said whole.
     expect(truncatedWords({ truncated: false, conditions: [] })).toBe("Not truncated");
+  });
+});
+
+describe("DUI-10: a duplicate catalog", () => {
+  const message = "RecoveryCatalog team-a/archive already catalogs BackupDestination team-a/primary, and one destination has one catalog per namespace (D3 §5.5): this newer catalog runs no sync and publishes no view. Use archive, or delete it and this catalog takes over within a minute.";
+  const duplicate = {
+    conditions: [{ type: "Ready", status: "False", reason: "DuplicateCatalog", message }],
+    counts: {},
+    syncedAt: null,
+    destinationRef: { name: "primary" },
+  } as unknown as Catalog;
+
+  it("leads with the controller's reason, not 'Not recorded of Not recorded'", () => {
+    expect(duplicateOf(duplicate)).toBe(message);
+    expect(catalogSentence(duplicate)).toBe("A read-only view over destination primary. Another catalog already indexes it, so this one runs no sync and publishes no view.");
+    expect(countsWords(duplicate)).toBe("no view: it duplicates another catalog and never syncs");
+    for (const words of [catalogSentence(duplicate), countsWords(duplicate)]) expect(words).not.toContain("Not recorded");
+  });
+
+  it("says a catalog that has not synced yet has not, and counts a synced one (the controls)", () => {
+    const fresh = { ...duplicate, conditions: [] } as unknown as Catalog;
+    expect(duplicateOf(fresh)).toBeNull();
+    expect(countsWords(fresh)).toBe("not synced yet");
+    const synced = { ...duplicate, conditions: [{ type: "Ready", status: "True" }], counts: { total: 409, available: 409 }, syncedAt: "2026-10-14T08:00:00Z" } as unknown as Catalog;
+    expect(countsWords(synced)).toBe("409 of 409 available");
+    expect(catalogSentence(synced)).toBe("A read-only view over destination primary: 409 of 409 points available at the last sync.");
+  });
+
+  it("finds the catalog that already indexes a destination, for the connect form's warning", () => {
+    const catalogs = [{ name: "archive", destinationRef: { name: "primary" } }] as Catalog[];
+    expect(catalogOf(catalogs, "primary")).toBe("archive");
+    expect(catalogOf(catalogs, "secondary")).toBeNull();
+    expect(catalogOf(catalogs, "")).toBeNull();
+  });
+});
+
+describe("DUI-19: the list's window sentence", () => {
+  it("names only a catalog whose view the controller says is a window, never a whole one", () => {
+    const whole = { name: "archive", truncated: false, conditions: [{ type: "Synced", status: "True", message: "the walk completed; the newest 410 of 410 points are materialised" }] } as unknown as Catalog;
+    const window = { name: "big", truncated: true, conditions: [{ type: "Synced", status: "True", message: "The view is a WINDOW: the newest 2000 of 5100 points" }] } as unknown as Catalog;
+    expect(windowedCatalogs([whole]).map((c) => c.name)).toEqual([]);
+    // The control: a window is named.
+    expect(windowedCatalogs([whole, window]).map((c) => c.name)).toEqual(["big"]);
   });
 });

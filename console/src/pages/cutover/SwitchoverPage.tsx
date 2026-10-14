@@ -27,13 +27,14 @@ import { useRestore } from "../../api/queries";
 import { useCan } from "../../api/session";
 import { ApiError } from "../../api/client";
 import { shellArg } from "../../lib/shell";
-import { fileName, isTerminal, reasonWords, useApprovalPolicy, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
+import { fileName, isTerminal, reasonWords, useSwitchover, useSwitchoverApprovalRequest, type Switchover } from "../../api/switchovers";
+import { useApprovalPolicy } from "../../api/approvals";
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { PhaseLabel } from "./status";
 import { PlanBlock } from "./parts";
-import { SwitchoverResult } from "./Cutover";
+import { SwitchoverResult, cutoverRefusal } from "./Cutover";
 import { SwitchoverApprovalSummary } from "./SwitchoverApprovalSummary";
 
 function ApprovalCard({ ns, sw }: { ns: string; sw: Switchover }) {
@@ -109,7 +110,10 @@ export function SwitchoverPage() {
   const { ns, name } = useParams({ from: "/$ns/switchovers/$name" });
   const navigate = useNavigate();
   const sw = useSwitchover(ns, name);
+  // Asked only once the Switchover names its restore (DUI-31.8: no read of an empty name).
   const restore = useRestore(ns, sw.data?.restore.name ?? "");
+  // DUI-30: "Review again" starts a review, a write; a role that may not create a restore here is not offered it.
+  const canWrite = useCan(ns, "restoreCreate");
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
       <BreadcrumbItem render={() => <Link to="/$ns/switchovers" params={{ ns }}>Switchovers</Link>} />
@@ -136,7 +140,8 @@ export function SwitchoverPage() {
         status={<PhaseLabel sw={s} />}
         description={`Applies restore ${s.restore.name}'s mapped consumer positions${target ? ` on ${target}` : ""}.`}
         actions={
-          isTerminal(s) && s.phase !== "Succeeded" && sameRestore ? (
+          // DUI-28: after any outcome, a Succeeded one included, the way back to a new review.
+          isTerminal(s) && sameRestore && canWrite && !cutoverRefusal(restore.data!) ? (
             <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name: s.restore.name }, search: {} })}>
               Review again
             </Button>

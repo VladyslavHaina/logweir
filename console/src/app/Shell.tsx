@@ -60,6 +60,7 @@ import { grantOf, useSessionDoc, type Flag } from "../api/session";
 import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "./theme";
 import { useNavCounts, type NavCount } from "./attention";
+import { shortSubject } from "./subject";
 import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
@@ -162,7 +163,9 @@ function UserMenu({ ns }: { ns: string }) {
   const { choice, setChoice } = useTheme();
   const actor = session.actor;
   const grant = grantOf(session, ns);
-  const name = actor.displayName || actor.subject;
+  // DUI-14: the subject is an opaque identifier (often a long base64 one): shortened, whole in the title.
+  const subject = shortSubject(actor.subject);
+  const name = actor.displayName || subject;
   // A localAdmin console has no sign-in and so no sign-out: its one actor is the
   // administrator who started it on loopback, holding every action (docs/api.md).
   const local = session.authenticationMode === "localAdmin";
@@ -171,6 +174,7 @@ function UserMenu({ ns }: { ns: string }) {
     <Dropdown
       isOpen={open}
       onOpenChange={setOpen}
+      shouldFocusToggleOnSelect
       popperProps={{ position: "right" }}
       toggle={(ref) => (
         <MenuToggle
@@ -192,15 +196,15 @@ function UserMenu({ ns }: { ns: string }) {
         <div>
           <strong className="lw-break">{name}</strong>
         </div>
-        <div className="lw-subtle lw-small lw-break">
-          {actor.subject} · {via}
+        <div className="lw-subtle lw-small lw-break" title={actor.subject}>
+          {name === subject ? via : `${subject} · ${via}`}
         </div>
         <div className="lw-user-head__roles">
           <div className="lw-subtle lw-small">Roles in {ns}</div>
           {local ? (
             <span className="lw-small">Every action (local administrator)</span>
           ) : grant?.roles.length ? (
-            <LabelGroup numLabels={4}>
+            <LabelGroup numLabels={4} aria-label={`Roles in ${ns}`}>
               {grant.roles.map((r) => (
                 <Label key={r} isCompact variant="outline">
                   {r}
@@ -213,13 +217,18 @@ function UserMenu({ ns }: { ns: string }) {
         </div>
       </div>
       <Divider component="li" />
-      <DropdownGroup label="Appearance">
+      {/* A heading in a menu is not the page's: h2, not PatternFly's default h1. */}
+      <DropdownGroup label="Appearance" labelHeadingLevel="h2">
         <DropdownList>
           {THEMES.map((t) => (
             <DropdownItem
               key={t.choice}
               icon={t.icon}
-              onClick={() => setChoice(t.choice)}
+              onClick={() => {
+                setChoice(t.choice);
+                // The choice is made: the menu closes rather than stay over the page.
+                setOpen(false);
+              }}
               isSelected={choice === t.choice}
               description={t.choice === "system" ? "Follow the operating system" : undefined}
             >
@@ -326,6 +335,14 @@ export function Shell() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 1200);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [rail, setRail] = useState(false);
+
+  // DUI-24: a new page opens at its top. The main region is the scroller, not the window,
+  // so nothing else resets it; a change of search alone (a filter, a tab) keeps the place.
+  useEffect(() => {
+    const main = document.getElementById("lw-main");
+    if (main) main.scrollTop = 0;
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+  }, [pathname]);
 
   // The drawer: Escape closes it and gives focus back to the menu button; the
   // page behind it is inert while it is open, so focus stays in the menu.

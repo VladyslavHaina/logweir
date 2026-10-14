@@ -266,8 +266,11 @@ pub struct OidcSettings {
     pub scopes: Vec<String>,
     /// The exact claim name carrying group membership.
     pub groups_claim: String,
-    /// The exact claim name carrying a display name.
-    pub display_name_claim: String,
+    /// The claim naming the person, OPT-IN (`oidc.displayNameClaim`). Self-
+    /// asserted at most identity providers, so it is shown as unverified and
+    /// never in place of an identifier. `None`: the verified email, else the
+    /// subject.
+    pub display_name_claim: Option<String>,
     /// How the client authenticates at the token endpoint.
     pub token_auth_method: TokenAuthMethod,
 }
@@ -354,6 +357,10 @@ pub struct Identity {
     pub subject: String,
     /// The display claim, for presentation only. Never an authorization input.
     pub display_name: String,
+    /// The `email` claim, only when the provider vouched for it
+    /// (`email_verified: true`). Shown to identify the person; never an
+    /// authorization input.
+    pub verified_email: Option<String>,
     /// The exact group strings, sorted and deduplicated.
     pub groups: Vec<String>,
     /// The provider's `auth_time`, or `iat` when it is absent.
@@ -753,11 +760,13 @@ impl Provider {
             .filter(|s| !s.is_empty())
             .ok_or(OidcError::NoSubject)?;
 
-        let display_name = claims
-            .get(&self.settings.display_name_claim)
-            .and_then(|v| v.as_str())
-            .map(|s| crate::validate::bounded(s, 128))
-            .unwrap_or_else(|| crate::validate::bounded(subject, 128));
+        let verified_email = verified_email_of(&claims);
+        let display_name = display_name_of(
+            &claims,
+            self.settings.display_name_claim.as_deref(),
+            verified_email.as_deref(),
+            subject,
+        );
 
         let mut groups: Vec<String> = match claims.get(&self.settings.groups_claim) {
             Some(serde_json::Value::Array(items)) => items
@@ -779,10 +788,46 @@ impl Provider {
             issuer: self.settings.issuer.clone(),
             subject: crate::validate::bounded(subject, 256),
             display_name,
+            verified_email,
             groups,
             auth_time,
         })
     }
+}
+
+/// The `email` claim, only when the provider says it verified the address
+/// (`email_verified` is the JSON boolean `true`), and only EXACTLY AS
+/// RECEIVED with an identifier's shape (`crate::approval::email_shape_ok`):
+/// never trimmed, normalised or cut, so two different addresses never read
+/// alike. Anything else is no email, and the subject identifies the person
+/// (DUI-21 security reviews).
+fn verified_email_of(claims: &BTreeMap<String, serde_json::Value>) -> Option<String> {
+    if claims.get("email_verified") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    claims
+        .get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| crate::approval::email_shape_ok(s))
+        .map(str::to_string)
+}
+
+/// The name a page greets someone by: the CONFIGURED claim when the install
+/// opted into one (self-asserted, so shown as unverified elsewhere), else the
+/// verified email, else the subject. The `name` claim is never read by
+/// default: at most providers the person sets it. An empty claim counts as
+/// absent. Bounded to 128 bytes.
+fn display_name_of(
+    claims: &BTreeMap<String, serde_json::Value>,
+    configured: Option<&str>,
+    verified_email: Option<&str>,
+    subject: &str,
+) -> String {
+    let named = configured
+        .and_then(|key| claims.get(key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    crate::validate::bounded(named.or(verified_email).unwrap_or(subject), 128)
 }
 
 /// The most group strings this module will read out of one ID token.
@@ -1397,6 +1442,62 @@ impl HttpClient for HyperHttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn claims_of(json: &str) -> BTreeMap<String, serde_json::Value> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn an_email_identifies_only_when_the_provider_verified_it() {
+        let verified = claims_of(r#"{"email":"ada@x.test","email_verified":true}"#);
+        assert_eq!(verified_email_of(&verified).as_deref(), Some("ada@x.test"));
+        // Verified, and still not an identifier: a zero-width space, a space, over 254 bytes.
+        for shape in [
+            "{\"email\":\"ada@x.test\\u200b\",\"email_verified\":true}".to_string(),
+            r#"{"email":" ada@x.test","email_verified":true}"#.to_string(),
+            format!(
+                r#"{{"email":"{}@x.test","email_verified":true}}"#,
+                "a".repeat(250)
+            ),
+        ] {
+            assert_eq!(verified_email_of(&claims_of(&shape)), None, "{shape}");
+        }
+        // Unverified, absent or merely a string "true": not an identifier, so the subject is shown.
+        for unverified in [
+            r#"{"email":"ceo@x.test","email_verified":false}"#,
+            r#"{"email":"ceo@x.test"}"#,
+            r#"{"email":"ceo@x.test","email_verified":"true"}"#,
+        ] {
+            let c = claims_of(unverified);
+            assert_eq!(verified_email_of(&c), None, "{unverified}");
+            assert_eq!(
+                display_name_of(&c, None, verified_email_of(&c).as_deref(), "u-ada"),
+                "u-ada"
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_claim_is_read_only_when_the_install_configures_it() {
+        let c = claims_of(r#"{"name":"The CEO","email":"ada@x.test","email_verified":true}"#);
+        let email = verified_email_of(&c);
+        // Not configured: the self-asserted name is never used; the verified email is.
+        assert_eq!(
+            display_name_of(&c, None, email.as_deref(), "u-ada"),
+            "ada@x.test"
+        );
+        // The control: configured, it is (and the console labels it unverified).
+        assert_eq!(
+            display_name_of(&c, Some("name"), email.as_deref(), "u-ada"),
+            "The CEO"
+        );
+        // Configured but empty: the verified email, else the subject.
+        let empty = claims_of(r#"{"name":"  "}"#);
+        assert_eq!(
+            display_name_of(&empty, Some("name"), None, "u-ada"),
+            "u-ada"
+        );
+    }
 
     #[test]
     fn the_pkce_challenge_is_the_rfc_7636_appendix_b_vector() {

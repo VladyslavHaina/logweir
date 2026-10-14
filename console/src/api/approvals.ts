@@ -16,6 +16,7 @@ import { useMemo } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LocalRefusal as Refusal, api, call, listAll, LIST_PAGE_SIZE, outcomeUnknown } from "./client";
 import { keys, useRestores } from "./queries";
+import { awaitingSwitchoverApproval, useSwitchoverApprovalRequests, useSwitchovers, type SwitchoverApprovalRequest } from "./switchovers";
 import { useCan, useSessionDoc } from "./session";
 import type { components } from "./schema";
 import type { Restore, Session } from "./types";
@@ -246,6 +247,7 @@ export type ApprovalStateWord =
   | "revoked-after-use"
   | "expired"
   | "refused"
+  | "request-recorded"
   | "awaiting-verification";
 
 export interface Found {
@@ -286,6 +288,11 @@ export function recordState(approval: Approval): Found {
       consumedAt: consumed,
     };
   }
+  if (verified && verified.status === "False" && verified.reason === REQUEST_RECORD_REASON) {
+    // DUI-20: the console's own record of a two-person request: by design it authorises
+    // nothing until a second person approves. A record, never a refusal.
+    return { state: "request-recorded", reason: verified.reason, message: verified.message ?? "" };
+  }
   if (verified && verified.status === "False") {
     return { state: verified.reason === "KeyIdExpired" ? "expired" : "refused", reason: verified.reason ?? "", message: verified.message ?? "" };
   }
@@ -293,17 +300,17 @@ export function recordState(approval: Approval): Found {
 }
 
 /**
- * Where one Approval stands for one Restore. The three states that bind another
- * subject, run or plan are checked before the verdict: a verdict about something
- * else is not a verdict about this Restore.
+ * Where one Approval stands for one Restore (or, with `kind`, one Switchover). The
+ * three states that bind another subject, run or plan are checked before the
+ * verdict: a verdict about something else is not a verdict about this subject.
  */
-export function approvalState(approval: Approval | null, subject: Subject): Found {
+export function approvalState(approval: Approval | null, subject: Subject, kind: "Restore" | "Switchover" = SUBJECT_KIND): Found {
   if (approval === null) return { state: "absent" };
-  if (approval.subjectRef.kind !== SUBJECT_KIND || approval.subjectRef.name !== subject.name) {
+  if (approval.subjectRef.kind !== kind || approval.subjectRef.name !== subject.name) {
     return { state: "foreign-subject", detail: `${approval.subjectRef.kind}/${approval.subjectRef.name}` };
   }
   const bound = approval.verifiedSubject;
-  if (bound && (bound.uid !== subject.uid || bound.name !== subject.name || bound.kind !== SUBJECT_KIND || bound.namespace !== subject.namespace)) {
+  if (bound && (bound.uid !== subject.uid || bound.name !== subject.name || bound.kind !== kind || bound.namespace !== subject.namespace)) {
     return { state: "foreign-execution", detail: bound.uid };
   }
   if (subject.planHash && approval.planHash !== subject.planHash) return { state: "plan-mismatch", detail: approval.planHash };
@@ -311,6 +318,9 @@ export function approvalState(approval: Approval | null, subject: Subject): Foun
 }
 
 /** The few words a table cell says for each state. */
+/** `Verified=False` on a two-person request's own record (`approval-<hash>-confirmation`). */
+export const REQUEST_RECORD_REASON = "GovernedApprovalRequired";
+
 export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   absent: "None recorded",
   "awaiting-verification": "Awaiting verification",
@@ -318,6 +328,7 @@ export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   "revoked-after-use": "Signer revoked after use",
   expired: "Expired",
   refused: "Refused",
+  "request-recorded": "Request recorded",
   "foreign-subject": "Bound to another subject",
   "foreign-execution": "Bound to another run",
   "plan-mismatch": "Names another plan",
@@ -345,6 +356,8 @@ export function stateSentence(found: Found, subject: Subject): string {
       return `The controller refused Approval ${name} because the approver key is past its notAfter (reason KeyIdExpired): ${found.message}`;
     case "refused":
       return `The controller refused Approval ${name} (reason ${found.reason}): ${found.message} The Restore does not run while this stands. A refusal about the roster can clear once the roster is fixed; a refusal about the documents cannot, because an Approval's spec is immutable.`;
+    case "request-recorded":
+      return `Approval ${name} is the console's record of a two-person request, and authorises nothing by design (reason ${found.reason}): a second person, signed in as an approver, approves it.`;
     case "foreign-subject":
       return `Approval ${name} exists but names ${found.detail}, not this Restore. It cannot approve this Restore, and this page will not reuse it.`;
     case "foreign-execution":
@@ -437,6 +450,12 @@ export function consoleApprovalOffered(v: OfferView): boolean {
 /** How many requests wait for THIS session: pending, and offered to it by the server. */
 export function waitingForYou(requests: (ApprovalRequest | null | undefined)[]): number {
   return requests.filter((r) => r?.state === "pending" && r.approve.offered === true && scopeShowable(r) !== null).length;
+}
+
+/** The same for switchover requests (DUI-27): pending, offered to this session, and
+ *  showing the whole scope, which is what its page's Approve button needs. */
+export function switchoversWaitingForYou(requests: (SwitchoverApprovalRequest | null | undefined)[]): number {
+  return requests.filter((r) => r?.state === "pending" && r.approve.offered === true && r.scopeComplete === true && !!r.confirmationSha256).length;
 }
 
 /** The navigation's Approvals count, or undefined when nothing waits for you. */
@@ -578,6 +597,13 @@ export function useWaitingRestores(ns: string, enabled = true) {
   return { ...all, data: waiting } as typeof all;
 }
 
+/** Every Switchover held for its approval (DUI-27): the Switchovers list, filtered. */
+export function useWaitingSwitchovers(ns: string, enabled = true) {
+  const all = useSwitchovers(ns, enabled);
+  const waiting = useMemo(() => all.data?.filter(awaitingSwitchoverApproval), [all.data]);
+  return { ...all, data: waiting } as typeof all;
+}
+
 /** One Restore, with its plan bytes; null when it does not exist. */
 export function useSubjectRestore(ns: string, name: string, enabled = true) {
   return useQuery({
@@ -641,10 +667,11 @@ export function useApprovalRequests(ns: string, restores: string[], enabled = tr
 }
 
 /**
- * The navigation's Approvals count: requests waiting for THIS session. Only a
- * two-person namespace on a console that takes approvals has any (record §4.1):
- * under confirm nothing waits for anyone, and a strict request has no
- * server-side "offered to you" view, so it is listed on the page and not counted.
+ * The navigation's Approvals count: requests waiting for THIS session, a
+ * restore's and a switchover's alike (DUI-27). Only a two-person namespace on a
+ * console that takes approvals has any (record §4.1): under confirm nothing waits
+ * for anyone, and a strict request has no server-side "offered to you" view, so
+ * it is listed on the page and not counted.
  * R1 wires it into the Shell: `approvals: useApprovalsNavCount(ns)` in useNavCounts.
  */
 export function useApprovalsNavCount(ns: string): NavCount | undefined {
@@ -657,7 +684,15 @@ export function useApprovalsNavCount(ns: string): NavCount | undefined {
     (restores.data ?? []).map((r) => r.name),
     twoPerson,
   );
-  return twoPerson ? approvalsNavCount(waitingForYou(requests.map((q) => q.data))) : undefined;
+  const switchovers = useWaitingSwitchovers(ns, twoPerson && grant.restoresRead);
+  const switchoverRequests = useSwitchoverApprovalRequests(
+    ns,
+    (switchovers.data ?? []).map((s) => s.name),
+    twoPerson,
+  );
+  return twoPerson
+    ? approvalsNavCount(waitingForYou(requests.map((q) => q.data)) + switchoversWaitingForYou(switchoverRequests.map((q) => q.data)))
+    : undefined;
 }
 
 // ------------------------------------------------------- writes

@@ -40,6 +40,7 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { CheckResult, Field, Instant, LastTestLine, NotRecorded, Term, WriteOutcome } from "../connections/parts";
 import { DestinationVerdict, TransportStatus } from "./DestinationList";
 import { RotateAccess } from "./RotateAccess";
+import { ErrorText } from "../../components/Prose";
 
 const MODE_WORDS: Record<string, string> = {
   secretKeys: "Secret",
@@ -251,7 +252,7 @@ function Usage({ ns, name }: { ns: string; name: string }) {
           <LoadingRows rows={2} label="Loading what uses this destination" />
         ) : usage.isError ? (
           <Content component="p" className="lw-subtle">
-            The usage list could not be read: {usage.error.message}
+            The usage list could not be read: <ErrorText error={usage.error} />
           </Content>
         ) : (
           <>

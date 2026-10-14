@@ -54,7 +54,7 @@ import {
   type WizardValues,
 } from "./model";
 import {
-  CATALOG_BINDING_SENTENCE,
+  bindingSentence,
   CATALOG_TOPICS_SENTENCE,
   COMPLETE_COVERAGE_COST,
   COVERAGE_BOUND_HELP,
@@ -62,7 +62,6 @@ import {
   ORIGINAL_NAME_NO_OWNER_STATEMENT,
   ORIGINAL_NAME_SENTENCE,
   ORIGINAL_NAME_TYPED_SENTENCE,
-  POINT_UNBOUND_SENTENCE,
   READINESS_CAVEAT_SENTENCE,
   READINESS_NOT_RUN_WARNING,
   REPLICATION_DIFFERS_NOTE,
@@ -76,6 +75,7 @@ import {
   TIME_BASIS_OPTED_WARNING,
   modeMeaning,
 } from "./words";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
 
 type Errors = Partial<Record<string, { message?: string }>>;
 const err = (errors: Errors, name: string) => errors[name]?.message;
@@ -202,7 +202,16 @@ export function PointStep({
               <Tbody>
                 {matching.slice(0, limit).map((b, i) => (
                   <Tr key={b.uid} isClickable isRowSelected={field.value === pointKeyOf(b)} onRowClick={() => field.onChange(pointKeyOf(b))}>
-                    <Td select={{ rowIndex: i, variant: "radio", isSelected: field.value === pointKeyOf(b), onSelect: () => field.onChange(pointKeyOf(b)) }} />
+                    {/* PatternFly's own select cell names every radio "Select row N"; this one is named by its point (DUI-22). */}
+                    <Td className="pf-v6-c-table__check">
+                      <Radio
+                        id={`point-${i}`}
+                        name="recovery-point"
+                        aria-label={`Restore up to ${end(b) ? exactUtc(end(b)!) : b.name}, backup ${b.name}`}
+                        isChecked={field.value === pointKeyOf(b)}
+                        onChange={() => field.onChange(pointKeyOf(b))}
+                      />
+                    </Td>
                     <Td dataLabel="Restores up to">
                       <strong>{end(b) ? exactUtc(end(b)!) : <span className="lw-subtle">Not recorded</span>}</strong>
                       {b.uid === newest && <span className="lw-subtle"> · newest</span>}
@@ -310,7 +319,7 @@ export function Resolution({
   if (error) {
     return (
       <Alert variant="danger" isInline title="The chosen point could not be read" className="lw-gap-top">
-        {error instanceof Error ? error.message : String(error)}
+        <ErrorText error={error} />
       </Alert>
     );
   }
@@ -333,7 +342,7 @@ export function Resolution({
         ]}
       />
       <Content component="p" className="lw-subtle lw-small">
-        {point.catalog ? CATALOG_BINDING_SENTENCE : POINT_UNBOUND_SENTENCE}
+        {bindingSentence(point.catalog)}
       </Content>
     </div>
   );
@@ -628,7 +637,7 @@ export function TargetStep({
         />
         <FieldHelp id="scratch">{v.scratch ? SCRATCH_SENTENCE : modeMeaning("newTopic", original)}</FieldHelp>
         {v.scratch && connection && !connection.markerTopic && (
-          <Alert variant="warning" isInline isPlain title={SCRATCH_MARKER_WARNING} />
+          <Alert variant="info" isInline isPlain title={SCRATCH_MARKER_WARNING} className="lw-gap-top lw-gap-below" />
         )}
         {v.scratch && (
           <Controller
@@ -644,7 +653,13 @@ export function TargetStep({
         control={control}
         name="topicConfiguration"
         render={({ field }) => (
-          <TopicConfigurationChoice value={field.value} onChange={field.onChange} target={connection?.name ?? "the target"} ownersAsked={ownersAsked} />
+          <TopicConfigurationChoice
+            value={field.value}
+            onChange={field.onChange}
+            target={connection?.name ?? "the target"}
+            ownersAsked={ownersAsked}
+            error={err(errors, "topicConfiguration")}
+          />
         )}
       />
       <Controller
@@ -790,7 +805,7 @@ export function CheckStep({
           )}
           {readiness.error !== null && readiness.error !== undefined && (
             <Alert variant="danger" isInline title="The check could not be started or read">
-              {readiness.error instanceof Error ? readiness.error.message : String(readiness.error)}
+              <ErrorText error={readiness.error} />
             </Alert>
           )}
           {r && refusal && !running && (
@@ -809,7 +824,12 @@ export function CheckStep({
                 <li key={c.id}>
                   <span>
                     <span className="lw-mono">{c.id}</span>
-                    {c.message ? <span className="lw-subtle"> · {c.message}</span> : null}
+                    {c.message ? (
+                      <span className="lw-subtle">
+                        {" "}
+                        · <Prose text={checkMessage(c.message)} />
+                      </span>
+                    ) : null}
                     {c.state !== "ready" && c.remedy ? <div className="lw-small">{c.remedy}</div> : null}
                     {c.code && c.state !== "ready" ? <div className="lw-subtle lw-small">{c.code}{!isBlockingRow(c) ? " (advisory)" : ""}</div> : null}
                   </span>

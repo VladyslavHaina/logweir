@@ -177,12 +177,17 @@ export const REFUSAL_GLOSS: Record<string, string> = {
   ProbeStale: "the last reading is too old to vouch for; the next probe that answers replaces it",
   ProbeOutputUnreadable: "the probe's output could not be read, so nothing about the cluster is known either way",
   AdvertisedBrokersUnreachable: ADVERTISED_BROKERS_UNREACHABLE_WORDS,
+  // The controller's own condition message for this reason (kafka_cluster.rs `verdict_message`).
+  ProbeReportedUnreachable:
+    "the probe ran and reported reachable=false: the broker did not answer, or it refused the credential this connection names. The probe Job's log says which",
 };
 
 /** A later probe's reason beside an earlier reading (an older controller left `reachable` alone). */
 export const LATER_PROBE_GLOSS: Record<string, string> = {
   NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
   ProbeOutputUnreadable: "the latest probe's output could not be read",
+  // DUI-31.6: a re-probe in flight beside an earlier reading.
+  ProbeRunning: "a new probe is running now",
 };
 const VERDICT_OWN_REASONS = ["Reachable", "ProbeReportedUnreachable", "AdvertisedBrokersUnreachable"];
 
@@ -230,8 +235,7 @@ export function probeState(r: Reachability | undefined, now = Date.now(), freshS
   const later =
     (verdict === "reachable" || verdict === "unreachable") &&
     reason.length > 0 &&
-    !VERDICT_OWN_REASONS.includes(reason) &&
-    reason !== PROBE_RUNNING_REASON;
+    !VERDICT_OWN_REASONS.includes(reason);
   return {
     verdict,
     reason,
@@ -297,6 +301,15 @@ export function usability(p: Pick<Preflight, "checks" | "warnings">): { lines: U
 
 export const AUTH_MODES = ["plaintext", "scramSha512", "scramSha256", "plain", "mtls"] as const satisfies readonly ConnectionAuthMode[];
 export const SASL_MODES: readonly ConnectionAuthMode[] = ["scramSha512", "scramSha256", "plain"];
+
+/** The mode inside a sentence ("…, no authentication."); AUTH_WORDS is the label. */
+export const AUTH_PHRASE: Record<ConnectionAuthMode, string> = {
+  plaintext: "no authentication",
+  scramSha512: "SCRAM-SHA-512",
+  scramSha256: "SCRAM-SHA-256",
+  plain: "SASL/PLAIN",
+  mtls: "a TLS client certificate",
+};
 
 export const AUTH_WORDS: Record<ConnectionAuthMode, string> = {
   plaintext: "No authentication",

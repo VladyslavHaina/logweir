@@ -139,6 +139,8 @@ export const DESTINATION_NAMES = ["primary"];
 // ------------------------------------------------------------------ schedules
 
 const ORDERS_TOPICS = ["orders", "orders-dlq", "payments"];
+/** The groups orders-hourly's runs record (DUI-25): the switchover story's groups. */
+const ORDERS_GROUPS = ["orders-billing", "orders-shipping", "orders-reporting"];
 
 export const schedules: Schedule[] = [
   {
@@ -153,6 +155,7 @@ export const schedules: Schedule[] = [
     sourceRef: { name: "orders-prod" },
     destinationRef: { name: "primary" },
     topics: ORDERS_TOPICS,
+    consumerGroups: ORDERS_GROUPS,
     archive: { url: "logweir-destination://primary" },
     retention: { keepDays: 14 },
     status: { nextFireTime: iso(slot(-1)), lastFireTime: iso(slot(0)) },
@@ -198,6 +201,7 @@ function verifiedBackup(name: string, at: number, records: number, extra: Partia
     slot: slotName(at),
     sourceRef: { name: "orders-prod" },
     topics: ORDERS_TOPICS,
+    consumerGroups: ORDERS_GROUPS,
     trigger: { kind: "Scheduled", attempt: 1 },
     triggeredBy: "schedule",
     windowCovered: { fromMs: at - HOUR, toMs: at + 4 * MINUTE },

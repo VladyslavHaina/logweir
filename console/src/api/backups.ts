@@ -2,7 +2,7 @@
 // those pages make, over the typed client. The backup list and one backup share
 // the overview's query keys (`["backups", ns, ...]`), so a write anywhere
 // refreshes both.
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LIST_PAGE_SIZE, LocalRefusal, api, call, createHeaders, listAll, mintKey, outcomeUnknown } from "./client";
 import { keys, useBackup, useBackups, useDestinations } from "./queries";
 import { useCan } from "./session";
@@ -143,6 +143,32 @@ export function useCatalog(ns: string, name: string) {
       (await call(() => api.GET("/api/v1/namespaces/{ns}/catalogs/{name}", { params: { path: { ns, name } }, signal }))).item,
     retry: (count, error) => !notFound(error) && count < 2,
   });
+}
+
+/**
+ * Each catalog's newest selectable point, for the Overview: one read of one point per
+ * catalog that reports available points (the view lists newest first). A catalog whose
+ * read fails is left out, never counted as holding nothing.
+ */
+export function useNewestCatalogPoints(ns: string, catalogs: Catalog[] | undefined): { catalog: string; point: PointView }[] {
+  const readable = useCan(ns, "catalogs");
+  const wanted = readable ? (catalogs ?? []).filter((c) => (c.counts.available ?? 0) > 0 && !c.viewExpired) : [];
+  const results = useQueries({
+    queries: wanted.map((c) => ({
+      queryKey: ["points", ns, c.name, "newest"],
+      queryFn: async ({ signal }: { signal: AbortSignal }) =>
+        (
+          await call(() =>
+            api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
+              params: { path: { ns, name: c.name }, query: { limit: 1, selectable: "true" as const } },
+              signal,
+            }),
+          )
+        ).items[0] ?? null,
+      retry: false,
+    })),
+  });
+  return results.flatMap((r, i) => (r.data ? [{ catalog: wanted[i]!.name, point: r.data }] : []));
 }
 
 /** One bounded page of the catalog's view at a time (200 points), the next only when asked for. */

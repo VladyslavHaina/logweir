@@ -72,8 +72,9 @@ import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { StatusLabel } from "../../components/Status";
 import { ApprovalFilesForm, CountersignForm } from "./forms";
-import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, ScopeCard, Term } from "./parts";
+import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, Requester, ScopeCard, Term } from "./parts";
 import "./approvals.css";
+import { ErrorText, Prose } from "../../components/Prose";
 
 /** The sha256 of the Restore's plan bytes, computed here; undefined while it computes. */
 function usePlanHash(restore: Restore | null | undefined): string | undefined {
@@ -198,13 +199,19 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
           A second person, signed in as an approver and not the requester, approves here. No key is involved and nothing is pasted: the console records who approved and when, and signs that.
         </Content>
         <Content component="p" id="request-state">
-          {request.stateSentence}
+          <Prose text={request.stateSentence} />
         </Content>
         {shown && (
           <DescriptionList isCompact columnModifier={{ default: "1Col", lg: "2Col" }} className="lw-gap-top lw-approval-facts">
             <Term term="Requested by">
               <span id="request-requester">
-                <Principal id={request.requester} grant={grant} />
+                <Requester
+                  id={request.requester}
+                  email={request.requesterEmail}
+                  name={request.requesterName}
+                  detailsNotVerified={request.requesterDetailsNotVerified === true}
+                  grant={grant}
+                />
               </span>
             </Term>
             <Term term="Plan hash">
@@ -434,7 +441,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
       decision = (
         <>
           <Content component="p" id="approve-sentence">
-            {request.approve.sentence}
+            <Prose text={request.approve.sentence} />
           </Content>
           <div className="lw-decision">
             <Button variant="primary" id="approve" isLoading={approve.isPending} isDisabled={approve.isPending} onClick={() => approve.mutate(view, { onSuccess: setWritten })}>
@@ -450,7 +457,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
         <Refusal title={readerOnly ? "Not offered to you" : (REFUSAL_TITLE[request.approve.refusal ?? ""] ?? "Not offered to you")} id="approve-not-offered">
           {readerOnly
             ? "This login may read the request and not approve it: that needs the approver role in this namespace, held by someone other than the requester."
-            : request.approve.sentence || "This login is not offered an approval for this request."}
+            : <Prose text={request.approve.sentence || "This login is not offered an approval for this request."} />}
         </Refusal>
       );
     }
@@ -461,7 +468,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
         </Alert>
       ) : (
         <Refusal title="Not approved" id="approve-refused">
-          {approve.error.message}
+          <ErrorText error={approve.error} />
         </Refusal>
       )
     ) : null;
@@ -480,7 +487,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
               <ScopeCard scope={scope} />
             ) : (
               <Refusal title="What this request approves cannot be shown in full" id="scope-incomplete">
-                {request.scopeSentence || "What this request approves could not be shown in full, so it cannot be approved here."}
+                <Prose text={request.scopeSentence || "What this request approves could not be shown in full, so it cannot be approved here."} />
               </Refusal>
             )}
           </StackItem>

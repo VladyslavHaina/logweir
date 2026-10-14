@@ -669,7 +669,8 @@ refusal; a refused render changes nothing:
 | `api.console.trustedProxyCidrs names … wider than /16` (only with `requireTrustedProxy`) | narrow it to the ingress controller's own pod range |
 
 **Roles come from the ID token's `groups` claim alone** (scopes `openid profile
-groups`). A user with no bound group sees no namespace (`404`). Per provider:
+email groups`; `email` names a requester to an approver only when the provider
+marks it verified, `email_verified: true`, and is never an authorization input). A user with no bound group sees no namespace (`404`). Per provider:
 
 - **Dex:** the connector supplies groups (LDAP `groupSearch`, GitHub
   `orgs`/`teams`, an OIDC upstream with `insecureEnableGroups: true`);

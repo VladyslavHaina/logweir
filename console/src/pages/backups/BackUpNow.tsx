@@ -25,6 +25,7 @@ import { useSchedules } from "../../api/queries";
 import { ApiError } from "../../api/client";
 import { LocalRefusal, mintKey, outcomeOf, useBackUpNow, type ManualBackupResponse } from "../../api/backups";
 import type { Schedule } from "../../api/types";
+import { Prose } from "../../components/Prose";
 
 /** What a 409 on this route means; its only answer is a new key. */
 export function conflictWords(error: unknown): string | null {
@@ -162,7 +163,7 @@ export function BackUpNow({ ns, open, onClose }: { ns: string; open: boolean; on
             title={outcome === "unknown" ? "The outcome is unknown" : "The backup was not started"}
             className="lw-gap-top"
           >
-            <p>{outcome === "unknown" ? UNKNOWN_RUN_OUTCOME : (conflict ?? run.error.message)}</p>
+            <p>{outcome === "unknown" ? UNKNOWN_RUN_OUTCOME : <Prose text={conflict ?? run.error.message} />}</p>
             {run.error instanceof ApiError && (
               <p className="lw-subtle lw-small">
                 {run.error.status} {run.error.code}

@@ -5,7 +5,9 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Button, Card, Content, PageSection } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import HistoryIcon from "@patternfly/react-icons/dist/esm/icons/history-icon";
-import { useCapabilities, useRestoreList, type Restore } from "../../api/restores";
+import { useCapabilities, useClones, useRestoreList, type Restore } from "../../api/restores";
+import type { Clone } from "../../api/switchovers";
+import { cloneListWords } from "../cutover/CloneLifetime";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { exactUtc } from "../../components/When";
@@ -14,16 +16,17 @@ import { Instant, RestoreStatus } from "./parts";
 import { coverageWords, selectionWords } from "./words";
 import "./restores.css";
 
-/** What kind of restore this is, in a few words: names, mode, coverage, selection. */
-export function restoreFacts(r: Restore): string {
-  // A clone's expiry is on its operation view, not on the list item: its page shows it.
-  const kind =
-    r.target.mode === "scratch"
+/** What kind of restore this is, in a few words: names, mode, coverage, selection. A kept
+ *  clone (its operation view's `status.clone`) says so and when it goes (DUI-23). */
+export function restoreFacts(r: Restore, clone?: Clone): string {
+  const kind = clone
+    ? cloneListWords(clone)
+    : r.target.mode === "scratch"
       ? "scratch rehearsal"
       : r.target.originalName
         ? "original names"
         : `prefix ${r.target.topicPrefix}`;
-  const coverage = coverageWords(r.coverage?.recorded, r.coverage?.requested, { covered: r.coverage?.covered ?? undefined });
+  const coverage = coverageWords(r.coverage?.recorded, r.coverage?.requested, { covered: r.coverage?.covered ?? undefined }, r.operation.terminal);
   const partial = selectionWords(r.selection) ? " · partial" : "";
   return `${kind} · ${coverage}${partial}`;
 }
@@ -32,6 +35,7 @@ export function Restores() {
   const { ns } = useParams({ from: "/$ns/restores" });
   const navigate = useNavigate();
   const restores = useRestoreList(ns);
+  const clones = useClones(ns, restores.data);
   const caps = useCapabilities(ns);
   const narrow = useNarrow();
   const mayCreate = caps?.restoreCreate !== false;
@@ -80,7 +84,7 @@ export function Restores() {
                 title: r.name,
                 meta: (
                   <>
-                    <Instant value={r.createdAt} /> · {restoreFacts(r)}
+                    <Instant value={r.createdAt} /> · {restoreFacts(r, clones.get(r.name))}
                   </>
                 ),
                 status: <RestoreStatus r={r} />,
@@ -104,7 +108,7 @@ export function Restores() {
                       <Link to="/$ns/restores/$name" params={{ ns, name: r.name }} className="lw-break">
                         {r.name}
                       </Link>
-                      <div className="lw-subtle lw-small">{restoreFacts(r)}</div>
+                      <div className="lw-subtle lw-small">{restoreFacts(r, clones.get(r.name))}</div>
                     </Td>
                     <Td dataLabel="Status">
                       <RestoreStatus r={r} />

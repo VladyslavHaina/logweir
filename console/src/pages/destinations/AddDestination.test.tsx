@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { Destination } from "../../api/destinations";
+import { onScreen, rotateDefaults, sourcesOf, type Destination } from "../../api/destinations";
 import { createdSecrets } from "../../mock/connections";
 import { destinationStore } from "../../mock/destinations";
 import { AddDestination } from "./AddDestination";
@@ -133,6 +133,33 @@ describe("Rotate access", () => {
     expect(onRotated.mock.calls[0]![0].generation).toBe(d.generation + 1);
     expect(everythingHeld(qc)).not.toContain(KEY_SECRET);
     expect(JSON.stringify(destinationStore())).not.toContain(KEY_SECRET);
+  });
+
+  it("marks an error about an input the chosen source hides on that grant's Credential select (DUI-2)", async () => {
+    const message = "a kept grant may name only a Secret this destination already names";
+    vi.spyOn(api, "POST").mockResolvedValue({
+      data: undefined,
+      error: { status: 422, code: "destination_invalid", detail: "invalid", requestId: "r", errors: [{ field: "access.archiveWrite.secret.existing", code: "existing_credential_refused", message }] },
+      response: new Response(null, { status: 422 }),
+    } as never);
+    rotate(primary());
+    // Archive write is on "Keep as it is": its Secret picker is not on the page.
+    expect(document.getElementById("rotate-archiveWrite-secret")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
+    await screen.findByText(/fix the fields marked below/);
+    const select = document.getElementById("rotate-archiveWrite-source")!;
+    expect(select.getAttribute("aria-invalid")).toBe("true");
+    expect(document.getElementById("rotate-archiveWrite-source-helper")!.textContent).toContain(message);
+  });
+
+  it("places a grant error where its source shows it, and on the Credential select where it does not", () => {
+    const keep = sourcesOf({ ...rotateDefaults().grants });
+    expect(onScreen({ "grants.archiveWrite.secret": "refused" }, keep)).toEqual({ "grants.archiveWrite.source": "refused" });
+    // The control: with "existing" chosen the Secret picker is on the page, and the error stays on it.
+    const existing = { ...keep, archiveWrite: { source: "existing" as const } };
+    expect(onScreen({ "grants.archiveWrite.secret": "refused" }, existing)).toEqual({ "grants.archiveWrite.secret": "refused" });
+    // Two errors on one control are both said.
+    expect(onScreen({ "grants.archiveRead.accessKeyId": "a.", "grants.archiveRead.source": "b." }, keep)).toEqual({ "grants.archiveRead.source": "a. b." });
   });
 
   it("is refused, not applied, when the destination moved since this page read it", async () => {

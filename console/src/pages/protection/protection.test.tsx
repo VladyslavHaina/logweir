@@ -15,7 +15,7 @@ import { SessionProvider } from "../../api/session";
 import type { Session } from "../../api/types";
 import { scheduleRoutes } from "../schedules/routes";
 import sessionDoc from "../../../fixtures/console/session.json";
-import { failedWords, openProblems, protectedWords } from "./Protection";
+import { failedWords, ledgerOf, openProblems, protectedWords } from "./Protection";
 import listFixture from "../../../fixtures/console/protection-policies-list.json";
 import healthy from "../../../fixtures/console/protection-policy.json";
 import unknown from "../../../fixtures/console/protection-policy-unknown.json";
@@ -163,5 +163,20 @@ describe("FX-38: a Backup listing cut at its bound (BackupHistoryTooLarge)", () 
     expect(body()).not.toContain("None yet");
     expect(body()).not.toContain("There is no recovery point this objective can use");
     expect(body()).not.toMatch(/\b0 \(\d+ allowed\)/);
+  });
+});
+
+describe("DUI-12: the ledger", () => {
+  it("lists a finished recovery apart from the problems, and never counts it as one", () => {
+    const alerts = [
+      { key: "a", kind: "RecoveryCompleted", state: "Resolved", openedAt: "2026-10-12T03:00:00Z" },
+      { key: "b", kind: "BackupFailure", state: "Open", openedAt: "2026-10-14T03:00:00Z" },
+    ];
+    const ledger = ledgerOf({ alerts } as never);
+    expect(ledger.problems.map((a) => a.kind)).toEqual(["BackupFailure"]);
+    expect(ledger.recoveries.map((a) => a.kind)).toEqual(["RecoveryCompleted"]);
+    // The control: an open BackupFailure is a problem; the recovery adds none.
+    expect(openProblems({ alerts } as never)).toBe(1);
+    expect(openProblems({ alerts: [alerts[0]] } as never)).toBe(0);
   });
 });

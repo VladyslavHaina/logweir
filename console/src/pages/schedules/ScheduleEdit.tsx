@@ -1,11 +1,11 @@
 // Guided create and the future-policy edit: one form, two routes.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { Alert, AlertActionLink, Breadcrumb, BreadcrumbItem, Card, CardBody, PageSection } from "@patternfly/react-core";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import { ApiError } from "../../api/client";
 import { useDestinations } from "../../api/queries";
-import { mintIntent, useCreateSchedule, useEditPolicy, useSchedule } from "../../api/schedules";
+import { mintIntent, useCreateSchedule, useEditPolicy, useSchedule, type Schedule } from "../../api/schedules";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { createBody, draftValues, editBody, outcomeOf, placeFieldErrors, valuesOf } from "./model";
@@ -132,6 +132,13 @@ export function ScheduleEdit() {
   const grant = useGrant(ns);
   const schedule = useSchedule(ns, name);
   const edit = useEditPolicy(ns, name);
+  // DUI-13: the revision this form was opened on, held until "Read it again". A re-read
+  // the page did not ask for (the write's invalidation after a 412, a refocus) must not
+  // swap the form for a newer revision and drop what was typed.
+  const [opened, setOpened] = useState<Schedule | null>(null);
+  useEffect(() => {
+    if (opened === null && schedule.data) setOpened(schedule.data);
+  }, [opened, schedule.data]);
   const header = <PageHeader title={`Edit ${name}`} breadcrumb={<Crumbs ns={ns} name={name} last="Edit policy" />} />;
   if (grant && !grant.scheduleCreate) {
     return (
@@ -161,7 +168,7 @@ export function ScheduleEdit() {
       </>
     );
   }
-  const s = schedule.data;
+  const s = opened ?? schedule.data;
   const generation = s.generation;
   if (typeof generation !== "number") {
     // The route's precondition IS the revision; without one an edit would land on whatever is current.
@@ -211,7 +218,10 @@ export function ScheduleEdit() {
                       <AlertActionLink
                         onClick={() => {
                           edit.reset();
-                          void schedule.refetch();
+                          // The revision in force now becomes the form's, once it has been read.
+                          void schedule.refetch().then((read) => {
+                            if (read.data) setOpened(read.data);
+                          });
                         }}
                       >
                         Read it again

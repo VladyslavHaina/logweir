@@ -43,6 +43,7 @@ import { count } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { Field, Instant, NotRecorded, Term, WriteOutcome } from "./parts";
+import { ErrorText, Prose } from "../../components/Prose";
 
 export const VISIBILITY_UNKNOWN_SENTENCE =
   "Kafka hides topics this principal cannot describe, and hides them without saying so, so a successful listing is not proof that this is every topic. Logweir records that as unknown rather than calling it complete.";
@@ -140,7 +141,7 @@ function Slot({ d, heading, stopped, onRunAgain }: { d: TopicDiscovery; heading:
         )}
         {d.error && (
           <Term term="Error">
-            <code>{d.error.code}</code> {d.error.message}
+            <code>{d.error.code}</code> <Prose text={d.error.message ?? ""} />
           </Term>
         )}
       </DescriptionList>
@@ -390,7 +391,7 @@ export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: 
                   {start.isError && <WriteOutcome error={start.error} subject="the discovery" credentials={false} unmatched={[]} />}
                   {cancel.isError && (
                     <Alert isInline variant="danger" title="The discovery was not cancelled">
-                      {cancel.error.message}
+                      <ErrorText error={cancel.error} />
                     </Alert>
                   )}
                   {reused && start.isSuccess && (

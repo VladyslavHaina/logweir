@@ -24,20 +24,73 @@ export function cloneTtlError(seconds: number | null): string | null {
   return null;
 }
 
+/** A topic's declarative owner as the plan states it (`logweir_core::topic_configuration::DeclaredOwner`). */
+export interface DeclaredOwner {
+  topic: string;
+  kind: "strimzi" | "external";
+  reference: string;
+}
+
+/** `OWNER_KINDS` and `MAX_OWNER_REFERENCE_CHARS` in logweir_core::topic_configuration. */
+export const OWNER_KINDS: readonly string[] = ["strimzi", "external"];
+export const MAX_OWNER_REFERENCE_CHARS = 256;
+
 /** The topic configuration choice (theme A, PROD-05.2), as the wizard holds it. */
 export interface TopicConfigurationValue {
   /** `null`: no block; the topics are created with the target's defaults, as always. */
   transition: "afterVerification" | "none" | null;
-  /** The requester states that no topic has a declarative owner (`owners: []`). */
-  noOwners: boolean;
+  /**
+   * DUI-17: the requester's statement about the topics' declarative owners. "none" signs
+   * `owners: []`; "named" signs the owners in `ownerLines`; null states nothing, which
+   * the runner accepts only when the point's backup looked for owners itself.
+   */
+  owners: "none" | "named" | null;
+  /** "topic kind reference", one owner per line, for "named". */
+  ownerLines: string;
 }
 
-export const NO_TOPIC_CONFIGURATION: TopicConfigurationValue = { transition: null, noOwners: false };
+export const NO_TOPIC_CONFIGURATION: TopicConfigurationValue = { transition: null, owners: null, ownerLines: "" };
+
+/** Why one owner is refused, by the runner's own rules (`refuse_declared`), or null. */
+export function ownerProblem(o: DeclaredOwner, topics: readonly string[] | null): string | null {
+  if (topics && !topics.includes(o.topic)) return `${o.topic} is not one of the topics this restore restores`;
+  if (!OWNER_KINDS.includes(o.kind)) return `${o.topic}: the kind is strimzi or external, not ${o.kind}`;
+  const chars = [...o.reference];
+  if (chars.length === 0 || chars.length > MAX_OWNER_REFERENCE_CHARS) return `${o.topic}: where it is defined is 1 to ${MAX_OWNER_REFERENCE_CHARS} characters`;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(o.reference)) return `${o.topic}: where it is defined holds a control character`;
+  return null;
+}
+
+/** "topic kind reference" lines to owners, with the first problem found (a topic named twice is one). */
+export function parseOwnerLines(text: string, topics: readonly string[] | null): { owners: DeclaredOwner[]; problem: string | null } {
+  const owners: DeclaredOwner[] = [];
+  let problem: string | null = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = /^(\S+)\s+(\S+)\s+(.+)$/.exec(line);
+    if (!m) {
+      problem ??= `"${line}": write the topic, strimzi or external, and where it is defined`;
+      continue;
+    }
+    const owner = { topic: m[1]!, kind: m[2]! as DeclaredOwner["kind"], reference: m[3]!.trim() };
+    const why = ownerProblem(owner, topics) ?? (owners.some((o) => o.topic === owner.topic) ? `${owner.topic} is named twice` : null);
+    if (why) problem ??= why;
+    else owners.push(owner);
+  }
+  return { owners, problem };
+}
 
 /** The plan's `target.topic_configuration` value, or `null` for none. */
-export function topicConfigurationPlan(v: TopicConfigurationValue): { transition: "afterVerification" | "none"; owners?: [] } | null {
+export function topicConfigurationPlan(
+  v: TopicConfigurationValue,
+  topics: readonly string[] | null = null,
+): { transition: "afterVerification" | "none"; owners?: DeclaredOwner[] } | null {
   if (!v.transition) return null;
-  return { transition: v.transition, ...(v.noOwners ? { owners: [] as [] } : {}) };
+  if (v.owners === "none") return { transition: v.transition, owners: [] };
+  if (v.owners === "named") return { transition: v.transition, owners: parseOwnerLines(v.ownerLines, topics).owners };
+  return { transition: v.transition };
 }
 
 /** `target.default_replication_factor` is an i16 in logweir_core::spec. */
@@ -89,7 +142,7 @@ export interface PlanFields {
     /** A clone (theme A, PROD-11.1a): `teardown: {ttl_seconds: N}`, scratch mode only. */
     teardownTtlSeconds?: number | null;
     /** Theme A, PROD-05.2: `topic_configuration`, created from the point's model. */
-    topicConfiguration?: { transition: "afterVerification" | "none"; owners?: [] } | null;
+    topicConfiguration?: { transition: "afterVerification" | "none"; owners?: DeclaredOwner[] } | null;
     originalName?: boolean;
     originalNameNoOwner?: boolean;
   };
@@ -236,7 +289,20 @@ export function renderPlanBytes(fields: PlanFields): string {
     }
     out.push("  topic_configuration:");
     out.push(`    transition: ${quote(tc.transition)}`);
-    if (tc.owners) out.push("    owners: []");
+    if (tc.owners && tc.owners.length === 0) out.push("    owners: []");
+    else if (tc.owners) {
+      // Each owner by the runner's own rules: a plan it would refuse is never rendered.
+      const seen = new Set<string>();
+      out.push("    owners:");
+      for (const o of tc.owners) {
+        const why = ownerProblem(o, f.topics ?? null) ?? (seen.has(o.topic) ? `${o.topic} is named twice` : null);
+        if (why) throw new TypeError(`TopicOwnerDeclarationRefused: ${why}`);
+        seen.add(o.topic);
+        out.push(`      - topic: ${quote(o.topic)}`);
+        out.push(`        kind: ${quote(o.kind)}`);
+        out.push(`        reference: ${quote(o.reference)}`);
+      }
+    }
   }
 
   // The recovery point: the window's END only. Its start is the archive's own floor.

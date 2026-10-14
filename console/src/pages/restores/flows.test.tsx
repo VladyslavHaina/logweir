@@ -290,6 +290,68 @@ describe("the restore wizard", () => {
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("DUI-17: the source's configuration asks who owns the topics before Next, and a preview that refuses holds Next", async () => {
+    const REFUSAL = "TopicOwnerNotChecked: source topic `orders` has no recorded owner and its backup looked for none (owner_detection is empty)";
+    let item: Record<string, unknown> | null = null;
+    net.override = (path, method, body) => {
+      const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (method === "POST" && path.endsWith("/preflights")) {
+        item = {
+          id: "pf-owners", namespace: "team-a", uid: "u", resourceVersion: "1", operation: "restore", state: "ready", terminal: true, applicable: true,
+          stale: false, staleBasis: ["expiry"], staleReasons: [], binding: { planHash: (body as S["CreatePreflightRequest"]).restore!.planHash, referents: [] },
+          warnings: [], executionOnly: [], conditions: [], detailsAvailable: true,
+          checks: [{ id: "target.mappedTopics", code: "MappedTopicsAbsent", state: "ready", gating: "blocking" }],
+        };
+        return json(201, { item, requestId: "r" });
+      }
+      if (method === "GET" && /\/preflights\/pf-owners$/.test(path)) return json(200, { item, requestId: "r" });
+      if (method === "GET" && path.startsWith("/namespaces/team-a/preflights/pf-owners/details")) {
+        return json(200, { items: [{ check: "target.topicConfiguration", entry: { check: "target.topicConfiguration", refusal: REFUSAL } }], page: { limit: 200 }, requestId: "r" });
+      }
+      return null;
+    };
+    renderAt("/team-a/restores/new");
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    await next();
+    await screen.findByRole("heading", { name: "What to restore" });
+    await next();
+    await screen.findByRole("heading", { name: "Where to restore" });
+    fireEvent.change(screen.getByLabelText("Prefix"), { target: { value: "owners-" } });
+    fireEvent.click(screen.getByLabelText("The source's, from the recovery point"));
+    // Asked before any check: the mock's point records no owner detection.
+    expect(await screen.findByLabelText(/No topic here is managed by an owner/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect((await screen.findAllByText(/say whether a declarative owner .* manages these topics: none, or name them/)).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "Where to restore" })).toBeTruthy();
+    // Answered: Next goes on, and the plan the check is asked about states owners: [].
+    fireEvent.click(screen.getByLabelText(/No topic here is managed by an owner/));
+    await next();
+    await screen.findByRole("heading", { name: /ready\?/ });
+    fireEvent.click(screen.getByRole("button", { name: "Run the readiness check" }));
+    const isCheck = (r: { method: string; path: string }) => r.method === "POST" && r.path.endsWith("/preflights");
+    await waitFor(() => expect(net.sent.some(isCheck)).toBe(true));
+    const check = net.sent.find(isCheck)!;
+    expect((check.body as S["CreatePreflightRequest"]).restore!.planBytes).toContain("  topic_configuration:\n    transition: \"afterVerification\"\n    owners: []\n");
+    // A preview that refuses the plan holds Next, as a stale verdict does, and says where to change it.
+    expect(await screen.findByText(/The topic configuration preview refuses this plan: TopicOwnerNotChecked/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("DUI-22: names each point's radio by its point, and opens each step at its top", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    renderAt("/team-a/restores/new");
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    const radios = screen.getAllByRole("radio", { name: /^Restore up to \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, backup / });
+    expect(radios.length).toBeGreaterThan(0);
+    expect(screen.queryByRole("radio", { name: /^Select row/ })).toBeNull();
+    // The control: nothing scrolls before a step changes.
+    expect(scrolled).not.toHaveBeenCalled();
+    await next();
+    await screen.findByRole("heading", { name: "What to restore" });
+    await waitFor(() => expect(scrolled).toHaveBeenCalledWith({ block: "start" }));
+  });
+
   it("a link to a Backup that is not a recovery point is refused by name, never replaced by another", async () => {
     renderAt("/team-a/restores/new?backup=orders-hourly-gone");
     await screen.findByText(/No Backup named orders-hourly-gone is in this namespace/);

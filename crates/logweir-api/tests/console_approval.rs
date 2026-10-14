@@ -152,11 +152,34 @@ struct Session {
 }
 
 fn session_as(app: &SharedApp, sid: &str, issuer: &str, subject: &str, groups: &[&str]) -> Session {
+    named_session(
+        app,
+        sid,
+        issuer,
+        subject,
+        &format!("{subject} display"),
+        None,
+        groups,
+    )
+}
+
+/// A session whose identity provider named the person `display` and, when
+/// `verified_email` is given, vouched for that address.
+fn named_session(
+    app: &SharedApp,
+    sid: &str,
+    issuer: &str,
+    subject: &str,
+    display: &str,
+    verified_email: Option<&str>,
+    groups: &[&str],
+) -> Session {
     let now = app.app.clock.now();
     let identity = Identity {
         issuer: issuer.to_string(),
         subject: subject.to_string(),
-        display_name: format!("{subject} display"),
+        display_name: display.to_string(),
+        verified_email: verified_email.map(str::to_string),
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         auth_time: now,
     };
@@ -2701,4 +2724,150 @@ async fn a_two_person_request_is_made_only_with_a_ticket_its_scope_can_show() {
     )
     .await;
     assert_eq!(created.status, 201, "{}", created.text());
+}
+
+/// **DUI-21: an approver sees who asked, and only what this console signed
+/// for this request.** The requester's provider-verified email and an
+/// opted-in name travel in a display document the console signs and binds
+/// to the request (approval name, requester principal, plan hash), stored
+/// beside the signed request and never in it. The view serves them only when
+/// that signature verifies for THIS request; a tampered document, or one
+/// signed for another request, serves neither and says so; a request made
+/// before the document existed serves neither and says nothing.
+#[tokio::test]
+async fn the_request_shows_who_asked_only_from_a_display_the_console_signed_for_it() {
+    let (app, console) = pair_app();
+    let hostile = format!("Alice \u{202E}Martin\u{200B}\u{0007}\n{}", "x".repeat(300));
+    let alice = named_session(
+        &app,
+        "sid-alice-named",
+        ISSUER,
+        "alice",
+        &hostile,
+        Some("alice@example.test"),
+        &["ops"],
+    );
+    let created = request_as(&app, &alice, "named", restore_request("approval-named")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let restore = created.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
+    let confirmation = "approval-named-confirmation";
+    let stored = app
+        .app
+        .fake
+        .object("approvals", NS_A, confirmation)
+        .expect("the request");
+    let annotations = stored["metadata"]["annotations"].clone();
+    let display: Value = serde_json::from_str(
+        annotations["logweir.dev/requester-display"]
+            .as_str()
+            .expect("a display document"),
+    )
+    .expect("JSON");
+    assert_eq!(display["email"], "alice@example.test");
+    assert_eq!(display["requester"], format!("{ISSUER}#alice"));
+    assert_eq!(display["approvalName"], "approval-named");
+    let written = display["name"]
+        .as_str()
+        .expect("the configured name")
+        .to_string();
+    assert!(written.starts_with("Alice Martin x"), "{written}");
+    assert_eq!(
+        written.chars().count(),
+        logweir_api::approval::MAX_SHOWN_NAME_CHARS
+    );
+    let bytes = stored["spec"]["approvalBytes"].as_str().expect("bytes");
+    assert!(
+        !bytes.contains("Alice") && !bytes.contains("alice@example.test"),
+        "neither is in the signed request: {bytes}"
+    );
+
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    let seen_with = |annotations: Value| {
+        let mut object = stored.clone();
+        object["metadata"]["annotations"] = annotations;
+        app.app.fake.seed("approvals", NS_A, object);
+        let app = &app;
+        let bob = &bob;
+        let restore = restore.clone();
+        async move { view(app, bob, &restore).await.json()["item"].clone() }
+    };
+
+    // The control: the console's own signed display, for this request, is served.
+    let seen = seen_with(annotations.clone()).await;
+    assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+    assert_eq!(seen["requesterEmail"], "alice@example.test", "{seen}");
+    assert_eq!(seen["requesterName"], written.as_str(), "{seen}");
+    assert!(seen.get("requesterDetailsNotVerified").is_none(), "{seen}");
+
+    // A tampered email (the signature kept): neither is served, and the view says so.
+    let mut tampered = annotations.clone();
+    let mut forged = display.clone();
+    forged["email"] = json!("ceo@example.test");
+    tampered["logweir.dev/requester-display"] = json!(forged.to_string());
+    let seen = seen_with(tampered).await;
+    assert!(
+        seen.get("requesterEmail").is_none() && seen.get("requesterName").is_none(),
+        "{seen}"
+    );
+    assert_eq!(seen["requesterDetailsNotVerified"], true, "{seen}");
+    assert_eq!(seen["requester"], format!("{ISSUER}#alice"), "{seen}");
+
+    // Signed by this very console, for another plan or another approval name: not this request's.
+    let request = stored_document(&app, confirmation).0;
+    for (approval_name, plan_hash) in [
+        ("approval-named", format!("sha256:{}", "e".repeat(64))),
+        ("approval-other", request.plan_hash.clone()),
+    ] {
+        let (document, signature) = logweir_api::approval::requester_display(
+            console.key(),
+            approval_name,
+            &format!("{ISSUER}#alice"),
+            &plan_hash,
+            Some("ceo@example.test"),
+            None,
+        )
+        .expect("signs")
+        .expect("something to show");
+        let mut copied = annotations.clone();
+        copied["logweir.dev/requester-display"] = json!(document);
+        copied["logweir.dev/requester-display-signature"] = json!(signature);
+        let seen = seen_with(copied).await;
+        assert!(
+            seen.get("requesterEmail").is_none(),
+            "{approval_name} {plan_hash}: {seen}"
+        );
+        assert_eq!(seen["requesterDetailsNotVerified"], true, "{seen}");
+    }
+
+    // A request made before the display existed: neither, and nothing to report.
+    let mut older = annotations.clone();
+    let kept = older.as_object_mut().expect("annotations");
+    kept.remove("logweir.dev/requester-display");
+    kept.remove("logweir.dev/requester-display-signature");
+    let seen = seen_with(older).await;
+    assert!(
+        seen.get("requesterEmail").is_none() && seen.get("requesterName").is_none(),
+        "{seen}"
+    );
+    assert!(seen.get("requesterDetailsNotVerified").is_none(), "{seen}");
+
+    // No verified email and no configured name (the display name is the subject):
+    // no display document at all, so only the signed principal is shown.
+    let dave = named_session(&app, "sid-dave", ISSUER, "dave", "dave", None, &["ops"]);
+    let created = request_as(&app, &dave, "plain", restore_request("approval-plain")).await;
+    assert_eq!(created.status, 201, "{}", created.text());
+    let plain = app
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-plain-confirmation")
+        .expect("the request");
+    let plain = &plain["metadata"]["annotations"];
+    assert!(
+        plain.get("logweir.dev/requester-display").is_none(),
+        "{plain}"
+    );
+    assert_eq!(plain["logweir.dev/requester"], format!("{ISSUER}#dave"));
 }
