@@ -48,7 +48,7 @@ use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, EngineReport, PartitionFacts, RestorePlan, SampleSelection,
     SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
-use logweir_core::outcome::IntegrityResult;
+use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::spec::{Anchor, Coverage, TargetMode};
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::ConsumedRecord;
@@ -410,6 +410,8 @@ fn run_child(mode: &str, dir: &Path) {
     };
     assert!(!block.covered, "{mode}: {block:?}");
     assert_ne!(v.integrity.result, IntegrityResult::Pass, "{mode}");
+    // A cap is not a segment format this build cannot read: the level stays.
+    assert_eq!(v.integrity.level, IntegrityLevel::ByteFingerprint, "{mode}");
     let reason = block.incomplete_reason.as_deref().unwrap_or_default();
     assert!(
         reason.contains("1 segment(s) are past the per-segment caps")
