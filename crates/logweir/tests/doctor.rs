@@ -1,4 +1,7 @@
-//! `logweir doctor`: seven checks, one test each. Each test names the check it
+//! `logweir doctor`: eight checks, one test each (check 8, `target engine`,
+//! FX-45, is `doctor::tests::check_8_names_a_target_the_engine_cannot_restore_into`
+//! over a stub reader, and live against Redpanda in
+//! `e2e/tests/compat_contract.rs`). Each test names the check it
 //! exercises and asserts the
 //! FAILURE TEXT that check must produce, not just a bare exit code: a check
 //! that regresses to a generic "doctor failed" would still exit 1 and pass a
