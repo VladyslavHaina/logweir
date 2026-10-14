@@ -518,7 +518,7 @@ drill), not as a defect in the artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.33.0` and the
+The Python report ends with `verifier: verify_scorecard.py 1.34.0` and the
 checks applied. That is the **verifier's** version, not the document's
 `format_version` (scorecard `1.0.0`; `1.1.0` FX-4; `1.2.0` FX-3; `1.3.0` FX-8;
 `1.4.0` PROD-08.1; `1.5.0` PROD-01.3's auth modes; `1.6.0` every sampled drill
@@ -563,6 +563,7 @@ positions mapping, PROD-04.2). It moves when the accepted-document set changes:
 | `1.31.0` | Scorecard `1.10.0` and `2.2.0` (PROD-11.1a): `target.creation` arms TCR-1 to TCR-5, the `target creation:` line. |
 | `1.32.0` | Scorecard `1.11.0` and `2.3.0` (PROD-05.2): `target.topic_configuration` arms TC-1 to TC-5 and its shape. |
 | `1.33.0` | Scorecard `1.12.0` and `2.4.0` (PROD-04.2): `positions_mapping` arms PM-1 to PM-5; with `--positions-mapping <file>`, the mapping document's PMD-1 to PMD-7 and one line per mapped position; `--payload-type switchover-record`, signature only. |
+| `1.34.0` | The public key file is one `PUBLIC KEY` PEM block followed only by whitespace, as `logweir drill verify` takes it (L1): both readers accept a trailing blank line and RFC 7468's explanatory text before the block, and neither accepts text after it. |
 
 Every document without a version's new field is decided as before it. One
 diagnostic-order difference remains: with both `run_id` and `engine` absent,

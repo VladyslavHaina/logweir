@@ -1271,6 +1271,135 @@ impl ResolvedDestination {
     }
 }
 
+/// **The store environment of a Job that READS a run's evidence and writes
+/// beside it** (theme A's PoC defect D1): the `Switchover` Job (it reads the
+/// restore's scorecard, sidecar, mapping and a rollback's record, and writes
+/// the switchover record) and a TTL clone's cleanup Job (it reads the
+/// scorecard and writes the cleanup attestation).
+///
+/// Neither reads an archive, so the ARCHIVE slot ([`ResolvedDestination::
+/// job_env`]: `AWS_*`, `LOGWEIR_ARCHIVE_CREDENTIALS`, the archive binding
+/// pair) carries the evidence destination's `evidenceRead` grant, and the
+/// EVIDENCE slot ([`ResolvedDestination::evidence_env`]) its `evidenceWrite`
+/// grant, `archive` when the two are one. The runner reads with the first and
+/// writes with the second (`logweir::evidence_read`).
+///
+/// An `evidenceRead` no Job can hold (`ControllerIdentity`, not configured,
+/// not resolvable, or a workload identity on another ServiceAccount than
+/// `evidenceWrite`'s) falls back to reading with the write grant, as these Jobs
+/// did before, and [`EvidenceAccessEnv::read_grant`] says so: a write grant
+/// that cannot read then fails by name, never as a verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceAccessEnv {
+    /// The archive slot: the grant the Job reads evidence with.
+    pub read: DestinationEnv,
+    /// The evidence slot: the grant it writes with.
+    pub write: DestinationEnv,
+    /// The read grant as a failure names it: `evidenceRead of
+    /// BackupDestination <ns>/<name>`, or the fallback with its reason.
+    pub read_grant: String,
+}
+
+impl EvidenceAccessEnv {
+    /// The ServiceAccount a workload-identity grant requires, if either does
+    /// (one pod, one ServiceAccount: [`ResolvedDestination::evidence_env`]
+    /// refused two different ones).
+    #[must_use]
+    pub fn service_account_name(&self) -> Option<&str> {
+        self.read
+            .service_account_name
+            .as_deref()
+            .or(self.write.service_account_name.as_deref())
+    }
+}
+
+/// Every variable [`ResolvedDestination::job_env`] and
+/// [`ResolvedDestination::evidence_env`] can render: what a Job copied from
+/// another's pod drops before it takes an [`EvidenceAccessEnv`].
+/// `every_rendered_store_variable_is_listed` holds the list to the renderers.
+pub const STORE_ENV_NAMES: [&str; 19] = [
+    STORE_CONTRACT_VERSION_ENV,
+    AWS_ALLOW_HTTP_ENV,
+    AWS_VIRTUAL_HOSTED_ENV,
+    AWS_METADATA_ENDPOINT_ENV,
+    AWS_REGION_ENV,
+    ARCHIVE_CA_FILE_ENV,
+    ARCHIVE_CREDENTIALS_ENV,
+    AWS_ACCESS_KEY_ID_ENV,
+    AWS_SECRET_ACCESS_KEY_ENV,
+    AWS_SESSION_TOKEN_ENV,
+    credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV,
+    credential_binding::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV,
+    EVIDENCE_CA_FILE_ENV,
+    EVIDENCE_CREDENTIALS_ENV,
+    EVIDENCE_ACCESS_KEY_ID_ENV,
+    EVIDENCE_SECRET_ACCESS_KEY_ENV,
+    EVIDENCE_SESSION_TOKEN_ENV,
+    credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV,
+    credential_binding::EVIDENCE_CREDENTIAL_BINDING_EXPECTED_ENV,
+];
+
+/// **The read and the write grant of an evidence-reading Job**, pure. `write`
+/// is the evidence destination resolved for `evidenceWrite`; `read` the same
+/// object resolved for `evidenceRead`, or `None` when that did not resolve.
+///
+/// # Errors
+///
+/// [`ResolvedDestination::evidence_env`]'s refusals of the write grant.
+pub fn evidence_access_env(
+    write: &ResolvedDestination,
+    read: Option<&ResolvedDestination>,
+) -> Result<EvidenceAccessEnv, DestinationRefusal> {
+    let why_not = match read {
+        None => "does not resolve".to_string(),
+        Some(r) if r.uid != write.uid => "is another object's".to_string(),
+        Some(r) => match &r.grant {
+            ResolvedGrant::SecretKeys { .. } | ResolvedGrant::WorkloadIdentity { .. } => {
+                match write.evidence_env(r) {
+                    Ok(write_env) => {
+                        return Ok(EvidenceAccessEnv {
+                            read: read_slot(r),
+                            write: write_env,
+                            read_grant: format!(
+                                "evidenceRead of BackupDestination {}/{}",
+                                r.namespace, r.name
+                            ),
+                        })
+                    }
+                    Err(refusal) => format!(
+                        "cannot share a pod with evidenceWrite ({})",
+                        refusal.message
+                    ),
+                }
+            }
+            ResolvedGrant::ControllerIdentity => {
+                "is the controller's own handle, which no Job holds".to_string()
+            }
+            ResolvedGrant::NotConfigured => "is not configured".to_string(),
+        },
+    };
+    Ok(EvidenceAccessEnv {
+        read: read_slot(write),
+        write: write.evidence_env(write)?,
+        read_grant: format!(
+            "evidenceWrite of BackupDestination {}/{} (its evidenceRead {why_not})",
+            write.namespace, write.name
+        ),
+    })
+}
+
+/// `dest`'s grant rendered into the archive slot, its CA at the evidence
+/// destination's key in the run's plan `ConfigMap` (where a Restore froze it).
+fn read_slot(dest: &ResolvedDestination) -> DestinationEnv {
+    let mut env = dest.job_env();
+    for (name, value) in &mut env.literals {
+        if name == ARCHIVE_CA_FILE_ENV {
+            *value = format!("{PLAN_MOUNT_PATH}/{EVIDENCE_CA_PLAN_KEY}");
+        }
+    }
+    env
+}
+
 /// The archive environment one resolved location and grant contribute to a
 /// runner Job; [`ResolvedDestination::job_env`] lists every variable.
 ///

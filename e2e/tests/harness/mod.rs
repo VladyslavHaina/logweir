@@ -337,6 +337,66 @@ pub fn mc(args: &[&str]) -> Output {
     compose("minio-setup", "mc", args)
 }
 
+/// One MinIO user of [`least_privilege_evidence`]: its access key id and
+/// secret, test values assembled here (no line holds a credential-shaped
+/// literal).
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct MinioUser {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+/// **The PoC's least-privilege evidence grants, on this stack's MinIO**
+/// (theme A's D1; `deploy/poc/minio-grants.yaml`'s shape on the evidence
+/// bucket): a WRITER that may only `PutObject` under `logweir/*`, and a
+/// READER that may `GetObject` (and list) under `logweir/*` and nothing else.
+/// Idempotent: the users and policies are created, or re-created, each call.
+///
+/// # Panics
+///
+/// When MinIO refuses to create them.
+#[allow(dead_code)]
+pub fn least_privilege_evidence() -> (MinioUser, MinioUser) {
+    let user = |role: &str| MinioUser {
+        access_key_id: format!("lw-e2e-evidence-{role}"),
+        secret_access_key: format!("{}-{role}-{}", "e2e", "not-a-secret-d1"),
+    };
+    let (writer, reader) = (user("writer"), user("reader"));
+    let bucket = EVIDENCE_BUCKET;
+    let writer_policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:PutObject"],"Resource":["arn:aws:s3:::{bucket}/logweir/*"]}}]}}"#
+    );
+    let reader_policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::{bucket}"],"Condition":{{"StringLike":{{"s3:prefix":["logweir/*"]}}}}}},{{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::{bucket}/logweir/*"]}}]}}"#
+    );
+    let script = format!(
+        "set -e\n\
+         printf '%s' '{writer_policy}' > /tmp/w.json\n\
+         printf '%s' '{reader_policy}' > /tmp/r.json\n\
+         mc admin policy create local lw-e2e-evidence-writer /tmp/w.json\n\
+         mc admin policy create local lw-e2e-evidence-reader /tmp/r.json\n\
+         mc admin user add local {wid} {wsec}\n\
+         mc admin user add local {rid} {rsec}\n\
+         mc admin policy attach local lw-e2e-evidence-writer --user {wid} || true\n\
+         mc admin policy attach local lw-e2e-evidence-reader --user {rid} || true\n\
+         mc admin user info local {wid}\n\
+         mc admin user info local {rid}\n",
+        wid = writer.access_key_id,
+        wsec = writer.secret_access_key,
+        rid = reader.access_key_id,
+        rsec = reader.secret_access_key,
+    );
+    let o = compose("minio-setup", "sh", &["-c", &script]);
+    assert!(
+        o.status.success(),
+        "the least-privilege MinIO users were not created:\n{}\n{}",
+        o.stdout_utf8(),
+        o.stderr_utf8()
+    );
+    (writer, reader)
+}
+
 pub fn kafka_topics(args: &[&str]) -> Output {
     compose("topic-setup", "kafka-topics", args)
 }

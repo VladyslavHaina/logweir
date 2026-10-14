@@ -276,6 +276,7 @@ fn main() -> std::process::ExitCode {
             approval_policy,
             confirmation_key,
             runner_line_token,
+            evidence_read_grant,
         }) => {
             // FX-43: set once, before anything runs.
             logweir::exit::set_line_tokens(None, runner_line_token);
@@ -293,6 +294,7 @@ fn main() -> std::process::ExitCode {
                 store_contract_version,
                 approval_policy,
                 confirmation_key,
+                evidence_read_grant,
             })
         }
         // NO catch-all arm: with every variant named, a subcommand added to

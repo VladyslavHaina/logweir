@@ -3362,6 +3362,62 @@ pub fn attribute_for(
     })
 }
 
+/// **The P rows of a check pod that RAN and whose runner is older than this
+/// controller** (the PoC's D6): the runner exited `exit_code` and relayed
+/// nothing this controller reads ([`check::observe`]'s
+/// `CheckContractMismatch`), while [`pod_outcomes`], seeing no relay, said
+/// "the check pod has not started". An exit code is the kubelet's own word
+/// that the image pulled, the container started and every projection the pod
+/// declares resolved (a container whose projection fails never starts). So
+/// `runner.image` is `notReady` with the observation's code and message (the
+/// image is the wrong release), `runner.pod` says the pod ran and exited,
+/// and each projection row says it was in place. `None`: the pod did not
+/// run, and the rows stand.
+pub fn ran_on_an_older_runner(
+    operation: PreflightOperation,
+    rows: &mut [CheckOutcome],
+    exit_code: Option<i32>,
+    message: &str,
+    now: DateTime<Utc>,
+) {
+    let Some(code) = exit_code else {
+        return;
+    };
+    let pod: Vec<CheckId> = pod_rows(operation).iter().map(|r| r.id).collect();
+    for row in rows.iter_mut().filter(|r| pod.contains(&r.id)) {
+        *row = match row.id {
+            CheckId::RunnerImage => outcome(
+                operation,
+                row.id,
+                CheckState::NotReady,
+                CheckCode::CheckContractMismatch,
+                now,
+            )
+            .with_message(message)
+            .with_remedy(&remedy_for(CheckCode::CheckContractMismatch)),
+            CheckId::RunnerPod => outcome(
+                operation,
+                row.id,
+                CheckState::Ready,
+                CheckCode::PodStarted,
+                now,
+            )
+            .with_message(&format!(
+                "the check pod ran and its runner exited {code}; the runner image is older than \
+                 this controller (runner.image)"
+            )),
+            _ => outcome(
+                operation,
+                row.id,
+                CheckState::Ready,
+                CheckCode::Projected,
+                now,
+            )
+            .with_message("the check pod ran with this projection in place"),
+        };
+    }
+}
+
 /// The **P** rows, plus whether every Job-sourced row is blocked.
 ///
 /// "An unmatched code blocks the whole pod: every Job-sourced check becomes
@@ -6992,13 +7048,24 @@ pub async fn reconcile_preflight(
     let relayed = relay_result.is_some();
     let image_id = image_id_of(pod.as_ref());
 
-    let (controller, blocked_by_pod) = inputs.controller_outcomes(
+    let (mut controller, blocked_by_pod) = inputs.controller_outcomes(
         &facts,
         observation.waiting.as_ref(),
         relayed,
         image_id.as_deref(),
         now,
     );
+    // D6: an older runner ran and said nothing this controller reads; the pod
+    // rows say so instead of "not started".
+    if !relayed && observation.reason == CheckCode::CheckContractMismatch {
+        ran_on_an_older_runner(
+            inputs.operation,
+            &mut controller,
+            observation.exit_code,
+            &observation.message,
+            now,
+        );
+    }
 
     if observation.phase == check::CheckPhase::Running {
         let status = status_for(

@@ -26,6 +26,10 @@ pub mod engine_bin;
 /// runner image's `/etc/logweir/engine-identity` first, the two environment
 /// variables where there is no image.
 pub mod engine_identity;
+/// The read grant of a Job that reads a run's evidence and writes beside it,
+/// and the one rule that a store refusing a read is never a verdict on the
+/// evidence (theme A's PoC defect D1).
+pub mod evidence_read;
 pub mod exit;
 /// Short-lived Kubernetes installation identity bootstrap. This remains in
 /// the signer-capable runner binary; the long-lived controller never links it.

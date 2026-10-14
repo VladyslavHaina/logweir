@@ -10,6 +10,7 @@
 //! | `c43_…` | `target.creation` (names, IDs equal to the broker's, `lineage_headers: kept`) is in the scorecard of every run that created topics — a clone (with its lifetime) and a plain restore (without) — both readers accept it, and a cloned record carries `x-original-offset` and `x-original-timestamp` | — |
 //! | `c44_…` (ignored; `LOGWEIR_E2E_OLDER_RUNNER`) | main's runner from before PROD-11.1a refuses the map form: exit 1, `drill spec does not parse`, nothing created | the same runner restores the plan with `teardown: keep` |
 //! | `c45_…` | a TTL clone whose run does not pass (an objective it cannot meet) is torn down at once: its topics are gone and phase 9 attests `teardown_policy: ttl` | — |
+//! | `d1_…` | theme A's D1 on the PoC's least-privilege MinIO policies: the cleanup reads the scorecard with the read grant and writes with the write grant, deletes exactly the created topics and attests them | the write grant in the read slot: exit 1, `EvidenceUnreadable` naming the grant and `AccessDenied` on the line, nothing deleted |
 //!
 //! # Running it
 //!
@@ -195,6 +196,132 @@ fn c40_a_ttl_clone_is_kept_and_its_cleanup_deletes_exactly_what_it_created() {
         "c40",
         &json!({"run_id": run_id, "created": created, "report": serde_json::to_value(&report).unwrap(),
                 "stranger_survives": topic_exists(stranger), "evidence": evidence}),
+    );
+    delete_all_drill_topics();
+}
+
+/// `logweir restore cleanup` as the controller's cleanup Job runs it (theme
+/// A's D1): under the store contract, `read` in the archive slot (the run's
+/// scorecard is read with it) and `write` in the evidence slot (the
+/// attestation is written with it), the read grant named.
+fn cleanup_with_grants(
+    s: &serde_yaml::Value,
+    run_id: &str,
+    attempt: u32,
+    read: &MinioUser,
+    write: &MinioUser,
+    grant: &str,
+) -> (Output, CloneCleanupReport) {
+    let path = demo_dir().join(format!("clone-cleanup-d1-{}.yaml", std::process::id()));
+    std::fs::write(&path, serde_yaml::to_string(s).unwrap()).unwrap();
+    let out = Command::new(bin())
+        .args(["restore", "cleanup", "--spec"])
+        .arg(&path)
+        .args(["--run-id", run_id, "--attempt", &attempt.to_string()])
+        .arg("--signing-key")
+        .arg(root().join("e2e/fixtures/signed/signing.pem"))
+        .args([
+            "--store-contract-version",
+            "1",
+            "--evidence-read-grant",
+            grant,
+        ])
+        .env("LOGWEIR_STORE_CONTRACT_VERSION", "1")
+        .env("LOGWEIR_ARCHIVE_CREDENTIALS", "static")
+        .env("AWS_ACCESS_KEY_ID", &read.access_key_id)
+        .env("AWS_SECRET_ACCESS_KEY", &read.secret_access_key)
+        .env("AWS_REGION", "us-east-1")
+        .env("AWS_ALLOW_HTTP", "true")
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env("LOGWEIR_EVIDENCE_CREDENTIALS", "static")
+        .env("LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID", &write.access_key_id)
+        .env(
+            "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY",
+            &write.secret_access_key,
+        )
+        .output()
+        .expect("logweir runs");
+    let report = out
+        .stdout_utf8()
+        .lines()
+        .find_map(|l| l.strip_prefix("clone-cleanup="))
+        .and_then(CloneCleanupReport::parse)
+        .unwrap_or_else(|| {
+            panic!(
+                "no clone-cleanup= line:\nstdout:\n{}\nstderr:\n{}",
+                out.stdout_utf8(),
+                out.stderr_utf8()
+            )
+        });
+    (out, report)
+}
+
+/// **Theme A's D1, live: a clone's cleanup reads its scorecard with the READ
+/// grant and writes its attestation with the WRITE grant, on the PoC's
+/// least-privilege MinIO policies** (`harness::least_privilege_evidence`).
+/// It deletes exactly the topics the run created and attests them.
+///
+/// NEGATIVE CONTROL, first: the write grant in the read slot too (what
+/// `sha-4db6e5bb`'s cleanup Job read with). The attempt exits 1, its
+/// `clone-cleanup=` line names `EvidenceUnreadable` with the key, the grant
+/// and `AccessDenied`, nothing is deleted, and no attestation is written.
+#[test]
+fn d1_a_clone_cleanup_reads_with_the_read_grant_on_least_privilege() {
+    let (writer, reader) = harness::least_privilege_evidence();
+    let s = clone_spec(300);
+    let r = restore(&s);
+    assert_eq!(r.out.status.code(), Some(0), "{}", summary(&r));
+    let sc = read_scorecard(&r);
+    let run_id = r.run_id();
+    let created = created_names(&sc);
+    for t in &created {
+        assert!(topic_exists(t), "phase 9 kept {t}");
+    }
+
+    // NEGATIVE CONTROL: the write grant reads.
+    let (old, old_report) = cleanup_with_grants(
+        &s,
+        &run_id,
+        1,
+        &writer,
+        &writer,
+        "evidenceWrite of BackupDestination e2e/least-privilege",
+    );
+    assert_eq!(old.status.code(), Some(1), "{}", old.stderr_utf8());
+    let error = old_report.error.clone().expect("the cause is on the line");
+    assert!(
+        error.starts_with(&format!(
+            "EvidenceUnreadable: could not read logweir/drills/{run_id}.json with grant \
+             evidenceWrite of BackupDestination e2e/least-privilege: AccessDenied"
+        )),
+        "{error}"
+    );
+    assert!(old_report.deleted.is_empty() && old_report.attestation_key.is_none());
+    for t in &created {
+        assert!(topic_exists(t), "the control deleted {t}");
+    }
+
+    // THE ROW: the read grant reads, the write grant writes.
+    let (out, report) = cleanup_with_grants(
+        &s,
+        &run_id,
+        2,
+        &reader,
+        &writer,
+        "evidenceRead of BackupDestination e2e/least-privilege",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", out.stderr_utf8());
+    assert_eq!(sorted(&report.deleted), created);
+    wait_gone(&created);
+    let key = report.attestation_key.clone().expect("attested");
+    assert_eq!(key, format!("logweir/drills/{run_id}.cleanup-2.json"));
+    let evidence = evidence_for_run(&run_id);
+    assert!(evidence.iter().any(|k| k.ends_with(&key)), "{evidence:?}");
+    write_outcome(
+        "d1_least_privilege",
+        &json!({"run_id": run_id, "created": created,
+                "control_exit": old.status.code(), "control_error": error,
+                "report": serde_json::to_value(&report).unwrap(), "evidence": evidence}),
     );
     delete_all_drill_topics();
 }

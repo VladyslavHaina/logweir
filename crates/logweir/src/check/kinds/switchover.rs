@@ -372,12 +372,17 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
     let scope = catalogue::scope("Restore", &req.restore_name, Some(&req.restore_uid));
     let mut result = CheckResult::new(CheckPlanKind::SwitchoverReadiness);
 
-    // 1. The restore's evidence, as the switchover's step 3 reads it.
-    let evidence = match wiring.objects(
-        &req.evidence,
-        DestinationRole::EvidenceRead,
-        deadline.remaining(),
-    ) {
+    // 1. The restore's evidence, as the switchover's step 3 reads it, with
+    // a store's refusal kept apart from the verdict (D1).
+    let grant = format!("evidenceRead of BackupDestination {}", req.evidence.name);
+    let evidence = match wiring
+        .objects(
+            &req.evidence,
+            DestinationRole::EvidenceRead,
+            deadline.remaining(),
+        )
+        .map(|handle| crate::evidence_read::NotingHandle::new(handle, &grant))
+    {
         Err(f) => {
             checks.push(from_store_failure(CheckId::SwitchoverEvidence, &f, now));
             None
@@ -410,9 +415,17 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
                     );
                     Some(ev)
                 }
+                // D1: a read the store refused is the store's answer, in its
+                // own code, never `RestoreEvidenceRefused`.
                 Err(why) => {
-                    checks.push(
-                        catalogue::outcome(
+                    checks.push(match handle.unreadable() {
+                        Some(failure) => from_store_failure(
+                            CheckId::SwitchoverEvidence,
+                            &crate::check::store::StoreFailure::new(failure.code, failure.sentence),
+                            now,
+                        )
+                        .with_scope(scope.clone()),
+                        None => catalogue::outcome(
                             CheckId::SwitchoverEvidence,
                             CheckState::NotReady,
                             CheckCode::RestoreEvidenceRefused,
@@ -421,7 +434,7 @@ pub fn run(req: &SwitchoverReadinessRequest, wiring: &dyn Wiring, deadline: Dead
                         .with_message(&why)
                         .with_remedy(EVIDENCE_REMEDY)
                         .with_scope(scope.clone()),
-                    );
+                    });
                     None
                 }
             }
@@ -997,5 +1010,112 @@ mod tests {
             },
             groups: Vec::new(),
         }
+    }
+
+    // ---- D1: a store's refusal is never the evidence's verdict ----------
+
+    // The evidence double lives outside `check/` (`evidence_read::test_support`):
+    // `check_cli.rs` holds this tree to ONE module naming the one write.
+    use crate::evidence_read::test_support::Answering;
+
+    /// The wiring of a review whose evidence handle answers every read with
+    /// `answer`; the target is never reached.
+    struct EvidenceOnly(fn(&str) -> logweir_engine_oso::storage::StoreError);
+
+    impl Wiring for EvidenceOnly {
+        fn broker(
+            &self,
+            _plan: &logweir_core::check_contract::ConnectionPlan,
+            _budget: std::time::Duration,
+        ) -> Result<
+            Box<dyn logweir_kafka::inventory::InventoryProbe>,
+            logweir_kafka::inventory::CheckFailure,
+        > {
+            unreachable!("the review reads no inventory")
+        }
+        fn objects(
+            &self,
+            _plan: &DestinationPlan,
+            role: DestinationRole,
+            _budget: std::time::Duration,
+        ) -> Result<Box<dyn crate::check::store::ObjectAccess>, crate::check::store::StoreFailure>
+        {
+            assert_eq!(role, DestinationRole::EvidenceRead, "the read grant");
+            Ok(Box::new(Answering(self.0)))
+        }
+        fn evidence_writer(
+            &self,
+            _plan: &DestinationPlan,
+            _grant: Option<&logweir_core::check_contract::GrantRef>,
+            _budget: std::time::Duration,
+        ) -> Result<Box<dyn crate::check::store::ObjectAccess>, crate::check::store::StoreFailure>
+        {
+            unreachable!("the review writes nothing")
+        }
+        fn evidence_reader(
+            &self,
+            _plan: &DestinationPlan,
+            _grant: Option<&logweir_core::check_contract::GrantRef>,
+            _budget: std::time::Duration,
+        ) -> Result<Box<dyn crate::check::store::ObjectAccess>, crate::check::store::StoreFailure>
+        {
+            unreachable!("the review reads through `objects`")
+        }
+        fn signer_key_id(&self, _path: &str) -> Result<String, String> {
+            unreachable!("the review signs nothing")
+        }
+        fn read_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                path.to_string(),
+            ))
+        }
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")
+                .expect("an instant")
+                .with_timezone(&chrono::Utc)
+        }
+    }
+
+    fn evidence_row(
+        answer: fn(&str) -> logweir_engine_oso::storage::StoreError,
+    ) -> logweir_core::check_contract::CheckOutcome {
+        run(&request(), &EvidenceOnly(answer), Deadline::new(60))
+            .result
+            .checks
+            .into_iter()
+            .find(|c| c.id == CheckId::SwitchoverEvidence)
+            .expect("the evidence row")
+    }
+
+    /// **A 403 reading the restore's scorecard is the store's answer, in its
+    /// own code, naming the key and the read grant; it is never
+    /// `RestoreEvidenceRefused`** (the PoC's switchover named the same 403
+    /// `MappingDigestMismatch`). CONTROL: an ABSENT scorecard is still the
+    /// evidence's refusal.
+    ///
+    /// KILLS: the `Err(why)` arm ignoring the handle's note (the 403 is
+    /// `RestoreEvidenceRefused`); `NotingHandle::get` not noting.
+    #[test]
+    fn a_denied_evidence_read_is_the_stores_answer_not_a_refusal() {
+        let denied = evidence_row(|key| {
+            logweir_engine_oso::storage::StoreError::Io(format!(
+                "{key}: Error performing GET http://minio:9000/e/{key} in 2ms - Server returned \
+                 non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code></Error>"
+            ))
+        });
+        assert_eq!(denied.code, CheckCode::AccessDenied, "{denied:?}");
+        assert!(
+            denied.message.starts_with(
+                "EvidenceUnreadable: could not read logweir/drills/run-1.json with grant \
+                 evidenceRead of BackupDestination evidence: AccessDenied"
+            ),
+            "{}",
+            denied.message
+        );
+        let absent =
+            evidence_row(|key| logweir_engine_oso::storage::StoreError::NotFound(key.to_string()));
+        assert_eq!(absent.code, CheckCode::RestoreEvidenceRefused);
+        assert_eq!(absent.state, CheckState::NotReady);
     }
 }

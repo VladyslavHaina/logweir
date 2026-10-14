@@ -292,7 +292,11 @@ async fn a_passing_clone_is_kept_with_its_cleanup_job_suspended() {
             "--run-id",
             "01J9X2QK7C4V0R8YB3ZP6MTS5A",
             "--attempt",
-            "1"
+            "1",
+            // D1: the read grant is named; an inline restore's is the plan's
+            // own archive credential, which the copied pod already holds.
+            "--evidence-read-grant",
+            weirkeeper::controllers::switchover::INLINE_READ_GRANT
         ])
     );
     let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
@@ -392,6 +396,44 @@ async fn a_cleanup_that_succeeded_is_removed_and_releases_the_finalizer() {
 fn not_found() -> String {
     json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
            "reason": "NotFound", "code": 404, "message": "not found"})
+    .to_string()
+}
+
+/// A cleanup Job owned by the Restore, for `attempt`: suspended, with the
+/// cleanup's argv, naming the read grant when this build built it
+/// (`with_grant`), on the image an older controller's would run.
+fn suspended_cleanup_job(name: &str, attempt: u32, with_grant: bool) -> String {
+    let mut args = vec![
+        "restore",
+        "cleanup",
+        "--spec",
+        "/plan/restore.yaml",
+        "--signing-key",
+        "/signing/key.pem",
+        "--run-id",
+        "01J9X2QK7C4V0R8YB3ZP6MTS5A",
+        "--attempt",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    args.push(attempt.to_string());
+    if with_grant {
+        args.extend([
+            "--evidence-read-grant".to_string(),
+            "evidenceRead of BackupDestination logweir-t20/d".to_string(),
+        ]);
+    }
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": name, "namespace": NS, "uid": CLEANUP_JOB_UID,
+            "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                "name": NAME, "uid": UID, "controller": true, "blockOwnerDeletion": true}]},
+        "spec": {"backoffLimit": 0, "suspend": true, "template": {"spec": {
+            "restartPolicy": "Never",
+            "containers": [{"name": "runner", "image": "runner:old", "args": args}]}}},
+        "status": {}
+    })
     .to_string()
 }
 
@@ -636,6 +678,18 @@ async fn a_transient_error_at_expiry_is_retried_and_a_gone_job_is_recorded() {
                 status: 200,
                 body: value.to_string(),
             },
+            // The suspended Job this build built (it names the read grant),
+            // or none.
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/jobs/{CLEANUP_JOB}")),
+                status: if code == 404 { 404 } else { 200 },
+                body: if code == 404 {
+                    not_found()
+                } else {
+                    suspended_cleanup_job(CLEANUP_JOB, 1, true)
+                },
+            },
             Route {
                 method: "PATCH",
                 path_suffix: leak(format!("/jobs/{CLEANUP_JOB}")),
@@ -665,5 +719,320 @@ async fn a_transient_error_at_expiry_is_retried_and_a_gone_job_is_recorded() {
             assert!(status.is_empty(), "a transient error recorded {status:?}");
         }
         assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+    }
+}
+
+// ---- Theme A's D1 and D4: the upgrade path out of an older build's grants ----
+
+fn cleanup_name(attempt: u32) -> String {
+    format!("logweir-clone-cleanup-{UID}-{attempt}")
+}
+
+fn job_routes_for(value: &Value, jobs: Vec<(String, u16, String)>) -> Vec<Route> {
+    let mut routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/restores/{NAME}")),
+            status: 200,
+            body: value.to_string(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: run_job(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/jobs/{}", cleanup_name(1))),
+            status: 200,
+            body: run_job(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/restores/{NAME}/status")),
+            status: 200,
+            body: value.to_string(),
+        },
+    ];
+    for (name, status, body) in jobs {
+        routes.push(Route {
+            method: "GET",
+            path_suffix: leak(format!("/jobs/{name}")),
+            status,
+            body,
+        });
+    }
+    routes
+}
+
+/// **D1's upgrade path: a suspended cleanup Job an older controller built is
+/// never resumed.** Its pod would read the scorecard with the run's write
+/// grant (the PoC's 403). At expiry the next attempt is built from it with
+/// this build's grants and image, unsuspended; the clone is `Removing` on
+/// attempt 2. CONTROL: a suspended Job this build built (it names the read
+/// grant) is resumed, and nothing is created.
+///
+/// KILLS: `Start(1)` resuming whatever Job-1 is (the older grant runs);
+/// `build_attempt` copying an older template without `rewire`.
+#[tokio::test]
+async fn an_older_suspended_cleanup_job_is_replaced_not_resumed() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z", "phase": "Active",
+                  "attempts": 0, "jobRef": {"name": CLEANUP_JOB}}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    for older in [true, false] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(job_routes_for(
+            &value,
+            vec![
+                (
+                    cleanup_name(1),
+                    200,
+                    suspended_cleanup_job(&cleanup_name(1), 1, !older),
+                ),
+                (cleanup_name(2), 404, not_found()),
+            ],
+        ));
+        around(
+            &restore(&value),
+            &client,
+            now(),
+            Some("runner:new"),
+            async { Ok(outcome()) },
+        )
+        .await
+        .unwrap();
+        let resumed = bodies_of(&bodies, "PATCH", &format!("/jobs/{}", cleanup_name(1)));
+        let posted = bodies_of(&bodies, "POST", "/jobs");
+        let clone = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"))[0]["status"]
+            ["clone"]
+            .clone();
+        if older {
+            assert!(resumed.is_empty(), "the older Job is never resumed");
+            assert_eq!(posted.len(), 1);
+            let job = &posted[0];
+            assert_eq!(job["metadata"]["name"], cleanup_name(2).as_str());
+            assert_eq!(job["spec"]["suspend"], false);
+            let c = &job["spec"]["template"]["spec"]["containers"][0];
+            assert_eq!(c["image"], "runner:new", "this build's runner");
+            let args: Vec<&str> = c["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            let at = args
+                .iter()
+                .position(|a| *a == "--evidence-read-grant")
+                .expect("the read grant is named");
+            assert_eq!(
+                args[at + 1],
+                weirkeeper::controllers::switchover::INLINE_READ_GRANT
+            );
+            assert_eq!(
+                args[args.iter().position(|a| *a == "--attempt").unwrap() + 1],
+                "2"
+            );
+            assert_eq!(clone["phase"], "Removing");
+            assert_eq!(clone["attempts"], 2);
+            assert_eq!(clone["jobRef"]["name"], cleanup_name(2).as_str());
+        } else {
+            assert_eq!(resumed.len(), 1, "this build's Job is resumed");
+            assert_eq!(resumed[0]["spec"]["suspend"], false);
+            assert!(posted.is_empty());
+            assert_eq!(clone["attempts"], 1);
+        }
+    }
+}
+
+/// **D4's way out: a `RemovalFailed` clone whose last cleanup Job an older
+/// controller built is re-armed with this build's grants**, built
+/// from attempt 1's Job; the clone is `Removing` on attempt 4 and the old
+/// reason is cleared. CONTROL: when the last Job is this build's own (it
+/// names the read grant), the clone holds: nothing is created and nothing
+/// recorded, the finalizer stays for the operator.
+///
+/// KILLS: `Step::Hold` never re-arming (the PoC's clones stay held after the
+/// upgrade); re-arming whatever failed (a loop over this build's own
+/// failures).
+#[tokio::test]
+async fn a_removal_failed_clone_an_older_job_left_gets_one_more_attempt() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z",
+                  "phase": "RemovalFailed", "attempts": 3,
+                  "jobRef": {"name": cleanup_name(3)},
+                  "reason": "the cleanup Job exited 1; 3 attempts failed"}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    for older in [true, false] {
+        let (client, rec, bodies) = mock_client_recording_bodies(job_routes_for(
+            &value,
+            vec![
+                (
+                    cleanup_name(3),
+                    200,
+                    suspended_cleanup_job(&cleanup_name(3), 3, !older),
+                ),
+                (
+                    cleanup_name(1),
+                    200,
+                    suspended_cleanup_job(&cleanup_name(1), 1, !older),
+                ),
+                (cleanup_name(4), 404, not_found()),
+            ],
+        ));
+        around(
+            &restore(&value),
+            &client,
+            now(),
+            Some("runner:new"),
+            async { Ok(outcome()) },
+        )
+        .await
+        .unwrap();
+        let posted = bodies_of(&bodies, "POST", "/jobs");
+        let status = bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}/status"));
+        if older {
+            assert_eq!(posted.len(), 1);
+            assert_eq!(posted[0]["metadata"]["name"], cleanup_name(4).as_str());
+            let c = &posted[0]["spec"]["template"]["spec"]["containers"][0];
+            assert_eq!(c["image"], "runner:new");
+            assert!(c["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--evidence-read-grant"));
+            let clone = &status[0]["status"]["clone"];
+            assert_eq!(clone["phase"], "Removing");
+            assert_eq!(clone["attempts"], 4);
+            assert_eq!(clone["jobRef"]["name"], cleanup_name(4).as_str());
+            assert!(clone["reason"].is_null(), "the old reason is cleared");
+        } else {
+            assert!(posted.is_empty(), "this build's own failure holds");
+            assert!(status.is_empty());
+            assert!(
+                !rec.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.uri.contains(&cleanup_name(4))),
+                "no next attempt is even looked for"
+            );
+        }
+        assert!(bodies_of(&bodies, "PATCH", &format!("/restores/{NAME}")).is_empty());
+    }
+}
+
+/// **HIGH-1 of the fix round's review: a clone `Removing` when the upgrade
+/// lands.** Its attempt-1 Job, built by an older controller (no
+/// `--evidence-read-grant`, image `runner:old`), failed exit 1. The new
+/// controller, configured with `runner:new`, builds attempt 2 from it: the
+/// template is rewired, so attempt 2 runs THIS controller's image, never the
+/// copied one (an older runner refuses the flag the rewire adds, and the clone
+/// would hold for good). CONTROL: a failed attempt whose template carries the
+/// flag is copied with its own image.
+///
+/// KILLS: the rewire path taking the failed Job's image (the review's probe).
+#[tokio::test]
+async fn a_rewired_retry_runs_this_controllers_image_and_a_copy_keeps_its_own() {
+    let status = json!({"phase": "Succeeded", "exitCode": 0,
+        "evidence": {"scorecardKey": "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json"},
+        "clone": {"ttlSeconds": 300, "expiresAt": "2026-10-13T11:00:00Z", "phase": "Removing",
+                  "attempts": 1, "jobRef": {"name": CLEANUP_JOB}}});
+    let value = restore_value(&plan("{ttl_seconds: 300}", "scratch"), &[FINALIZER], status);
+    let line = "clone-cleanup={\"runId\":\"01J9X2QK7C4V0R8YB3ZP6MTS5A\",\"deleted\":[],\
+                \"alreadyAbsent\":[],\"left\":[]}";
+    let pods = json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [{
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "cleanup-pod", "namespace": NS,
+            "labels": {"batch.kubernetes.io/job-name": CLEANUP_JOB, "job-name": CLEANUP_JOB},
+            "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job", "name": CLEANUP_JOB,
+                "uid": CLEANUP_JOB_UID, "controller": true}]},
+        "spec": {"containers": []},
+        "status": {"phase": "Failed", "containerStatuses": [{"name": "runner", "ready": false,
+            "restartCount": 0, "image": "x", "imageID": "x",
+            "state": {"terminated": {"exitCode": 1}}}]}}]});
+    for older in [true, false] {
+        let mut failed: Value =
+            serde_json::from_str(&suspended_cleanup_job(CLEANUP_JOB, 1, !older)).unwrap();
+        failed["spec"]["suspend"] = json!(false);
+        failed["status"] = json!({"conditions": [{"type": "Failed", "status": "True",
+                                     "lastTransitionTime": "2026-10-13T11:00:00Z"}]});
+        let (client, _rec, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/restores/{NAME}")),
+                status: 200,
+                body: value.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/jobs/{}", cleanup_name(2))),
+                status: 404,
+                body: not_found(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: leak(format!("/jobs/{CLEANUP_JOB}")),
+                status: 200,
+                body: failed.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/pods",
+                status: 200,
+                body: pods.to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/log",
+                status: 200,
+                body: format!("starting\n{line}\n"),
+            },
+            Route {
+                method: "POST",
+                path_suffix: "/jobs",
+                status: 201,
+                body: run_job(),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: leak(format!("/restores/{NAME}/status")),
+                status: 200,
+                body: value.to_string(),
+            },
+        ]);
+        around(
+            &restore(&value),
+            &client,
+            now(),
+            Some("runner:new"),
+            async { Ok(outcome()) },
+        )
+        .await
+        .unwrap();
+        let posted = bodies_of(&bodies, "POST", "/jobs");
+        assert_eq!(posted.len(), 1, "attempt 2 is built");
+        assert_eq!(posted[0]["metadata"]["name"], cleanup_name(2).as_str());
+        let c = &posted[0]["spec"]["template"]["spec"]["containers"][0];
+        assert!(
+            c["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--evidence-read-grant"),
+            "attempt 2 names the read grant"
+        );
+        if older {
+            assert_eq!(
+                c["image"], "runner:new",
+                "a rewired template runs this build"
+            );
+        } else {
+            assert_eq!(
+                c["image"], "runner:old",
+                "a copy keeps the failed attempt's image"
+            );
+        }
     }
 }

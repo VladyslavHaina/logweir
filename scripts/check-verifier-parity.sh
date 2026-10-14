@@ -3017,3 +3017,51 @@ done <<< "$(cat "$tmp/mapping-cases.tsv")"
 [ "$mapping_count" -gt 0 ] || fail "walked zero positions-mapping cases"
 [ "$mapping_listed" -ge 1 ] || fail "positions-mapping-index.json must carry at least one accepted case with its document"
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $mapping_count positions-mapping cases ($mapping_accepted accepted, $mapping_listed with every entry named)"
+
+# ---------------------------------------------------------------------------
+# KEY-FILE LOOP (L1, theme A's PoC): the public key file's shape.
+# ---------------------------------------------------------------------------
+# `logweir drill verify` refused a key file with one extra trailing newline
+# that `verify_scorecard.py` accepted, and the script accepted text after the
+# block that the Rust reader refused. Both now take ONE `PUBLIC KEY` block,
+# then only whitespace; RFC 7468's explanatory text before the block is
+# ignored by both. A verdict is compared (rust 0 = python 0; any rust refusal
+# = python 1), over the genuine scorecard and the checked-in key.
+mkdir -p "$tmp/keys"
+cp "$FIX/public.pem" "$tmp/keys/plain.pem"
+{ cat "$FIX/public.pem"; printf '\n \t\n\n'; } > "$tmp/keys/trailing-blank.pem"
+{ printf 'a note\n'; cat "$FIX/public.pem"; } > "$tmp/keys/text-before.pem"
+{ cat "$FIX/public.pem"; printf 'a note\n'; } > "$tmp/keys/text-after.pem"
+# The whitespace set is Rust's `is_ascii_whitespace` on both sides (review
+# L-3): a form feed is whitespace, a vertical tab is not.
+{ cat "$FIX/public.pem"; printf '\f\n'; } > "$tmp/keys/trailing-formfeed.pem"
+{ cat "$FIX/public.pem"; printf '\v\n'; } > "$tmp/keys/trailing-vtab.pem"
+key_cases=0
+while IFS=' ' read -r keyname want; do
+    [ -n "$keyname" ] || continue
+    key_cases=$((key_cases + 1))
+    pub="$tmp/keys/$keyname.pem"
+    set +e
+    "$BIN" drill verify --scorecard "$FIX/scorecard.json" --signature "$FIX/scorecard.sig" \
+        --public-key "$pub" >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    "$PY" "$VERIFIER" "$FIX/scorecard.json" "$FIX/scorecard.sig" "$pub" \
+        >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    if [ "$want" = "accept" ]; then
+        [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "keys/$keyname: drill verify exited $rust_rc, expected 0"; }
+        [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "keys/$keyname: verify_scorecard.py exited $py_rc, expected 0"; }
+    else
+        [ "$rust_rc" -ne 0 ] || fail "keys/$keyname: drill verify accepted a key file it must refuse"
+        [ "$py_rc" -eq 1 ] || { cat "$tmp/py.err" >&2; fail "keys/$keyname: verify_scorecard.py exited $py_rc, expected 1"; }
+    fi
+    echo "check-verifier-parity: keys/$keyname  rust=$rust_rc python=$py_rc  ok"
+done <<< "plain accept
+trailing-blank accept
+text-before accept
+text-after refuse
+trailing-formfeed accept
+trailing-vtab refuse"
+[ "$key_cases" -eq 6 ] || fail "walked $key_cases key-file cases, expected 6"
+echo "check-verifier-parity: both readers agree on all $key_cases key-file shapes"

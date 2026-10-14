@@ -1150,7 +1150,8 @@ pub struct CloneStatus {
     /// `Active`, `Removing`, `Removed`, `RemovalFailed` or `NotKept`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// How many cleanup Jobs have been started (at most 3).
+    /// How many cleanup Jobs have been started: at most 3, and one more when an
+    /// upgrade finds the last one built by an older controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<i64>,
     /// The current cleanup Job.

@@ -309,7 +309,7 @@ spec:
                 nullable: true
                 properties:
                   attempts:
-                    description: How many cleanup Jobs have been started (at most 3).
+                    description: 'How many cleanup Jobs have been started: at most 3, and one more when an upgrade finds the last one built by an older controller.'
                     format: int64
                     nullable: true
                     type: integer

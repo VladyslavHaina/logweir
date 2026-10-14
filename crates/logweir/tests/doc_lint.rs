@@ -2223,25 +2223,43 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the control-evidence mapping page is removed",
             "verify-a-scorecard.md#what-the-scorecard-does-not-claim",
         ),
-        // PROD-18.1 (item 98): the rebuilt console and its addresses.
+        // Item 98 (theme A's D1, D4): the evidence read grant; the runner flag
+        // that names it.
+        (
+            "the switchover and a clone's cleanup read with the read grant",
+            "`--evidence-read-grant`",
+        ),
+        // Item 99 (D3): a refused create leaves nothing; the answer.
+        (
+            "a create refused for a taken approval name",
+            "`409 state_conflict`",
+        ),
+        // Item 100 (L1): the readers agree on a key file; the script version.
+        (
+            "both verifiers read a public key file the same way",
+            "`verify_scorecard.py` 1.34.0",
+        ),
+        // Item 101 (D6): an older runner's pod rows; the row that says it ran.
+        ("an older runner's pod rows say the pod ran", "`runner.pod`"),
+        // PROD-18.1 (item 102): the rebuilt console and its addresses.
         ("the console is rebuilt", "`/ui/#/<namespace>/<page>`"),
-        // FX-30 (item 99): a capped segment is not compared, never a pass.
+        // FX-30 (item 103): a capped segment is not compared, never a pass.
         (
             "a complete verification reads under caps",
             "`covered: false`",
         ),
-        // FX-38 (item 100): a cut Backup listing is Unknown, by name.
+        // FX-38 (item 104): a cut Backup listing is Unknown, by name.
         ("a partial read says partial", "`BackupHistoryTooLarge`"),
-        // FX-36 (item 101): one answer for a receipt not held.
+        // FX-36 (item 105): one answer for a receipt not held.
         (
             "a bound restore reads only its own receipt",
             "`PointBindingMismatch`",
         ),
-        // FX-12 (item 102): one instant per reconcile pass.
+        // FX-12 (item 106): one instant per reconcile pass.
         ("evidence judged at the pass's instant", "`verifiedAt`"),
-        // FX-45 (item 103): a missing READ named before the engine.
+        // FX-45 (item 107): a missing READ named before the engine.
         ("a missing READ is named", "`TopicAuthorizationFailed`"),
-        // FX-46 (item 104): the probe's third line.
+        // FX-46 (item 108): the probe's third line.
         (
             "the probe asks every advertised broker",
             "`brokers-answered=<answered>/<listed>`",

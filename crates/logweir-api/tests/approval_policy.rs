@@ -265,16 +265,26 @@ async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
     );
     assert_eq!(created.code(), "state_conflict");
     assert!(approvals_posted(&app.app.fake).is_empty());
+    // Theme A's D3: refused BEFORE the Restore exists, so nothing is left.
+    assert_eq!(app.app.fake.count("restores", NS_A), 0, "no Restore");
 }
 
 /// **A confirmation for a PREVIOUS subject of the same name is not this
 /// one's.** The console's own document, byte-for-byte what it signs for this
 /// plan, policy and requester -- except that it names another UID (a Restore
 /// of this name that was deleted and recreated). Adopting it would route the
-/// new Restore to execution on an authorization that names a different
-/// object; the controller would refuse it, but the console must not answer
-/// `confirmed` for it either. The control is the same document with the
-/// current UID, which a replay adopts.
+/// Restore to execution on an authorization that names a different object;
+/// the controller would refuse it, but the console must not answer
+/// `confirmed` for it either.
+///
+/// Three cases, each from the same first create:
+/// * the document under the name and NO subject: refused before anything is
+///   created (theme A's D3: a `409` leaves nothing behind);
+/// * the subject an earlier attempt of this request created, and a document
+///   naming ANOTHER UID: the create replays and the document is still not
+///   adopted, nothing is signed;
+/// * THE CONTROL: the same subject and the document naming ITS UID, which the
+///   replay adopts.
 #[tokio::test]
 async fn a_confirmation_naming_another_uid_is_never_adopted() {
     let first = ordinary_app().0;
@@ -285,10 +295,19 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
         "{}",
         String::from_utf8_lossy(&created.body)
     );
+    let restore_name = created.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
     let restore_uid = created.json()["item"]["uid"]
         .as_str()
         .expect("a uid")
         .to_string();
+    let stored_restore = first
+        .app
+        .fake
+        .object("restores", NS_A, &restore_name)
+        .expect("the Restore is stored");
     let stored = approvals_posted(&first.app.fake)
         .pop()
         .expect("the console stored its confirmation");
@@ -300,18 +319,25 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
         bytes.contains(&restore_uid),
         "the document names the subject UID"
     );
-
-    // THE ROW: the same bytes naming a previous object's UID. The Restore is
-    // still created (the subject comes first), but its confirmation is not
-    // adopted and nothing is signed over the foreign object.
-    let seeded = |uid: &str| {
+    // A fresh console holding the document (naming `uid`), and the Restore an
+    // earlier attempt of this request created when `with_subject`.
+    let seeded = |uid: &str, with_subject: bool| {
         let mut object = stored.clone();
         object["spec"]["approvalBytes"] = Value::String(bytes.replace(&restore_uid, uid));
         let target = ordinary_app().0;
         target.app.fake.seed("approvals", NS_A, object);
+        if with_subject {
+            target
+                .app
+                .fake
+                .seed("restores", NS_A, stored_restore.clone());
+        }
         target
     };
-    let foreign = seeded("00000000-0000-4000-8000-0000000000aa");
+    let other_uid = "00000000-0000-4000-8000-0000000000aa";
+
+    // 1. No subject: refused, and NOTHING is created.
+    let foreign = seeded(other_uid, false);
     let refused = ocreate(&foreign, "ordinary-restore-uid").await;
     assert_eq!(
         refused.status,
@@ -320,29 +346,39 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
         String::from_utf8_lossy(&refused.body)
     );
     assert_eq!(refused.code(), "state_conflict");
+    assert!(String::from_utf8_lossy(&refused.body).contains("Nothing was created"));
+    assert_eq!(foreign.app.fake.count("restores", NS_A), 0, "no Restore");
+    assert!(approvals_posted(&foreign.app.fake).is_empty());
+
+    // 2. The earlier attempt's subject, a document naming another UID: the
+    // create replays (creating nothing) and the document is not adopted.
+    let replayed_foreign = seeded(other_uid, true);
+    let refused = ocreate(&replayed_foreign, "ordinary-restore-uid").await;
+    assert_eq!(
+        refused.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert_eq!(refused.code(), "state_conflict");
+    assert_eq!(replayed_foreign.app.fake.count("restores", NS_A), 1);
     assert!(
-        approvals_posted(&foreign.app.fake).is_empty(),
+        approvals_posted(&replayed_foreign.app.fake).is_empty(),
         "nothing is signed over the foreign object"
     );
-    let listed = oget(&foreign, &format!("/api/v1/namespaces/{NS_A}/restores")).await;
-    let subject_uid = listed["items"][0]["uid"]
-        .as_str()
-        .expect("the Restore was created")
-        .to_string();
 
-    // THE CONTROL: the identical sequence, with the document naming THIS
-    // subject's UID, is adopted as this Restore's confirmation.
-    let matching = seeded(&subject_uid);
+    // 3. THE CONTROL: the document naming THIS subject's UID is adopted.
+    let matching = seeded(&restore_uid, true);
     let adopted = ocreate(&matching, "ordinary-restore-uid").await;
     assert_eq!(
         adopted.status,
-        201,
+        200,
         "{}",
         String::from_utf8_lossy(&adopted.body)
     );
     assert_eq!(
         adopted.json()["item"]["uid"].as_str(),
-        Some(subject_uid.as_str())
+        Some(restore_uid.as_str())
     );
     assert_eq!(adopted.json()["authorization"]["state"], "confirmed");
     assert!(
