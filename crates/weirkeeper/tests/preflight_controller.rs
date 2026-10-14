@@ -3686,6 +3686,60 @@ async fn dui26_the_details_config_map_keeps_a_long_topic_and_redacts_free_text()
     assert!(!text.contains(secret), "{text}");
 }
 
+/// DUI-39: a restore check's row names the topic it refuses. `entry_of`
+/// renders a row's bounded `detail` into its status message, and the
+/// message's long-run rule read the sampled 43-character restored topic as a
+/// credential: `target.mappedTopics` said "1 of 1 mapped target topic(s)
+/// already exist ([redacted])", hiding the one topic to delete. A sampled
+/// topic is a NAME (DUI-26): kept whole, here and for `target.topicCreate`.
+///
+/// CONTROLS: an access key id planted in a topic-shaped sample, a sampled
+/// secret that is not topic-shaped, and a secret in the row's own words are
+/// still redacted.
+#[test]
+fn dui39_a_sampled_topic_reaches_the_status_whole_and_a_secret_does_not() {
+    let topic = "rc2r-rc1-settlement-ledger-eu-west-1-orders";
+    assert_eq!(topic.len(), 43);
+    for (id, code) in [
+        (CheckId::TargetMappedTopics, CheckCode::MappedTopicExists),
+        (CheckId::TargetTopicCreate, CheckCode::MappedTopicExists),
+    ] {
+        let row = runner_row(id, CheckState::NotReady, code, Gating::Blocking)
+            .with_detail(json!({"count": 2, "sample": [topic, format!("{topic}/1")]}));
+        let message = entry_of(&row).message.unwrap_or_default();
+        assert!(
+            message.ends_with(&format!(
+                "[detail: {{\"count\":2,\"sample\":[\"{topic}\",\"{topic}/1\"]}}]"
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("[redacted]"), "{message}");
+    }
+
+    // CONTROLS.
+    let secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01+/=";
+    let planted = "orders-AKIAIOSFODNN7EXAMPLE";
+    let row = runner_row(
+        CheckId::TargetMappedTopics,
+        CheckState::NotReady,
+        CheckCode::MappedTopicExists,
+        Gating::Blocking,
+    )
+    .with_message(&format!(
+        "refused with {}",
+        "a".repeat(8) + "Zx9Q2wE4rT6yU8iO0pA1sD3fG5hJ7kL9"
+    ))
+    .with_detail(json!({"count": 2, "sample": [planted, secret]}));
+    let message = entry_of(&row).message.unwrap_or_default();
+    assert!(!message.contains("AKIAIOSFODNN7EXAMPLE"), "{message}");
+    assert!(!message.contains(secret), "{message}");
+    assert!(
+        !message.contains("Zx9Q2wE4rT6yU8iO0pA1sD3fG5hJ7kL9"),
+        "{message}"
+    );
+    assert!(message.contains("[redacted]"), "{message}");
+}
+
 /// **An expired approval refuses the restore before it is submitted**, end to
 /// end, with the verdict taken from the `Approval` and not the roster.
 ///

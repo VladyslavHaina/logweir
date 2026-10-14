@@ -236,7 +236,7 @@ fn sample_value(name: &str) -> String {
     // DUI-26: a Kafka topic name, or `<topic>/<partition>`, is a NAME: it
     // passes the secret-shape rules and not the long-run rule; anything else
     // (a segment key) is redacted as a key path.
-    let redacted = if is_topic_sample(name) {
+    let redacted = if logweir_core::check_contract::is_relayable_topic_sample(name) {
         logweir_core::check_contract::redact_name(name)
     } else {
         crate::check::redact_path(name)
@@ -247,18 +247,6 @@ fn sample_value(name: &str) -> String {
     let mut out: String = redacted.chars().take(DETAIL_VALUE_MAX_CHARS - 1).collect();
     out.push('…');
     out
-}
-
-/// Whether a sample is a legal Kafka topic name, or `<topic>/<partition>`
-/// over one (a selected partition's sample).
-fn is_topic_sample(value: &str) -> bool {
-    use logweir_core::check_contract::is_relayable_topic_name;
-    is_relayable_topic_name(value)
-        || value.rsplit_once('/').is_some_and(|(topic, partition)| {
-            is_relayable_topic_name(topic)
-                && !partition.is_empty()
-                && partition.bytes().all(|b| b.is_ascii_digit())
-        })
 }
 
 /// Run one `operationReadiness`.

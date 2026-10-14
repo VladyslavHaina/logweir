@@ -3785,8 +3785,17 @@ pub fn entry_of(outcome: &CheckOutcome) -> CheckEntry {
             .join("; ");
         message = format!("{message} [{facts}]");
     }
+    // The row's own words and facts are free text. Its bounded `detail` is
+    // walked: a sampled Kafka topic name is a NAME and passes the secret-shape
+    // rules, not the long-run rule, as the runner sampled it (DUI-39: a
+    // 43-character restored topic read `[redacted]` in `target.mappedTopics`,
+    // the one name that refusal is about). The whole is capped once.
+    let mut message = redact(&message);
     if let Some(detail) = outcome.detail.as_ref() {
-        message = format!("{message} [detail: {detail}]");
+        message = format!(
+            "{message} [detail: {}]",
+            logweir_core::check_contract::redact_detail_lines(&detail.to_string())
+        );
     }
     CheckEntry {
         id: outcome.id.as_str().to_string(),
@@ -3820,7 +3829,7 @@ pub fn entry_of(outcome: &CheckOutcome) -> CheckEntry {
             .to_string(),
         ),
         code: Some(outcome.code.as_str().to_string()),
-        message: Some(redact(&message)).filter(|m| !m.is_empty()),
+        message: Some(logweir_core::check_contract::cap(&message)).filter(|m| !m.is_empty()),
         remedy: Some(outcome.remedy.clone()).filter(|m| !m.is_empty()),
         observed_at: outcome.observed_at,
         expires_at: outcome.expires_at,
