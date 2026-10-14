@@ -33,7 +33,8 @@ cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
-landed after the `v0.2.0` tag and are in no release yet.
+landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
+is below.
 
 ### Candidate record
 
@@ -59,6 +60,57 @@ pass.
 | `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
 | Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
+
+### `v0.3.0`: the release after `v0.2.0`
+
+Logweir v2's theme A, cutover (OD-15), built together and proven once on the
+PoC, with its one fix round. It is `v0.2.0` (the next record) plus items 91 to
+101:
+
+- **Consumer positions follow a restore (item 95, PROD-04.2).** A `Switchover`
+  applies the reviewed positions of a verified complete restore to stopped
+  consumer groups on its target, one person or two by the namespace's approval
+  mode, and signs a record; a live group is refused, and the rollback is a
+  download.
+- **A restore can take the source's topic configuration (item 92, PROD-05.2)**
+  and apply the held settings after a passing verdict; **owner detection
+  (item 93, PROD-05.1a)** reads Strimzi `KafkaTopic` resources where the chart
+  grants it (off by default).
+- **Safe clones (item 91, PROD-11.1a):** a scratch restore may keep its topics
+  for a declared time and removes exactly the topics it created.
+- **Point-in-time selection (item 94, PROD-01.1b)** and **sealed runner lines
+  (item 96, FX-43).**
+- **The fix round (items 98 to 101):** the Switchover and the clone cleanup
+  read evidence with the read grant, and a store refusal is never a verdict;
+  a create refused for a taken approval name leaves nothing; both readers read
+  a key file alike; an older runner's Preflight rows say the pod ran.
+- **Before a rollback below this release:** delete the `Switchover`-kind
+  Approvals first (rollback step 7, [kubernetes.md](kubernetes.md)).
+
+The rebuilt console and the v1.1 fixes (items 102 and on) are on `main` after
+this release and are not in it.
+
+### Candidate record, `v0.3.0`
+
+Filled as the next record is: before the tag from the release dry run; the
+chart and archive rows after the tag.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | the commit that adds this record, on `claude/rel-v030`; it differs from the publication commit only under `docs/` |
+| Version tag | `v0.3.0`, approved by the owner on 2026-10-13 (OD-18) once theme A's test pass was green; a full GitHub Release |
+| Publication commit (`release.json` `.images.publication`) | `cc59922e1ac9764b7c8c171113c304d4613f93ee` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [38513884587](https://github.com/VladyslavHaina/logweir/actions/runs/38513884587): `check`, the five `e2e` shards and `publish` (build amd64, build arm64, promote, sign) green |
+| Release dry run (`release.yml` dispatched on `claude/rel-v030` at the publication commit) | [38518413169](https://github.com/VladyslavHaina/logweir/actions/runs/38518413169), every job green; `release.sh verify` on its `release-assets` from a checkout of the publication commit: 14 assets verified |
+| Release run (`release.yml` on the tag) and release drill | — (after the tag) |
+| Runner image digest (`logweir`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:ed8bdea4c67a3c89e0b0f66e59a9c3b96b0830e40951bca178144069c83a9903` |
+| Controller image digest (`weirkeeper`; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:0bb5bfcd81dc13f99f5aaf99b205999f4eb7581e8080c1ea10b25ae35581f48d` |
+| Console image digest (`logweir-console`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:c0986cda49fd14526976fe12e01829aa9f0c2e44a79599d23e2cbe9eb5c38ac9` |
+| Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | `docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6` (amd64 and arm64), built from `d4e32956` (unchanged since `v0.2.0`) |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | — (after the tag) |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | — (after the tag) |
+| Kubernetes exercises run on this candidate | the PoC (docker-desktop, arm64, Kubernetes 1.34, Helm 4.0.1, shared mode with Traefik, Dex and cert-manager, MinIO with least-privilege grants): theme A's single pass `poc-v2a` on `sha-4db6e5bb` (Helm revisions 9 to 17; 18 of P1–P23 passed, the rest blocked by D1 alone; the Strimzi `KafkaTopic` CRD installed for P10 and removed; a `helm rollback` to `v0.2.0` and back, P9, which found D5), then `poc-v2a-r2` on this publication (revisions 18 to 21): the render diff was only chart labels, image tags and one CRD description; `cosign verify` of all four images; the identity keys, the schedule and the catalog counts unchanged; P7u-c, P7u, P1, P1c, P2, P5, P7, P8, P3, P23 and P14 passed once each |
+| Checks deliberately deferred, each with its reason | as `v0.2.0`'s, plus: a Switchover against a destination whose `evidenceRead` cannot be held by a pod (`ControllerIdentity`) reads with `evidenceWrite`, named (item 98); the clone cleanup's ServiceAccount and the evidence destination's UID check on the cleanup path are follow-ups (L-1, L-5 of the fix round's review); the sampled lane's whole-segment decode is a follow-up (FX-30's review) |
 
 ### `v0.2.0`: the release after `v0.2.0-rc.2`
 
@@ -2063,7 +2115,13 @@ refusing the plan; a failed clone torn down at once; the preview. Unit and
 mock-API rows cover the controller's finalizer paths, each fail-closed path
 with its control, and mutants on the deletion rule and the finalizer were all
 killed.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K7 (expiry) and K8 (deletion first).]
+**Scope (PoC):** rows P7 and P8 of `poc-v2a-r2` (build `sha-cc59922e`,
+2026-10-14, the PoC's least-privilege MinIO grants): a clone kept for 300 s
+goes `Removing` at expiry and then `Removed`, its `teardown.deleted` equal to
+the scorecard's `target.creation`, with the attestation written, while a
+stranger topic under the prefix survives; a clone deleted before expiry is
+gone in 7 s with its topics. The first pass (`poc-v2a`, `sha-4db6e5bb`) found
+D1 here (item 98).
 **Rollback:** an older runner refuses a clone plan, and an older controller
 neither sets nor reads `status.clone`. After a rollback, delete a remaining
 clone's topics by hand and remove its `logweir.dev/clone-cleanup` finalizer.
@@ -2216,7 +2274,14 @@ transactional archive; the rollback and its refusal; the subject kind. The
 review row reads every position before the switchover. 14 mutants on the
 mapping rule, the compare, the admission and the apply were killed; the API's
 approval gates are held to the restore's by a parity table.
-[UNVERIFIED — not yet run on a cluster; the combined theme-A PoC pass runs K1 to K5 and K9.]
+**Scope (PoC):** rows P1 to P5 and P9 of `poc-v2a` (build `sha-4db6e5bb`,
+2026-10-14) and, after item 98, P1, P2 and P5 of `poc-v2a-r2` (`sha-cc59922e`):
+a backup with three captured groups, a passing complete restore, and a
+Switchover that applies `k1-app`, whose consumer's first record carries
+`x-original-offset=40`; a live member refused `GroupActive` and a new run
+then applied; a recreated target topic refused `TargetGenerationChanged` with
+nothing committed; the two-person request and approval, and a self-approval
+refused (P3); the subject kind (P4); the rollback hazard of item 98's D5 (P9).
 **Rollback:** an older controller ignores `Switchover` objects, so nothing is
 applied, and a Helm rollback leaves the CRD and its objects inert. **But an
 `Approval` naming a `Switchover`, or a `Preflight` with operation `Switchover`,
@@ -2355,7 +2420,18 @@ the write grant alone fails `EvidenceUnreadable` by name, nothing committed or
 deleted); after the fix round's review, rows for a rewired retry's image (with
 a copied attempt's as the control), the cleaned cause on both sides, and the
 `Switchover` Job's plan mount with its CA paths. 17 mutants were killed.
-[UNVERIFIED — not yet run on a cluster; the PoC re-run runs P1, P2, P5, P7, P8, the D4 upgrade row and a clone that fails its attempt 1 under the older build before the upgrade.]
+**Scope (PoC):** `poc-v2a-r2` (build `sha-cc59922e`, 2026-10-14), on the PoC's
+least-privilege MinIO grants: the Switchover (P1) reads with
+`evidenceRead of BackupDestination logweir-poc/primary`, writes with the
+writer's grant and holds no variable of the archive reader's; through a
+destination whose `evidenceRead` is the writer's credential it ends `Failed`
+`EvidenceUnreadable`, naming the key, the grant and `AccessDenied`, with
+nothing committed (P1c); a clone the older build left `RemovalFailed` is
+re-armed once by the upgrade, at attempt 4, and `Removed` (P7u); an older
+build's suspended attempt-1 Job is never resumed and attempt 2 removes the
+clone (P7u); a clone whose attempt 1 failed under the older build just before
+the upgrade gets attempt 2 on this build's runner image with the flag, and is
+`Removed` (P7u-c).
 **Rollback:** an older controller builds both Jobs with the write grant again,
 and an older runner refuses the new flag, so roll both together. Nothing
 stored changes.
@@ -2372,6 +2448,9 @@ Before, the subject was created and then refused, and it failed
 **Scope:** API rows for both kinds and one under a Governed policy, whose
 taken name is the `-confirmation`, each with its control under a free name,
 and the replay rows; 5 mutants were killed.
+**Scope (PoC):** row P3 of `poc-v2a-r2` (`sha-cc59922e`): a resubmission whose
+approval name is taken answers `409 state_conflict` "…Nothing was created…"
+and the Restore count is unchanged; a fresh plan answers 201 and runs.
 **Rollback:** an older API creates the subject before refusing again.
 
 #### 100. Both verifiers read a public key file the same way (L1)
@@ -2399,6 +2478,10 @@ it, `runner.pod` says the pod ran and exited, and the projection rows say they
 were in place, instead of "the check pod has not started".
 **Do:** nothing; roll the runner image to the controller's (item 96).
 **Scope:** one controller row with its control; 1 mutant was killed.
+**Scope (PoC):** row P23 of `poc-v2a-r2` (`sha-cc59922e`), under an older
+runner set through Helm values: `runner.image` reads `notReady`
+`CheckContractMismatch` with the `RunnerOlderThanController` sentence and
+`runner.pod` "the check pod ran and its runner exited 1".
 **Rollback:** an older controller says "the check pod has not started" again.
 
 ### Required operator actions after `v0.2.0-rc.1`
