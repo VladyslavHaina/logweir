@@ -361,6 +361,7 @@ fn inputs<'a>(
         schedules,
         slots,
         rehearsal,
+        backups_complete: true,
         now: now(),
     }
 }
@@ -3405,4 +3406,182 @@ fn an_empty_capture_is_never_a_policys_recovery_point() {
         Some(point_id("b-empty").as_str())
     );
     assert_eq!(outcome.health, p::Health::Healthy);
+}
+
+// FX-38: a cut or partly unreadable read is never a verdict
+
+/// **(4) A `Backup` listing cut at its bound is `Unknown`, never a verdict.**
+/// The API server lists by name, so past 1 000 `Backup`s the runs not read
+/// may be the newest: the point, the failure streak and the last attempt are
+/// all unknown, so none is published and none opens an alert; an alert
+/// already open stays open (`Unknown` resolves nothing). Every page here
+/// answers the same runs and a `continue` token, so the walk stops at its
+/// five pages with more to read.
+/// CONTROLS: the same runs without the token are a verdict: `Healthy` with
+/// the point, the attempt and a streak of 0; three failed runs open
+/// `BackupFailure`.
+/// MUTANTS: `list_backups` answering complete, `evaluate` ignoring
+/// `backups_complete`, or a streak published over the cut listing.
+#[test]
+fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
+    let mut spec = spec_value();
+    merge(
+        &mut spec,
+        &json!({"objectives": {"requireCatalogAvailability": false}}),
+    );
+    let listing = |backups: Vec<Value>, cut: bool| {
+        let mut list: Value = serde_json::from_str(&backup_list(backups)).unwrap();
+        if cut {
+            list["metadata"]["continue"] = json!("more");
+        }
+        let mut routes = vec![
+            ok(SOURCE_PATH, source_object()),
+            ok(DESTINATION_PATH, destination_object()),
+            ok(SCHEDULE_PATH, schedule_object(json!({}))),
+            ok(BACKUPS_PATH, list.to_string()),
+            ok(RESTORES_PATH, restore_list(Vec::new())),
+        ];
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+    let fresh = || vec![backup("b-1", 2, json!({}))];
+    let (outcome, recorder, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(fresh(), true),
+    );
+    assert_eq!(outcome.health, p::Health::Unknown);
+    assert_eq!(outcome.reason, p::FreshnessReason::BackupHistoryTooLarge);
+    let lists = requests(&recorder)
+        .iter()
+        .filter(|(m, u)| m == "GET" && u.split('?').next().is_some_and(|p| p.ends_with("/backups")))
+        .count();
+    assert_eq!(
+        lists,
+        pp::MAX_BACKUP_PAGES,
+        "the bound still bounds the read"
+    );
+    let status = last_status_patch(&bodies);
+    assert_eq!(status["status"]["health"].as_str(), Some("Unknown"));
+    for field in ["lastAvailablePoint", "lastAttempt", "consecutiveFailedRuns"] {
+        assert!(
+            status["status"][field].is_null(),
+            "{field} is not published over a cut listing: {status}"
+        );
+    }
+    let protected = condition(&status, "Protected");
+    assert_eq!(protected["status"].as_str(), Some("Unknown"));
+    assert_eq!(protected["reason"].as_str(), Some("BackupHistoryTooLarge"));
+    assert!(
+        protected["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("more than 1000 Backup objects")),
+        "{protected}"
+    );
+
+    // CONTROL: the whole listing is a verdict, with its facts.
+    let (outcome, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(fresh(), false),
+    );
+    assert_eq!(outcome.health, p::Health::Healthy);
+    let status = last_status_patch(&bodies);
+    assert!(
+        status["status"]["lastAvailablePoint"].is_object(),
+        "{status}"
+    );
+    assert!(status["status"]["lastAttempt"].is_object(), "{status}");
+    assert_eq!(status["status"]["consecutiveFailedRuns"], json!(0));
+
+    // Three failed runs: the whole listing opens `BackupFailure` (CONTROL)...
+    let failed = || {
+        [2, 3, 4]
+            .into_iter()
+            .map(|h| {
+                backup(
+                    &format!("f-{h}"),
+                    h,
+                    json!({"status": {"phase": "Failed", "exitCode": 1, "capture": null}}),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let open_failure = |status: &Value| {
+        status["status"]["alerts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| a["kind"] == "BackupFailure" && a["state"] == "Open")
+    };
+    let (_, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(failed(), false),
+    );
+    let whole = last_status_patch(&bodies);
+    assert!(open_failure(&whole), "{whole}");
+    // ...the cut one opens nothing,
+    let (_, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(failed(), true),
+    );
+    let cut = last_status_patch(&bodies);
+    assert!(!open_failure(&cut), "{cut}");
+    // ...and an alert already open stays open, while the stored streak, point
+    // and attempt are cleared.
+    let stored = whole["status"].clone();
+    let (_, _, bodies) = drive(&policy_with(spec, stored), listing(failed(), true));
+    let after = last_status_patch(&bodies);
+    assert!(open_failure(&after), "{after}");
+    assert!(
+        after["status"]["consecutiveFailedRuns"].is_null(),
+        "{after}"
+    );
+    assert!(after["status"]["lastAttempt"].is_null(), "{after}");
+}
+
+/// **(5) A catalog line this build cannot read makes the view unreadable.**
+/// The line may be the very point the verdict is about; skipping it would
+/// answer "the point is gone". The page holds the fresh run's row and a
+/// garbled one: `Unknown`, `CatalogUnreadable`.
+/// CONTROL: the page without the garbled line answers `Healthy`.
+#[test]
+fn fx38_an_unreadable_catalog_line_is_an_unreadable_view() {
+    let with_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    let run = |garbled: bool| {
+        let entry = catalog_entry("b-1", 2, "Available", "Verified");
+        let body = if garbled {
+            format!("{entry}\n{{\"pointId\": 7\n")
+        } else {
+            format!("{entry}\n")
+        };
+        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+        let mut catalog = catalog_routes(entry);
+        catalog[1] = ok(
+            PAGE_PATH,
+            json!({
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": PAGE_CM, "namespace": NS},
+                "data": {"entries.jsonl": body}
+            })
+            .to_string(),
+        );
+        routes.extend(catalog);
+        routes.push(patch(STATUS_PATH));
+        drive(&policy_with(with_catalog.clone(), json!({})), routes)
+    };
+    let (outcome, _, bodies) = run(true);
+    assert_eq!(outcome.health, p::Health::Unknown);
+    assert_eq!(outcome.reason, p::FreshnessReason::CatalogUnreadable);
+    assert_eq!(
+        condition(&last_status_patch(&bodies), "Protected")["status"].as_str(),
+        Some("Unknown")
+    );
+    // CONTROL.
+    assert_eq!(run(false).0.health, p::Health::Healthy);
 }

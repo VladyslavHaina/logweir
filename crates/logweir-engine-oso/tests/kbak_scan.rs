@@ -5,7 +5,8 @@
 //! `TooLarge`, before holding anything past its cap — a body that decompresses
 //! past the cap, whatever the codec.
 use logweir_engine_oso::kbak::{
-    decode_segment, scan_segment, RecordPrefix, ScanError, ScanLimits, ZSTD_WINDOW_LOG_MAX,
+    decode_segment, digest_segment, scan_segment, RecordDigest, RecordPrefix, ScanError,
+    ScanLimits, ZSTD_WINDOW_LOG_MAX,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -280,4 +281,189 @@ fn a_passed_deadline_stops_the_scan() {
         other => panic!("{other:?}"),
     }
     assert!(scan_segment(&bytes, &limits(1 << 30), 6, &mut |_| true).is_ok());
+}
+
+// ======================================= FX-30: `digest_segment`
+
+const LINEAGE: &str = "x-original-offset";
+
+fn digest_all(bytes: &[u8], cap: u64) -> Result<Vec<RecordDigest>, ScanError> {
+    let mut out = Vec::new();
+    digest_segment(bytes, &limits(cap), LINEAGE, &mut |r| {
+        out.push(r);
+        true
+    })?;
+    Ok(out)
+}
+
+/// What the complete lane computed before FX-30, from the whole decode: the
+/// ordered digest and the LAST lineage header, when it is 8 bytes.
+/// Offset, timestamp, ordered digest and kept lineage value.
+type Digested = (i64, i64, [u8; 32], Option<[u8; 8]>);
+
+fn expected_digests(bytes: &[u8]) -> Vec<Digested> {
+    decode_segment(bytes)
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let kept = r
+                .headers
+                .iter()
+                .rev()
+                .find(|(k, _)| k == LINEAGE)
+                .and_then(|(_, v)| v.as_deref())
+                .and_then(|v| <[u8; 8]>::try_from(v).ok());
+            (
+                r.offset,
+                r.timestamp,
+                logweir_kafka::fingerprint::record_digest_ordered(
+                    r.key.as_deref(),
+                    r.value.as_deref(),
+                    &r.headers,
+                    r.timestamp,
+                ),
+                kept,
+            )
+        })
+        .collect()
+}
+
+fn as_tuples(d: &[RecordDigest]) -> Vec<Digested> {
+    d.iter()
+        .map(|r| (r.offset, r.timestamp, r.digest, r.kept))
+        .collect()
+}
+
+/// One uncompressed record with every shape the digest must agree on: a null
+/// key, a value longer than the stream's 16 KiB chunk, a header key that is
+/// not UTF-8 (hashed lossily, as `decode_segment` presents it), a null
+/// header value, and lineage headers whose LAST one decides.
+fn shaped(last_lineage: Option<&[u8]>) -> Vec<u8> {
+    let mut headers: Vec<(Vec<u8>, Option<Vec<u8>>)> = vec![
+        (vec![0xFF, b'k'], Some(b"v".to_vec())),
+        (b"empty".to_vec(), None),
+        (
+            LINEAGE.as_bytes().to_vec(),
+            Some(41i64.to_le_bytes().to_vec()),
+        ),
+    ];
+    headers.push((
+        LINEAGE.as_bytes().to_vec(),
+        last_lineage.map(<[u8]>::to_vec),
+    ));
+    let value: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+    let mut rec = Vec::new();
+    rec.extend_from_slice(&1_760_000_000_123i64.to_le_bytes());
+    rec.extend_from_slice(&42i64.to_le_bytes());
+    rec.extend_from_slice(&(-1i32).to_le_bytes());
+    rec.extend_from_slice(&(value.len() as i32).to_le_bytes());
+    rec.extend_from_slice(&value);
+    rec.extend_from_slice(&(headers.len() as u16).to_le_bytes());
+    for (k, v) in &headers {
+        rec.extend_from_slice(&(k.len() as u16).to_le_bytes());
+        rec.extend_from_slice(k);
+        match v {
+            None => rec.extend_from_slice(&(-1i32).to_le_bytes()),
+            Some(v) => {
+                rec.extend_from_slice(&(v.len() as i32).to_le_bytes());
+                rec.extend_from_slice(v);
+            }
+        }
+    }
+    let mut body = (rec.len() as u32).to_le_bytes().to_vec();
+    body.extend_from_slice(&rec);
+    envelope(1, 0, &body)
+}
+
+/// The streamed digest is the whole decode's, record for record, over every
+/// codec, the real upstream segment and the shaped records: the complete lane
+/// compares exactly what it compared before FX-30.
+#[test]
+fn the_digest_stream_agrees_with_the_full_decoder() {
+    for name in ["none.kbak", "zstd.kbak", "lz4.kbak", "upstream-0.21.0.kbak"] {
+        let bytes = fixture(name);
+        let got = digest_all(&bytes, 1 << 30).unwrap();
+        assert!(!got.is_empty(), "{name}");
+        assert_eq!(as_tuples(&got), expected_digests(&bytes), "{name}");
+    }
+    let eight = 42i64.to_le_bytes();
+    for last in [Some(&eight[..]), Some(&b"nine bytes"[..9]), None] {
+        let bytes = shaped(last);
+        let got = digest_all(&bytes, 1 << 30).unwrap();
+        assert_eq!(as_tuples(&got), expected_digests(&bytes), "{last:?}");
+    }
+    // The LAST lineage header decides, and a malformed last one is none.
+    assert_eq!(
+        digest_all(&shaped(Some(&eight)), 1 << 30).unwrap()[0].kept,
+        Some(eight)
+    );
+    assert_eq!(
+        digest_all(&shaped(Some(b"123456789")), 1 << 30).unwrap()[0].kept,
+        None
+    );
+    assert_eq!(digest_all(&shaped(None), 1 << 30).unwrap()[0].kept, None);
+}
+
+/// The scan's bounds hold for the digest stream: a zstd bomb is `TooLarge` at
+/// the cap, a corrupt segment `Unreadable`, and under the cap it reads.
+#[test]
+fn the_digest_stream_stops_at_the_cap() {
+    let value = 4u64 << 20;
+    let mut body = Vec::new();
+    body.extend_from_slice(&((8 + 8 + 4 + 4 + value + 2) as u32).to_le_bytes());
+    body.extend_from_slice(&0i64.to_le_bytes());
+    body.extend_from_slice(&0i64.to_le_bytes());
+    body.extend_from_slice(&(-1i32).to_le_bytes());
+    body.extend_from_slice(&(value as i32).to_le_bytes());
+    body.resize(body.len() + value as usize, 0);
+    body.extend_from_slice(&0u16.to_le_bytes());
+    let bytes = envelope(1, 1, &zstd::encode_all(&body[..], 19).unwrap());
+    match digest_all(&bytes, 1 << 20) {
+        Err(ScanError::TooLarge(_)) => {}
+        other => panic!("a bomb past the cap is TooLarge: {other:?}"),
+    }
+    assert_eq!(
+        digest_all(&bytes, 8 << 20).unwrap().len(),
+        1,
+        "NEGATIVE CONTROL: under the cap it reads"
+    );
+    let mut corrupt = fixture("none.kbak");
+    let n = corrupt.len();
+    corrupt[n / 2] ^= 0xFF;
+    assert!(matches!(
+        digest_all(&corrupt, 1 << 30),
+        Err(ScanError::Unreadable(_))
+    ));
+}
+
+/// A frame that declares more than the cap leaves is refused before a byte of
+/// it is decoded, naming the frame: one 4 MiB record under a 1 MiB cap, and
+/// the sixteenth of twenty 64 KiB records, the first that does not fit.
+#[test]
+fn a_frame_past_the_cap_is_refused_before_it_is_decoded() {
+    let zeros = |count: u64, len: usize| {
+        let mut body = Vec::new();
+        for _ in 0..count {
+            body.extend_from_slice(&frame(&vec![0u8; len]));
+        }
+        envelope(count, 1, &zstd::encode_all(&body[..], 3).unwrap())
+    };
+    for scan in [
+        |b: &[u8]| scan_all(b, 1 << 20, 6).map(|v| v.len()),
+        |b: &[u8]| digest_all(b, 1 << 20).map(|v| v.len()),
+    ] {
+        match scan(&zeros(1, 4 << 20)) {
+            Err(ScanError::TooLarge(m)) => assert!(m.contains("declares a"), "{m}"),
+            other => panic!("one frame past the cap: {other:?}"),
+        }
+        match scan(&zeros(20, 64 << 10)) {
+            Err(ScanError::TooLarge(m)) => assert!(m.starts_with("record 15 declares"), "{m}"),
+            other => panic!("frames past the cap together: {other:?}"),
+        }
+        assert_eq!(
+            scan(&zeros(15, 64 << 10)).unwrap(),
+            15,
+            "CONTROL: under the cap"
+        );
+    }
 }

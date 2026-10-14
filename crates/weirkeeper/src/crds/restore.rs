@@ -1275,4 +1275,13 @@ pub struct Teardown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 256))]
     pub failed: Option<Vec<TeardownFailure>>,
+    /// How many topics it removed; `deleted` lists at most 256 of them. Absent
+    /// on a status written before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_count: Option<i64>,
+    /// How many topics it could not remove; `failed` lists at most 256 of
+    /// them. Absent on a status written before the field, or from a runner
+    /// older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_count: Option<i64>,
 }

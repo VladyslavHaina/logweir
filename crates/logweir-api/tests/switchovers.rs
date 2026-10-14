@@ -127,3 +127,47 @@ async fn a_switchover_is_created_held_to_its_plan_and_approved_by_kind() {
         String::from_utf8_lossy(&recorded.body)
     );
 }
+
+/// **FX-38: a Switchover whose groups are partial says so through the API.**
+/// The status the controller lifts from a run log with an unreadable group
+/// line (`weirkeeper::controllers::switchover::status_from_run`, the same
+/// function both sides read) is projected with its `message`, which names the
+/// partial groups; counts stay unpublished. CONTROL: a whole run's view
+/// carries its normal message and no such note.
+#[test]
+fn fx38_a_partial_switchover_view_carries_the_note() {
+    use weirkeeper::controllers::switchover::status_from_run;
+    let object = |log: &str| {
+        let mut s: weirkeeper::crds::switchover::Switchover = serde_json::from_value(json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
+            "metadata": {"name": "swo-1", "namespace": NS_A, "uid": "s-uid"},
+            "spec": {
+                "planBytes": plan(), "approvalRef": {"name": "cutover"},
+                "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 900
+            }
+        }))
+        .expect("a Switchover");
+        s.status = Some(status_from_run(2, log, "swo-1-job"));
+        s
+    };
+    let whole = "switchover-group={\"source\":\"app\",\"target\":\"app\",\"outcome\":\"applied\",\"partitions\":[{}]}\n\
+                 switchover-outcome=PartiallyApplied\n";
+    let partial = format!("{whole}switchover-group={{\"source\":\"b\"\n");
+    let view = logweir_api::routes::switchovers::view(&object(&partial), false);
+    let message = view.message.clone().expect("the note is published");
+    assert!(
+        message.contains("1 group line(s) are not listed here"),
+        "{message}"
+    );
+    assert_eq!(view.groups.len(), 1);
+    let published = serde_json::to_value(&view).unwrap();
+    assert!(published.get("counts").is_none(), "{published}");
+    // CONTROL.
+    let view = logweir_api::routes::switchovers::view(&object(whole), false);
+    let message = view.message.expect("the normal message");
+    assert!(
+        message.starts_with("the switchover Job exited 2"),
+        "{message}"
+    );
+    assert!(!message.contains("not listed"), "{message}");
+}

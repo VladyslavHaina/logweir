@@ -970,12 +970,18 @@ pub struct TeardownView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub deleted: Vec<String>,
-    /// Whether `deleted` was cut short by this projection's row bound.
+    /// Whether `deleted` is not every topic removed: cut short by this
+    /// projection's row bound, or the status counts more (FX-38).
     pub deleted_truncated: bool,
-    /// The ones that could not be removed.
+    /// The ones that could not be removed: at most 256 of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(default)]
     pub failed: Vec<TeardownFailureView>,
+    /// How many topics could not be removed, when the status says (FX-38);
+    /// more than `failed` lists means the list is cut. Absent on a status
+    /// written before the field: then a list of 256 may be cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_count: Option<i64>,
 }
 
 /// PROD-11.1a: a TTL clone's lifetime and cleanup, from
@@ -1532,10 +1538,13 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
                     .take(MAX_TEARDOWN_ROWS)
                     .map(|name| bounded(name, 249))
                     .collect(),
-                deleted_truncated: t
-                    .deleted
-                    .as_ref()
-                    .is_some_and(|d| d.len() > MAX_TEARDOWN_ROWS),
+                deleted_truncated: t.deleted.as_ref().is_some_and(|d| {
+                    d.len() > MAX_TEARDOWN_ROWS
+                        || t.deleted_count.is_some_and(|n| {
+                            usize::try_from(n).is_ok_and(|n| n > d.len().min(MAX_TEARDOWN_ROWS))
+                        })
+                }),
+                failed_count: t.failed_count,
                 failed: t
                     .failed
                     .iter()

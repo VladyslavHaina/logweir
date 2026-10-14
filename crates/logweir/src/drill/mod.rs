@@ -2780,6 +2780,19 @@ fn execute_with_validated_approval(
     })
 }
 
+/// Whether a run's consumer positions may be mapped (08.1-A4): it passed a
+/// complete verification that covered every partition. A partition the bound
+/// stopped, or one with a segment past a per-segment cap (FX-30), is not
+/// covered, so nothing is mapped over it.
+#[must_use]
+pub fn maps_positions(sc: &Scorecard) -> bool {
+    sc.outcome == Outcome::Pass
+        && sc.integrity.verification.as_ref().is_some_and(|v| {
+            v.coverage == logweir_core::scorecard::COVERAGE_COMPLETE
+                && v.complete.as_ref().is_some_and(|c| c.covered)
+        })
+}
+
 /// **PROD-04.2.** Maps the bound point's captured positions onto the target
 /// and binds the mapping into the scorecard about to be signed: only when the
 /// run passed a complete verification that covered every partition (08.1-A4).
@@ -2796,12 +2809,7 @@ fn attach_positions_mapping(
     scans: &phase7_verify::positions::Scans,
     transactional: bool,
 ) {
-    let passing_complete = sc.outcome == Outcome::Pass
-        && sc.integrity.verification.as_ref().is_some_and(|v| {
-            v.coverage == logweir_core::scorecard::COVERAGE_COMPLETE
-                && v.complete.as_ref().is_some_and(|c| c.covered)
-        });
-    if !passing_complete {
+    if !maps_positions(sc) {
         tracing::info!(
             "consumer positions not mapped: the run is not a passing complete verification"
         );
@@ -4374,6 +4382,57 @@ mod tests {
     fn a_scorecard() -> Scorecard {
         serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json"))
             .expect("the checked-in fixture parses")
+    }
+
+    /// FX-30: positions are mapped only over a passing complete verification
+    /// that covered every partition; a capped segment makes `covered` false,
+    /// and then nothing is mapped. KILLS: dropping the `covered` conjunct.
+    #[test]
+    fn positions_are_mapped_only_over_a_covered_passing_complete_run() {
+        use logweir_core::scorecard::{
+            ArchiveIntegrity, CompleteVerification, CompleteWindow, ReplayComparison, Verification,
+            COVERAGE_COMPLETE,
+        };
+        let with = |covered: bool, outcome: Outcome| {
+            let mut sc = a_scorecard();
+            sc.outcome = outcome;
+            sc.integrity.verification = Some(Verification {
+                positions_mapping: None,
+                coverage: COVERAGE_COMPLETE.to_string(),
+                comparison_basis: String::new(),
+                header_order: String::new(),
+                application: String::new(),
+                gaps: vec![],
+                pruned: vec![],
+                complete: Some(CompleteVerification {
+                    covered,
+                    incomplete_reason: (!covered).then(|| "past a cap".to_string()),
+                    max_records: None,
+                    window: CompleteWindow {
+                        start_ms: None,
+                        end_ms: 0,
+                    },
+                    archive: ArchiveIntegrity {
+                        segments: 0,
+                        segments_verified: 0,
+                        segments_failed: vec![],
+                        segments_unverified: vec![],
+                        records_decoded: 0,
+                        offset_holes: 0,
+                    },
+                    replay: ReplayComparison::default(),
+                    partitions: vec![],
+                }),
+            });
+            sc
+        };
+        assert!(maps_positions(&with(true, Outcome::Pass)), "CONTROL");
+        assert!(!maps_positions(&with(false, Outcome::Pass)));
+        assert!(!maps_positions(&with(true, Outcome::FailIntegrity)));
+        assert!(
+            !maps_positions(&a_scorecard()),
+            "a sampled run maps nothing"
+        );
     }
 
     /// The fixture scorecard as a whole `RestoreOutcome`, with the keys

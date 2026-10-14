@@ -274,6 +274,18 @@ one are NOT compared, and the signed block says `covered: false` with the
 reason; the verdict is then never `pass`. **Complete coverage is never
 silently replaced by sampling.** Absent means no bound.
 
+**Per-segment caps** (FX-30). Each archived segment is streamed, each record
+hashed as it is decoded and never held whole. The pass that reads every
+segment of the selected partitions before the restore stops the run first:
+exit 1 for a segment over 1 GiB stored, and exit 3 for a segment the restore
+reads whose body decompresses past 1 GiB. The complete verification's own caps
+(the same 1 GiB each) cover what that pass lets through: a segment outside the
+restore window whose body decompresses past the cap (a corrupt segment, or a
+decompression bomb), and an object that grew past the stored cap between the
+two reads. Its partition is then not compared, the segment counts as
+unverified, and `covered: false` names both caps. It is never a crash, and
+never a `pass`.
+
 **Refused at phase 0** (exit 3, before anything runs), because each asks for
 two verifications at once:
 

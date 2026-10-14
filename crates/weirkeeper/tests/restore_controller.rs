@@ -13679,3 +13679,30 @@ async fn fx43_a_killed_restore_is_not_named_older() {
     let (_, status) = fx43_pass(1, older).await;
     assert_eq!(status["exitReason"], "RunnerOlderThanController");
 }
+
+/// **FX-38 (8): a teardown list cut at 256 says how many were left.** The
+/// runner's `teardown-failed-count=` line reaches `failedCount`, held between
+/// the names kept and the names the plan maps. CONTROLS: without the line no
+/// count is written (an older runner); a count past the mapped names is held
+/// to them.
+#[test]
+fn fx38_a_cut_teardown_list_carries_the_runners_count() {
+    use weirkeeper::controllers::restore::teardown_failed;
+    let mapped: Vec<String> = (0..300).map(|i| format!("drill-t{i}")).collect();
+    let left: Vec<(String, String)> = mapped.iter().map(|t| (t.clone(), "x".into())).collect();
+    let lines = logweir_core::execution_contract::teardown_failed_lines(&left);
+    let log = format!("{}\n{}\n", lines[0], lines[1]);
+    let t = teardown_failed(&log, &mapped).expect("a teardown block");
+    assert_eq!(t["failed"].as_array().map(Vec::len), Some(256));
+    assert_eq!(t["failedCount"], serde_json::json!(300));
+    // CONTROL: the list alone, as an older runner prints it.
+    let t = teardown_failed(&format!("{}\n", lines[0]), &mapped).expect("a teardown block");
+    assert!(t.get("failedCount").is_none(), "{t}");
+    // A count past the plan's names is held to them.
+    let t = teardown_failed(
+        &format!("{}\nteardown-failed-count=9999\n", lines[0]),
+        &mapped,
+    )
+    .expect("a teardown block");
+    assert_eq!(t["failedCount"], serde_json::json!(300));
+}

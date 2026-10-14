@@ -1833,19 +1833,35 @@ fn partial_view_note(walked: i64, complete: bool, from_start: bool) -> Option<St
 
 /// The `Synced=True` message: what was published, and what the ten counters
 /// could not carry.
-fn sync_message(materialised: &view::View, parsed: &view::SyncBody, tally: &view::Tally) -> String {
+#[must_use]
+pub fn sync_message(
+    materialised: &view::View,
+    parsed: &view::SyncBody,
+    tally: &view::Tally,
+) -> String {
     let mut message = format!(
         "the walk completed; the newest {} of {} points are materialised across {} page(s)",
         materialised.entries,
         tally.counts.total.unwrap_or(0),
         materialised.pages.len()
     );
-    if materialised.truncated {
+    // Each cause of a truncated view in its own words (FX-38): only the
+    // window has points beyond it, and only the window is cured by viewLimit.
+    if materialised.beyond_window {
         message.push_str(
             ". The view is a WINDOW: points beyond it are counted and histogrammed here and \
              listed by `logweir catalog list` against the archive",
         );
     }
+    if materialised.dropped_for_space > 0 {
+        message.push_str(&format!(
+            ". {} entr(y/ies) did not fit the view's {} page(s) and are not listed; raising \
+             viewLimit does not list them, and `logweir catalog list` does",
+            materialised.dropped_for_space,
+            materialised.pages.len()
+        ));
+    }
+
     if parsed.skipped_entries > 0 {
         message.push_str(&format!(
             ". {} entr(y/ies) did not parse and were skipped, never counted as available",

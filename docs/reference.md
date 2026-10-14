@@ -166,6 +166,7 @@ it holds (`logweir_core::runner_line::one_line`).
 | `progress-contract=<n>` then `progress-phase=<0..9>:<name>` | While running; optional | `status.progress.runnerPhase` |
 | `topic-preflight=<json>` | Exit 0 only: phase 0's observation of the target: `timestampType`, `retentionMs`, `timestampBound` | `status.topicPreflight` |
 | `teardown-failed=[{"topic":…,"error":…}]` | When a teardown left a topic; at most 256 entries | `status.teardown.failed` |
+| `teardown-failed-count=<n>` | With `teardown-failed=`: how many topics it left, of which the list carries at most 256 | `status.teardown.failedCount` |
 | `teardown-key=logweir/drills/<run_id>.teardown.json` | When phase 9's signed teardown attestation was written | `status.teardown` |
 | `scorecard-key=logweir/drills/<run_id>.json` | Exit 0 and exit 2 | `status.evidence` |
 | `sidecar-key=logweir/drills/<run_id>.sig` | Exit 0 and exit 2 | `status.evidence` |
@@ -177,7 +178,7 @@ it holds (`logweir_core::runner_line::one_line`).
 
 | Line | When | Read into |
 |---|---|---|
-| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). Not printed when the evidence store or the cluster did not answer (exit 1) or the attestation was not persisted (exit 4) | `status.teardown` (`deleted`, `failed`, `attestationKey`) and `status.clone` |
+| `clone-cleanup={"runId":…,"deleted":[…],"alreadyAbsent":[…],"left":[{"topic":…,"reason":…}],"attestationKey":…}` | Exit 0, exit 1 for a failed delete or an unreadable ID, and exit 3 (it then carries `"refused":"<reason>"`, followed by the refusal's two lines). Not printed when the evidence store or the cluster did not answer (exit 1) or the attestation was not persisted (exit 4) | `status.teardown` (`deleted`, `failed`, `attestationKey`, and `deletedCount` and `failedCount`, which count past the lists' 256) and `status.clone` |
 | `refusal-detail={…}` then `refusal-reason=GuardRefused` | Exit 3, the last two lines | `status.clone.reason` (from `refused`) |
 
 The evidence keys (interface I8) are the final lines of a run that signed a
@@ -606,7 +607,8 @@ point `Unreadable`, `UnsupportedFormat`, `Conflict` or `AlreadyDeleted`.
 `status.health`: `Healthy`, `AtRisk`, `Stale`, `Unprotected`, `Unknown`.
 `Protected`'s reason: `WithinObjective`, `PointOlderThanObjective`,
 `NoAvailablePoint`, `CatalogStale`, `CatalogUnreadable`, `SourceMissing`,
-`DestinationMissing`, `ScheduleMissing`, `PointFactsUnread`.
+`DestinationMissing`, `ScheduleMissing`, `PointFactsUnread`,
+`BackupHistoryTooLarge`.
 `status.availabilityBasis`: `KubernetesStatus`, `Catalog`, `CatalogStale`.
 `Ready`: `Evaluated`, `NotEvaluated`. `NotificationsDelivered`:
 `NotificationsWithdrawn`. Ledger kinds include `Staleness`, `ArchiveUnavailable`

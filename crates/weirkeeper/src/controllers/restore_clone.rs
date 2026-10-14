@@ -398,9 +398,14 @@ pub fn ended(exit_code: Option<i32>, report: Option<CloneCleanupReport>) -> Ende
 /// characters per reason).
 /// `earlier` is what earlier attempts already deleted (the stored
 /// `status.teardown.deleted`), kept so a later attempt's list does not
-/// replace it.
+/// replace it; `earlier_count` is the stored `deletedCount`, which counts past
+/// that list's 256, so a retry never counts fewer than were already removed.
 #[must_use]
-pub fn teardown_value(report: &CloneCleanupReport, earlier: &[String]) -> Value {
+pub fn teardown_value(
+    report: &CloneCleanupReport,
+    earlier: &[String],
+    earlier_count: Option<i64>,
+) -> Value {
     let bounded = |s: &str| -> String { s.chars().take(256).collect() };
     let mut t = serde_json::Map::new();
     if let Some(key) = &report.attestation_key {
@@ -412,10 +417,18 @@ pub fn teardown_value(report: &CloneCleanupReport, earlier: &[String]) -> Value 
             deleted.push(name);
         }
     }
+    // The lists are cut at the CRD's bound; the counts say how many there
+    // were, so a cut list never reads as whole (FX-38).
+    let computed = i64::try_from(deleted.len()).unwrap_or(i64::MAX);
+    t.insert(
+        "deletedCount".into(),
+        json!(computed.max(earlier_count.unwrap_or(0))),
+    );
     t.insert(
         "deleted".into(),
         json!(deleted.into_iter().take(256).collect::<Vec<_>>()),
     );
+    t.insert("failedCount".into(), json!(report.left.len()));
     t.insert(
         "failed".into(),
         json!(report
@@ -788,6 +801,11 @@ async fn watch(
         .and_then(|s| s.teardown.as_ref())
         .and_then(|t| t.deleted.clone())
         .unwrap_or_default();
+    let earlier_count = restore
+        .status
+        .as_ref()
+        .and_then(|s| s.teardown.as_ref())
+        .and_then(|t| t.deleted_count);
     let outcome = if older {
         // Refused, not retried: the next attempt runs the same image.
         Ended::Refused(format!(
@@ -805,7 +823,7 @@ async fn watch(
                 &restores,
                 &name,
                 json!({"phase": PHASE_REMOVED, "reason": null}),
-                Some(teardown_value(&report, &earlier)),
+                Some(teardown_value(&report, &earlier, earlier_count)),
             )
             .await?;
             if has_finalizer(&stored) {
@@ -824,7 +842,9 @@ async fn watch(
             Ok(Requeue::AwaitChange)
         }
         Ended::Failed(why, report) => {
-            let teardown = report.as_ref().map(|r| teardown_value(r, &earlier));
+            let teardown = report
+                .as_ref()
+                .map(|r| teardown_value(r, &earlier, earlier_count));
             if attempts >= MAX_ATTEMPTS {
                 patch_clone(
                     &restores,
@@ -1389,14 +1409,51 @@ mod tests {
             refused: None,
         };
         assert_eq!(
-            teardown_value(&report, &[]),
+            teardown_value(&report, &[], None),
             json!({"attestationKey": "logweir/drills/r.cleanup.json", "deleted": ["c-a"],
+                   "deletedCount": 1, "failedCount": 1,
                    "failed": [{"topic": "c-b", "error": "CloneTargetReplaced: x"}]})
+        );
+        // FX-38: past the CRD's 256 the lists are cut and the counts say how
+        // many there were. KILLS: a count of the cut list.
+        let many = CloneCleanupReport {
+            deleted: (0..300).map(|i| format!("c-d{i}")).collect(),
+            left: (0..300)
+                .map(|i| logweir_core::target_creation::CloneCleanupLeft {
+                    topic: format!("c-l{i}"),
+                    reason: "x".into(),
+                })
+                .collect(),
+            ..report.clone()
+        };
+        let cut = teardown_value(&many, &[], None);
+        assert_eq!(cut["deleted"].as_array().map(Vec::len), Some(256));
+        assert_eq!(cut["failed"].as_array().map(Vec::len), Some(256));
+        assert_eq!(
+            (cut["deletedCount"].clone(), cut["failedCount"].clone()),
+            (json!(300), json!(300))
+        );
+        // FX-38 review L3: a retry after an attempt that removed 300 keeps
+        // the stored count, though the stored list holds 256 and this attempt
+        // removed nothing new. KILLS: the count of the merged list alone.
+        let stored: Vec<String> = (0..256).map(|i| format!("c-d{i}")).collect();
+        let retry = CloneCleanupReport {
+            deleted: Vec::new(),
+            ..report.clone()
+        };
+        assert_eq!(
+            teardown_value(&retry, &stored, Some(300))["deletedCount"],
+            json!(300)
+        );
+        // CONTROL: a larger computed count wins over a smaller stored one.
+        assert_eq!(
+            teardown_value(&many, &[], Some(5))["deletedCount"],
+            json!(300)
         );
         // An earlier attempt's deletions stay listed (review LOW-4); KILLS a
         // later attempt's list replacing them.
         assert_eq!(
-            teardown_value(&report, &["c-z".into(), "c-a".into()])["deleted"],
+            teardown_value(&report, &["c-z".into(), "c-a".into()], None)["deleted"],
             json!(["c-z", "c-a"])
         );
     }

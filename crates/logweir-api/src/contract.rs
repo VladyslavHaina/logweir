@@ -4517,6 +4517,11 @@ pub struct SwitchoverView {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The sentence beside `reason`. It says when `groups` is partial: a
+    /// group line the controller could not read, or a run log it did not
+    /// read at all (FX-38). Then the signed record names every group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub groups: Vec<SwitchoverGroupView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_key: Option<String>,
