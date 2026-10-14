@@ -24,6 +24,7 @@
 //! | `a_hidden_target_group_is_not_visible_and_never_created` | C13 | the classification answers `NotVisible` (never absent) |
 //! | `a_transactional_archive_maps_nothing` | C16 | every position `TransactionalArchive` |
 //! | `an_absent_group_is_created_on_3_9` | C14, C2 (3.9) | absent target group created; a live classic group refused |
+//! | `d1_the_switchover_reads_with_the_read_grant_on_least_privilege` | theme A's D1 | on the PoC's least-privilege MinIO policies the switchover reads with the read grant, writes its record with the write grant and applies; CONTROL: the write grant in the read slot fails exit 1 `EvidenceUnreadable` (never `MappingDigestMismatch`), naming the grant and `AccessDenied`, nothing committed |
 //! | `the_review_reads_every_position_before_the_switchover` | §3.8 (K1's preview) | `logweir check run` over a `switchoverReadiness` plan: the restore's evidence and mapping verify, the target is the restore's, every group admissible, and the details list every partition `exact` at its mapped offset with no committed position; with a live member the groups row is `GroupActive`; over the scorecard without `target.creation` the target row is `TargetIdentityUnknown`; nothing is committed |
 //!
 //! # `target.creation`
@@ -1073,6 +1074,196 @@ fn the_headline_a_paused_consumer_resumes_at_its_record() {
         Some(0),
         "drill verify --positions-mapping:\n{}",
         text(&verify)
+    );
+}
+
+/// `logweir switchover run` as the `Switchover` Job runs it (theme A's D1):
+/// under the store contract, `read` in the archive slot (`AWS_*`, which the
+/// runner reads the restore's evidence with) and `write` in the evidence slot
+/// (`LOGWEIR_EVIDENCE_*`, which it writes the record with; `archive` when the
+/// two are one user), and the read grant named.
+fn switchover_with_grants(
+    r: &Restore,
+    scorecard_key: &str,
+    p: &Plan,
+    approval: &Path,
+    read: &harness::MinioUser,
+    write: &harness::MinioUser,
+    grant: &str,
+) -> Run {
+    let (_, approver_pub) = approver();
+    let mut c = Command::new(bin());
+    c.args(["switchover", "run", "--plan"])
+        .arg(&p.path)
+        .arg("--restore-plan")
+        .arg(&r.spec)
+        .arg("--approval")
+        .arg(approval)
+        .arg("--approver-key")
+        .arg(&approver_pub)
+        .arg("--evidence-keys")
+        .arg(evidence_keyring())
+        .arg("--signing-key")
+        .arg(signing_pem())
+        .args(["--scorecard-key", scorecard_key])
+        .args([
+            "--namespace",
+            "e2e",
+            "--name",
+            "sw-d1",
+            "--uid",
+            "sw-d1-uid",
+        ])
+        .args([
+            "--store-contract-version",
+            "1",
+            "--evidence-read-grant",
+            grant,
+        ])
+        .env("LOGWEIR_STORE_CONTRACT_VERSION", "1")
+        .env("LOGWEIR_ARCHIVE_CREDENTIALS", "static")
+        .env("AWS_ACCESS_KEY_ID", &read.access_key_id)
+        .env("AWS_SECRET_ACCESS_KEY", &read.secret_access_key)
+        .env("AWS_REGION", "us-east-1")
+        .env("AWS_ALLOW_HTTP", "true")
+        .env("AWS_EC2_METADATA_DISABLED", "true");
+    if read.access_key_id == write.access_key_id {
+        c.env("LOGWEIR_EVIDENCE_CREDENTIALS", "archive");
+    } else {
+        c.env("LOGWEIR_EVIDENCE_CREDENTIALS", "static")
+            .env("LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID", &write.access_key_id)
+            .env(
+                "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY",
+                &write.secret_access_key,
+            );
+    }
+    let out = output_within(c, 300);
+    let record_key = line(&out, "switchover-record-key=");
+    let record = record_key
+        .as_ref()
+        .map(|k| serde_json::from_slice(&fetch(k)).expect("a record"));
+    eprintln!(
+        "[prod-04-2] switchover (grants): exit={:?} outcome={:?} reason={:?}",
+        out.status.code(),
+        line(&out, "switchover-outcome="),
+        line(&out, "failure-reason=").or_else(|| line(&out, "refusal-reason="))
+    );
+    Run {
+        out,
+        record,
+        record_key,
+    }
+}
+
+/// **Theme A's D1, live: the switchover reads the restore's evidence with the
+/// READ grant and writes its record with the WRITE grant, on the PoC's
+/// least-privilege MinIO policies** (`harness::least_privilege_evidence`:
+/// the writer may only `PutObject` under `logweir/*`, the reader only
+/// `GetObject`). The switchover succeeds, the paused group resumes at its
+/// record, and the record is written.
+///
+/// NEGATIVE CONTROL, first, on the same restore and plan: the write grant in
+/// the read slot (what `sha-4db6e5bb`'s Job read with). It fails by NAME,
+/// exit 1 and `failure-reason=EvidenceUnreadable`, the detail naming the key,
+/// the grant and `AccessDenied`; never `MappingDigestMismatch`; nothing is
+/// committed, and its `Failed` record is still written by the write grant.
+#[test]
+fn d1_the_switchover_reads_with_the_read_grant_on_least_privilege() {
+    let (writer, reader) = harness::least_privilege_evidence();
+    let n = nonce();
+    let topic = format!("sw-d1-{n}");
+    let app = format!("app-d1-{n}");
+    make_topic(&topic, 2, &[]);
+    produce(&topic, 0, 0, 100);
+    produce(&topic, 1, 0, 100);
+    commit(&app, &[(&topic, 0, 40), (&topic, 1, 40)]);
+    let b = backup(&format!("p042-d1-{n}"), &topic, &[&app]);
+    let r = restore(
+        &restore_spec(&b, &topic, &format!("d1-{n}-"), true, ""),
+        "d1",
+    );
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "the restore:\n{}",
+        text(&r.out)
+    );
+    let target = restored_topic(&r, &topic);
+    let (sc_key, sc_bytes) = own_scorecard(&r);
+    let p = plan(&r, &sc_bytes, &[], "d1");
+    let approval = approve(&p.path, "Switchover", "d1");
+    let grant = "evidenceRead of BackupDestination e2e/least-privilege";
+
+    // NEGATIVE CONTROL: the write grant reads.
+    let old = switchover_with_grants(
+        &r,
+        &sc_key,
+        &p,
+        &approval,
+        &writer,
+        &writer,
+        "evidenceWrite of BackupDestination e2e/least-privilege",
+    );
+    assert_eq!(
+        old.out.status.code(),
+        Some(1),
+        "the control:\n{}",
+        text(&old.out)
+    );
+    assert_eq!(
+        line(&old.out, "failure-reason=").as_deref(),
+        Some("EvidenceUnreadable")
+    );
+    assert!(
+        line(&old.out, "refusal-reason=").is_none(),
+        "never a verdict"
+    );
+    let detail = line(&old.out, "switchover-detail=").expect("the detail line");
+    assert!(
+        detail.starts_with(&format!(
+            "EvidenceUnreadable: could not read {sc_key} with grant evidenceWrite of \
+             BackupDestination e2e/least-privilege: AccessDenied"
+        )),
+        "{detail}"
+    );
+    assert!(!text(&old.out).contains("MappingDigestMismatch"));
+    assert_eq!(
+        committed(&app, &target, 2),
+        vec![None, None],
+        "nothing applied"
+    );
+    let old_record = old
+        .record
+        .as_ref()
+        .expect("the write grant wrote the record");
+    assert_eq!(old_record.outcome, "Failed");
+
+    // THE ROW: the read grant reads, the write grant writes.
+    let run = switchover_with_grants(&r, &sc_key, &p, &approval, &reader, &writer, grant);
+    assert_eq!(
+        run.out.status.code(),
+        Some(0),
+        "the switchover:\n{}",
+        text(&run.out)
+    );
+    let rec = run.record.as_ref().expect("a signed record");
+    assert_eq!(rec.outcome, "Succeeded");
+    let first = first_records(&app, &target, 2);
+    for p in [0, 1] {
+        assert_eq!(
+            first.get(&p).and_then(|x| x.1),
+            Some(40),
+            "partition {p} resumes at its record"
+        );
+    }
+    write_evidence(
+        "d1_least_privilege",
+        &json!({
+            "topic": topic, "target": target, "scorecard_key": sc_key,
+            "control_exit": old.out.status.code(), "control_detail": detail,
+            "control_record": old.record_key, "record": rec,
+            "first_records": format!("{first:?}"),
+        }),
     );
 }
 
