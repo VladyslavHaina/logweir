@@ -20,8 +20,8 @@ the `docker-desktop` context; name your own explicitly.
 - **Nodes: linux/amd64 or linux/arm64.** The controller, runner and console
   images, the identity hook's included, are published for both
   ([support-matrix.md, *Architectures*](support-matrix.md#architectures)).
-- **Engine: Logweir's build of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.3`
-  (build 3, PROD-00.3g's patch 0003;
+- **Engine: Logweir's build of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.4`
+  (build 4, patch 0001's rustls 0.23.46;
   [../third_party/kafka-backup-build.env](../third_party/kafka-backup-build.env)),
   inside the runner image. The floor is 0.21.0; an engine below it, such as
   `v0.19.1`, is `unsupported (lever-absent)`, never a fault. A standalone CLI
