@@ -1659,14 +1659,21 @@ fn block_rest(
 /// It is applied HERE because this function is the ONE place the stream is
 /// assembled, so a new producer of a detail line cannot forget — which is the
 /// property a per-push-site redaction would not have. `redact` is idempotent
-/// and fires only on credential shapes, so an ordinary key or topic name is
-/// unchanged, and it never emits a quote, so a JSON line stays a JSON line.
+/// and fires only on credential shapes, and it never emits a quote, so a JSON
+/// line stays a JSON line. A Kafka topic or group NAME in a typed field
+/// (`topic`, `mappedTopicExists`, `group`, `target`) is not free text and is
+/// kept whole when it is a legal name
+/// ([`logweir_core::check_contract::redact_detail_line`], DUI-26): a 43-character
+/// restored topic is an ordinary name, and the long-run rule ate it.
 #[must_use]
 pub fn details_stream(lines: &[String]) -> Vec<u8> {
     let mut out = String::new();
     let mut kept = 0usize;
     for line in lines {
-        let line = crate::check::redact_path(line);
+        // DUI-26: a Kafka topic or group name in a typed field is kept; every
+        // other string is redacted as before.
+        let line =
+            logweir_core::check_contract::redact_detail_line(line, &crate::check::redact_path);
         if out.len() + line.len() + 1 > DETAILS_MAX_BYTES {
             break;
         }

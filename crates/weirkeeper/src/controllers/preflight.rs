@@ -7093,11 +7093,10 @@ pub async fn reconcile_preflight(
         Some(bytes) if !bytes.is_empty() => {
             // Redacted by rule, not by `redact`, whose 512-character cap is
             // right for a message and destroys a stream: the details document
-            // is JSON lines, and a cut line is unparseable.
-            let text = logweir_core::check_contract::apply_rules(
-                &String::from_utf8_lossy(bytes),
-                logweir_core::check_contract::redaction_rules(),
-            );
+            // is JSON lines, and a cut line is unparseable. A Kafka topic or
+            // group name in a typed field is kept whole (DUI-26).
+            let text =
+                logweir_core::check_contract::redact_detail_lines(&String::from_utf8_lossy(bytes));
             let object = check::chunks::build_details(&job_name, &namespace, &owner, &text);
             match check::chunks::write_all(
                 client,

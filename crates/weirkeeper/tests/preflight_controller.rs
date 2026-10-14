@@ -3610,6 +3610,82 @@ async fn a_missing_segment_publishes_a_sample_and_writes_the_details_config_map(
     );
 }
 
+/// **DUI-26: the controller's pass over the details keeps a Kafka name.** The
+/// relayed details hold a 60-character mapped topic under `mappedTopicExists`
+/// and a secret-shaped run in a free-text field; the details `ConfigMap` this
+/// controller writes keeps the topic byte for byte and redacts the run. Its
+/// old pass (every rule over the whole document) turned the topic into
+/// `[redacted]`, so a console reading the details named a topic that is not
+/// the mapping's.
+///
+/// KILLS: the controller's pass sending the typed name through the free-text
+/// rules; the free-text field kept.
+#[tokio::test]
+async fn dui26_the_details_config_map_keeps_a_long_topic_and_redacts_free_text() {
+    let job = job_name(CheckPlanKind::RestorePreflight);
+    let topic = format!("dui26r-settlement-ledger-eu-west-orders-{}", "t".repeat(20));
+    assert_eq!(topic.len(), 60);
+    let secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+    let details = format!(
+        "{}\n{}",
+        json!({"check": "target.mappedTopics", "mappedTopicExists": topic}),
+        json!({"check": "topicConfiguration.preview", "refusal": format!("refused {secret}")})
+    );
+    let relayed = vec![runner_row(
+        CheckId::TargetMappedTopics,
+        CheckState::NotReady,
+        CheckCode::MappedTopicExists,
+        Gating::Blocking,
+    )
+    .with_detail(json!({"count": 1, "sample": [topic]}))];
+    let log = relay_log(PLAN_DIGEST, relayed, Some(&details));
+    let mut routes = restore_referent_routes();
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.push(route(
+        "GET",
+        "/pods",
+        list_of(vec![owned_pod(&job, terminated(0))]),
+    ));
+    routes.push(route("GET", "/events", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "-plan",
+        plan_config_map(&job, PLAN_DIGEST).to_string(),
+    ));
+    routes.push(route("GET", "/log", log));
+    routes.push(route("POST", "/configmaps", echo("ConfigMap", "details")));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    routes.push(route("PATCH", leak(job.clone()), echo("Job", &job)));
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&preflight(restore_request(json!({}))), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let recorded = bodies.lock().expect("bodies");
+    let posted = recorded
+        .iter()
+        .find(|b| b.method == "POST" && b.uri.contains("/configmaps"))
+        .expect("the details ConfigMap was written");
+    let object: Value = serde_json::from_str(&posted.body).expect("JSON");
+    let text = object["data"]
+        .as_object()
+        .and_then(|d| d.values().next())
+        .and_then(Value::as_str)
+        .expect("the details document");
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .collect();
+    assert_eq!(lines[0]["mappedTopicExists"], topic.as_str(), "{text}");
+    assert_eq!(lines[1]["refusal"], "refused [redacted]", "{text}");
+    assert!(!text.contains(secret), "{text}");
+}
+
 /// **An expired approval refuses the restore before it is submitted**, end to
 /// end, with the verdict taken from the `Approval` and not the roster.
 ///

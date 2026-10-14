@@ -14956,3 +14956,31 @@ fn a_restore_preflight_previews_the_topic_configuration_diff() {
         "{details}"
     );
 }
+
+/// **DUI-26: a sampled topic name, or `<topic>/<partition>`, is a NAME**: a
+/// 60-character topic survives the bounded `detail` of a Preflight row (a
+/// missing topic, a mapped topic that exists, an empty partition) whole.
+/// CONTROL: a segment key whose component is a 60-character run is still
+/// redacted, as before.
+///
+/// KILLS: the sample redacted as free text; every sample kept.
+#[test]
+fn dui26_a_sampled_topic_name_is_kept_and_a_long_key_component_is_not() {
+    let topic = format!("dui26-settlement-ledger-eu-west-orders-{}", "t".repeat(21));
+    assert_eq!(topic.len(), 60);
+    let key = format!("logweir-archive/{}/segment-0001", "Q1w2E3r4".repeat(8));
+    let d = logweir::check::kinds::readiness::detail(&[
+        topic.clone(),
+        format!("{topic}/3"),
+        key.clone(),
+    ]);
+    assert_eq!(d["sample"][0], topic.as_str(), "{d}");
+    assert_eq!(d["sample"][1], format!("{topic}/3"), "{d}");
+    assert_ne!(d["sample"][2], key.as_str(), "{d}");
+    assert!(
+        d["sample"][2]
+            .as_str()
+            .is_some_and(|s| s.contains(logweir_core::check_contract::REDACTED)),
+        "{d}"
+    );
+}
