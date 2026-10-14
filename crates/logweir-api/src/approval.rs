@@ -109,6 +109,234 @@ pub fn confirmation_name(approval_name: &str) -> String {
     format!("{approval_name}{CONFIRMATION_SUFFIX}")
 }
 
+/// The annotation on a request object naming who signed in when it was made:
+/// `<issuer>#<subject>`. Written beside the signed bytes, never read for a
+/// decision.
+pub const REQUESTER_ANNOTATION: &str = "logweir.dev/requester";
+
+/// DUI-21: the annotation holding the [`RequesterDisplay`] document's exact
+/// bytes, and the one holding this console's signature over them
+/// ([`PAYLOAD_TYPE_REQUESTER_DISPLAY`]). An annotation anyone who may patch
+/// Approvals can change, so its content is served only when that signature
+/// verifies and the document binds this very request ([`verified_display`]).
+pub const REQUESTER_DISPLAY_ANNOTATION: &str = "logweir.dev/requester-display";
+/// See [`REQUESTER_DISPLAY_ANNOTATION`].
+pub const REQUESTER_DISPLAY_SIGNATURE_ANNOTATION: &str = "logweir.dev/requester-display-signature";
+
+/// The DSSE payload type of a [`RequesterDisplay`]. Not the request's: the
+/// console key's signature over one never verifies as the other.
+pub const PAYLOAD_TYPE_REQUESTER_DISPLAY: &str = "application/vnd.logweir.requester-display+json";
+
+/// The document's `kind`.
+pub const REQUESTER_DISPLAY_KIND: &str = "RequesterDisplay";
+
+/// The longest email an identifier may be (RFC 5321's path limit).
+pub const MAX_EMAIL_BYTES: usize = 254;
+
+/// **What an approver is shown about who asked, signed by the console**
+/// (DUI-21, second security review). Bound to one request by its approval
+/// name, the requester principal exactly as the signed request names it, and
+/// the plan hash; the email only when the provider verified it and it has an
+/// identifier's shape ([`email_shape_ok`]), the name only from a claim the
+/// install opted into, cleaned ([`shown_name`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequesterDisplay {
+    /// [`REQUESTER_DISPLAY_KIND`].
+    pub kind: String,
+    /// The Approval the subject references.
+    pub approval_name: String,
+    /// `<issuer>#<subject>`, as the signed request's requester.
+    pub requester: String,
+    /// The signed request's plan hash.
+    pub plan_hash: String,
+    /// The provider-verified email.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The name from an opted-in claim: self-asserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// **Whether an email may be shown as an identifier, exactly as received**:
+/// printable ASCII with no whitespace, at most [`MAX_EMAIL_BYTES`], and of
+/// the form `local@domain` (one `@`, neither side empty). An identifier is
+/// never normalised or cut: an address that fails is not shown at all, and
+/// the principal is used, so two different addresses can never render alike.
+#[must_use]
+pub fn email_shape_ok(raw: &str) -> bool {
+    raw.len() <= MAX_EMAIL_BYTES
+        && raw.bytes().all(|b| b.is_ascii_graphic())
+        && matches!(
+            raw.split_once('@'),
+            Some((local, domain)) if !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+        )
+}
+
+/// Build and sign the display document for one request, or `None` when there
+/// is nothing to show beyond the signed principal. Returns the document's
+/// exact bytes and the sidecar, for the two annotations.
+///
+/// # Errors
+///
+/// When the signer fails.
+pub fn requester_display(
+    key: &ConfirmationKey,
+    approval_name: &str,
+    requester: &str,
+    plan_hash: &str,
+    email: Option<&str>,
+    name: Option<&str>,
+) -> Result<Option<(String, String)>, String> {
+    let email = email.filter(|e| email_shape_ok(e)).map(str::to_string);
+    let name = name.and_then(shown_name);
+    if email.is_none() && name.is_none() {
+        return Ok(None);
+    }
+    let document = RequesterDisplay {
+        kind: REQUESTER_DISPLAY_KIND.to_string(),
+        approval_name: approval_name.to_string(),
+        requester: requester.to_string(),
+        plan_hash: plan_hash.to_string(),
+        email,
+        name,
+    };
+    let bytes = serde_json::to_string(&document)
+        .map_err(|e| format!("rendering the display document: {e}"))?;
+    let sidecar = sign_detached(&key.key, PAYLOAD_TYPE_REQUESTER_DISPLAY, bytes.as_bytes())
+        .map_err(|e| format!("signing the display document: {e}"))?;
+    let sidecar = serde_json::to_string(&sidecar)
+        .map_err(|e| format!("rendering the display sidecar: {e}"))?;
+    Ok(Some((bytes, sidecar)))
+}
+
+/// What a request object may show of its requester beyond the signed
+/// principal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisplayCheck {
+    /// The object carries no display document (a request made before them, or
+    /// one with nothing to show): the signed principal alone.
+    Absent,
+    /// The console's own signature verifies over a document binding THIS
+    /// request; its email (shape held again) and name may be shown.
+    Verified {
+        /// The provider-verified email.
+        email: Option<String>,
+        /// The opted-in, self-asserted name.
+        name: Option<String>,
+    },
+    /// A document is there and it does not verify, or binds another request:
+    /// nothing of it is shown, and the page says so.
+    NotVerified,
+}
+
+/// **The display document of a request, served only if the console signed
+/// it for this request.** The signature must verify under this console's key
+/// and the display payload type; the document must parse (no unknown field),
+/// be a [`REQUESTER_DISPLAY_KIND`], and name exactly `requester` (the signed
+/// request's), `approval_name` and `plan_hash`; its email must still have an
+/// identifier's shape. Anything else is [`DisplayCheck::NotVerified`].
+#[must_use]
+pub fn verified_display(
+    key: &ConfirmationKey,
+    annotations: &std::collections::BTreeMap<String, String>,
+    requester: &str,
+    approval_name: &str,
+    plan_hash: &str,
+) -> DisplayCheck {
+    let document = annotations.get(REQUESTER_DISPLAY_ANNOTATION);
+    let signature = annotations.get(REQUESTER_DISPLAY_SIGNATURE_ANNOTATION);
+    let (Some(document), Some(signature)) = (document, signature) else {
+        return if document.is_none() && signature.is_none() {
+            DisplayCheck::Absent
+        } else {
+            DisplayCheck::NotVerified
+        };
+    };
+    let Ok(sidecar) = serde_json::from_str::<Sidecar>(signature) else {
+        return DisplayCheck::NotVerified;
+    };
+    if logweir_evidence::verify::verify_detached(
+        &key.key.verifying_key(),
+        PAYLOAD_TYPE_REQUESTER_DISPLAY,
+        document.as_bytes(),
+        &sidecar,
+    )
+    .is_err()
+    {
+        return DisplayCheck::NotVerified;
+    }
+    let Ok(display) = serde_json::from_str::<RequesterDisplay>(document) else {
+        return DisplayCheck::NotVerified;
+    };
+    let binds = display.kind == REQUESTER_DISPLAY_KIND
+        && display.requester == requester
+        && display.approval_name == approval_name
+        && display.plan_hash == plan_hash
+        && display.email.as_deref().is_none_or(email_shape_ok);
+    if !binds {
+        return DisplayCheck::NotVerified;
+    }
+    DisplayCheck::Verified {
+        email: display.email,
+        name: display.name.as_deref().and_then(shown_name),
+    }
+}
+
+/// The most characters a shown name keeps.
+pub const MAX_SHOWN_NAME_CHARS: usize = 128;
+
+/// A character that changes how text around it is displayed without being
+/// visible itself: the bidirectional controls and isolates, the zero-width
+/// characters, the byte-order mark, the Arabic letter mark and the soft
+/// hyphen. A name shown to another person must not reorder or hide what sits
+/// beside it.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// **A name as it may be shown to another person** (DUI-21): control and
+/// invisible formatting characters removed, any run of whitespace one space,
+/// the ends trimmed, and at most [`MAX_SHOWN_NAME_CHARS`] characters (a cut
+/// name ends with `…`). `None` when nothing printable is left.
+#[must_use]
+pub fn shown_name(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut space = false;
+    for c in raw.chars() {
+        if is_invisible_format(c) {
+            continue;
+        }
+        if c.is_whitespace() || c.is_control() {
+            space = !out.is_empty();
+            continue;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    if out.chars().count() > MAX_SHOWN_NAME_CHARS {
+        let cut: String = out.chars().take(MAX_SHOWN_NAME_CHARS - 1).collect();
+        return Some(format!("{}…", cut.trim_end()));
+    }
+    Some(out)
+}
+
 /// The console's `ConsoleConfirmation` signing key.
 pub struct ConfirmationKey {
     key: SigningKey,
@@ -712,6 +940,71 @@ mod tests {
         assert!(merge_countersignature(&confirmation, &confirmation).is_err());
         let other_type = sign_detached(&approver, "application/other", doc).expect("sign");
         assert!(merge_countersignature(&confirmation, &other_type).is_err());
+    }
+}
+
+#[cfg(test)]
+mod email_shape_tests {
+    use super::{email_shape_ok, MAX_EMAIL_BYTES};
+
+    #[test]
+    fn an_email_is_an_identifier_only_exactly_as_received() {
+        assert!(email_shape_ok("bob@corp.com"));
+        // A zero-width space, a space, a tab, a newline, a non-ASCII letter: not shown at all.
+        for refused in [
+            "bob@corp.com\u{200B}",
+            "bob\u{200B}@corp.com",
+            "bob @corp.com",
+            "bob@corp.com ",
+            "bob@corp.com\n",
+            "bob@cörp.com",
+            "bobcorp.com",
+            "bob@@corp.com",
+            "@corp.com",
+            "bob@",
+            "",
+        ] {
+            assert!(!email_shape_ok(refused), "{refused:?}");
+        }
+        // At the limit it is kept whole; one byte over, it is not shown (never cut).
+        let at_limit = format!(
+            "{}@corp.com",
+            "a".repeat(MAX_EMAIL_BYTES - "@corp.com".len())
+        );
+        assert_eq!(at_limit.len(), MAX_EMAIL_BYTES);
+        assert!(email_shape_ok(&at_limit));
+        assert!(!email_shape_ok(&format!("a{at_limit}")));
+    }
+}
+
+#[cfg(test)]
+mod shown_name_tests {
+    use super::{shown_name, MAX_SHOWN_NAME_CHARS};
+
+    #[test]
+    fn a_name_keeps_its_letters_and_loses_what_would_hide_or_reorder_text() {
+        assert_eq!(shown_name("Alice Martin").as_deref(), Some("Alice Martin"));
+        // Letters of any script stay: a name is not an identifier.
+        assert_eq!(shown_name("José Ñúñez").as_deref(), Some("José Ñúñez"));
+        // A right-to-left override, an isolate, a zero-width joiner, a BOM and a bell go;
+        // a newline and a tab are a space; the ends are trimmed.
+        assert_eq!(
+            shown_name("  \u{202E}Mallory\u{2066}\u{200D}\u{FEFF}\u{0007}\n\tadmin  ").as_deref(),
+            Some("Mallory admin")
+        );
+        // Nothing printable left is no name, never an empty one.
+        assert_eq!(shown_name("\u{202E}\u{200B} \n"), None);
+    }
+
+    #[test]
+    fn a_long_name_is_cut_to_the_cap() {
+        let long = "x".repeat(MAX_SHOWN_NAME_CHARS * 4);
+        let shown = shown_name(&long).expect("a name");
+        assert_eq!(shown.chars().count(), MAX_SHOWN_NAME_CHARS);
+        assert!(shown.ends_with('…'));
+        // The control: a name at the cap is kept whole.
+        let at_cap = "y".repeat(MAX_SHOWN_NAME_CHARS);
+        assert_eq!(shown_name(&at_cap).as_deref(), Some(at_cap.as_str()));
     }
 }
 

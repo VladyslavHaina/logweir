@@ -1861,6 +1861,26 @@ pub async fn update_access(
     crate::http::parse_query(uri.query(), &[])?;
     IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE_ACCESS, Some("expectedGeneration"))?;
     let request: UpdateDestinationAccessRequest = read_json(body, MAX_JSON_BODY).await?;
+    if access_carries_a_value(&request.access) {
+        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
+    }
+    let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
+    // THE PRECONDITION BEFORE ANY FIELD RULE (DUI-2). A request written
+    // against an older generation is answered 412 whatever its fields say: a
+    // stale tab's "keep" names the Secret the rotation it missed replaced, and
+    // answering that as a field error sent the operator to fix a field rather
+    // than to read the destination again.
+    let generation = object.meta().generation.unwrap_or_default();
+    if generation != request.expected_generation {
+        return Err(ApiError::new(
+            ProblemCode::PreconditionFailed,
+            format!(
+                "expectedGeneration {} is not the destination's current generation {generation}: \
+                 it changed since it was read, and nothing was written. Read it again.",
+                request.expected_generation
+            ),
+        ));
+    }
     let mut errors = Vec::new();
     validate_access(&request.access, &mut errors);
     if let Some(transport) = &request.transport {
@@ -1875,17 +1895,9 @@ pub async fn update_access(
             }
         }
     }
-    if !errors.is_empty() {
-        return Err(ApiError::destination_invalid(errors));
-    }
-    if access_carries_a_value(&request.access) {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
-    }
-    let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
     // A rotation keeps or re-arranges the Secrets this destination already
     // names, and enters every other credential as a value; it never adopts a
     // Secret written for something else.
-    let mut errors = Vec::new();
     refuse_existing_secrets(
         &request.access,
         &referenced_secrets(&object.spec.access),
@@ -1893,17 +1905,6 @@ pub async fn update_access(
     );
     if !errors.is_empty() {
         return Err(ApiError::destination_invalid(errors));
-    }
-    let generation = object.meta().generation.unwrap_or_default();
-    if generation != request.expected_generation {
-        return Err(ApiError::new(
-            ProblemCode::PreconditionFailed,
-            format!(
-                "expectedGeneration {} is not the destination's current generation {generation}; \
-                 read it again.",
-                request.expected_generation
-            ),
-        ));
     }
     // A CA BUNDLE ON A PLAINTEXT DESTINATION IS REFUSED HERE TOO (R4). The
     // stored transport is the only one there will ever be, so the rule is
@@ -2014,7 +2015,7 @@ pub async fn test(
             return Err(ApiError::validation(vec![FieldError::new(
                 "roles",
                 "count_out_of_range",
-                "name between 1 and 4 roles, or omit the field for every configured role",
+                "name between 1 and 4 roles, or omit the field for every role a run uses",
             )]))
         }
         Some(roles) => {
@@ -2023,7 +2024,7 @@ pub async fn test(
             roles.dedup();
             roles
         }
-        None => configured_roles(&object),
+        None => default_test_roles(&object),
     };
     let created = super::preflights::start_destination_access(
         &state,
@@ -2046,18 +2047,23 @@ pub async fn test(
     ))
 }
 
-fn configured_roles(object: &BackupDestination) -> Vec<DestinationRoleDto> {
-    let mut roles = vec![DestinationRoleDto::ArchiveWrite];
-    if object.spec.access.archive_read.is_some() {
-        roles.push(DestinationRoleDto::ArchiveRead);
-    }
-    if object.spec.access.evidence_write.is_some() {
-        roles.push(DestinationRoleDto::EvidenceWrite);
-    }
-    if object.spec.access.evidence_read.is_some() {
-        roles.push(DestinationRoleDto::EvidenceRead);
-    }
-    roles
+/// The roles `:test` exercises when the request names none
+/// ([`core_destination::DestinationRole::access_test_defaults`]): every role a
+/// run uses one of this destination's credentials for, the fallbacks to
+/// `archiveWrite` included. Only the roles the destination SET used to be
+/// tested, so a destination whose one credential MinIO did not know tested
+/// Ready: `archiveWrite` alone is never dialled (DUI-1).
+fn default_test_roles(object: &BackupDestination) -> Vec<DestinationRoleDto> {
+    use core_destination::DestinationRole;
+    DestinationRole::access_test_defaults(object.spec.access.evidence_read.is_some())
+        .into_iter()
+        .map(|role| match role {
+            DestinationRole::ArchiveWrite => DestinationRoleDto::ArchiveWrite,
+            DestinationRole::ArchiveRead => DestinationRoleDto::ArchiveRead,
+            DestinationRole::EvidenceWrite => DestinationRoleDto::EvidenceWrite,
+            DestinationRole::EvidenceRead => DestinationRoleDto::EvidenceRead,
+        })
+        .collect()
 }
 
 /// The command dispatcher for `POST .../destinations/{target}`, where `target`

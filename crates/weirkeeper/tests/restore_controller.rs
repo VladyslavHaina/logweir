@@ -13706,3 +13706,65 @@ fn fx38_a_cut_teardown_list_carries_the_runners_count() {
     .expect("a teardown block");
     assert_eq!(t["failedCount"], serde_json::json!(300));
 }
+
+/// **DUI-5: an exit-1 `Restore` says why it failed**, from the runner's
+/// SEALED `failure-detail=` line, printed first in its block (sealed only),
+/// and a stopped creation step's pair after it keeps its place rule: the
+/// state and lists are still read.
+///
+/// CONTROL: under a Job an FX-34 controller built, a plain `failure-detail=`
+/// line is not read and the message is what it was.
+///
+/// KILLS: the detail not read for a Restore; the place rule broken by it.
+#[tokio::test]
+async fn dui5_an_exit_1_restore_says_why_and_keeps_its_creation_stop() {
+    use logweir_core::runner_line::{final_block_with, LineScope};
+    let detail = "failure-detail=engine: operational: kafka-backup restore exited 1: ERROR \
+                  producer: TOPIC_AUTHORIZATION_FAILED on drill-payments"
+        .to_string();
+    let pair = [
+        r#"target-topics-appeared={"appeared":["drill-payments"],"left":[]}"#.to_string(),
+        "failure-reason=TargetTopicAppeared".to_string(),
+    ];
+    let sealed: Vec<String> = std::iter::once(detail.clone())
+        .chain(pair.iter().cloned())
+        .collect();
+    let block = final_block_with(
+        Some((&fx34_token(), LineScope::EveryLine)),
+        1,
+        &sealed,
+        &pair,
+    );
+    let (_, status) = fx43_pass(1, block).await;
+    let message = fx34_message(&status);
+    assert!(
+        message.starts_with("the runner exited 1 (operational); the code was read from ")
+            && message.contains(
+                "; the runner's last error, cleaned and bounded: engine: operational: \
+                 kafka-backup restore exited 1: ERROR producer: TOPIC_AUTHORIZATION_FAILED on \
+                 drill-payments; the creation step stopped (TargetTopicAppeared)"
+            ),
+        "{message}"
+    );
+    assert_eq!(status["exitReason"], "TargetTopicAppeared", "{status}");
+    assert_eq!(
+        status["targetTopicsAppeared"]["appeared"],
+        serde_json::json!(["drill-payments"]),
+        "{status}"
+    );
+
+    // CONTROL: an FX-34 Job's plain line is not read.
+    let (outcome, seen) = fx34_pass_over(
+        &restore(),
+        fx34_routes_for(
+            1,
+            200,
+            log_body(&format!("{detail}\n")),
+            Some(&fx34_token()),
+        ),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    let status = patched_statuses(&seen).remove(0);
+    assert!(!fx34_message(&status).contains("last error"), "{status}");
+}

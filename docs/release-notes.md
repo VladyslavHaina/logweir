@@ -29,13 +29,13 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107 and 108. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 and 117. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 108 landed after the `v0.3.0` tag and are in no
+is below. Items 102 to 117 landed after the `v0.3.0` tag and are in no
 release yet.
 
 ### Candidate record
@@ -89,7 +89,7 @@ PoC, with its one fix round. It is `v0.2.0` (the next record) plus items 91 to
 - **Before a rollback below this release:** delete the `Switchover`-kind
   Approvals first (rollback step 7, [kubernetes.md](kubernetes.md)).
 
-The rebuilt console and the v1.1 fixes (items 102 and on) are on `main` after
+The rebuilt console, the v1.1 fixes and the deep UI validation's fixes (items 102 and on) are on `main` after
 this release and are not in it.
 
 ### Candidate record, `v0.3.0`
@@ -2509,6 +2509,13 @@ the console is the `logweir-console` image, by digest, and
 goldens, which `console_plan.rs` also parses into `RestoreSpec`), its
 Playwright rows against `logweir-api` on the host, and the image check; the
 journeys on a cluster are the PoC pass's.
+**Scope (PoC):** `poc-v11` (build `sha-519ab67c`, 2026-10-14) rows 9 (the
+served files, their cache headers and the CSP), 73 (the ported specs, through
+a browser that accepts the PoC's local CA) and 74 (`/ui` is this tree's build,
+14 files); the deep UI validation's parts 1 to 3 (`deep-ui-1`, `deep-ui-2`,
+`deep-ui-3`, the same build) used every page under the seven validation roles,
+light and dark, at 1440 and 390 px, by clicks only. What they found is fixed
+in items 109 to 115.
 **Rollback:** an older `logweir-console` image serves the old page again;
 nothing is stored differently.
 
@@ -2532,7 +2539,11 @@ the unverified segments and the partitions not compared.
 segment, the child-process memory row, the complete-lane rows, one compose row
 through the shipped engine (`0.23.3+logweir.3`, Kafka 4.3), 26 mutants over
 items 103 and 104, and the console's rows.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX30-1.]
+**Scope (PoC):** K-FX30-1, row 48 of `deep-ui-2` (build `sha-519ab67c`): a
+restore of a catalog point with complete coverage ended `pass`,
+`complete.covered: true` with no `incompleteReason`, 400 of 400 records. The
+PoC holds no oversized or corrupt segment, so the caps rest on the rows above;
+the restore page could not show the result then (DUI-16, item 111).
 **Rollback:** an older runner decodes each segment whole again; no scorecard
 field or format changed.
 
@@ -2571,7 +2582,16 @@ again. Apply the CRDs first: the `Restore` CRD gains
 **Scope:** the protection, catalog, preflight, restore and clone controller
 rows, the API rows (`d3_reads`, `operation_view`, `switchovers`), the mutants
 of item 103, and the console's rows.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX38-4, K-FX38-6, K-FX38-8, K-FX38-L4 and K-FX38-SW.]
+**Scope (PoC):** on build `sha-519ab67c`, 2026-10-14: `poc-v11` row 4
+(K-FX38-4: no policy reads `BackupHistoryTooLarge` over 9 Backups; a transient
+policy reads `WithinObjective`), row 5 (K-FX38-L4: neither catalog's `Synced`
+calls a whole view a window) and row 6 (K-FX38-6: a synced catalog serves its
+status's `truncated`, an unsynced one `truncated: true`, and a whole view's
+points page has no `incomplete`); `deep-ui-2` (K-FX38-8: two clones `Removed`
+at expiry, `deletedCount` equal to the length of `deleted`, `failedCount` 0);
+`deep-ui-3` row 77 (K-FX38-SW: a Succeeded Switchover's page shows its
+message and the counts line). The PoC holds no namespace of more than 1,000
+Backups and no teardown that left topics.
 **Rollback:** an older controller ignores `teardown-failed-count=` and judges
 protection over the runs it read; an older `Restore` CRD prunes the new
 teardown fields; an older API publishes an unsynced catalog as
@@ -2600,7 +2620,11 @@ its record as `logweir/switchovers/<run id>.record.json`.
 count every store read; compose rows on Kafka 4.3.1 (the point-set binding row
 with a live negative control, theme A's switchover and clone rows); 23
 mutants over items 105 and 106, and the console's rows.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX36-1 to K-FX36-3.]
+**Scope (PoC):** on build `sha-519ab67c`: K-FX36-1, row 48 of `deep-ui-2` (a
+catalog point's restore logs `recovery point binding verified`, and no
+`PointBindingMismatch`); K-FX36-2, `poc-v11` row 2 (a sync on the new runner
+and controller: all 411 points keep their availability and signature).
+[UNVERIFIED — K-FX36-3 (a switchover plan whose `rollback_of.key` is not a switchover record, answered 422) has not run on a cluster; it needs an API call the UI-only passes do not make.]
 **Rollback:** an older runner reads the receipt key the plan names, and an
 older catalog sync lists a record by the keys it names.
 
@@ -2615,7 +2639,10 @@ the year.
 **Scope:** every verification path judged at a handed instant (2001, 2026 and
 2999), the shifted-clock run at +26752 days with its control, the mutants of
 item 105.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K-FX12-1.]
+**Scope (PoC):** K-FX12-1, `poc-v11` row 3 (build `sha-519ab67c`): every
+Backup's and Restore's evidence verdict and every `TrustPolicy` key's
+`effectiveState` are what they were before the upgrade, after the new
+controller evaluated them again.
 **Rollback:** an older controller reads the clock again inside the verifier;
 away from a key's window edge its verdicts are the same.
 
@@ -2642,7 +2669,13 @@ connection authenticates as, or remove the topic from the selection.
 **Scope:** compose rows on Kafka 4.3.1 through the shipped runner image (an
 ACL principal without READ, Redpanda), the doctor row, the crate rows, 16
 mutants over items 107 and 108, and the console's rows.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K4 and K5.]
+**Scope (PoC):** on build `sha-519ab67c`: K4, `deep-ui-1` row 32 (the
+schedule form's readiness lists `connection.topicsReadable` under "Only the
+run itself can answer", "the broker reports READ … on all 2") and row 31
+(*Back up now* runs succeed); K5, `deep-ui-2` row 49 (a scratch restore
+`Succeeded` `pass`, its runner log carrying phase 0's `target.engineProtocol`
+line).
+[UNVERIFIED — K4's runner-log lines (READ reported for the backup principal, the source's engine protocol before the engine starts) were not read on a cluster; the PoC re-check reads them.]
 **Rollback:** an older runner starts the engine and fails exit 1 again; an
 older controller reads the row as before.
 
@@ -2663,10 +2696,331 @@ runner refuses the new `capabilityChecks` field of a connection test.
 **Scope:** compose rows on Kafka 4.3.1 (an unreachable advertised listener,
 Redpanda), a librdkafka mock-cluster row for the silent broker, the probe and
 controller rows, the mutants of item 107, and the console's rows.
-[UNVERIFIED — not yet run on a cluster; the combined v1.1 PoC pass runs K1 to K3.]
+**Scope (PoC):** on build `sha-519ab67c`: K1, `poc-v11` row 1 (every
+`KafkaCluster` stays `Reachable`, "1 of the 1 broker(s) the cluster
+advertises answered", each probe log `brokers-answered=1/1`); K3, `deep-ui-1`
+rows 22 and 23 (Test connection on the Kafka 3.7.1 source: "Usable as a source
+and as a target", consumer group positions "No", the three lines again after a
+reload) and `deep-ui-3` (on Kafka 4.3.1 all three lines "Yes").
+[UNVERIFIED — K2 (`AdvertisedBrokersUnreachable` on a cluster) has not run: no PoC listener advertises an address its namespace cannot reach, so the compose row is the only evidence.]
 **Rollback:** an older runner prints no third line and the reason stays
 `ProbeReportedUnreachable`; an older controller asks a connection test for no
 capability row.
+
+#### 109. *Test access* tests the credential a destination has, and a stale edit is "changed since it was read" (DUI-1, DUI-2)
+
+**Changed.** With no grant ticked, a destination's *Test access* now tests
+every grant a run uses: Archive write, Archive read and Evidence write (unset,
+the last two use the archive-write credential), and Evidence read when it is
+set. It used to test only the grants the destination set. A destination with
+only an archive-write key was then tested for that grant alone, which no check
+dials, so a key the endpoint did not know read **Ready**; it now reads **Not
+ready**, `destination.archiveListable` `InvalidCredentials`. No test writes
+with the archive-write grant itself: it is dialled through Archive read or
+Evidence write when they fall back to it, else only the run checks it (a
+destination with its own `archiveRead` and `evidenceWrite` credentials, or the
+write probe off). A destination whose `archiveRead` and `archiveWrite` are two
+different workload identities, with `evidenceWrite` unset and the write probe
+on, now gets `ExecutionContextConflict` from the default test; ticking grants
+still works. `:update-access` and `PUT …/schedules/{name}` now check `expectedGeneration` before any field rule:
+a request written against an older generation is `412 precondition_failed`
+("…it changed since it was read, and nothing was written. Read it again."),
+whatever its fields say. A stale *Rotate access* used to get
+`422 existing_credential_refused` on a field the dialog does not show. A
+schedule edit for a name that does not exist is now `404` before its field
+rules (it was `422`). The console marks an API field error about an input the
+chosen source hides on the control that shows it (the grant's Credential
+select, the CA's Change select), in *Rotate access* and *Add a destination*.
+**Do:** re-run *Test access* on every destination that sets only an
+archive-write grant.
+**Scope:** API rows for the default set (control: named roles are sent as
+named), and for a stale rotation and a stale schedule edit (412 before any
+field rule; control: the same body at the current generation gets its field
+error); a controller row holding the default set to the roles that resolve to
+a credential; a live row on a compose MinIO (an unknown key reads `notReady`
+`InvalidCredentials` under the default set and `ready` under the old one;
+control: the good key reads `ready`); the console's placement rows; a mutant
+on each rule was killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-1 and DUI-2 on the PoC.]
+**Rollback:** an older API tests the old set, and answers a stale edit by its
+field rules again; nothing stored changes.
+
+#### 110. A backup of a topic the source does not hold is refused by name, a failed run says why, and a schedule names its consumer groups (DUI-5, DUI-25, DUI-3, DUI-13, DUI-31)
+
+**Changed.**
+- **A selected topic the source does not hold.** When the source's
+  DescribeTopics answers `UNKNOWN_TOPIC_OR_PARTITION` for a selected topic and
+  DescribeCluster says the principal may Describe the cluster, `backup run`
+  refuses before the execution claim and the engine: exit 3, `GuardRefused`,
+  "topic `x` does not exist on the source …", with the remedy, and nothing is
+  written. Such a run used to fail "the runner exited 1 (operational)" with no
+  cause. The Backup Preflight's `connection.topicsReadable` is blocking
+  `notReady` `TopicNotFound` for that topic, ahead of a missing READ
+  (item 107). Without the cluster's Describe, and for any other describe
+  failure, nothing changes: the engine's own fetch answers.
+- **Every other exit 1.** A `Backup` or `Restore` that fails at exit 1 carries
+  the error it ended on in its `Failed` condition, its
+  `status.progress.message`, the API's operation `message` and the console's
+  run page: "…; the runner's last error, cleaned and bounded: …". For an
+  engine failure it is the engine's last line saying "error". The runner
+  prints it as a new `failure-detail=` line, sealed with the Job's
+  `--runner-line-token` only (item 96) and first in its final block; the
+  controller reads it only sealed, cleans it again and cuts it to 760 bytes.
+  `exitReason` and the retry classification are unchanged.
+- **Consumer groups from the console.** `POST …/schedules` takes an optional
+  `consumerGroups`, checked by the runner's own rule before anything is stored
+  (`duplicate`, `invalid_consumer_group` or `count_out_of_range` on the field)
+  and stored as `spec.consumerGroups`; an edit keeps the stored list. The
+  schedule and run views (`Schedule.consumerGroups`, `Backup.consumerGroups`)
+  and pages list the groups, and the restore wizard says when a point maps no
+  consumer position, so its restore cannot be switched over.
+- **The console:** the Overview's newest recovery point is the newest of each
+  policy's point, every verified backup and each catalog's newest selectable
+  point, and names its source; a new schedule shows its next runs without a
+  reload, and an edit keeps what was typed after a `412`; the Schedules list's
+  last run counts *Back up now* runs; *Back up now* reads the schedule again
+  before it offers a revision; the Overview's failed-run item opens the last
+  failed run.
+
+**Do:** nothing. To record consumer positions, name the groups when you create
+the schedule (`kubectl` can still set `spec.consumerGroups`).
+**Scope:** the access rows (a missing topic is absent only with the cluster's
+Describe), the `backup run` and Preflight rows, each with its control, and a
+compose row on Kafka 4.3.1 (`[existing, missing]` reads `notReady`
+`TopicNotFound`, exit 3, no receipt and the engine not started; control: the
+existing topic alone backs up); the `failure-detail=` rows in the core, the
+runner, both reconcilers, the forged-line table and the API, and a live
+compose row (a password the broker refuses: exit 1, the cause in
+`status.progress.message`, the password nowhere; control: no line without the
+token); the API's `consumerGroups` rows (a 46-character id stored and read
+back; five refusals, nothing written; control: an empty list is stored
+absent); the console's rows; a mutant on each guard was killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-3, DUI-5, DUI-13, DUI-25 and DUI-31 on the PoC.]
+**Rollback:** an older runner starts the engine for a missing topic and prints
+no `failure-detail=`, which an older controller ignores; the console and the
+API roll back as one image, and schedules keep their stored
+`spec.consumerGroups` (rollback step 5).
+
+#### 111. Every finished restore's page opens, and the wizard asks who owns the topics (DUI-16, DUI-17, DUI-18, DUI-22, DUI-23)
+
+**Changed.**
+- A restore whose target broker sets no timestamp bound (the default of
+  `log.message.timestamp.before.max.ms`) crashed its page once the run ended
+  ("Invalid time value"), so no verdict, coverage, evidence, Clone or Topic
+  configuration card could be read. The bound is now read as a duration
+  ("Any age: the broker sets no bound"), a number no date holds reads "not a
+  time", and every page has an error boundary: a page that cannot render says
+  so, and the navigation stays.
+- When a restore takes the source's topic configuration from a point whose
+  backup did not look for owners, the wizard asks who owns the topics ("No
+  topic here is managed by an owner", or "Some are: name them") and holds Next
+  until it is answered; the plan carries the `owners` list the runner reads
+  (item 92). The check step holds Next and Create while the configuration
+  preview refuses. Before, the wizard built a plan the runner always refused,
+  `TopicOwnerNotChecked`.
+- A confirm namespace's restore reads "The controller is verifying your
+  confirmation" in its first seconds, not "an approver who is not you". The
+  controller's 30 s wait before it reads the approval again is unchanged.
+- The Restores list says "clone, deletes in 45 min" for a kept clone; the
+  wizard opens each step at its top, names each point's radio, and writes check
+  details and instants in words; a restore waiting for its approval reads
+  "Waiting for approval".
+
+**Do:** nothing.
+**Scope:** the console's rows: a finished restore over a target with no bound,
+and a number that is not a time (control: a real instant); a page that throws
+(control: the other pages); the owners question with its four refusals
+(control: a point that looked is not asked); the plan golden
+`plan-owners.golden.yaml`, which `console_plan.rs` parses into `RestoreSpec`
+and the runner's owner rules (control: the clone golden's `owners: []`); the
+confirm card, the wizard and the clones list; mutants over each were killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-16, DUI-17, DUI-18, DUI-22 and DUI-23 on the PoC.]
+**Rollback:** an older console image crashes on such a page again and builds
+no `owners` list; nothing stored changes.
+
+#### 112. A switchover waiting for its approver is listed in Approvals, and a requester is named by a signed, provider-verified identifier (DUI-20, DUI-21, DUI-27, DUI-28, DUI-30, DUI-31)
+
+**Changed.**
+- **Approvals.** A `Switchover` held at `Pending`, `ApprovalNotVerified`, is
+  listed beside the waiting restores, counted in the navigation when it is
+  offered to this session, and opens its own approval page under two-person
+  (the Switchover's page under strict or files). The console's own two-person
+  request record (`Verified=False`, `GovernedApprovalRequired`) reads "Request
+  recorded", not "Refused".
+- **Who asked.** At request time the API signs a requester-display document
+  with the console key, under its own payload type
+  (`application/vnd.logweir.requester-display+json`), and stores it in the
+  `logweir.dev/requester-display` annotation and its signature, never in the
+  request's signed bytes. It holds the requester's email only when the
+  provider marked it verified (`email_verified: true`) and it has an address's
+  shape (printable ASCII, at most 254 bytes, one `@`), exactly as received,
+  and a name only from a claim the install opted into. The request views serve
+  `requesterEmail` and `requesterName` only when that signature verifies for
+  this request (the same requester, approval name and plan hash); otherwise
+  they serve `requesterDetailsNotVerified: true` and neither. The console leads
+  "Requested by" with that email, else the signed principal in full, never
+  shortened; an opted-in name follows, marked as not verified. The switchover
+  approval page names its requester too, and the Approvals list shows
+  principals in full.
+- **The sign-in.** The `name` claim is opt-in (`oidc.displayNameClaim`, no
+  default): a session's display name is the provider-verified email, else the
+  subject. The default scopes ask for `email` too (`openid profile email
+  groups`).
+- **The cutover** reads the restore afresh on every visit, so a just-finished
+  restore is not refused from an old copy, and offers "Review again" after
+  every ended switchover (its page, the cutover's result and the Switchovers
+  list). A role without `restoreCreate` is offered no review and no "Review
+  again", and the cutover sends nothing for it. A switchover with no phase yet
+  reads "Submitted", and both approval pages write the server's instants in
+  words.
+
+**Do:** nothing. A chart install takes the API's defaults: `email` is now
+requested, and no name claim is read, so its sessions show the
+provider-verified email, else the subject. See *Required operator actions*
+for the `email` scope.
+**Scope:** the API rows: a tampered email (signature kept), and a display
+signed for another plan hash or approval name, each not served and flagged
+(control: a valid display is served); the email shape (a zero-width space,
+whitespace, non-ASCII, 255 bytes, each refused; 254 bytes kept whole); the
+sign-in (an email the provider did not mark, `email_verified` as a string, the
+subject as the fallback; the `name` claim read only when configured); the
+console's requester rows (control: an older request shows the principal only);
+the Approvals, cutover and viewer rows (controls: a Succeeded switchover is not
+listed; the requester's own request counts nothing; an operator's cutover
+sends its one review); mutants over each were killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-20, DUI-21, DUI-27, DUI-28, DUI-30 and DUI-31 on the PoC.]
+**Rollback:** an older API reads the `name` claim by default again, ignores the
+requester-display annotations and serves none of the three fields; an older
+console lists no switchover in Approvals. Either build reads the other's
+session cookie (its new `em` field is optional); a session sealed before the
+upgrade shows the subject until it ends.
+
+#### 113. Long topic and consumer group names are shown whole, and their switchover applies (DUI-26)
+
+**Changed.** A topic name or consumer group id of 40 or more characters was
+read as a credential and shown as `[redacted]`: in the catalog's consumer
+groups, the restore preflight's samples and details, and the switchover
+review. A switchover planned from that review was always refused
+`PlanDisagreesWithMapping`. These names now travel in typed fields: details
+`topic`, `mappedTopicExists`, `group` and `target`; catalog `groupId` and topic
+`name`; a check row's topic samples. A legal name (a topic of
+`[a-zA-Z0-9._-]`, at most 249 characters; a group of printable ASCII, at most
+255 bytes) passes the specific secret-shape rules (PEM, S3 XML, URL userinfo,
+a keyed value, an access key id) but not the 40-character rule, so it arrives
+whole. Free text is redacted as before, so a refusal sentence that names a
+long group (`GroupActive: …`) still reads `[redacted]` there; the typed field
+beside it carries the name.
+**Do:** roll the runner and the controller together (the controller's own pass
+would still redact a newer runner's long names); then set each
+`RecoveryCatalog`'s `spec.syncRequest` to a new value and review each cutover
+again, so the names show. Catalog rows synced before keep `[redacted]` until
+that sync, and a finished Preflight keeps its details.
+**Scope:** the core rows (60-character names survive the typed walk; the
+free-text rule alone gives `[redacted]`; a secret-shaped run in `message` or
+under an untyped key is still redacted; an access key id planted in a topic is
+removed); the runner's review, catalog and sample rows and the controller's
+details row, each with its control; a live compose switchover on Kafka 4.3.1:
+a 60-character group over a 60-character topic is reviewed, planned from the
+review's details as the console plans it, approved and applied (exit 0,
+`Succeeded`, the offsets read back); control: the old pass names both
+`[redacted]` and the plan built from it is refused `PlanDisagreesWithMapping`,
+exit 3, nothing committed. One mutant was killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-26 on the PoC.]
+**Rollback:** an older runner or controller redacts such names again, and a
+switchover planned over one is refused again; nothing stored changes.
+
+#### 114. The console warns before a session ends and keeps the page after it (DUI-4, DUI-9)
+
+**Changed.** About two minutes before the session's `expiresAt` (the cap is
+`sessionMaxAgeSeconds`), a warning offers **Sign in again in a new tab**, which
+renews the cookie this tab shares. A later `401` no longer sends the page to
+the sign-in page: a blocking dialog, "Your session ended: sign in again in a
+new tab, then continue here", keeps the page and what was typed on it, with no
+browser storage, until a read of the session succeeds (Continue here, or coming
+back to the tab). Reads refused while signed out are read again, and a
+different person signing in gets a Reload dialog. At the local expiry the page
+asks the service, which decides. The sign-in link follows the address when it
+changes in the same tab.
+**Do:** nothing.
+**Scope:** the console's rows: a `401` keeps a half-typed form, and Continue
+before the sign-in still says signed out; the warning at about two minutes
+(control: at ten, none); the sign-in link follows a hash change (control: the
+first `next`); mutants on the re-read, the link and the dialog were killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-4 and DUI-9 on the PoC.]
+**Rollback:** an older console image sends a page whose session ended to the
+sign-in page again; nothing is stored.
+
+#### 115. Tables and forms fit, links go where they say, and states read in words (DUI-6, DUI-7, DUI-8, DUI-10, DUI-11, DUI-12, DUI-14, DUI-15, DUI-19, DUI-24, DUI-29, DUI-31)
+
+**Changed.**
+- **Layout.** Table cells marked to break wrap long values anywhere, and
+  column headers wrap between words instead of ending in an ellipsis; the
+  check table gives its columns fixed shares; form toggles and dialog titles
+  wrap, so every form and dialog fits a 390 px screen; a compact list wraps a
+  long name beside its status; a new page opens at its top (a filter change
+  keeps the place); the Overview's policy column is no longer crushed.
+- **Words.** `ProbeReportedUnreachable` and a probe running again carry the
+  controller's words, and an unreachable connection's Overview item says what
+  it stops by its role; a `DuplicateCatalog` leads its catalog's page and the
+  list, and *Connect an archive* warns before it is sent; the catalog list
+  names only catalogs whose view is a window; problem details show the API's
+  code spans as code (as text); readiness notes are a list; the Evidence card,
+  the installation-default trust policy and an administrator's empty
+  Protection page say what they mean; "1 topic".
+- **Links.** The schedule page's source and destination, and the Overview's
+  schedule names, link to their pages; the Overview's cells are dated; the
+  Protection ledger lists `RecoveryCompleted` under "Recoveries recorded", not
+  as a problem.
+- **The user menu** shortens the subject, with the whole value in its title,
+  and a theme choice closes it.
+
+**Do:** nothing.
+**Scope:** the console's rows (code spans, instants and check details; the
+readiness list; the duplicate and window catalogs; the ledger; the links; the
+probe gloss; the scroll reset, with a search-only change as its control), and
+two screenshot walks over the single-file mock build at 1440 and 390 px, light
+and dark (72 and 46 shots): 0 screens wider than the viewport, 0 children past
+a card or dialog edge, 0 list labels over a name, 0 axe violations; mutants
+over the rows were killed.
+[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-6 to DUI-8, DUI-10 to DUI-12, DUI-14, DUI-15, DUI-19, DUI-24, DUI-29 and DUI-31 on the PoC.]
+**Rollback:** an older console image shows the old layout and words; nothing is
+stored.
+
+#### 116. Logweir's own binaries carry rustls 0.23.46 (RUSTSEC-2026-0346 to -0349)
+
+**Changed.** Every Logweir binary that speaks TLS (the runner, the controller,
+`logweir-api`, the retention worker) links rustls 0.23.46, for four advisories
+published against 0.23.45: a derived `Debug` that printed session secrets, data
+buffered before an ECH rejection sent to the outer server, a Brotli
+certificate decompressor that could allocate 1 GiB before authentication, and
+an unauthenticated ServerHello that could downgrade later key exchange. A
+lockfile-only change, as the 0.23.45 move for RUSTSEC-2026-0285 was; no
+Logweir code changes.
+**Do:** nothing beyond rolling the images.
+**Scope:** `cargo deny` over the workspace (advisories, licences, bans and
+sources pass), the workspace built against it, and the TLS suites (both
+`linkage` suites and `tls_ca`). The engine in the runner image moves to
+rustls 0.23.46 with its build 4 (item 117), whose `cargo deny` passes and whose
+compose rows ran.
+**Rollback:** an older image links 0.23.45 again; nothing stored changes.
+
+#### 117. The engine is build `0.23.3+logweir.4`: its rustls is 0.23.46 (RUSTSEC-2026-0346 to -0349)
+
+**Changed.** Patch `0001-lockfile-rustls-h2-spin.patch` moves the engine's
+lockfile from rustls 0.23.45 to 0.23.46, for item 116's four advisories. It is
+a lockfile-only change: the patch list is the same, and no engine code
+changes. The engine is `kafka-backup 0.23.3+logweir.4` (build-input digest
+`sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662`), and
+`logweir doctor` accepts only that version: build 3 is now a version mismatch.
+**Do:** roll the controller and the runner images together, as for item 35. A
+standalone CLI install replaces its engine with build 4 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4` and
+`LOGWEIR_ENGINE_DIGEST=sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662`
+([quickstart.md](quickstart.md), step 4).
+**Scope:** the engine's `cargo deny` (advisories, bans, licences and sources pass; build 3 fails advisories), the six patch oracles, and `record_semantics` (13 rows, the contract asserted) and `full_drill` (15/15) with build 4 built natively on compose (Kafka 4.3.1).
+[UNVERIFIED — no PoC drill has signed engine build 4 yet; the next image refresh runs one.]
+**Rollback:** roll both images back together; the engine is build 3 again,
+and its documents say so. Documents build 4 signed stay valid.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -2731,7 +3085,7 @@ In addition to the next entry's six, in its order.
 
 **The roll:**
 - **Move `controllerImage` and `runnerImage` in one `helm upgrade`, and never
-  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65, 67, 82 and 108). This
+  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65, 67, 82, 108 and 113). This
   controller gives every `Restore` and `Backup` Job a `--line-token` argument,
   and every runner image published before that change, the images of this
   same entry included, stops on it: the object says `exitCode: 1`,
@@ -2743,11 +3097,15 @@ In addition to the next entry's six, in its order.
   both together or the controller first.
 - **Roll the console with the controller and the runner** (items 33, 38 and
   56).
+- **Let the identity provider serve the `email` scope** (item 112): a chart
+  install takes the API's defaults, and `email` is now requested
+  (`openid profile email groups`). A provider that refuses a scope refuses the
+  sign-in; `email` is a standard OpenID Connect scope.
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35). A standalone CLI install
   replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3` and its digest (items 28, 35, 41
-  and 82),
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4` and its digest (items 28, 35, 41,
+  82 and 117),
   and every spec that names an `http://` archive endpoint says
   `allow_http: true` (item 28).
 - **Back up the console key too, once it exists** (item 29):
@@ -2786,9 +3144,10 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 **After the upgrade:**
 - **Set each `RecoveryCatalog`'s `spec.syncRequest` to a new value** once the
   runner image has rolled, so its view is published again by the new runner
-  (items 31, 65 and 71).
-- **Re-run *Test access* on each destination** (item 48), and bind its own
-  Secret where a grant reads `CredentialBindingMismatch`.
+  (items 31, 65, 71 and 113), and review a cutover again before you plan a
+  switchover from it (item 113).
+- **Re-run *Test access* on each destination** (items 48 and 109), and bind its
+  own Secret where a grant reads `CredentialBindingMismatch`.
 - **Upgrade every verifier that will read a partition-subset restore's
   scorecard** before one is run (item 51): older verifiers refuse format 2.0.0.
 
@@ -2808,7 +3167,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107 and 108, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 and 117, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2894,6 +3253,15 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 106 | the controller | nothing |
 | 107 | the runner (`backup run`, `drill run`, `doctor`) | nothing |
 | 108 | the runner (the probe and the connection test), the controller, the `KafkaCluster` CRD (a description) | `runnerImage` at least as new as `controllerImage` |
+| 109 | the API (the default access test, the precondition first) and the console | *Test access* re-run on archive-write-only destinations |
+| 110 | the runner (`backup run`, the Backup Preflight, a new sealed line), the controller, the API (`consumerGroups` on create and in two views), the console | nothing, in either order |
+| 111 | the console | nothing |
+| 112 | the API (sign-in, the request's signed display, three view fields), the console | nothing; an identity provider that refuses the `email` scope allows it |
+| 113 | the runner (details, catalog entries, samples) and the controller (the details pass) | the two rolled together; a re-sync of each catalog |
+| 114 | the console | nothing |
+| 115 | the console | nothing |
+| 116 | every Logweir binary's TLS library (rustls 0.23.46) | nothing |
+| 117 | the engine in the runner image (its rustls) | the controller and runner images rolled together |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

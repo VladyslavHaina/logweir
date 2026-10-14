@@ -75,6 +75,7 @@ export const policySchema = z
     incompleteDiscovery: z.enum(["", "Refuse", "BackUpVisibleTopics"]),
     excludeTopics: z.string(),
     excludePrefixes: z.string(),
+    consumerGroups: z.string(),
     where: z.enum(["destination", "archive"]),
     destination: z.string(),
     archiveUrl: z.string(),
@@ -115,6 +116,8 @@ export const policySchema = z
     } else if (v.incompleteDiscovery === "") {
       issue("incompleteDiscovery", "Choose what a run does when discovery cannot prove it saw every topic.");
     }
+    const groupsWhy = groupsRefusal(groupList(v.consumerGroups));
+    if (groupsWhy) issue("consumerGroups", groupsWhy);
     if (v.where === "destination" && v.destination === "") issue("destination", "Choose a saved destination.");
     if (v.where === "archive" && !/^[a-z0-9]+:\/\/./.test(v.archiveUrl.trim())) {
       issue("archiveUrl", "An object-store URL with its scheme, such as s3://bucket/prefix.");
@@ -143,6 +146,7 @@ export function draftValues(destinations: DestinationSummary[] | undefined): Pol
     incompleteDiscovery: "",
     excludeTopics: "",
     excludePrefixes: "",
+    consumerGroups: "",
     where: "destination",
     // Two defaults are no default: nothing is preselected then.
     destination: defaults.length === 1 ? defaults[0]!.name : "",
@@ -180,6 +184,7 @@ export function valuesOf(s: Schedule): PolicyValues {
     incompleteDiscovery: s.allUserTopics?.incompleteDiscovery ?? "",
     excludeTopics: (exclude?.topics ?? []).join(", "),
     excludePrefixes: (exclude?.prefixes ?? []).join(", "),
+    consumerGroups: (s.consumerGroups ?? []).join("\n"),
     where: s.destinationRef ? "destination" : "archive",
     destination: s.destinationRef?.name ?? "",
     archiveUrl: s.destinationRef ? "" : s.archive.url,
@@ -193,6 +198,35 @@ export function valuesOf(s: Schedule): PolicyValues {
     activeDeadlineSeconds: num(s.activeDeadlineSeconds),
     confirmMove: false,
   };
+}
+
+// ---------------------------------------------------------- consumer groups
+
+/** The runner's bounds on `spec.consumerGroups` (consumer_positions.rs). */
+export const GROUP_BOUNDS = { count: 100, idBytes: 255 } as const;
+
+/** One group id per line: a group id may hold a comma or a space, never a line break
+ *  (a control character, which the runner refuses). Blank lines are dropped. */
+export function groupList(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((g) => g.trim())
+    .filter(Boolean);
+}
+
+/** Why the runner would refuse this selection before any Job, or null (DUI-25). The API
+ *  checks it again, the receipt's 80 KiB cap included. */
+export function groupsRefusal(groups: string[]): string | null {
+  if (groups.length > GROUP_BOUNDS.count) return `At most ${GROUP_BOUNDS.count} consumer groups; this names ${groups.length}.`;
+  const seen = new Set<string>();
+  for (const g of groups) {
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(g)) return `A group id carries a control character: ${JSON.stringify(g.slice(0, 64))}.`;
+    if (new TextEncoder().encode(g).length > GROUP_BOUNDS.idBytes) return `A group id is longer than ${GROUP_BOUNDS.idBytes} bytes: ${g.slice(0, 64)}…`;
+    if (seen.has(g)) return `${g} is listed twice; name each group once.`;
+    seen.add(g);
+  }
+  return null;
 }
 
 export function list(text: string): string[] {
@@ -272,7 +306,9 @@ function policy(v: PolicyValues, schedule: string) {
 
 export function createBody(v: PolicyValues, schedule: string): CreateScheduleRequest {
   const { allUserTopics, ...rest } = policy(v, schedule);
-  return { ...rest, sourceRef: { name: v.source }, ...(allUserTopics ? { allUserTopics } : {}) };
+  // The groups are set on create only (DUI-25): the edit route keeps the stored ones.
+  const consumerGroups = groupList(v.consumerGroups);
+  return { ...rest, sourceRef: { name: v.source }, ...(allUserTopics ? { allUserTopics } : {}), ...(consumerGroups.length ? { consumerGroups } : {}) };
 }
 
 /** The whole future policy under the revision the form was opened at. `sourceRef` is never sent. */
@@ -304,6 +340,7 @@ const FIELD_PATHS: [string, keyof PolicyValues][] = [
   ["allUserTopics", "incompleteDiscovery"],
   ["allUserTopics.exclude.topics", "excludeTopics"],
   ["allUserTopics.exclude.prefixes", "excludePrefixes"],
+  ["consumerGroups", "consumerGroups"],
   ["archive", "archiveUrl"],
   ["archive.credentialRef", "archiveSecret"],
   ["destinationRef", "destination"],
@@ -436,6 +473,19 @@ export function runsOf(name: string, uid: string | undefined, backups: Backup[])
     earlier: named.filter((b) => b.scheduleRef?.uid && b.scheduleRef.uid !== uid),
     legacy: named.filter((b) => !b.scheduleRef?.uid),
   };
+}
+
+/**
+ * When this schedule last ran (DUI-31.2): its newest run of either kind. `lastFireTime` is
+ * the scheduler's last slot only, so a Back up now run newer than it is the last run.
+ * Undefined when neither is recorded.
+ */
+export function lastRunAt(s: Pick<Schedule, "name" | "uid" | "status">, backups: Backup[] | undefined): string | undefined {
+  const fired = s.status.lastFireTime ?? undefined;
+  const newest = backups ? runsOf(s.name, s.uid, backups).mine[0]?.createdAt ?? undefined : undefined;
+  if (!fired) return newest;
+  if (!newest) return fired;
+  return Date.parse(newest) > Date.parse(fired) ? newest : fired;
 }
 
 /** The newest run of this schedule the controller verified: what "Restore the latest point" opens. */

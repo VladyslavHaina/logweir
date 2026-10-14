@@ -4,17 +4,22 @@
 //   401 unauthenticated/expired -> "Sign in", handing over to /auth/login and back to this route;
 //   anything else               -> "Can't reach the Logweir service", with what it got and Retry;
 //   a session with no namespace -> what the actor holds (nothing) and Sign out.
+// Once the console is up it stays up: a session that ends later is SessionClock's
+// dialog over the page, never a sign-in page in its place (DUI-4).
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bullseye, Button, EmptyState, EmptyStateActions, EmptyStateBody, EmptyStateFooter, Spinner } from "@patternfly/react-core";
 import ExclamationCircleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import UserIcon from "@patternfly/react-icons/dist/esm/icons/user-icon";
-import { ApiError, readSession, setCsrfToken, signInHref, signOut } from "../api/client";
+import { ApiError, readSession, setCsrfToken, signOut } from "../api/client";
 import { keys } from "../api/queries";
 import { SessionProvider } from "../api/session";
 import type { Session } from "../api/types";
 import { Logo } from "./Logo";
+import { ErrorText } from "../components/Prose";
+import { SessionClock, useSignInHref } from "./SessionClock";
+import { shortSubject } from "./subject";
 
 export function useSessionQuery() {
   return useQuery({
@@ -44,6 +49,7 @@ function FullPage({ children }: { children: ReactNode }) {
 
 export function SignedOut({ code }: { code: string }) {
   const ended = code === "session_expired";
+  const href = useSignInHref();
   return (
     <FullPage>
       <EmptyState titleText={ended ? "Your session has ended" : "Sign in to Logweir"} headingLevel="h1" icon={LockIcon} variant="sm">
@@ -54,7 +60,7 @@ export function SignedOut({ code }: { code: string }) {
         </EmptyStateBody>
         <EmptyStateFooter>
           <EmptyStateActions>
-            <Button component="a" href={signInHref()} variant="primary">
+            <Button component="a" href={href} variant="primary">
               Sign in
             </Button>
           </EmptyStateActions>
@@ -70,7 +76,7 @@ export function Unavailable({ error, onRetry }: { error: unknown; onRetry: () =>
     <FullPage>
       <EmptyState titleText="Can't reach the Logweir service" headingLevel="h1" icon={ExclamationCircleIcon} status="danger" variant="sm">
         <EmptyStateBody>
-          {error instanceof Error ? error.message : String(error)}
+          <ErrorText error={error} />
           {api && (
             <span className="lw-error-meta">
               {api.status || "no answer"} {api.code}
@@ -91,13 +97,20 @@ export function Unavailable({ error, onRetry }: { error: unknown; onRetry: () =>
 }
 
 export function NoNamespace({ session }: { session: Session }) {
-  const name = session.actor.displayName || session.actor.subject;
+  const subject = shortSubject(session.actor.subject);
+  const name = session.actor.displayName || subject;
   return (
     <FullPage>
       <EmptyState titleText="No namespace is granted to you" headingLevel="h1" icon={UserIcon} variant="sm">
         <EmptyStateBody>
-          You are signed in as <strong>{name}</strong> ({session.actor.subject}), but your groups hold no Logweir role in any
-          namespace. An administrator grants roles in the console's role bindings.
+          You are signed in as <strong className="lw-break">{name}</strong>
+          {name !== subject && (
+            <span className="lw-break" title={session.actor.subject}>
+              {" "}
+              ({subject})
+            </span>
+          )}
+          , but your groups hold no Logweir role in any namespace. An administrator grants roles in the console's role bindings.
         </EmptyStateBody>
         {session.authenticationMode === "oidc" && (
           <EmptyStateFooter>
@@ -115,19 +128,27 @@ export function NoNamespace({ session }: { session: Session }) {
 
 export function SessionGate({ children }: { children: (session: Session) => ReactNode }) {
   const query = useSessionQuery();
-  if (query.isPending) {
+  const session = query.data;
+  if (session === undefined) {
+    if (query.isError) {
+      const error = query.error;
+      if (error instanceof ApiError && error.signedOut) return <SignedOut code={error.code} />;
+      return <Unavailable error={error} onRetry={() => void query.refetch()} />;
+    }
     return (
       <FullPage>
         <Spinner aria-label="Connecting to the Logweir service" />
       </FullPage>
     );
   }
-  if (query.isError) {
-    const error = query.error;
-    if (error instanceof ApiError && error.signedOut) return <SignedOut code={error.code} />;
-    return <Unavailable error={error} onRetry={() => void query.refetch()} />;
-  }
-  const session = query.data;
   if (session.namespaces.length === 0) return <NoNamespace session={session} />;
-  return <SessionProvider session={session}>{children(session)}</SessionProvider>;
+  // A later read that failed keeps the document it had: the page stays, and the clock
+  // says whether the service answered "sign in".
+  const ended = query.isError && query.error instanceof ApiError && query.error.signedOut;
+  return (
+    <SessionProvider session={session}>
+      {children(session)}
+      <SessionClock session={session} ended={ended} recheck={() => query.refetch()} />
+    </SessionProvider>
+  );
 }

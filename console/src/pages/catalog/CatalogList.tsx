@@ -15,7 +15,7 @@ import { When, count } from "../../components/When";
 import { useFlags } from "../backups/parts";
 import "../backups/evidence.css";
 import { ConnectArchive } from "./ConnectArchive";
-import { CATALOG_WINDOW_SENTENCE, NO_CATALOG_SENTENCE, conditionOf } from "./model";
+import { CATALOG_WINDOW_SENTENCE, DUPLICATE_CATALOG, NO_CATALOG_SENTENCE, conditionOf, countsWords, windowedCatalogs } from "./model";
 
 /** The catalog's Ready condition as a word; never read from the browser's clock. */
 export function ReadyStatus({ c }: { c: Pick<Catalog, "conditions"> }) {
@@ -23,6 +23,7 @@ export function ReadyStatus({ c }: { c: Pick<Catalog, "conditions"> }) {
   const title = ready ? `Ready ${ready.status}${ready.reason ? ` (${ready.reason})` : ""}${ready.message ? `: ${ready.message}` : ""}` : "no Ready condition yet";
   if (ready?.status === "True") return <StatusLabel tone="success" text="Ready" title={title} />;
   if (!ready) return <StatusLabel tone="neutral" text="Not synced yet" title={title} />;
+  if (ready.reason === DUPLICATE_CATALOG) return <StatusLabel tone="warning" text="Duplicate" title={title} />;
   return <StatusLabel tone="warning" text="Not ready" title={title} />;
 }
 
@@ -41,6 +42,7 @@ export function CatalogList() {
   const [connecting, setConnecting] = useState(false);
   const mayConnect = flags?.catalogConnect === true;
   const items = catalogs.data ?? [];
+  const windowed = windowedCatalogs(items);
   const connectButton = (variant: "primary" | "secondary") =>
     mayConnect ? (
       <Button variant={variant} onClick={() => setConnecting(true)}>
@@ -77,7 +79,13 @@ export function CatalogList() {
                 title: c.name,
                 meta: (
                   <>
-                    {whereFrom(c)} · {count(c.counts.available)} of {count(c.counts.total)} available · synced <When value={c.syncedAt} />
+                    {whereFrom(c)} · {countsWords(c)}
+                    {c.syncedAt && (
+                      <>
+                        {" "}
+                        · synced <When value={c.syncedAt} />
+                      </>
+                    )}
                   </>
                 ),
                 status: <ReadyStatus c={c} />,
@@ -134,9 +142,11 @@ export function CatalogList() {
               </Tbody>
             </Table>
           )}
-          {items.length > 0 && (
+          {items.length > 0 && (windowed.length > 0 || !mayConnect) && (
             <Content component="p" className="lw-subtle lw-small lw-ev-note">
-              {CATALOG_WINDOW_SENTENCE.replace(/`/g, "")} {mayConnect ? "" : CONNECT_READ_ONLY_SENTENCE}
+              {/* DUI-19: the window sentence only under a view the controller says is a window, as on the catalog's page. */}
+              {windowed.length > 0 ? `${windowed.map((c) => c.name).join(", ")}: ${CATALOG_WINDOW_SENTENCE.replace(/`/g, "")} ` : ""}
+              {mayConnect ? "" : CONNECT_READ_ONLY_SENTENCE}
             </Content>
           )}
         </Card>

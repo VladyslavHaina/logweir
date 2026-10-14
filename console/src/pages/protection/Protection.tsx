@@ -22,10 +22,12 @@ import {
   ProgressMeasureLocation,
   ProgressSize,
   Stack,
+  Title,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ShieldAltIcon from "@patternfly/react-icons/dist/esm/icons/shield-alt-icon";
 import { useProtection } from "../../api/queries";
+import { grantOf, useSessionDoc } from "../../api/session";
 import { ApiError } from "../../api/client";
 import { useProtectionPolicy, type ProtectionPolicy } from "../../api/schedules";
 import { ageVsObjective, historyTooLarge, newestPointWords } from "../../app/policyAge";
@@ -43,8 +45,16 @@ const PROBLEM_WORDS: Record<string, string> = {
   Staleness: "The newest point is older than the objective",
   ArchiveUnavailable: "The catalog cannot find the point in storage",
   RehearsalFailure: "A rehearsal failed, or has not run for too long",
-  RecoveryCompleted: "A recovery finished",
 };
+
+/** The ledger's informational kind: a finished recovery, recorded resolved when it happens. Not a problem (DUI-12). */
+export const RECOVERY_COMPLETED = "RecoveryCompleted";
+
+/** The ledger split in two: what went wrong, and the recoveries it recorded. */
+export function ledgerOf(p: Pick<ProtectionPolicy, "alerts">) {
+  const alerts = p.alerts ?? [];
+  return { problems: alerts.filter((a) => a.kind !== RECOVERY_COMPLETED), recoveries: alerts.filter((a) => a.kind === RECOVERY_COMPLETED) };
+}
 
 const EVIDENCE_WORDS: Record<string, string> = {
   Valid: "Verified",
@@ -56,7 +66,7 @@ const EVIDENCE_WORDS: Record<string, string> = {
 
 /** Open problems in the policy's ledger. */
 export function openProblems(p: ProtectionPolicy): number {
-  return (p.alerts ?? []).filter((a) => a.state === "Open").length;
+  return ledgerOf(p).problems.filter((a) => a.state === "Open").length;
 }
 
 /** `Protected` has three statuses, kept apart: Unknown is not rounded down to False. */
@@ -102,6 +112,9 @@ function scheduleWords(p: ProtectionPolicy): string {
 
 export function ProtectionList() {
   const { ns } = useParams({ from: "/$ns/protection" });
+  // A localAdmin console holds no roles: its one actor is the installation's administrator.
+  const session = useSessionDoc();
+  const administers = session.authenticationMode === "localAdmin" || grantOf(session, ns)?.roles.includes("administrator") === true;
   const policies = useProtection(ns);
   const narrow = useNarrow();
   const rows = policies.data ?? [];
@@ -121,8 +134,11 @@ export function ProtectionList() {
             <ErrorState error={policies.error} onRetry={() => void policies.refetch()} />
           ) : rows.length === 0 ? (
             <Empty title="No protection policy" icon={ShieldAltIcon}>
-              Nothing here is checking whether a recoverable backup exists or how old it is. Protection policies are set by
-              whoever administers Logweir for {ns}; this console reads them and does not create them.
+              Nothing here is checking whether a recoverable backup exists or how old it is.{" "}
+              {/* DUI-31.11: an administrator is the one who sets it, so it is not told to ask one. */}
+              {administers
+                ? `This console reads protection policies and does not create them: as an administrator of ${ns}, you add one with kubectl, as a ProtectionPolicy in ${ns} that names its schedules and objectives.`
+                : `Protection policies are set by whoever administers Logweir for ${ns}; this console reads them and does not create them.`}
             </Empty>
           ) : narrow ? (
             <CompactList
@@ -213,7 +229,7 @@ export function ProtectionDetail() {
   const met = protectedWords(p);
   const behind = typeof p.generation === "number" && typeof p.observedGeneration === "number" && p.observedGeneration < p.generation;
   const schedules = p.schedules ?? [];
-  const alerts = p.alerts ?? [];
+  const { problems: alerts, recoveries } = ledgerOf(p);
   return (
     <>
       <PageHeader
@@ -410,8 +426,23 @@ export function ProtectionDetail() {
                       </Tbody>
                     </Table>
                   )}
+                  {recoveries.length > 0 && (
+                    <>
+                      <Title headingLevel="h3" size="md" className="lw-gap-top">
+                        Recoveries recorded
+                      </Title>
+                      <ul className="lw-plain-list" aria-label="Recoveries recorded">
+                        {recoveries.map((a) => (
+                          <li key={a.key}>
+                            A recovery from this policy's source finished <When value={a.openedAt} />
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                   <Content component="p" className="lw-subtle lw-small lw-gap-top">
-                    A ledger of what was found, open until it clears. Nothing is sent anywhere: alert delivery is not part of v1.
+                    A ledger of what was found, open until it clears. A finished recovery is recorded beside it, not as a problem. Nothing is sent
+                    anywhere: alert delivery is not part of v1.
                   </Content>
                 </CardBody>
               </Card>

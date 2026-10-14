@@ -102,11 +102,23 @@ function PolicyCard({ p }: { p: TrustPolicy }) {
             {p.generation ?? "Not recorded"}
             <span className="lw-subtle"> · observed {p.observedGeneration ?? "not recorded"}</span>
           </Term>
+          {/* DUI-31.5: the installation default names no namespace and still governs; say so instead of "Not recorded". */}
           <Term term="Claims namespaces">
-            <Value value={list(p.namespaces)} />
+            {p.default && !p.namespaces?.length ? (
+              <>
+                None by name
+                <div className="lw-subtle lw-small">As the installation default it needs none.</div>
+              </>
+            ) : (
+              <Value value={list(p.namespaces)} />
+            )}
           </Term>
           <Term term="Governs namespaces">
-            <Value value={list(p.boundNamespaces)} />
+            {p.default ? (
+              <>{p.boundNamespaces?.length ? `${list(p.boundNamespaces)}, and every` : "Every"} namespace no other policy names</>
+            ) : (
+              <Value value={list(p.boundNamespaces)} />
+            )}
           </Term>
           <Term term="Namespace lists">
             {p.namespacesFiltered ? "Narrowed to the namespaces you administer" : "Complete for this policy"}
@@ -118,6 +130,11 @@ function PolicyCard({ p }: { p: TrustPolicy }) {
           </Term>
           <Term term="Allowed target clusters">
             {count(p.allowedTargetClusterIds)} {p.allowedTargetClusterIds === 1 ? "cluster id" : "cluster ids"} a rehearsal or restore may write to
+            {p.allowedTargetClusterIds > 0 && (
+              <div className="lw-subtle lw-small">
+                This page is given the count only; the ids are in the policy: <span className="lw-mono">kubectl get trustpolicy {p.name} -o yaml</span>
+              </div>
+            )}
           </Term>
         </DescriptionList>
         {(p.conditions ?? []).filter((c) => c.type !== "CompromiseGuard").length > 0 && (

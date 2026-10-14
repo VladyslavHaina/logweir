@@ -102,7 +102,7 @@ signs a scorecard.
 - Logweir's build of the engine on `$PATH`: `docker create` the runner image and
   `docker cp <container>:/usr/local/bin/kafka-backup .`, or
   `scripts/engine-source.sh build`. `kafka-backup --version` prints
-  `kafka-backup 0.23.3+logweir.3`.
+  `kafka-backup 0.23.3+logweir.4`.
 
 ### 1. Write the drill spec
 
@@ -138,7 +138,7 @@ logweir doctor --spec drill.yaml --allowed-clusters allowed-clusters.json \
 
 `doctor` checks credentials, the engine **version** and glibc floor, target
 reachability, the marker topic and the approver key. It compares the engine's
-`--version` with `0.23.3+logweir.3` as a whole token (`0.23.3+logweir.2` or
+`--version` with `0.23.3+logweir.4` as a whole token (`0.23.3+logweir.3` or
 `0.23.3` is a mismatch; OSO's `0.23.3` passes only as the declared rollback) and
 refuses an engine that is not the one the run would sign. It computes no digest:
 a green `ok engine version` says the right version ran, not the right binary.
@@ -176,8 +176,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
 # Optional engine override. Both doctor and drill run search LOGWEIR_ENGINE_BIN,
 # ./.engine/kafka-backup, /usr/local/bin/kafka-backup, then PATH.
 export LOGWEIR_ENGINE_BIN=/usr/local/bin/kafka-backup
-export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3
-export LOGWEIR_ENGINE_DIGEST=sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4
+export LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4
+export LOGWEIR_ENGINE_DIGEST=sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662
 
 logweir drill run --spec drill.yaml \
   --approval approval.json --approver-key approver.pub.pem \

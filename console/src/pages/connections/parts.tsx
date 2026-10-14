@@ -1,7 +1,7 @@
 // Pieces the Connections and Destinations pages share: a form field with its
 // error beside it, the outcome of a write in words, a probe's labels, and a
 // readiness check (Preflight) rendered from its own recorded fields.
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import type { z } from "zod";
 import {
   Alert,
@@ -39,6 +39,7 @@ import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
 
 // ------------------------------------------------------------------- forms
 
@@ -77,7 +78,7 @@ export function Field({
       {(error || help) && (
         <FormHelperText>
           <HelperText id={`${id}-helper`}>
-            <HelperTextItem variant={error ? "error" : "default"}>{error ?? help}</HelperTextItem>
+            <HelperTextItem variant={error ? "error" : "default"}>{error ? <Prose text={error} /> : help}</HelperTextItem>
           </HelperText>
         </FormHelperText>
       )}
@@ -128,7 +129,7 @@ export function WriteOutcome({
   if (outcome === "local") {
     return (
       <Alert isInline variant="danger" title="Nothing was sent">
-        <p>{error instanceof Error ? error.message : String(error)}</p>
+        <p><ErrorText error={error} /></p>
       </Alert>
     );
   }
@@ -140,7 +141,7 @@ export function WriteOutcome({
             ? `Whether ${subject} was created is unknown. ${kept} Submitting again is safe, and it is the right thing to do: it resends the idempotency key this form is holding, and the service answers a repeat of that key with what the first request made rather than creating a second one.`
             : `Whether ${subject} was applied is unknown. ${kept} Re-read the destination: if the generation moved, the rotation landed; if it did not, rotate again. A rotation sent twice is refused the second time (the generation no longer matches), never applied twice.`}
         </p>
-        <p className="lw-subtle lw-small">{error instanceof Error ? error.message : String(error)}</p>
+        <p className="lw-subtle lw-small"><ErrorText error={error} /></p>
       </Alert>
     );
   }
@@ -154,11 +155,11 @@ export function WriteOutcome({
           : `The service refused ${subject}. Nothing was ${verb === "create" ? "created" : "changed"}.`
       }
     >
-      {outcome === "refused" && <p>{error instanceof Error ? error.message : String(error)}</p>}
+      {outcome === "refused" && <p><ErrorText error={error} /></p>}
       {unmatched.length > 0 && (
         <ul className="lw-plain-list">
           {unmatched.map((m) => (
-            <li key={m}>{m}</li>
+            <li key={m}><Prose text={m} /></li>
           ))}
         </ul>
       )}
@@ -277,6 +278,21 @@ function scopeText(scope: CheckEntry["scope"]): string {
   return kind && name ? `${kind}/${name}` : kind + name;
 }
 
+/** A dotted check id that may break after each dot first, rather than mid-word. */
+function DottedId({ id }: { id: string }) {
+  const parts = id.split(".");
+  return (
+    <code>
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <wbr />}
+          {i < parts.length - 1 ? `${part}.` : part}
+        </Fragment>
+      ))}
+    </code>
+  );
+}
+
 function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
   const narrow = useNarrow();
   if (narrow) {
@@ -297,17 +313,18 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
     <Table aria-label={label} variant="compact" gridBreakPoint="grid-md">
       <Thead>
         <Tr>
-          <Th>Check</Th>
-          <Th>Verdict</Th>
+          {/* The check id keeps a quarter of the width, so a long finding wraps and the id does not break mid-word. */}
+          <Th width={25}>Check</Th>
+          <Th modifier="fitContent">Verdict</Th>
           <Th>Finding</Th>
-          <Th modifier="nowrap">When</Th>
+          <Th modifier="fitContent">When</Th>
         </Tr>
       </Thead>
       <Tbody>
         {checks.map((c) => (
           <Tr key={c.id}>
             <Td dataLabel="Check" className="lw-break">
-              <code>{c.id}</code>
+              <DottedId id={c.id} />
               <div className="lw-subtle lw-small">{c.code ?? "Not recorded"}</div>
             </Td>
             <Td dataLabel="Verdict">
@@ -315,7 +332,7 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
               <div className="lw-subtle lw-small">{c.gating ?? "blocking"}</div>
             </Td>
             <Td dataLabel="Finding" className="lw-break">
-              <div>{c.message ?? <NotRecorded />}</div>
+              <div>{c.message ? <Prose text={checkMessage(c.message)} /> : <NotRecorded />}</div>
               {c.remedy && <div className="lw-subtle lw-small">Remedy: {c.remedy}</div>}
               <div className="lw-subtle lw-small">Scope: {scopeText(c.scope)}</div>
             </Td>
@@ -332,6 +349,39 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
       </Tbody>
     </Table>
   );
+}
+
+/**
+ * Every advisory row the check recorded: those in `checks` (a `ready` advisory row
+ * lives only there) and those in `warnings` (the advisory rows that said no), once each.
+ */
+export function advisoryRows(p: Pick<Preflight, "checks" | "warnings">): CheckEntry[] {
+  const rows = p.checks.filter((c) => c.gating === "advisory");
+  for (const w of p.warnings) if (!rows.some((r) => r.id === w.id)) rows.push(w);
+  return rows;
+}
+
+const BASIS_WORDS: Record<string, string> = {
+  expiry: "the expiry",
+  planHash: "the plan hash",
+  policyDigest: "the installation policy",
+};
+
+/**
+ * One `staleBasis` entry in words. The API writes tokens (`referents:2`,
+ * `policyDigest:byController(…)`); a token this build does not know is shown as
+ * it came, with a space before its note.
+ */
+export function basisWords(token: string): string {
+  const note = /^([^(]*)\((.*)\)$/.exec(token);
+  const head = (note ? note[1]! : token).trim();
+  const tail = note ? ` (${note[2]!.trim()})` : "";
+  if (head === "policyDigest:byController") return `the installation policy, compared by the controller${tail}`;
+  const referents = /^referents:(\d+)$/.exec(head);
+  if (referents) return `${referents[1]} referenced ${referents[1] === "1" ? "object" : "objects"}`;
+  const referent = /^referent:(.+)$/.exec(head);
+  if (referent) return `${referent[1]}${tail}`;
+  return `${BASIS_WORDS[head] ?? head}${tail}`;
 }
 
 function staleReasonText(r: Preflight["staleReasons"][number]): string {
@@ -360,6 +410,7 @@ export function CheckResult({
   const running = !p.terminal;
   const answeredAtRun = p.checks.filter((c) => c.gating === "executionOnly" && (c.state === "unknown" || c.state === "skipped")).length;
   const blocking = p.checks.filter((c) => c.gating !== "advisory" && c.gating !== "executionOnly");
+  const advisory = advisoryRows(p);
   return (
     <div>
       <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }} flexWrap={{ default: "wrap" }}>
@@ -402,7 +453,7 @@ export function CheckResult({
           )}
           <span className="lw-subtle lw-small">
             {p.staleReasons.length > 0 ? `Why: ${p.staleReasons.map(staleReasonText).join("; ")}. ` : ""}
-            {p.staleBasis.length > 0 ? `Compared: ${p.staleBasis.join(", ")}.` : "Compared: nothing. An empty comparison is not a match."}
+            {p.staleBasis.length > 0 ? `Compared: ${p.staleBasis.map(basisWords).join("; ")}.` : "Compared: nothing. An empty comparison is not a match."}
           </span>
         </Flex>
       )}
@@ -430,12 +481,12 @@ export function CheckResult({
             : "No blocking check has recorded a verdict. That is not a pass: it is an empty result, and the state above says what this check amounts to."}
         </Content>
       )}
-      {p.warnings.length > 0 && (
+      {advisory.length > 0 && (
         <>
           <Title headingLevel="h4" size="md" className="lw-gap-top">
             Advisory
           </Title>
-          <CheckRows label="Advisory checks" checks={p.warnings} />
+          <CheckRows label="Advisory checks" checks={advisory} />
         </>
       )}
       {p.executionOnly.length > 0 && (

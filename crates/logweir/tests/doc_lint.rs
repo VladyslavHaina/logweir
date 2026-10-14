@@ -2264,6 +2264,39 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the probe asks every advertised broker",
             "`brokers-answered=<answered>/<listed>`",
         ),
+        // DUI-1, DUI-2 (item 109): a stale edit's answer.
+        (
+            "the default access test and the precondition first",
+            "`412 precondition_failed`",
+        ),
+        // DUI-5, DUI-25 (item 110): the sealed line that says why a run failed.
+        ("a failed run says why", "`failure-detail=`"),
+        // DUI-16, DUI-17 (item 111): the refusal the wizard no longer builds.
+        (
+            "the wizard asks who owns the topics",
+            "`TopicOwnerNotChecked`",
+        ),
+        // DUI-21, DUI-27 (item 112): the signed requester details.
+        (
+            "a requester named by a signed identifier",
+            "`logweir.dev/requester-display`",
+        ),
+        // DUI-26 (item 113): the refusal a long name caused.
+        ("long Kafka names shown whole", "`PlanDisagreesWithMapping`"),
+        // DUI-4 (item 114): the session warning's action.
+        (
+            "the console warns before a session ends",
+            "Sign in again in a new tab",
+        ),
+        // DUI-7 to DUI-31 (item 115): layout and wording; a reason in words.
+        ("layout and wording", "`DuplicateCatalog`"),
+        // Item 116: RUSTSEC-2026-0346 to -0349; the version that fixes them.
+        ("Logweir's binaries carry rustls 0.23.46", "rustls 0.23.46"),
+        // Item 117: engine build 4; the patch that makes it.
+        (
+            "the engine is build 4",
+            "0001-lockfile-rustls-h2-spin.patch",
+        ),
     ];
     assert_eq!(
         items.len(),

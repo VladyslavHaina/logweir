@@ -1327,3 +1327,54 @@ fn a_claim_outcome_reaches_the_operation_model() {
         assert!(!op.verified_success);
     }
 }
+
+/// **DUI-5: an exit-1 run's cause reaches the operation model** the console's
+/// run page reads (`message`, shown under "This run failed"). The controller
+/// appends the runner's sealed `failure-detail=` sentence to the terminal
+/// condition (`weirkeeper::refusal::RunnerReason::Failed`), and the API's
+/// operation message is that condition's. CONTROL: no reason, no cause.
+#[test]
+fn dui5_an_exit_1_cause_reaches_the_operation_message() {
+    let base = base_backup();
+    let (running, _) = patched::<Backup>(
+        base.clone(),
+        &backup_ctl::running_status_patch(&backup_of(&base), "b1", now()),
+    );
+    let cause = "kafka: unreachable: no broker returned a ClusterId within 20s";
+    for (reason, shown) in [
+        (
+            Some(weirkeeper::refusal::RunnerReason::Failed(cause.to_string())),
+            true,
+        ),
+        (None, false),
+    ] {
+        let terminal = backup_ctl::finished_status_patch_with_reason(
+            &backup_of(&running),
+            1,
+            &EvidenceKeys::default(),
+            None,
+            reason.as_ref(),
+            None,
+            None,
+            None,
+            None,
+            now(),
+        );
+        let (_, typed) = patched::<Backup>(running.clone(), &terminal);
+        let op = backup_operation(&typed);
+        assert_eq!(op.state, OperationState::Failed);
+        assert_eq!(op.result.exit_reason.as_deref(), Some("operational"));
+        let message = op.message.as_deref().unwrap_or_default();
+        assert_eq!(
+            message.contains(&format!(
+                "the runner's last error, cleaned and bounded: {cause}"
+            )),
+            shown,
+            "{message}"
+        );
+        assert!(
+            message.starts_with("the runner exited 1 (operational)"),
+            "{message}"
+        );
+    }
+}

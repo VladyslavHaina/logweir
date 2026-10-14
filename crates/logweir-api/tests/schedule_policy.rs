@@ -5,8 +5,10 @@
 //! 1. **It changes the future and nothing else.** A `Backup` already created
 //!    keeps its copied policy; the edit's whole effect is one PATCH on one
 //!    `BackupSchedule`.
-//! 2. **It cannot reach `spec.sourceRef`.** Refused before any read, with the
-//!    CRD's own sentence, and unreachable through the adapter regardless.
+//! 2. **It cannot reach `spec.sourceRef`.** Refused before any write, with
+//!    the CRD's own sentence, and unreachable through the adapter regardless.
+//!    The generation precondition answers first (DUI-2): a stale edit is 412
+//!    whatever its fields say.
 //! 3. **It does not keep a second copy of the CRD's rules.** R2 and R3 are
 //!    the API SERVER's to refuse (D1 §5.2); the route maps the refusal onto
 //!    the field the person typed.
@@ -296,18 +298,19 @@ async fn a_concurrent_edit_is_412_at_either_precondition() {
     app.fake.assert_strict();
 }
 
-/// **`sourceRef` is refused before anything is read, with the CRD's own
+/// **`sourceRef` is refused before anything is written, with the CRD's own
 /// sentence.**
 ///
 /// It is on the request DTO ONLY so that the refusal is a field error: a
 /// console that writes back everything it read sends `sourceRef`, and
 /// `malformed_request: unknown field` would not tell the person that the
-/// answer is "create a new schedule".
+/// answer is "create a new schedule". The object is read first, for the
+/// generation precondition (DUI-2), and nothing more.
 ///
 /// KILLS: dropping `sourceRef` silently (the edit would appear to succeed and
-/// the cluster would not change); answering 400; reading the object first.
+/// the cluster would not change); answering 400; writing anything.
 #[tokio::test]
-async fn source_ref_is_refused_before_any_read() {
+async fn source_ref_is_refused_before_any_write() {
     let app = TestApp::new();
     seed_legacy(&app.fake, "nightly");
     app.fake.clear_requests();
@@ -328,10 +331,53 @@ async fn source_ref_is_refused_before_any_read() {
         weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE
     );
     assert!(
-        app.fake.requests().is_empty(),
-        "a refused edit read the object: {:#?}",
+        app.fake.requests().iter().all(|r| r.method == "GET"),
+        "a refused edit wrote: {:#?}",
         app.fake.requests()
     );
+}
+
+/// **DUI-2: a stale edit is 412 whatever its fields say.** An edit written
+/// against an older generation that also breaks field rules (`sourceRef`, a
+/// cadence that is not one) is answered `412 precondition_failed`, "nothing
+/// was written", so the person is sent to read the schedule again rather than
+/// to fix fields of a revision that is gone.
+///
+/// KILLS: `validate_update` (or any field rule) evaluated before the
+/// generation. CONTROL: the same body at the current generation is the 422.
+#[tokio::test]
+async fn dui2_a_stale_edit_is_412_before_any_field_rule() {
+    let app = TestApp::new();
+    seed_legacy(&app.fake, "nightly");
+    let mut body = edit();
+    body["sourceRef"] = json!({"name": "somewhere-else"});
+    body["schedule"] = json!("not a cadence");
+    body["expectedGeneration"] = json!(3);
+    app.fake.clear_requests();
+    let stale = app
+        .put(
+            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &body.to_string(),
+        )
+        .await;
+    stale.assert_problem(412, "precondition_failed");
+    assert!(
+        stale.text().contains("nothing was written"),
+        "{}",
+        stale.text()
+    );
+    assert!(patches(&app).is_empty(), "a stale edit wrote");
+
+    // CONTROL: at the current generation the field rules answer.
+    body["expectedGeneration"] = json!(4);
+    app.put(
+        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &body.to_string(),
+    )
+    .await
+    .assert_problem(422, "validation_failed");
+    assert!(patches(&app).is_empty(), "a refused edit wrote");
+    app.fake.assert_strict();
 }
 
 /// **The CRD's own rules are refused by the API SERVER and mapped back to the
@@ -586,9 +632,10 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
     )
     .await
     .assert_problem(422, "validation_failed");
+    // Read once each, for the generation precondition (DUI-2); never written.
     assert!(
-        app.fake.requests().is_empty(),
-        "a refused edit reached Kubernetes: {:#?}",
+        app.fake.requests().iter().all(|r| r.method == "GET"),
+        "a refused edit wrote: {:#?}",
         app.fake.requests()
     );
 }
@@ -801,6 +848,14 @@ async fn a_destination_is_written_as_the_sentinel_and_never_read_from_a_body() {
     );
     assert_eq!(stored["spec"]["destinationRef"], json!({"name": "primary"}));
     assert_eq!(response.json()["item"]["destinationRef"]["name"], "primary");
+    // The edit moved the generation; the refusals below are field rules, so
+    // they are sent at the current one (a stale one is 412 first, DUI-2).
+    let current = stored["metadata"]["generation"].clone();
+    let edit = || {
+        let mut body = edit();
+        body["expectedGeneration"] = current.clone();
+        body
+    };
 
     // The scheme is reserved: it cannot be typed into `archive.url`.
     let mut smuggled = edit();

@@ -4,18 +4,20 @@
 // files, the Switchover's own page gives the CLI commands.
 import { Link, useParams } from "@tanstack/react-router";
 import { Alert, Breadcrumb, BreadcrumbItem, Button, Card, CardBody, CardHeader, CardTitle, Content, PageSection, Stack, StackItem } from "@patternfly/react-core";
-import { outcomeOf, UNKNOWN_OUTCOME_SENTENCE } from "../../api/approvals";
+import { outcomeOf, UNKNOWN_OUTCOME_SENTENCE, useApprovalGrant } from "../../api/approvals";
 import { useApproveSwitchover, useSwitchoverApprovalRequest } from "../../api/switchovers";
 import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { SwitchoverApprovalSummary } from "../cutover/SwitchoverApprovalSummary";
 import { REFUSAL_TITLE } from "./ApprovalPage";
-import { Refusal, RequestStatus } from "./parts";
+import { Refusal, RequestStatus, Requester } from "./parts";
 import "./approvals.css";
+import { ErrorText, Prose } from "../../components/Prose";
 
 export function SwitchoverApprovalPage() {
   const { ns, name } = useParams({ from: "/$ns/approvals/switchover/$name" });
   const requestQ = useSwitchoverApprovalRequest(ns, name);
+  const grant = useApprovalGrant(ns);
   const approve = useApproveSwitchover(ns, name);
   const request = requestQ.data;
   const breadcrumb = (
@@ -40,7 +42,19 @@ export function SwitchoverApprovalPage() {
                   <CardTitle component="h2">What approving commits</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <Content component="p" className="lw-subtle">{request.stateSentence}</Content>
+                  <Content component="p" className="lw-subtle"><Prose text={request.stateSentence} /></Content>
+                  {/* DUI-21: the second person sees who asked, as on a restore's request. */}
+                  {request.state !== "notConfirmed" && request.requester && (
+                    <Content component="p" id="switchover-requester">
+                      Requested by <Requester
+                        id={request.requester}
+                        email={request.requesterEmail}
+                        name={request.requesterName}
+                        detailsNotVerified={request.requesterDetailsNotVerified === true}
+                        grant={grant}
+                      />
+                    </Content>
+                  )}
                   <SwitchoverApprovalSummary request={request} />
                 </CardBody>
               </Card>
@@ -58,7 +72,7 @@ export function SwitchoverApprovalPage() {
                     </Alert>
                   ) : request.approve.offered && request.confirmationSha256 ? (
                     <>
-                      <Content component="p">{request.approve.sentence}</Content>
+                      <Content component="p"><Prose text={request.approve.sentence} /></Content>
                       <div className="lw-decision">
                         <Button variant="primary" id="approve-switchover" isLoading={approve.isPending} isDisabled={approve.isPending} onClick={() => approve.mutate(request.confirmationSha256!)}>
                           Approve
@@ -68,7 +82,7 @@ export function SwitchoverApprovalPage() {
                     </>
                   ) : (
                     <Refusal title={REFUSAL_TITLE[request.approve.refusal ?? ""] ?? "Not offered to you"} id="approve-not-offered">
-                      {request.approve.sentence || "This login is not offered an approval for this request."}
+                      <Prose text={request.approve.sentence || "This login is not offered an approval for this request."} />
                     </Refusal>
                   )}
                   {approve.error &&
@@ -78,7 +92,7 @@ export function SwitchoverApprovalPage() {
                       </Alert>
                     ) : (
                       <Refusal title="Not approved" id="approve-refused">
-                        {approve.error.message}
+                        <ErrorText error={approve.error} />
                       </Refusal>
                     ))}
                 </CardBody>

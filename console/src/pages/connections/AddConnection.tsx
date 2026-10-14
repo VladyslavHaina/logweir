@@ -181,7 +181,7 @@ export function AddConnection({
                 name="tls"
                 control={control}
                 render={({ field }) => (
-                  <Field id="connection-tls-group" label="Transport" role="group" error={err("tls")} help="The only switch that turns TLS on. No authentication with TLS on is refused rather than dialled in the clear.">
+                  <Field id="connection-tls-group" label="Transport" role="group" error={err("tls")} help="The only switch that turns TLS on. TLS with no authentication is not supported by saved connections: it is refused, never dialled without TLS.">
                     <Switch
                       id="connection-tls"
                       label="TLS"

@@ -5707,7 +5707,7 @@
         ]
       },
       "ApprovalRequestView": {
-        "description": "PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata.",
+        "description": "PROD-16.2: a two-person request as the approver is shown it. Every field from `requester` to `confirmationSha256` comes from the request's signed bytes, AFTER the console verified its own signature on them; none is read from the stored object's metadata — except `requesterEmail` and `requesterName`, which say so and decide nothing.",
         "type": "object",
         "required": [
           "approvalName",
@@ -5787,6 +5787,21 @@
           },
           "requester": {
             "description": "Who asked, `<issuer>#<subject>`, as the console attested them.",
+            "type": "string",
+            "nullable": true
+          },
+          "requesterDetailsNotVerified": {
+            "description": "DUI-21: `true` when the request carries requester details that this console's signature does not verify for this request (changed after it was made, or copied from another): neither `requesterEmail` nor `requesterName` is served. ABSENT otherwise.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requesterEmail": {
+            "description": "DUI-21: the requester's email, verified by the identity provider (`email_verified: true`) when the request was made, exactly as received (printable ASCII, `local@domain`, at most 254 bytes), and served only when this console's own signature over the document that carries it verifies and binds this request (its approval name, `requester` and plan hash). Not part of the signed request. Show it with `requester`, never instead of it. ABSENT when the provider vouched for no such address and on a request made before it was recorded.",
+            "type": "string",
+            "nullable": true
+          },
+          "requesterName": {
+            "description": "DUI-21: the requester's name from the claim the install opted into (`oidc.displayNameClaim`); not part of the signed request. Self-asserted at most identity providers: show it as unverified, after the identifier, never in its place. ABSENT unless a name claim is configured, and as `requesterEmail` is. Cleaned of control and invisible formatting characters, at most 128 characters.",
             "type": "string",
             "nullable": true
           },
@@ -6209,6 +6224,14 @@
           "backupId": {
             "description": "The archive backup ID.",
             "type": "string",
+            "nullable": true
+          },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions this run records (`spec.consumerGroups`, copied from its schedule). ABSENT selects none: the run records no positions (DUI-25). What each group's outcome was is the receipt's, on the recovery point.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           },
           "createdAt": {
@@ -8480,6 +8503,14 @@
             "description": "`Forbid` (default) or `Allow`.",
             "default": null,
             "$ref": "#/components/schemas/ConcurrencyPolicy",
+            "nullable": true
+          },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions every run records, by exact id (`spec.consumerGroups`): never a pattern, never \"all groups\". A restore maps them, and a switchover moves them (DUI-25).\n\nOptional and additive: ABSENT (or empty) selects no group and the schedule is the one this route always created, its request hash included. A blank, repeated or control-character id, one over 255 bytes, more than 100 ids, or a selection whose receipt summary could be over its cap is refused here by the rule the runner applies (`consumer_positions::refuse_selection`), before any write. The edit route leaves the stored selection as it is.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
             "nullable": true
           },
           "destinationRef": {
@@ -13533,6 +13564,14 @@
             "description": "`Forbid` or `Allow`.",
             "$ref": "#/components/schemas/ConcurrencyPolicy"
           },
+          "consumerGroups": {
+            "description": "The consumer groups whose positions every run records (`spec.consumerGroups`), as stored. ABSENT selects none: the runs record no positions, so no restore of them maps any (DUI-25).",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
           "createdAt": {
             "description": "When the object was created.",
             "type": "string",
@@ -14677,6 +14716,21 @@
             "type": "string",
             "nullable": true
           },
+          "requesterDetailsNotVerified": {
+            "description": "DUI-21: as `ApprovalRequestView.requesterDetailsNotVerified`.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requesterEmail": {
+            "description": "DUI-21: the requester's provider-verified email; not part of the signed request (as `ApprovalRequestView.requesterEmail`).",
+            "type": "string",
+            "nullable": true
+          },
+          "requesterName": {
+            "description": "DUI-21: the requester's name from an opted-in claim, unverified; not part of the signed request (as `ApprovalRequestView.requesterName`).",
+            "type": "string",
+            "nullable": true
+          },
           "scope": {
             "description": "Present exactly when `scopeComplete`.",
             "$ref": "#/components/schemas/SwitchoverScopeView",
@@ -15161,7 +15215,7 @@
         "type": "object",
         "properties": {
           "roles": {
-            "description": "The roles to exercise, 1 to 4. Absent means every configured role.",
+            "description": "The roles to exercise, 1 to 4. Absent means every role a run uses this destination's credentials for: `archiveWrite`, `archiveRead` and `evidenceWrite` (unset, the last two use the archive-write credential), and `evidenceRead` when it is configured.",
             "default": null,
             "type": "array",
             "items": {

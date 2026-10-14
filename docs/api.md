@@ -211,7 +211,8 @@ is left out of the request hash when absent, so an old-shape retry replays.
 `expectedGeneration` (`PUT …/schedules/{name}`, `:update-access`) or
 `expectedResourceVersion` (`:set-suspension`, on the whole object, so a
 controller status write in between is `412 precondition_failed`: read and
-resend).
+resend). The precondition is checked before any field rule, so a stale write
+is always `412` and nothing is written.
 
 **Lists** default to `limit=50`, at most 200: `{items, page: {limit,
 nextCursor, snapshot}}`. A cursor is MAC-authenticated with the cursor key and
@@ -297,7 +298,7 @@ the schedule carries `RetentionReportWithdrawn`. Use a `RetentionPolicy`.
 and `topicSelection`, and **a field omitted is removed**. It changes the future
 only: an existing `Backup` keeps its copied policy and its Job.
 
-- `sourceRef` is refused before anything is read: `422`,
+- `sourceRef` is refused before anything is written: `422`,
   `sourceRef: field_immutable`. A different cluster is a different schedule.
 - A different current generation, or an edit landing between read and write, is
   `412 precondition_failed`. A console that sees `generation` absent asks for a
@@ -407,6 +408,19 @@ More refusals at `POST …/restores`:
 
 `GET …/approval-request` verifies the console's own signature on the stored
 request before projecting anything, and `approve.offered` is advisory.
+Beside the signed `requester` it serves `requesterEmail`, the requester's email
+when the identity provider marked it verified (`email_verified: true`), and
+`requesterName`, only when `oidc.displayNameClaim` is configured: self-asserted at
+most identity providers, so shown as unverified and never in place of the
+identifier. Neither is part of the signed request: both travel in a display
+document the console signs with its confirmation key (its own payload type) and
+binds to the request's approval name, `requester` and plan hash, stored in the
+annotations `logweir.dev/requester-display` and `-display-signature`. They are
+served only when that signature verifies for this request; otherwise neither is,
+and `requesterDetailsNotVerified: true` says so. An email is shown only exactly
+as received (printable ASCII, `local@domain`, at most 254 bytes), never
+normalised or cut; the name is cleaned and capped at 128 characters. A request
+made before the document existed has neither and no flag.
 `POST …/console-approval` takes `{"confirmationSha256": "sha256:<64 hex>"}` and
 nothing else: `201` with the `Approval`, or `200 replayed: true` for the same
 approver's second click. Checked in order:
@@ -533,7 +547,10 @@ withdrawn in v1 (release-notes item 75).
 
 ### Destination access test
 
-`:test` probes every configured grant. With `writeProbe: createOnlyMarker` it
+`:test` with no `roles` probes every role a run uses this destination's
+credentials for: `archiveWrite`, `archiveRead` and `evidenceWrite` (unset, the
+last two use the `archiveWrite` credential, and the `archiveRead` list dials
+it), and `evidenceRead` when it is set. With `writeProbe: createOnlyMarker` it
 creates `logweir/readiness/<uid>.json` as the `evidenceWrite` grant, which
 answers `destination.evidenceWritable`; with `disabled` the row is
 `WriteNotProbed`. `destination.evidenceReadable` is the `evidenceRead` grant's
@@ -573,8 +590,10 @@ No response carries a credential. An archive credential is published by name
 (`legacyArchive.credentialRef`), a deletion credential as
 `credentialConfigured: true`, and every archive URL without userinfo.
 `/signers` offers no trust button: an administrator adds a key with
-`kubectl apply`. The API neither sets nor shows `spec.consumerGroups`; set it
-with `kubectl`. Retention and catalog members are described in the OpenAPI
+`kubectl apply`. A schedule's `spec.consumerGroups` is set by the schedule
+create's `consumerGroups` (refused by field as the runner would refuse it) and
+shown on the schedule and on each run; an edit leaves it alone, and `kubectl`
+changes it. Retention and catalog members are described in the OpenAPI
 document; nothing in a retention evaluation was deleted.
 
 ### Trust
@@ -634,9 +653,9 @@ oidc:
   clientId: logweir-console                        # EXACT; also the expected audience
   clientSecretFile: /var/run/secrets/oidc/clientSecret
   allowedAlgorithms: [RS256, ES256]                # the two this service verifies
-  scopes: [openid, profile, groups]                # must contain `openid`
+  scopes: [openid, profile, email, groups]         # must contain `openid`; `email` names a requester to an approver
   groupsClaim: groups                              # the EXACT claim name
-  displayNameClaim: name                           # presentation only
+  # displayNameClaim: name                         # OPT-IN: self-asserted at most identity providers; shown as unverified
   tokenAuthMethod: clientSecretBasic               # or clientSecretPost
   caBundleFile: /var/run/logweir/oidc-ca/ca.crt    # OPTIONAL: a private issuer CA, ADDED to the system roots
   systemRoots: true                                # false: trust caBundleFile alone

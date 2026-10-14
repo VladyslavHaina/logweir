@@ -32,6 +32,8 @@ import {
   destinationBody,
   destinationField,
   destinationProblems,
+  onScreen,
+  sourcesOf,
   useCreateDestination,
   type DestinationValues,
 } from "../../api/destinations";
@@ -95,6 +97,7 @@ export function AddDestination({ ns, onClose, onCreated }: { ns: string; onClose
       setLocal(refusal);
       return;
     }
+    const shown = sourcesOf(values.grants);
     const body = destinationBody(values);
     for (const role of GRANT_ROLES) {
       values.grants[role].accessKeyId = "";
@@ -110,7 +113,7 @@ export function AddDestination({ ns, onClose, onCreated }: { ns: string; onClose
         },
         onError: (error) => {
           const placed = placeProblems(error, destinationField);
-          for (const [field, message] of Object.entries(placed.fields)) {
+          for (const [field, message] of Object.entries(onScreen(placed.fields, shown))) {
             setError(field as Path<DestinationValues>, { type: "server", message: message as string });
           }
           setUnmatched(placed.unmatched);

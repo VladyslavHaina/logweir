@@ -30,7 +30,9 @@ import {
   rotateDefaults,
   rotationBody,
   rotationField,
+  onScreen,
   rotationProblems,
+  sourcesOf,
   useRotateAccess,
   type Destination,
   type RotateValues,
@@ -78,6 +80,8 @@ export function RotateAccess({
 
   const submit = handleSubmit((values) => {
     setUnmatched([]);
+    // What each grant's source and the CA choice were when sent: they decide which inputs an error can be shown on.
+    const shown = { grants: sourcesOf(values.grants), caChange: values.caChange };
     const body = rotationBody(values, d);
     for (const role of GRANT_ROLES) {
       values.grants[role].accessKeyId = "";
@@ -88,7 +92,18 @@ export function RotateAccess({
       onSuccess: (item) => onRotated(item),
       onError: (error) => {
         const placed = placeProblems(error, rotationField);
-        for (const [field, message] of Object.entries(placed.fields)) setError(field as Path<RotateValues>, { type: "server", message: message as string });
+        const fields: Partial<Record<string, string>> = onScreen(placed.fields, shown.grants);
+        // The CA's name and key are shown only while "Point it at a ConfigMap" is chosen.
+        if (shown.caChange !== "set") {
+          for (const ca of ["caName", "caKey"] as const) {
+            const message = fields[ca];
+            if (message) {
+              fields.caChange = fields.caChange ? `${fields.caChange} ${message}` : message;
+              delete fields[ca];
+            }
+          }
+        }
+        for (const [field, message] of Object.entries(fields)) setError(field as Path<RotateValues>, { type: "server", message: message as string });
         setUnmatched(placed.unmatched);
       },
     });
@@ -128,9 +143,10 @@ export function RotateAccess({
                   <Field
                     id="rotate-ca-change"
                     label="Change"
+                    error={errors.caChange?.message}
                     help={d.transport.caBundle ? `Now: ConfigMap ${d.transport.caBundle.configMapName}, key ${d.transport.caBundle.key}.` : "Now: the runner image's own trust store."}
                   >
-                    <FormSelect {...controlState("rotate-ca-change", undefined)} value={field.value} onChange={(_e, v) => field.onChange(v)}>
+                    <FormSelect {...controlState("rotate-ca-change", errors.caChange?.message)} value={field.value} onChange={(_e, v) => field.onChange(v)}>
                       <FormSelectOption value="keep" label="Leave it alone" />
                       <FormSelectOption value="set" label="Point it at a ConfigMap" />
                       <FormSelectOption value="clear" label="Clear it" />

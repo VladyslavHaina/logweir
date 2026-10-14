@@ -1,7 +1,7 @@
 // Every backup run in the namespace: find one, see whether the controller
 // verified it, restore it, or start one now.
 import { useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   Button,
   Card,
@@ -32,7 +32,13 @@ import { BackupStatus, useFlags } from "./parts";
 import "./evidence.css";
 import { LIST_VERIFIED_NOTE, listVerdict, restoreOffer, triggerWords, windowShort } from "./verdict";
 
-type Filter = "all" | "verified" | "unverified" | "running";
+export type Filter = "all" | "verified" | "unverified" | "running";
+
+/** The list's address may name a filter (DUI-31.3: Overview's "runs that did not verify"). */
+export function backupsSearch(search: Record<string, unknown>): { filter?: Filter } {
+  const f = search.filter;
+  return f === "verified" || f === "unverified" || f === "running" ? { filter: f } : {};
+}
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
@@ -88,11 +94,12 @@ export function Trigger({ b }: { b: Backup }) {
 
 export function Backups() {
   const { ns } = useParams({ from: "/$ns/backups" });
+  const { filter: linked } = useSearch({ from: "/$ns/backups" });
   const navigate = useNavigate();
   const list = useBackupList(ns);
   const flags = useFlags(ns);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(linked ?? "all");
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(10);
   const [sortDesc, setSortDesc] = useState(true);

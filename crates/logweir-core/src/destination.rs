@@ -123,6 +123,24 @@ impl DestinationRole {
         Self::EvidenceWrite,
         Self::EvidenceRead,
     ];
+
+    /// **The roles a destination access test exercises when the request
+    /// names none** (DUI-1): every role a run uses one of the destination's
+    /// credentials for. `ArchiveRead` and `EvidenceWrite` are always in it,
+    /// because unset each falls back to the `archiveWrite` credential
+    /// (`weirkeeper::destination::resolve`). The `ArchiveRead` list then dials
+    /// with that credential whatever the write probe says; the archive prefix
+    /// itself is never write-probed. `EvidenceRead` has no fallback (unset, a
+    /// run's verification is not attempted), so it is in the set only when
+    /// configured.
+    #[must_use]
+    pub fn access_test_defaults(evidence_read_configured: bool) -> Vec<Self> {
+        let mut roles = vec![Self::ArchiveWrite, Self::ArchiveRead, Self::EvidenceWrite];
+        if evidence_read_configured {
+            roles.push(Self::EvidenceRead);
+        }
+        roles
+    }
 }
 
 /// The immutable half of a `BackupDestination.spec`: the location plus the

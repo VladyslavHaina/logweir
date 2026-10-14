@@ -2104,7 +2104,8 @@ fn entry_consumer_positions(
             .groups
             .iter()
             .map(|g| EntryGroup {
-                group_id: redact(&g.group_id),
+                // DUI-26: a Kafka NAME, not free text: kept whole when legal.
+                group_id: relayed_group_id(&g.group_id),
                 outcome: redact(&g.outcome),
                 reason: g.reason.as_deref().map(redact),
                 group_type: g.group_type.as_deref().map(redact),
@@ -2128,6 +2129,28 @@ fn entry_consumer_positions(
         groups,
         groups_omitted,
     })
+}
+
+/// A topic name as a catalog entry carries it: redacted as a NAME
+/// (`redact_name`, no long-run rule) when it is a legal Kafka topic name, else
+/// as free text (DUI-26).
+fn relayed_topic_name(name: &str) -> String {
+    if logweir_core::check_contract::is_relayable_topic_name(name) {
+        logweir_core::check_contract::redact_name(name)
+    } else {
+        redact(name)
+    }
+}
+
+/// A consumer group id as a catalog entry carries it: redacted as a NAME when
+/// it is relayable ([`logweir_core::check_contract::is_relayable_group_id`]),
+/// else as free text (DUI-26).
+fn relayed_group_id(id: &str) -> String {
+    if logweir_core::check_contract::is_relayable_group_id(id) {
+        logweir_core::check_contract::redact_name(id)
+    } else {
+        redact(id)
+    }
 }
 
 /// An entry's `topics` and `topicsOmitted`, from the record.
@@ -2157,7 +2180,8 @@ fn entry_topics(
         .topics
         .iter()
         .map(|t| EntryTopic {
-            name: redact(&t.name),
+            // DUI-26: a Kafka NAME, not free text: kept whole when legal.
+            name: relayed_topic_name(&t.name),
             partitions: t.partitions,
             replication_factor: t.configuration.as_ref().and_then(|c| c.replication_factor),
             config_coverage: t.config_coverage.as_ref().map(|c| redact(&c.coverage)),
@@ -2563,6 +2587,32 @@ mod tests {
         bare.owner_detection = None;
         let (a, b) = entry_renderings(&bare);
         assert_eq!(a, b);
+    }
+
+    /// **DUI-26: a catalog entry carries a consumer group id and a topic name
+    /// as NAMES**: 60 characters each survive whole, where the free-text
+    /// redactor turned them into `[redacted]` on the backup page and in the
+    /// restore's group choice. CONTROL: a value that is not a legal name (a
+    /// topic with `/` and `+`, a group with a control character) takes the
+    /// free-text rule and its secret-shaped run is redacted.
+    ///
+    /// KILLS: the names redacted as free text; illegal names kept.
+    #[test]
+    fn dui26_a_catalog_entry_keeps_long_group_and_topic_names() {
+        let group = format!(
+            "dui26-billing-reconciliation-consumer-eu-west-1-{}",
+            "g".repeat(12)
+        );
+        let topic = format!("dui26-settlement-ledger-eu-west-orders-{}", "t".repeat(21));
+        assert_eq!((group.len(), topic.len()), (60, 60));
+        assert_eq!(relayed_group_id(&group), group);
+        assert_eq!(relayed_topic_name(&topic), topic);
+        let secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+        assert_eq!(
+            relayed_topic_name(&format!("{secret}/a+b")),
+            logweir_core::check_contract::REDACTED
+        );
+        assert!(!relayed_group_id(&format!("g\u{7} {secret}")).contains(secret));
     }
 
     /// The SLIM rendering drops the consumer groups' list and

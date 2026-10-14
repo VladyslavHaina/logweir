@@ -531,6 +531,19 @@ pub struct CreateScheduleRequest {
     /// same `validate_selection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
+    /// The consumer groups whose positions every run records, by exact id
+    /// (`spec.consumerGroups`): never a pattern, never "all groups". A
+    /// restore maps them, and a switchover moves them (DUI-25).
+    ///
+    /// Optional and additive: ABSENT (or empty) selects no group and the
+    /// schedule is the one this route always created, its request hash
+    /// included. A blank, repeated or control-character id, one over 255
+    /// bytes, more than 100 ids, or a selection whose receipt summary could be
+    /// over its cap is refused here by the rule the runner applies
+    /// (`consumer_positions::refuse_selection`), before any write. The edit
+    /// route leaves the stored selection as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where backups are written. Exactly one of `archive` or
     /// `destinationRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +705,11 @@ pub struct Schedule {
     /// Dynamic selection, when the schedule uses it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
+    /// The consumer groups whose positions every run records
+    /// (`spec.consumerGroups`), as stored. ABSENT selects none: the runs
+    /// record no positions, so no restore of them maps any (DUI-25).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where backups are written. With `destinationRef` this is the CRD's
     /// sentinel URL and the console should render the destination instead.
     pub archive: ArchiveView,
@@ -971,6 +989,12 @@ pub struct Backup {
     pub source_ref: NameRef,
     /// Named topics.
     pub topics: Vec<String>,
+    /// The consumer groups whose positions this run records
+    /// (`spec.consumerGroups`, copied from its schedule). ABSENT selects
+    /// none: the run records no positions (DUI-25). What each group's outcome
+    /// was is the receipt's, on the recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer_groups: Option<Vec<String>>,
     /// Where the archive is written. With `destinationRef` this is the CRD's
     /// sentinel URL `logweir-destination://<name>` and carries no credential;
     /// a console renders the destination instead of the URL.
@@ -2097,7 +2121,10 @@ pub struct UpdateDestinationAccessRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TestDestinationRequest {
-    /// The roles to exercise, 1 to 4. Absent means every configured role.
+    /// The roles to exercise, 1 to 4. Absent means every role a run uses this
+    /// destination's credentials for: `archiveWrite`, `archiveRead` and
+    /// `evidenceWrite` (unset, the last two use the archive-write credential),
+    /// and `evidenceRead` when it is configured.
     #[serde(default)]
     pub roles: Option<Vec<DestinationRoleDto>>,
 }
@@ -4346,7 +4373,8 @@ pub struct ApproveOfferView {
 /// PROD-16.2: a two-person request as the approver is shown it. Every field
 /// from `requester` to `confirmationSha256` comes from the request's signed
 /// bytes, AFTER the console verified its own signature on them; none is read
-/// from the stored object's metadata.
+/// from the stored object's metadata — except `requesterEmail` and
+/// `requesterName`, which say so and decide nothing.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestView {
@@ -4372,6 +4400,30 @@ pub struct ApprovalRequestView {
     /// Who asked, `<issuer>#<subject>`, as the console attested them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// DUI-21: the requester's email, verified by the identity provider
+    /// (`email_verified: true`) when the request was made, exactly as
+    /// received (printable ASCII, `local@domain`, at most 254 bytes), and
+    /// served only when this console's own signature over the document that
+    /// carries it verifies and binds this request (its approval name,
+    /// `requester` and plan hash). Not part of the signed request. Show it
+    /// with `requester`, never instead of it. ABSENT when the provider vouched
+    /// for no such address and on a request made before it was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_email: Option<String>,
+    /// DUI-21: the requester's name from the claim the install opted into
+    /// (`oidc.displayNameClaim`); not part of the signed request. Self-asserted
+    /// at most identity providers: show it as unverified, after the
+    /// identifier, never in its place. ABSENT unless a name claim is
+    /// configured, and as `requesterEmail` is. Cleaned of control and
+    /// invisible formatting characters, at most 128 characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_name: Option<String>,
+    /// DUI-21: `true` when the request carries requester details that this
+    /// console's signature does not verify for this request (changed after it
+    /// was made, or copied from another): neither `requesterEmail` nor
+    /// `requesterName` is served. ABSENT otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_details_not_verified: Option<bool>,
     /// The plan hash the request names — the Restore's own, recomputed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
@@ -4635,6 +4687,17 @@ pub struct SwitchoverApprovalRequestView {
     pub state_sentence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// DUI-21: the requester's provider-verified email; not part of the signed
+    /// request (as `ApprovalRequestView.requesterEmail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_email: Option<String>,
+    /// DUI-21: the requester's name from an opted-in claim, unverified; not
+    /// part of the signed request (as `ApprovalRequestView.requesterName`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_name: Option<String>,
+    /// DUI-21: as `ApprovalRequestView.requesterDetailsNotVerified`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_details_not_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
     /// Whether `scope` is everything a second person approves, in full.

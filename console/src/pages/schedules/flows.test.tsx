@@ -14,6 +14,7 @@ import { scheduleRoutes } from "./routes";
 import { BackUpNow } from "./BackUpNow";
 import { NextRuns } from "./parts";
 import { Verdict } from "./Readiness";
+import { nextRunsPending } from "./ScheduleDetail";
 import repeated from "../../../fixtures/console/cadence-preview-repeated.json";
 import policyFixture from "../../../fixtures/console/schedule-policy.json";
 
@@ -407,6 +408,72 @@ describe("FX-45: the backup readiness check", () => {
     const note = "the broker reports READ for this principal on all 2 selected topic(s)";
     render(<Verdict preflight={check([{ id: "connection.topicsReadable", state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: note }], [{ id: "connection.topicsReadable", note }])} />);
     expect(screen.queryByText(/Missing READ/)).toBeNull();
-    expect(document.body.textContent).toContain(`Only the run itself can answer: ${note}`);
+    // DUI-11: one item per note, so two notes never run together.
+    const list = screen.getByRole("list", { name: "Only the run itself can answer" });
+    expect(list.querySelectorAll("li")).toHaveLength(1);
+    expect(list.textContent).toBe(`connection.topicsReadable ${note}`);
+  });
+});
+
+describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
+  it("re-reads a schedule whose next runs are not computed yet, and shows them without leaving the page", async () => {
+    let reads = 0;
+    formNetwork((r, path) => {
+      if (r.method === "GET" && path === "/namespaces/team-a/schedules/nightly") {
+        reads += 1;
+        const base = schedule();
+        return json(200, { item: reads === 1 ? { ...base, status: { ...base.status, nextRuns: undefined } } : base, requestId: "r" });
+      }
+      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/schedules/nightly");
+    expect(await screen.findByText(/Not computed yet/)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/Not computed yet/)).toBeNull(), { timeout: 8000 });
+    expect(reads).toBeGreaterThan(1);
+    // DUI-12: what it backs up links to the objects it names, not to their lists.
+    expect(screen.getByRole("link", { name: "source" }).getAttribute("href")).toMatch(/\/team-a\/connections\/source$/);
+    expect(screen.getByRole("link", { name: "dest" }).getAttribute("href")).toMatch(/\/team-a\/destinations\/dest$/);
+  });
+
+  it("is pending only while the next runs are absent or computed from an older revision (the control)", () => {
+    const s = schedule();
+    expect(nextRunsPending(s)).toBe(false);
+    expect(nextRunsPending({ ...s, status: { ...s.status, nextRuns: [] } })).toBe(false);
+    expect(nextRunsPending({ ...s, status: { ...s.status, nextRuns: undefined } })).toBe(true);
+    expect(nextRunsPending({ ...s, generation: 2, status: { ...s.status, observedGeneration: 1 } })).toBe(true);
+  });
+
+  it("after a 412 the typed change stays, on the revision it was typed against, until Read it again", async () => {
+    let generation = 4;
+    let reads = 0;
+    formNetwork((r, path) => {
+      if (path === "/namespaces/team-a/schedules/nightly") {
+        if (r.method === "PUT") {
+          generation = 5;
+          return json(412, { code: "precondition_failed", status: 412, detail: "The schedule changed since it was read.", requestId: "r" });
+        }
+        reads += 1;
+        const base = schedule();
+        return json(200, { item: { ...base, generation, status: { ...base.status, observedGeneration: generation } }, requestId: "r" });
+      }
+      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/schedules/nightly/edit");
+    expect(await screen.findByText("Editing revision g4")).toBeTruthy();
+    const zone = () => document.getElementById("sf-timeZone") as HTMLInputElement;
+    fireEvent.change(zone(), { target: { value: "Europe/Berlin" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+    expect(await screen.findByText("Somebody changed this schedule after this page read it")).toBeTruthy();
+    // The write's invalidation re-read the schedule (now g5): the form stays on g4, with what was typed.
+    await waitFor(() => expect(reads).toBeGreaterThan(1));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(screen.getByText("Editing revision g4")).toBeTruthy();
+    expect(zone().value).toBe("Europe/Berlin");
+    // The control: Read it again takes the revision in force, and the form is that revision's.
+    fireEvent.click(screen.getByRole("button", { name: "Read it again" }));
+    expect(await screen.findByText("Editing revision g5")).toBeTruthy();
+    expect(zone().value).toBe("Asia/Kathmandu");
   });
 });

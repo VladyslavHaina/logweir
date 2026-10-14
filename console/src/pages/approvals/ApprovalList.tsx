@@ -17,19 +17,22 @@ import {
   useApprovalRequests,
   useApprovals,
   useWaitingRestores,
+  useWaitingSwitchovers,
   type Approval,
   type ApprovalGrant,
   type ApprovalMode,
   type ApprovalRequest,
 } from "../../api/approvals";
+import { useSwitchoverApprovalRequests, type Switchover } from "../../api/switchovers";
 import type { Restore } from "../../api/types";
+import type { ReactNode } from "react";
 import { PageHeader } from "../../components/PageHeader";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { StatusLabel } from "../../components/Status";
-import { ApprovalStatus, ErrorLine, principalShort } from "./parts";
+import { ApprovalStatus, ErrorLine, principalText } from "./parts";
 import "./approvals.css";
 
 /** Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A). */
@@ -42,14 +45,17 @@ export function subjectHref(ns: string, approval: Approval): string | undefined 
 }
 
 const NOTHING_WAITS: Record<ApprovalMode, string> = {
-  confirm: "Under confirm a restore runs on its requester's own confirmation, so nothing waits for an approver here.",
-  twoPerson: "When someone asks for a restore, it waits here until a second person approves it.",
-  strict: "When someone asks for a restore, it waits here until an approver countersigns it with their key.",
-  files: "A restore created in this namespace waits here until an approver records the files logweir drill approve wrote.",
+  confirm: "Under confirm a restore or a switchover runs on its requester's own confirmation, so nothing waits for an approver here.",
+  twoPerson: "When someone asks for a restore or a switchover, it waits here until a second person approves it.",
+  strict: "When someone asks for a restore or a switchover, it waits here until an approver countersigns it with their key.",
+  files: "A restore or a switchover created in this namespace waits here until an approver records the files logweir drill approve wrote.",
 };
 
-/** What happens next for one waiting restore, for this sign-in. */
-function nextStep(mode: ApprovalMode | null, grant: ApprovalGrant, request: { data?: ApprovalRequest; isError: boolean; isPending: boolean } | undefined): { text: string; mine: boolean } {
+/** The part of a restore's or a switchover's request that says what happens next. */
+type RequestRead = { data?: { state: ApprovalRequest["state"]; approve: ApprovalRequest["approve"] }; isError: boolean; isPending: boolean };
+
+/** What happens next for one waiting restore or switchover, for this sign-in. */
+function nextStep(mode: ApprovalMode | null, grant: ApprovalGrant, request: RequestRead | undefined): { text: string; mine: boolean } {
   switch (mode) {
     case "twoPerson": {
       if (!request || request.isPending) return { text: "Reading the request", mine: false };
@@ -73,6 +79,18 @@ function nextStep(mode: ApprovalMode | null, grant: ApprovalGrant, request: { da
   }
 }
 
+/** One row of "Waiting for approval": a Restore's or a Switchover's (DUI-27). */
+interface WaitingRow {
+  key: string;
+  name: string;
+  href: string;
+  link: ReactNode;
+  sub: string;
+  step: { text: string; mine: boolean };
+  found: ReturnType<typeof approvalState> | null;
+  requestedAt: string | null | undefined;
+}
+
 function byNewest<T extends { createdAt?: string | null; name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")) || a.name.localeCompare(b.name));
 }
@@ -84,11 +102,19 @@ export function ApprovalList() {
   const policy = useApprovalPolicy(ns, grant.approvalsRead);
   const approvals = useApprovals(ns, grant.approvalsRead);
   const waiting = useWaitingRestores(ns, grant.restoresRead);
+  // DUI-27: a switchover held for its approval waits here too, as a restore does.
+  const waitingSwitchovers = useWaitingSwitchovers(ns, grant.restoresRead);
   const mode = policy.data ? approvalMode(policy.data) : null;
   const restores = byNewest(waiting.data ?? []);
+  const switchovers: Switchover[] = waitingSwitchovers.data ?? [];
   const requests = useApprovalRequests(
     ns,
     restores.map((r) => r.name),
+    mode === "twoPerson",
+  );
+  const switchoverRequests = useSwitchoverApprovalRequests(
+    ns,
+    switchovers.map((s) => s.name),
     mode === "twoPerson",
   );
 
@@ -115,79 +141,120 @@ export function ApprovalList() {
 
   const byName = new Map<string, Approval>((approvals.data ?? []).map((a) => [a.name, a]));
 
-  const waitingRows = restores.map((r: Restore, i) => {
-    const step = nextStep(mode, grant, requests[i]);
-    const found = approvals.isError ? null : approvalState(byName.get(r.approvalRef.name) ?? null, { name: r.name, uid: r.uid, namespace: r.namespace, planHash: "", approvalName: r.approvalRef.name });
-    return { r, step, found };
-  });
+  const waitingRows: WaitingRow[] = [
+    ...restores.map((r: Restore, i) => ({
+      key: `restore/${r.name}`,
+      name: r.name,
+      href: `#/${ns}/approvals/${encodeURIComponent(r.name)}`,
+      link: (
+        <Link to="/$ns/approvals/$name" params={{ ns, name: r.name }} search={{}} className="lw-break">
+          {r.name}
+        </Link>
+      ),
+      sub: `Restore into ${r.target.clusterRef.name} · ${r.target.originalName ? "original names" : `prefix ${r.target.topicPrefix || "none"}`}`,
+      step: nextStep(mode, grant, requests[i]),
+      found: approvals.isError ? null : approvalState(byName.get(r.approvalRef.name) ?? null, { name: r.name, uid: r.uid, namespace: r.namespace, planHash: "", approvalName: r.approvalRef.name }),
+      requestedAt: r.createdAt,
+    })),
+    ...switchovers.map((s, i) => ({
+      key: `switchover/${s.name}`,
+      name: s.name,
+      // A second person decides on the switchover's approval page; under strict or with
+      // files the Switchover's own page gives the commands.
+      href: mode === "twoPerson" ? `#/${ns}/approvals/switchover/${encodeURIComponent(s.name)}` : `#/${ns}/switchovers/${encodeURIComponent(s.name)}`,
+      link:
+        mode === "twoPerson" ? (
+          <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: s.name }} className="lw-break">
+            {s.name}
+          </Link>
+        ) : (
+          <Link to="/$ns/switchovers/$name" params={{ ns, name: s.name }} className="lw-break">
+            {s.name}
+          </Link>
+        ),
+      sub: `Switchover of restore ${s.restore.name}`,
+      step: nextStep(mode, grant, switchoverRequests[i]),
+      found: approvals.isError
+        ? null
+        : approvalState(byName.get(s.approvalName) ?? null, { name: s.name, uid: s.uid, namespace: s.namespace, planHash: "", approvalName: s.approvalName }, "Switchover"),
+      requestedAt: switchoverRequests[i]?.data?.issuedAt,
+    })),
+  ];
+  // The restores decide the card; switchovers that cannot be listed are said in a line beside them.
+  const waitingPending = waiting.isPending || (waitingSwitchovers.isPending && !waitingSwitchovers.isError);
+  const waitingKnown = waiting.data !== undefined && waitingSwitchovers.data !== undefined;
 
   const waitingCard = (
     <Card>
       <CardHeader>
         <CardTitle component="h2">
-          Waiting for approval{waiting.data ? ` (${restores.length})` : ""}
+          Waiting for approval{waitingKnown ? ` (${waitingRows.length})` : ""}
         </CardTitle>
       </CardHeader>
       <CardBody>
         {approvals.isError && (
           <Content component="p" className="lw-subtle">
-            The Approvals in this namespace could not be listed, so this page cannot say which restores already have one. Each restore&apos;s own page reads its Approval directly.
+            The Approvals in this namespace could not be listed, so this page cannot say which restores or switchovers already have one. Each restore&apos;s own page reads its Approval directly.
             <ErrorLine error={approvals.error} />
+          </Content>
+        )}
+        {waitingSwitchovers.isError && (
+          <Content component="p" className="lw-subtle">
+            The switchovers in this namespace could not be listed, so one that waits for an approval is not shown here.
+            <ErrorLine error={waitingSwitchovers.error} />
           </Content>
         )}
         {!grant.restoresRead && grant.known ? (
           <Content component="p" className="lw-subtle">
-            Your sign-in may not list restores in {ns}, so none can be chosen here.
+            Your sign-in may not list restores or switchovers in {ns}, so none can be chosen here.
           </Content>
-        ) : waiting.isPending ? (
-          <LoadingRows rows={3} label="Loading the restores that wait" />
+        ) : waitingPending ? (
+          <LoadingRows rows={3} label="Loading what waits" />
         ) : waiting.isError ? (
           <ErrorState error={waiting.error} onRetry={() => void waiting.refetch()} />
-        ) : restores.length === 0 ? (
-          <Empty title="Nothing waits for approval" icon={CheckCircleIcon}>
-            {mode ? NOTHING_WAITS[mode] : "No restore in this namespace waits for an approval."}
-          </Empty>
+        ) : waitingRows.length === 0 ? (
+          waitingSwitchovers.isError ? null : (
+            <Empty title="Nothing waits for approval" icon={CheckCircleIcon}>
+              {mode ? NOTHING_WAITS[mode] : "No restore or switchover in this namespace waits for an approval."}
+            </Empty>
+          )
         ) : narrow ? (
           <CompactList
             flush
-            label="Restores waiting for approval"
-            items={waitingRows.map(({ r, step, found }) => ({
-              key: r.name,
-              href: `#/${ns}/approvals/${encodeURIComponent(r.name)}`,
-              title: r.name,
+            label="Waiting for approval"
+            items={waitingRows.map(({ key, name, href, sub, step, found, requestedAt }) => ({
+              key,
+              href,
+              title: name,
               meta: (
                 <>
-                  {step.mine ? <strong>{step.text}</strong> : step.text} · <When value={r.createdAt} />
+                  {sub} · {step.mine ? <strong>{step.text}</strong> : step.text} · <When value={requestedAt} />
                 </>
               ),
               status: found ? <ApprovalStatus found={found} waiting /> : <StatusLabel tone="neutral" text="Unknown" />,
             }))}
           />
         ) : (
-          <Table aria-label="Restores waiting for approval" variant="compact" gridBreakPoint="grid-md">
+          <Table aria-label="Waiting for approval" variant="compact" gridBreakPoint="grid-md">
             <Thead>
               <Tr>
-                <Th>Restore</Th>
+                <Th>Subject</Th>
                 <Th>Approval</Th>
                 <Th>Next</Th>
                 <Th modifier="nowrap">Requested</Th>
               </Tr>
             </Thead>
             <Tbody>
-              {waitingRows.map(({ r, step, found }) => (
-                <Tr key={r.name}>
-                  <Td dataLabel="Restore">
-                    <Link to="/$ns/approvals/$name" params={{ ns, name: r.name }} search={{}} className="lw-break">
-                      {r.name}
-                    </Link>
-                    <div className="lw-subtle lw-small">
-                      into {r.target.clusterRef.name} · {r.target.originalName ? "original names" : `prefix ${r.target.topicPrefix || "none"}`}
-                    </div>
+              {waitingRows.map(({ key, link, sub, step, found, requestedAt }) => (
+                <Tr key={key}>
+                  <Td dataLabel="Subject">
+                    {link}
+                    <div className="lw-subtle lw-small lw-break">{sub}</div>
                   </Td>
                   <Td dataLabel="Approval">{found ? <ApprovalStatus found={found} waiting /> : <StatusLabel tone="neutral" text="Unknown: not readable" />}</Td>
                   <Td dataLabel="Next">{step.mine ? <strong>{step.text}</strong> : step.text}</Td>
                   <Td dataLabel="Requested" modifier="nowrap">
-                    <When value={r.createdAt} />
+                    <When value={requestedAt} />
                   </Td>
                 </Tr>
               ))}
@@ -227,7 +294,7 @@ export function ApprovalList() {
                 title: `${a.subjectRef.kind}/${a.subjectRef.name}`,
                 meta: (
                   <>
-                    {a.approver ? principalShort(a.approver, grant) : "No approver recorded"} · <When value={a.createdAt} />
+                    {a.approver ? principalText(a.approver, grant) : "No approver recorded"} · <When value={a.createdAt} />
                   </>
                 ),
                 status: <ApprovalStatus found={recordState(a)} />,
@@ -260,9 +327,7 @@ export function ApprovalList() {
                       </Td>
                       <Td dataLabel="Approver">
                         {a.approver ? (
-                          <span title={a.approver} className="lw-break">
-                            {principalShort(a.approver, grant)}
-                          </span>
+                          <span className="lw-break lw-mono">{principalText(a.approver, grant)}</span>
                         ) : (
                           <span className="lw-subtle">Not recorded</span>
                         )}
@@ -288,7 +353,7 @@ export function ApprovalList() {
       <PageSection>
         <Stack hasGutter>
           {/* Under confirm nothing waits for an approver; the card shows only while a confirmation verifies. */}
-          {!(mode === "confirm" && waiting.isSuccess && restores.length === 0) && <StackItem>{waitingCard}</StackItem>}
+          {!(mode === "confirm" && waitingKnown && waitingRows.length === 0) && <StackItem>{waitingCard}</StackItem>}
           <StackItem>{recordedCard}</StackItem>
         </Stack>
       </PageSection>

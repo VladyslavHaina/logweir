@@ -77,13 +77,20 @@ export function useRestores(ns: string, enabled = true) {
   });
 }
 
-export function useRestore(ns: string, name: string) {
+/**
+ * One Restore. No name reads nothing (DUI-31.8: a page whose name comes from another
+ * read asks only once it has one). `fresh` reads it again on every mount, so a page
+ * that decides from it never decides from a copy cached before the run ended (DUI-28).
+ */
+export function useRestore(ns: string, name: string, { fresh = false }: { fresh?: boolean } = {}) {
+  const readable = useCan(ns, "restoresRead");
   return useQuery({
     queryKey: keys.item("restores", ns, name),
-    enabled: useCan(ns, "restoresRead"),
+    enabled: readable && name.length > 0,
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? LIVE_MS : false),
+    ...(fresh ? { refetchOnMount: "always" as const } : {}),
   });
 }
 

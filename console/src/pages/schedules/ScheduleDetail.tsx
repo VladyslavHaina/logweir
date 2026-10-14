@@ -1,7 +1,7 @@
 // One schedule: when it runs, what it backs up, what its last slot did, its
 // runs and their recovery points, and retention for its destination. Every
 // action on the page is bound to this schedule.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   Alert,
@@ -42,6 +42,7 @@ import { ErrorState, LoadingRows } from "../../components/States";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When, count } from "../../components/When";
 import { Ident } from "../../components/Ident";
+import { ConsumerGroups } from "../../components/ConsumerGroups";
 import { BackUpNow } from "./BackUpNow";
 import { RetentionCard } from "./Retention";
 import { cadenceWords, latestPoint, outcomeOf, runsOf, zoneOf } from "./model";
@@ -231,7 +232,9 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
   return (
     <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "14ch" }}>
       <Term term="Source">
-        <a href={`#/${ns}/connections`}>{s.sourceRef.name}</a>
+        <Link to="/$ns/connections/$name" params={{ ns, name: s.sourceRef.name }} className="lw-break">
+          {s.sourceRef.name}
+        </Link>
       </Term>
       <Term term="Topics">
         {s.allUserTopics ? (
@@ -256,10 +259,15 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
           </LabelGroup>
         )}
       </Term>
+      <Term term="Consumer groups">
+        <ConsumerGroups groups={s.consumerGroups} each="Each run records where these groups stand, so a restore of the run can map their positions." />
+      </Term>
       <Term term="Written to">
         {s.destinationRef ? (
           <>
-            <a href={`#/${ns}/destinations`}>{s.destinationRef.name}</a>
+            <Link to="/$ns/destinations/$name" params={{ ns, name: s.destinationRef.name }} className="lw-break">
+              {s.destinationRef.name}
+            </Link>
             {dest ? (
               <div className="lw-subtle lw-small lw-break">{dest.canonicalUrl}</div>
             ) : destinations.isError ? (
@@ -365,6 +373,37 @@ function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
   );
 }
 
+/** Whether the controller has yet to write this revision's next runs (absent, or computed from an older generation). */
+export function nextRunsPending(s: Pick<Schedule, "generation" | "status">): boolean {
+  const behind = typeof s.generation === "number" && typeof s.status.observedGeneration === "number" && s.status.observedGeneration < s.generation;
+  return s.status.nextRuns === null || s.status.nextRuns === undefined || behind;
+}
+
+export const UNTIL_COMPUTED_MS = 2000;
+export const UNTIL_COMPUTED_READS = 30;
+
+/**
+ * DUI-13: a schedule just created or edited reads "Not computed yet" until the controller
+ * writes its next runs, which it does within seconds. Re-read it every 2 s while that is
+ * so, for at most a minute per revision; after that the page says what it read.
+ */
+export function useUntilComputed(s: Schedule | undefined, refetch: () => unknown): void {
+  const pending = s !== undefined && nextRunsPending(s);
+  const revision = s ? `${s.uid}/${String(s.generation)}` : "";
+  const reread = useRef(refetch);
+  reread.current = refetch;
+  useEffect(() => {
+    if (!pending) return undefined;
+    let reads = 0;
+    const timer = setInterval(() => {
+      reads += 1;
+      if (reads > UNTIL_COMPUTED_READS) clearInterval(timer);
+      else void reread.current();
+    }, UNTIL_COMPUTED_MS);
+    return () => clearInterval(timer);
+  }, [pending, revision]);
+}
+
 function WhenItRuns({ s }: { s: Schedule }) {
   const zone = zoneOf(s);
   const policy = s.status.policy;
@@ -428,6 +467,7 @@ export function ScheduleDetail() {
   const suspension = useSetSuspension(ns, name);
   const [backUp, setBackUp] = useState(false);
   const [flash, setFlash] = useState(search.done);
+  useUntilComputed(schedule.data, schedule.refetch);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
@@ -472,7 +512,7 @@ export function ScheduleDetail() {
         title={s.name}
         breadcrumb={breadcrumb}
         status={<ScheduleStatus schedule={s} />}
-        description={`${cadenceWords(s.preset, s.schedule)} (${zoneOf(s)}) · ${s.allUserTopics ? "all user topics" : `${s.topics.length} topics`} from ${s.sourceRef.name}`}
+        description={`${cadenceWords(s.preset, s.schedule)} (${zoneOf(s)}) · ${s.allUserTopics ? "all user topics" : `${s.topics.length} ${s.topics.length === 1 ? "topic" : "topics"}`} from ${s.sourceRef.name}`}
         actions={
           <Flex gap={{ default: "gapSm" }}>
             {grant?.manualBackupCreate && (

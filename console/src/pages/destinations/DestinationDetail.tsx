@@ -40,6 +40,7 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { CheckResult, Field, Instant, LastTestLine, NotRecorded, Term, WriteOutcome } from "../connections/parts";
 import { DestinationVerdict, TransportStatus } from "./DestinationList";
 import { RotateAccess } from "./RotateAccess";
+import { ErrorText } from "../../components/Prose";
 
 const MODE_WORDS: Record<string, string> = {
   secretKeys: "Secret",
@@ -198,7 +199,7 @@ function TestAccess({ ns, d, mayTest }: { ns: string; d: Destination; mayTest: b
         </Content>
         {mayTest ? (
           <>
-            <Field id="test-roles" label="Grants to exercise" role="group" help="None chosen: every grant this destination configures.">
+            <Field id="test-roles" label="Grants to exercise" role="group" help="None chosen: every grant a run uses, including Archive read and Evidence write when they fall back to the archive-write credential. Archive write itself is never written to by a test: it is dialled through Archive read or Evidence write when they fall back to it, else the run verifies it.">
               <Flex gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
                 {GRANT_ROLES.map((role) => (
                   <Checkbox
@@ -251,7 +252,7 @@ function Usage({ ns, name }: { ns: string; name: string }) {
           <LoadingRows rows={2} label="Loading what uses this destination" />
         ) : usage.isError ? (
           <Content component="p" className="lw-subtle">
-            The usage list could not be read: {usage.error.message}
+            The usage list could not be read: <ErrorText error={usage.error} />
           </Content>
         ) : (
           <>

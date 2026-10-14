@@ -42,7 +42,9 @@ import { attentionItems, useAttentionReadable, type Attention } from "../app/att
 import { ageVsObjective, newestPointWords } from "../app/policyAge";
 import { mintKey, outcomeUnknown } from "../api/client";
 import { can, useSessionDoc } from "../api/session";
-import { activity, backupDay, freshestPoint, protectionCount, strip } from "./overviewData";
+import { activity, backupDay, newestPoint, protectionCount, strip, type NewestPoint } from "./overviewData";
+import { useCatalogs, useNewestCatalogPoints } from "../api/backups";
+import { Prose } from "../components/Prose";
 import { GettingStarted } from "./GettingStarted";
 
 function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
@@ -118,7 +120,7 @@ function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
             onTimeout={() => setToast(null)}
             actionClose={<AlertActionCloseButton onClose={() => setToast(null)} />}
           >
-            {toast.body}
+            <Prose text={toast.body} />
           </Alert>
         </AlertGroup>
       )}
@@ -146,6 +148,41 @@ function Stat({ title, value, detail, tone }: { title: string; value: string; de
   );
 }
 
+/** Where the newest point came from, in words; "from protection policies" only when it did (DUI-3). */
+function NewestPointDetail({ ns, point, looked }: { ns: string; point: NewestPoint | undefined; looked: string[] }) {
+  if (!point) {
+    return <>No recovery point yet{looked.length ? `: looked at ${joinAnd(looked)}` : ""}.</>;
+  }
+  if (point.kind === "policy") {
+    return (
+      <>
+        From protection policy {point.policy.name}: {point.verified ? "verified" : "not verified"}, objective{" "}
+        {duration(point.policy.objectives.maxRecoveryPointAgeSeconds)}
+      </>
+    );
+  }
+  if (point.kind === "backup") {
+    return (
+      <>
+        Backup{" "}
+        <a href={`#/${ns}/backups/${point.backup.name}`} className="lw-break">
+          {point.backup.name}
+        </a>
+        , verified
+      </>
+    );
+  }
+  return (
+    <>
+      A verified point in catalog <a href={`#/${ns}/catalog/${point.catalog}`}>{point.catalog}</a>
+    </>
+  );
+}
+
+function joinAnd(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 function topicsOf(p: ProtectionPolicy): string {
   // Absent means "the topics of the newest matching point" (the API's own reading).
   if (!p.protects.topics) return "topics of its newest point";
@@ -158,10 +195,10 @@ function PolicyTable({ policies, now }: { policies: ProtectionPolicy[]; now: num
     <Table aria-label="Protection policies" variant="compact" gridBreakPoint="grid-md">
       <Thead>
         <Tr>
-          <Th>Policy</Th>
-          <Th>Status</Th>
+          <Th width={25}>Policy</Th>
+          <Th modifier="fitContent">Status</Th>
           <Th width={30}>Recovery point age</Th>
-          <Th>Source</Th>
+          <Th width={25}>Source</Th>
         </Tr>
       </Thead>
       <Tbody>
@@ -185,7 +222,7 @@ function PolicyTable({ policies, now }: { policies: ProtectionPolicy[]; now: num
                   aria-label={`${p.name}: newest recovery point ${age.text}`}
                 />
                 <div className="lw-subtle">
-                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}
+                  {p.lastAvailablePoint ? <When value={p.lastAvailablePoint.recoveryPointAt} /> : newestPointWords(p)} · <span className="lw-nowrap">objective {duration(p.objectives.maxRecoveryPointAgeSeconds)}</span>
                 </div>
               </Td>
               <Td dataLabel="Source" className="lw-break">
@@ -232,7 +269,9 @@ function RunStrip({ ns, schedule, runs }: { ns: string; schedule: string; runs: 
   return (
     <div className="lw-strip">
       <div className="lw-strip__name">
-        <strong className="lw-break">{schedule}</strong>
+        <Link to="/$ns/schedules/$name" params={{ ns, name: schedule }} search={{}} className="lw-break">
+          <strong>{schedule}</strong>
+        </Link>
         <span className="lw-subtle"> · {cells.length ? `last ${cells.length} ${cells.length === 1 ? "run" : "runs"}` : "no runs yet"}</span>
       </div>
       {cells.length > 0 && (
@@ -333,7 +372,10 @@ export function Overview() {
     schedules: can(session, ns, "schedulesRead"),
     backUp: can(session, ns, "manualBackupCreate") && can(session, ns, "schedulesRead"),
     restore: can(session, ns, "restoreCreate"),
+    catalogs: can(session, ns, "catalogs"),
   };
+  const catalogs = useCatalogs(ns);
+  const catalogPoints = useNewestCatalogPoints(ns, catalogs.data);
   const attentionReadable = useAttentionReadable(ns);
 
   const queries = [protection, backups, restores, connections, schedules];
@@ -401,7 +443,10 @@ export function Overview() {
   }
 
   const count = protectionCount(policies);
-  const freshest = freshestPoint(policies, now);
+  const newest = newestPoint(policies, may.backups ? runs : [], catalogPoints, now);
+  const looked = [may.backups && "backups", may.catalogs && "recovery catalogs", may.protection && "protection policies"].filter(
+    (s): s is string => typeof s === "string",
+  );
   const day = backupDay(runs, now);
   const attention = attentionReadable ? attentionItems(ns, policies, runs, conns, now) : [];
   const scheduleNames = (schedules.data ?? []).map((s) => s.name);
@@ -419,16 +464,12 @@ export function Overview() {
               detail={count.total ? "policies meet their objective" : "No protection policy yet"}
             />
           )}
-          {may.protection && (
+          {looked.length > 0 && (
             <Stat
               title="Newest recovery point"
-              value={freshest ? `${duration(freshest.ageSeconds)} old` : "None"}
-              tone={freshest ? (freshest.withinObjective ? "success" : "danger") : count.total ? "danger" : undefined}
-              detail={
-                freshest
-                  ? `${freshest.policy.name}: ${freshest.verified ? "verified" : "not verified"}, objective ${duration(freshest.policy.objectives.maxRecoveryPointAgeSeconds)}`
-                  : "No available point yet"
-              }
+              value={newest ? `${duration(newest.ageSeconds)} old` : "None"}
+              tone={newest ? (newest.kind !== "policy" || newest.withinObjective ? "success" : "danger") : count.total ? "danger" : undefined}
+              detail={<NewestPointDetail ns={ns} point={newest} looked={looked} />}
             />
           )}
           {may.backups && (
@@ -444,7 +485,7 @@ export function Overview() {
               title="Needs attention"
               value={String(attention.length)}
               tone={attention.some((a) => a.tone === "danger") ? "danger" : attention.length ? "warning" : "success"}
-              detail={attention.length ? "items, listed below" : "Nothing right now"}
+              detail={attention.length ? `${attention.length === 1 ? "item" : "items"}, listed below` : "Nothing right now"}
             />
           )}
         </Gallery>

@@ -39,6 +39,7 @@ import {
   type Written,
 } from "../../api/approvals";
 import { Refusal } from "./parts";
+import { ErrorText } from "../../components/Prose";
 
 type Field = "approvalBytes" | "sidecarBytes";
 
@@ -174,7 +175,7 @@ function SendOutcome({ error, unmatched }: { error: unknown; unmatched: string[]
   if (outcome === "local") return null;
   return (
     <Refusal title="Not recorded" id="approval-refused">
-      {error instanceof Error ? error.message : String(error)}
+      <ErrorText error={error} />
     </Refusal>
   );
 }

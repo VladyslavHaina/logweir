@@ -122,7 +122,7 @@ const BLANK: WizardValues = {
   noOwner: false,
   scratch: false,
   cloneTtl: null,
-  topicConfiguration: { transition: null, noOwners: false },
+  topicConfiguration: { transition: null, owners: null, ownerLines: "" },
   replication: "",
   evidenceDestination: "primary",
   archiveSecret: "",
@@ -456,8 +456,33 @@ describe("the create request", () => {
     expect(validate(ctxFor(lp), lv, planFields(ctxFor(lp), lv), null)).toMatchObject({ archiveSecret: expect.any(String), evidenceBucket: expect.any(String) });
     expect(validate(ctx, values, planFields(ctx, values), null)).toEqual({});
   });
+  it("DUI-17: the source's configuration from a point that did not look for owners asks for them, and signs the answer", () => {
+    const tc = (over: Partial<WizardValues["topicConfiguration"]>) => ({ ...values, topicConfiguration: { transition: "afterVerification" as const, owners: null, ownerLines: "", ...over } });
+    const problem = (v: WizardValues, c = ctx) => validate(c, v, planFields(c, v), null).topicConfiguration;
+    // Unanswered: refused beside the choice, before any check (the runner would refuse TopicOwnerNotChecked).
+    expect(problem(tc({}))).toMatch(/say whether a declarative owner .* manages these topics: none, or name them/);
+    expect(problem(tc({ owners: "none" }))).toBeUndefined();
+    expect(planFields(ctx, tc({ owners: "none" })).target.topicConfiguration).toEqual({ transition: "afterVerification", owners: [] });
+    const named = tc({ owners: "named", ownerLines: "orders strimzi kafka/orders\n\npayments external terraform/payments" });
+    expect(problem(named)).toBeUndefined();
+    expect(planFields(ctx, named).target.topicConfiguration?.owners).toEqual([
+      { topic: "orders", kind: "strimzi", reference: "kafka/orders" },
+      { topic: "payments", kind: "external", reference: "terraform/payments" },
+    ]);
+    expect(renderPlanBytes(planFields(ctx, named))).toContain(
+      '  topic_configuration:\n    transition: "afterVerification"\n    owners:\n      - topic: "orders"\n        kind: "strimzi"\n        reference: "kafka/orders"\n',
+    );
+    // The runner's rules, beside the field: a kind it does not know, a topic not restored, one named twice, none at all.
+    expect(problem(tc({ owners: "named", ownerLines: "orders operator kafka/orders" }))).toMatch(/strimzi or external/);
+    expect(problem(tc({ owners: "named", ownerLines: "billing strimzi kafka/billing" }))).toMatch(/not one of the topics/);
+    expect(problem(tc({ owners: "named", ownerLines: "orders strimzi a\norders external b" }))).toMatch(/named twice/);
+    expect(problem(tc({ owners: "named", ownerLines: "" }))).toMatch(/name at least one owner/);
+    // The control: a point whose catalog row says its backup looked for owners is not asked.
+    const looked = ctxFor(backupPoint(backup, { name: "primary", entry: { ...row, ownerDetection: ["declared"] } }));
+    expect(problem(tc({}), looked)).toBeUndefined();
+  });
   it("theme A: a clone's lifetime and the topic configuration reach the plan only as chosen", () => {
-    const clone = { ...values, scratch: true, cloneTtl: 86_400, topicConfiguration: { transition: "afterVerification" as const, noOwners: true } };
+    const clone = { ...values, scratch: true, cloneTtl: 86_400, topicConfiguration: { transition: "afterVerification" as const, owners: "none" as const, ownerLines: "" } };
     const f = planFields(ctx, clone);
     expect(f.target).toMatchObject({ mode: "scratch", teardownTtlSeconds: 86_400, topicConfiguration: { transition: "afterVerification", owners: [] } });
     expect(renderPlanBytes(f)).toContain("  teardown:\n    ttl_seconds: 86400\n  topic_configuration:\n");
@@ -539,5 +564,15 @@ describe("recovery points", () => {
       const end = endInstant(point);
       expect(() => renderPlanBytes(planFields(ctxFor(point), { ...BLANK, prefix: defaultPrefixFor(end, "") }))).not.toThrow();
     }
+  });
+});
+
+describe("DUI-25: what the wizard says a point maps", () => {
+  it("says no consumer position is mapped when the plan is bound to the backup set only, or the point publishes none", async () => {
+    const { bindingSentence, CATALOG_BINDING_SENTENCE, NO_POSITIONS_SENTENCE } = await import("./words");
+    expect(bindingSentence(null)).toMatch(/It maps no consumer group's position either, so this restore cannot be switched over\.$/);
+    expect(bindingSentence({ entry: {} })).toBe(`${CATALOG_BINDING_SENTENCE} ${NO_POSITIONS_SENTENCE}`);
+    // CONTROL: a bound point that publishes positions says only how it is bound.
+    expect(bindingSentence({ entry: { consumerPositions: { listing: "complete", groups: [] } } })).toBe(CATALOG_BINDING_SENTENCE);
   });
 });

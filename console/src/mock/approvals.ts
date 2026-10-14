@@ -447,6 +447,10 @@ async function requestOf(d: Demo): Promise<ApprovalRequest> {
     policy: "prod-pair",
     policyDigest: DIGEST(502),
     requester: d.requester,
+    // DUI-21: the provider-verified email, and (as if the install opted into a name claim) the
+    // self-asserted name, which the page labels unverified. Neither is signed.
+    requesterEmail: d.requester === ALICE ? "alice@example.com" : "bob@example.com",
+    requesterName: d.requester === ALICE ? session.actor.displayName : "Bob Novak",
     restore: r.name,
     restoreUid: r.uid,
     ticket: d.ticket ?? null,

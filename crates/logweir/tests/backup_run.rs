@@ -1437,6 +1437,60 @@ fn a_topic_the_principal_may_not_read_is_refused_before_the_engine_by_name() {
     }
 }
 
+/// **DUI-5: a selected topic the source does not hold is refused before the
+/// engine, by name**: exit 3, "topic `x` does not exist on the source", with
+/// the remedy, and nothing reaches the engine. It used to fail exit 1
+/// "operational" with no cause. Absence is refused ahead of a READ denial on
+/// another topic.
+///
+/// CONTROL: the same name answered "not held" by a principal not seen to
+/// Describe the cluster (`Unknown`) reaches the engine, as before.
+#[test]
+fn dui5_a_selected_topic_the_source_does_not_hold_is_refused_before_the_engine() {
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .with_reads(&[("orders", TopicRead::Absent)]);
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_for("mvp-demo");
+    assert_eq!(
+        run(&f.args, &reader, &engine, &store),
+        ExitCode::GuardRefused
+    );
+    let msg = guard_message(exec(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err());
+    assert!(
+        msg.starts_with("topic `orders` does not exist on the source")
+            && msg.contains("Correct the topic name")
+            && msg.contains("refused before the engine is spawned and nothing was written"),
+        "{msg}"
+    );
+    assert!(
+        engine.plans.lock().unwrap().is_empty(),
+        "a refused plan must never reach the engine"
+    );
+    // Several are counted and each named.
+    let several =
+        logweir::backup::phase_minus1_admit::absent_refusal(&["a".to_string(), "b".to_string()], 3);
+    assert!(
+        several.starts_with("2 of 3 selected topics do not exist on the source: `a`, `b`"),
+        "{several}"
+    );
+
+    // CONTROL: not known to be absent, so the engine's own fetch answers.
+    let f = ok_fixture("mvp-demo");
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001").with_reads(&[(
+        "orders",
+        TopicRead::Unknown(
+            "the broker does not hold the topic, and whether this principal may Describe the \
+             cluster was not reported"
+                .into(),
+        ),
+    )]);
+    let engine = RecordingEngine::one_topic();
+    let (store, _k, _b) = archive_for("mvp-demo");
+    assert_eq!(run(&f.args, &reader, &engine, &store), ExitCode::Ok);
+    assert_eq!(engine.plans.lock().unwrap().len(), 1);
+}
+
 /// **`connection.engineProtocol` before the engine** (FX-45, PROD-01.2's
 /// capability row): an endpoint SEEN not to serve a request version the
 /// engine's capture sends is refused by the row's name, exit 3, before the

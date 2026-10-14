@@ -443,6 +443,25 @@ async fn an_old_shape_create_retried_under_its_key_replays() {
 #[tokio::test]
 async fn create_and_replace_refuse_the_same_policy_faults_with_the_same_errors() {
     let app = TestApp::new();
+    // The replace reads the schedule for its generation precondition before
+    // any field rule (DUI-2), so it needs one to replace.
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        json!({
+            "metadata": {"name": "nightly", "generation": 1},
+            "spec": {
+                "schedule": "0 3 * * *",
+                "sourceRef": {"name": "source"},
+                "topics": ["orders"],
+                "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+                "concurrencyPolicy": "Forbid",
+                "suspend": false
+            },
+            "status": {"observedGeneration": 1}
+        }),
+    );
+    let stored = app.fake.object("backupschedules", NS_A, "nightly");
     let faults = json!({
         "schedule": "61 * * * *",
         "timeZone": "Mars/Olympus",
@@ -500,5 +519,91 @@ async fn create_and_replace_refuse_the_same_policy_faults_with_the_same_errors()
         on_create, on_replace,
         "the two routes validate the same policy differently"
     );
-    assert_eq!(app.fake.count("backupschedules", NS_A), 0);
+    assert_eq!(app.fake.count("backupschedules", NS_A), 1);
+    assert_eq!(
+        app.fake.object("backupschedules", NS_A, "nightly"),
+        stored,
+        "a refused replace changed the schedule"
+    );
+}
+
+/// **DUI-25: the consumer groups each run records are set on create, stored
+/// as the CRD's `spec.consumerGroups`, and read back on the schedule; a
+/// selection the runner would refuse is refused here, by field, before any
+/// write.**
+///
+/// The ids are Kafka group names and travel as they are: a 46-character id
+/// with dashes is stored and projected byte for byte.
+///
+/// KILLS: dropping `consumerGroups` (the console's field would create a
+/// schedule whose runs record no positions); projecting a stored selection as
+/// absent; storing a selection the runner refuses with `ExecutionSpecInvalid`
+/// (`ConsumerGroupSelectedTwice`); storing an empty list as a selection
+/// instead of as none.
+#[tokio::test]
+async fn the_consumer_groups_are_stored_read_back_and_a_bad_selection_is_refused() {
+    let app = TestApp::new();
+    let groups = json!([
+        "orders-billing",
+        "dui3-billing-reconciliation-consumer-eu-west-1"
+    ]);
+    let mut body = guided();
+    body["consumerGroups"] = groups.clone();
+    let response = app
+        .post(
+            &create_path(),
+            Some("groups-create-0001"),
+            &body.to_string(),
+        )
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    let name = response.json()["item"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stored = app.fake.object("backupschedules", NS_A, &name).unwrap();
+    assert_eq!(stored["spec"]["consumerGroups"], groups);
+    assert_eq!(response.json()["item"]["consumerGroups"], groups);
+    let read = app.get(&format!("{}/{name}", create_path())).await;
+    assert_eq!(read.status, 200, "{}", read.text());
+    assert_eq!(read.json()["item"]["consumerGroups"], groups);
+
+    // An empty list selects none: stored and projected absent, as without the field.
+    let mut none = guided();
+    none["consumerGroups"] = json!([]);
+    let response = app
+        .post(&create_path(), Some("groups-none-0001"), &none.to_string())
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    let empty = response.json()["item"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stored = app.fake.object("backupschedules", NS_A, &empty).unwrap();
+    assert!(stored["spec"].get("consumerGroups").is_none(), "{stored}");
+    assert!(response.json()["item"].get("consumerGroups").is_none());
+
+    // CONTROL: the runner's refusals, by field, and nothing written.
+    for (groups, code) in [
+        (json!(["orders-billing", "orders-billing"]), "duplicate"),
+        (json!(["   "]), "invalid_consumer_group"),
+        (json!(["a\u{7}b"]), "invalid_consumer_group"),
+        (json!(["g".repeat(256)]), "invalid_consumer_group"),
+        (
+            json!((0..101).map(|i| format!("g{i}")).collect::<Vec<_>>()),
+            "count_out_of_range",
+        ),
+    ] {
+        let mut bad = guided();
+        bad["consumerGroups"] = groups;
+        let response = app
+            .post(&create_path(), Some("groups-bad-0001"), &bad.to_string())
+            .await;
+        response.assert_problem(422, "validation_failed");
+        let error = &response.json()["errors"][0];
+        assert_eq!(error["field"], "consumerGroups");
+        assert_eq!(error["code"], code, "{error}");
+    }
+    assert_eq!(app.fake.count("backupschedules", NS_A), 2);
+    app.fake.assert_strict();
 }

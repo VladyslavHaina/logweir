@@ -4,7 +4,7 @@
 // are one request; a corrected field is a new request and gets a new key.
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Controller, useForm } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
@@ -31,12 +31,14 @@ import {
   LocalRefusal,
   mintKey,
   outcomeOf,
+  useCatalogs,
   useConnectArchive,
   useDestinationChoices,
   type CatalogResponse,
   type ConnectArchiveRequest,
 } from "../../api/backups";
-import { CATALOG_MODE_HELP, CONNECT_SENTENCE, INTENT_USED_SENTENCE, SYNC_MODES, connectFieldOf, isIntentConflict } from "./model";
+import { CATALOG_MODE_HELP, CONNECT_SENTENCE, INTENT_USED_SENTENCE, SYNC_MODES, catalogOf, connectFieldOf, isIntentConflict } from "./model";
+import { Prose } from "../../components/Prose";
 
 /** A DNS-1123 subdomain, the catalog name's rule. */
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
@@ -91,6 +93,11 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
   });
   const { errors } = form.formState;
   const list = choices.data ?? null;
+  // DUI-10: one destination has one catalog per namespace; a second one never syncs.
+  const catalogs = useCatalogs(ns);
+  const chosen = useWatch({ control: form.control, name: "destination" });
+  const holder = catalogOf(catalogs.data, chosen.trim());
+  const [duplicated, setDuplicated] = useState<string | null>(null);
 
   const submit = form.handleSubmit((values) => {
     if (connect.isPending) return;
@@ -103,6 +110,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
       return;
     }
     setHeld(next);
+    setDuplicated(catalogOf(catalogs.data, values.destination.trim()));
     setLocalError(null);
     setUnmatched([]);
     connect.mutate(
@@ -141,7 +149,12 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
       <ModalBody id="connect-body">
         <Content component="p">{CONNECT_SENTENCE}</Content>
         {made ? (
-          <Alert isInline variant={made.replayed ? "info" : "success"} title={made.replayed ? "Already connected" : "Connected"} className="lw-gap-top">
+          <Alert
+            isInline
+            variant={duplicated ? "warning" : made.replayed ? "info" : "success"}
+            title={made.replayed ? "Already connected" : duplicated ? "Connected, as a duplicate that will not sync" : "Connected"}
+            className="lw-gap-top"
+          >
             {made.replayed
               ? "That submission had already created this catalog, so the API answered with the one it made the first time rather than creating a second. "
               : ""}
@@ -149,6 +162,12 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
               {made.item.name}
             </Link>{" "}
             exists now. Syncing is the controller's; this page does not wait for it.
+            {duplicated && (
+              <p>
+                Catalog {duplicated} already indexes this destination, so this one runs no sync and publishes no view. Use {duplicated}, or
+                delete one of the two.
+              </p>
+            )}
           </Alert>
         ) : (
           <Form id="connect-form" onSubmit={(e) => void submit(e)} className="lw-gap-top" noValidate>
@@ -200,6 +219,18 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
                   : choices.isError
                     ? "The saved destinations could not be read, so type the destination's name. Its credential is the one the sync uses; a read-only one is enough."
                     : "The saved destination whose bucket holds the archive. Its credential is the one the sync uses; a read-only one is enough.",
+              )}
+              {holder && (
+                <Alert
+                  isInline
+                  isPlain
+                  variant="warning"
+                  className="lw-gap-top"
+                  title={`${chosen.trim()} already has catalog ${holder}`}
+                >
+                  One destination has one catalog per namespace: a second one runs no sync and publishes no view. Use {holder}, or delete it
+                  first.
+                </Alert>
               )}
               {list !== null && list.length === 0 && (
                 <a href={`#/${ns}/destinations`} className="lw-small">
@@ -253,7 +284,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
             title={outcomeOf(connect.error) === "unknown" ? "The outcome is unknown" : "The catalog was not created"}
             className="lw-gap-top"
           >
-            <p>{connectRefusalWords(connect.error, connect.variables?.body.name ?? "")}</p>
+            <p><Prose text={connectRefusalWords(connect.error, connect.variables?.body.name ?? "")} /></p>
             {unmatched.length > 0 && (
               <ul>
                 {unmatched.map((m) => (

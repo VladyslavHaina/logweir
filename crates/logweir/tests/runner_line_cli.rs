@@ -144,6 +144,77 @@ fn the_older_flag_prints_what_an_fx34_runner_printed() {
     assert!(sealed_lines(&stdout).is_empty() && !stdout.contains(RUNNER_EXIT_PREFIX));
 }
 
+/// **DUI-5: an exit-1 `backup run` given FX-43's flag seals WHY it failed**:
+/// a `failure-detail=` line, first in the sealed block, cleaned, and never a
+/// plain line. The run is refused locally (two receipt paths, interface I6:
+/// exit 1 before any client or signer), so nothing dials. CONTROL: without
+/// the flag, and under FX-34's, the stdout has no `failure-detail=` at all;
+/// an exit-3 run seals none (`a_backup_seals_its_refusal_and_its_end`).
+///
+/// KILLS: the detail printed plain, or not printed; printed without a token.
+#[test]
+fn dui5_an_exit_1_backup_seals_why_it_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let with = |flag: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+        command.current_dir(dir.path());
+        std::fs::create_dir_all(dir.path().join("archive")).unwrap();
+        let spec = format!(
+            "backup_id: dui5-row\nsource:\n  bootstrap_servers: [b0.invalid:9092]\n  topics: \
+             [orders]\nstorage:\n  backend: filesystem\n  path: {}\n",
+            dir.path().join("archive").display()
+        );
+        std::fs::write(dir.path().join("backup.yaml"), spec).unwrap();
+        std::fs::write(
+            dir.path().join("allowed.json"),
+            r#"{"allowed_cluster_ids":[]}"#,
+        )
+        .unwrap();
+        command.args([
+            "backup",
+            "run",
+            "--spec",
+            "backup.yaml",
+            "--allowed-clusters",
+            "allowed.json",
+            "--signing-key",
+            "absent-signing-key.pem",
+            "--out",
+            "one.json",
+            "--receipt-out",
+            "two.json",
+        ]);
+        if let Some(flag) = flag {
+            command.args([flag, token().expose_token()]);
+        }
+        run(command)
+    };
+    let out = with(Some(RUNNER_LINE_TOKEN_ARG));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stdout}\n{stderr}");
+    let sealed = sealed_lines(&stdout);
+    assert_eq!(sealed.len(), 2, "{stdout}");
+    assert!(
+        sealed[0].starts_with("failure-detail=operational: --receipt-out ")
+            && sealed[0].contains("name DIFFERENT paths"),
+        "{sealed:?}"
+    );
+    assert_eq!(sealed[1], format!("{RUNNER_EXIT_PREFIX}1"));
+    for line in stdout.lines().chain(stderr.lines()) {
+        assert!(
+            !line.starts_with("failure-detail="),
+            "printed plain: {line}"
+        );
+    }
+    for flag in [None, Some(LINE_TOKEN_ARG)] {
+        let out = with(flag);
+        assert_eq!(out.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("failure-detail="), "{flag:?}: {stdout}");
+    }
+}
+
 /// The two flags are one token by two contracts: given both, the runner
 /// refuses its arguments (exit 1) and prints nothing on stdout.
 #[test]

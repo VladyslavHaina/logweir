@@ -365,10 +365,12 @@ connection in flight across the upgrade (a check Job the older controller
 created) reports none of the three capability rows this controller expects,
 so that one `Preflight` reads `unknown`; run the test again.
 `connection.topicsReadable` may now be blocking `notReady`
-(`TopicAuthorizationFailed`), a code and a gating every controller reads.
+(`TopicAuthorizationFailed`, or `TopicNotFound` for a named topic the source
+does not hold), codes and a gating every controller reads.
 `backup run` and `drill run` refuse, by the row's name, what the broker
 reports the principal may not READ and what the endpoint was seen not to
-serve, before the engine; not observed is never a refusal. No signed document
+serve, before the engine (`backup run` also a named topic the source does not
+hold); not observed is never a refusal. No signed document
 changes.
 
 ### Values an older build cannot list (theme A): delete them before a rollback
@@ -907,13 +909,13 @@ and G-PITR's fixture keeps its producers' timestamps. MSK stays
   a CA bundle: `debian:bookworm-slim` with `ca-certificates` and `libssl3`,
   never a musl or distroless base.
 - **Supported engine pin.** The images ship **Logweir's build of OSO 0.23.3**,
-  `kafka-backup 0.23.3+logweir.3` (PROD-00.2, OD-3; build 2 adds FX-21's patch
+  `kafka-backup 0.23.3+logweir.4` (PROD-00.2, OD-3; build 2 adds FX-21's patch
   0002, build 3 PROD-00.3g's patch 0003: the restore checkpoint is saved
   inside a topic when its interval is due, and hashed without the run's
-  paths): OSO's 2026-10-07 release source (tag commit `afb160e7`) plus
-  Logweir's patch folder, for linux/amd64 and linux/arm64
-  (`third_party/kafka-backup-build.env`). `doctor` accepts exactly that
-  version, as a whole token, and names OSO's own 0.23.3 binary (image digest
+  paths; build 4 moves patch 0001's rustls to 0.23.46): OSO's 2026-10-07
+  release source (tag commit `afb160e7`) plus Logweir's patch folder, for
+  linux/amd64 and linux/arm64 (`third_party/kafka-backup-build.env`).
+  `doctor` accepts exactly that version, as a whole token, and names OSO's own 0.23.3 binary (image digest
   `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`,
   `third_party/kafka-backup-binary.digest`) as the one-release rollback;
   `engine.version` and `engine.digest` in signed documents name whichever ran.

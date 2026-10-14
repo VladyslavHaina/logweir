@@ -16,12 +16,14 @@ import originalFields from "../../../fixtures/plan-original-name-fields.json";
 import pointFields from "../../../fixtures/plan-point-fields.json";
 import timeBasisFields from "../../../fixtures/plan-time-basis-fields.json";
 import cloneFields from "../../../fixtures/plan-clone-fields.json";
+import ownersFields from "../../../fixtures/plan-owners-fields.json";
 import plainGolden from "../../../fixtures/plan.golden.yaml?raw";
 import completeGolden from "../../../fixtures/plan-complete.golden.yaml?raw";
 import originalGolden from "../../../fixtures/plan-original-name.golden.yaml?raw";
 import pointGolden from "../../../fixtures/plan-point.golden.yaml?raw";
 import timeBasisGolden from "../../../fixtures/plan-time-basis.golden.yaml?raw";
 import cloneGolden from "../../../fixtures/plan-clone.golden.yaml?raw";
+import ownersGolden from "../../../fixtures/plan-owners.golden.yaml?raw";
 import {
   INSECURE_CONTEXT_SENTENCE,
   defaultTopicPrefix,
@@ -42,6 +44,7 @@ const GOLDENS: [string, unknown, string][] = [
   ["plan-point.golden.yaml", pointFields, pointGolden],
   ["plan-time-basis.golden.yaml", timeBasisFields, timeBasisGolden],
   ["plan-clone.golden.yaml", cloneFields, cloneGolden],
+  ["plan-owners.golden.yaml", ownersFields, ownersGolden],
 ];
 
 const bytes = (s: string) => new TextEncoder().encode(s);

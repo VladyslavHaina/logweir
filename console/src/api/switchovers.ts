@@ -7,7 +7,7 @@
 // THE PREFLIGHT'S WORD DECIDES. A group is offered only when the review's own details
 // line says `admissible`; the console never derives "ready" from anything else, and the
 // Switchover Job repeats every check under its approval anyway.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "./schema";
 import { ApiError, LIST_PAGE_SIZE, api, call, createHeaders, listAll, mintKey } from "./client";
 import { keys } from "./queries";
@@ -15,7 +15,8 @@ import { useCan } from "./session";
 import { hasShape, shellArg } from "../lib/shell";
 
 export { outcomeUnknown } from "./client";
-export { useApprovalPolicy } from "./approvals";
+// The approval policy is read from ./approvals, which reads this module for the
+// switchovers that wait (DUI-27); nothing here imports it back.
 
 type S = components["schemas"];
 
@@ -40,6 +41,11 @@ export const TERMINAL_PHASES = ["Succeeded", "PartiallyApplied", "Failed", "Refu
 
 export function isTerminal(s: Pick<Switchover, "phase">): boolean {
   return (TERMINAL_PHASES as readonly string[]).includes(s.phase ?? "");
+}
+
+/** A Switchover held until its approval verifies (DUI-27): Approvals lists it as waiting. */
+export function awaitingSwitchoverApproval(s: Pick<Switchover, "phase" | "reason">): boolean {
+  return s.phase === "Pending" && s.reason === "ApprovalNotVerified";
 }
 
 /** What each unavailable class means (§2.2), in the operator's words. */
@@ -598,10 +604,11 @@ export const UNKNOWN_OUTCOME = "The service did not confirm the switchover. It m
 
 const moving = (items: Switchover[] | undefined) => (items?.some((s) => !isTerminal(s)) ? LIVE_MS : false);
 
-export function useSwitchovers(ns: string) {
+export function useSwitchovers(ns: string, enabled = true) {
+  const readable = useCan(ns, "restoresRead");
   return useQuery({
     queryKey: keys.list("switchovers", ns),
-    enabled: useCan(ns, "restoresRead"),
+    enabled: enabled && readable,
     queryFn: ({ signal }) =>
       listAll("switchovers", (cursor) =>
         call(() => api.GET("/api/v1/namespaces/{ns}/switchovers", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
@@ -723,15 +730,33 @@ export function mintNames(planHash: string, attempt: string): { key: string; app
 
 // --------------------------------------------------- approvals (R6's pages)
 
+const requestKey = (ns: string, name: string) => ["switchover-approval-requests", ns, name] as const;
+
+async function readSwitchoverRequest(ns: string, name: string, signal?: AbortSignal): Promise<SwitchoverApprovalRequest> {
+  return (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item;
+}
+
 /** A two-person switchover request, as the second person is shown it. */
 export function useSwitchoverApprovalRequest(ns: string, name: string, enabled = true) {
   const readable = useCan(ns, "approvalsRead");
   return useQuery({
-    queryKey: ["switchover-approval-requests", ns, name],
+    queryKey: requestKey(ns, name),
     enabled: enabled && readable,
-    queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item,
+    queryFn: ({ signal }) => readSwitchoverRequest(ns, name, signal),
     retry: false,
+  });
+}
+
+/** The requests of several waiting Switchovers, for Approvals and its navigation count (DUI-27). */
+export function useSwitchoverApprovalRequests(ns: string, names: string[], enabled = true) {
+  const readable = useCan(ns, "approvalsRead");
+  return useQueries({
+    queries: names.map((name) => ({
+      queryKey: requestKey(ns, name),
+      enabled: enabled && readable,
+      queryFn: ({ signal }: { signal: AbortSignal }) => readSwitchoverRequest(ns, name, signal),
+      retry: false,
+    })),
   });
 }
 
@@ -747,7 +772,7 @@ export function useApproveSwitchover(ns: string, name: string) {
         }),
       ),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["switchover-approval-requests", ns, name] });
+      void client.invalidateQueries({ queryKey: requestKey(ns, name) });
       void client.invalidateQueries({ queryKey: keys.list("switchovers", ns) });
       void client.invalidateQueries({ queryKey: keys.list("approvals", ns) });
     },

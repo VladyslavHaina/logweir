@@ -177,6 +177,8 @@ describe("an approval's state", () => {
     const refusedBy = (reason: string): Approval => ({ ...approval, verified: false, verifiedSubject: undefined, conditions: [{ type: "Verified", status: "False", reason, message: "m" }] });
     expect(recordState(refusedBy("KeyIdExpired")).state).toBe("expired");
     expect(recordState(refusedBy("SignatureInvalid")).state).toBe("refused");
+    // DUI-20: a two-person request's own record is a record, not a refusal; any other False reason still is (the control above).
+    expect(recordState(refusedBy("GovernedApprovalRequired")).state).toBe("request-recorded");
     expect(recordState({ ...approval, verified: null, verifiedSubject: undefined, conditions: [] }).state).toBe("awaiting-verification");
     // `verified: true` without the bound subject is not a verdict about anything.
     expect(recordState({ ...approval, verifiedSubject: undefined }).state).toBe("awaiting-verification");

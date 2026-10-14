@@ -166,6 +166,51 @@ fn the_console_clone_plan_is_one_the_runner_reads_as_a_clone() {
     }
 }
 
+/// DUI-17: THE SOURCE'S CONFIGURATION WITH THE TOPICS' OWNERS NAMED
+/// (`plan-owners.golden.yaml`). A point whose backup looked for no owner is
+/// refused `TopicOwnerNotChecked` unless the plan states them; the wizard now
+/// asks, and each owner it names arrives as the runner reads it and passes the
+/// runner's own declaration rules.
+#[test]
+fn the_console_owners_plan_states_each_owner_as_the_runner_reads_it() {
+    let s = spec("plan-owners.golden.yaml");
+    let f = fields("plan-owners-fields.json");
+    let tc = s
+        .target
+        .topic_configuration
+        .as_ref()
+        .expect("the golden states target.topic_configuration");
+    let owners = tc.owners.as_deref().expect("the golden states owners");
+    let want = f["target"]["topicConfiguration"]["owners"]
+        .as_array()
+        .expect("the fields file names owners");
+    assert_eq!(owners.len(), want.len());
+    assert!(
+        !owners.is_empty(),
+        "the row is about named owners, not owners: []"
+    );
+    for (owner, w) in owners.iter().zip(want) {
+        assert_eq!(owner.topic, w["topic"].as_str().unwrap());
+        assert_eq!(owner.kind, w["kind"].as_str().unwrap());
+        assert_eq!(owner.reference, w["reference"].as_str().unwrap());
+    }
+    assert_eq!(
+        logweir_core::topic_configuration::refuse_declarations(owners, &s.source.topics),
+        None
+    );
+    // Control: the clone golden states owners: [], which is not this list.
+    let clone = spec("plan-clone.golden.yaml");
+    assert_eq!(
+        clone
+            .target
+            .topic_configuration
+            .as_ref()
+            .and_then(|t| t.owners.as_deref())
+            .map(<[_]>::len),
+        Some(0)
+    );
+}
+
 /// THE PREFIX THE WIZARD PREFILLS IS THE ONE THE RUNNER COMPUTES, for the
 /// instants `console/fixtures/legacy-console.json` records (the console's
 /// `plan.test.ts` holds `defaultTopicPrefix` to the same file).

@@ -10,6 +10,7 @@ import { StatusLabel, type Tone } from "../../components/Status";
 import { When } from "../../components/When";
 import { missingRead } from "./model";
 import { WriteAlert } from "./parts";
+import { Prose, checkMessage } from "../../components/Prose";
 
 type BackupCheck = components["schemas"]["BackupPreflightRequest"];
 
@@ -69,7 +70,7 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
                   </span>
                 ) : (
                   <span>
-                    {c.message ?? c.id}
+                    <Prose text={checkMessage(c.message ?? c.id)} />
                     {c.remedy && <span className="lw-subtle lw-small"> {c.remedy}</span>}
                   </span>
                 )}
@@ -80,9 +81,19 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
         </ol>
       )}
       {preflight.executionOnly.length > 0 && (
-        <Content component="p" className="lw-subtle lw-small">
-          Only the run itself can answer: {preflight.executionOnly.map((e) => e.note).join(" ")}
-        </Content>
+        <>
+          <Content component="p" className="lw-subtle lw-small">
+            Only the run itself can answer:
+          </Content>
+          {/* One item per note: joined into one sentence, two notes ran together with no separator. */}
+          <ul className="lw-plain-list lw-subtle lw-small" aria-label="Only the run itself can answer">
+            {preflight.executionOnly.map((e) => (
+              <li key={e.id}>
+                <code>{e.id}</code> <Prose text={e.note} />
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );

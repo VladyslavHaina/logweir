@@ -3388,7 +3388,8 @@ pub fn finished_status_patch_with_reason(
             Some(state) => format!(
                 "the runner exited {exit_code} ({wire_reason}: {state}); the code was read from \
                  status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode \
-                 and the state from the runner's final `{FAILURE_REASON_PREFIX}` line"
+                 and the state from the runner's final `{FAILURE_REASON_PREFIX}` line{}",
+                runner_reason.map_or_else(String::new, |r| r.message_suffix())
             ),
             None => format!(
                 "the runner exited {exit_code} ({wire_reason}); the code was read from \
@@ -4953,6 +4954,10 @@ async fn reconcile_backup_inner(
         runner_reason = Some(crate::refusal::RunnerReason::RunnerOlderThanController);
     }
     let older = runner_reason == Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    // DUI-5: why an exit-1 run failed, from its sealed `failure-detail=`.
+    if runner_reason.is_none() {
+        runner_reason = crate::refusal::failure_detail(exit_code, &lines);
+    }
     let log = lines.text();
     let keys = evidence_keys(log);
     let refusal = if older {

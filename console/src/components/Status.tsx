@@ -38,6 +38,8 @@ const IN_PROGRESS: Record<string, string> = {
 /** A run's state. Green means the controller verified the signed evidence. */
 export function RunStatus({ op }: { op: OperationSummary }) {
   const title = `state ${op.state}; verification ${op.verificationState}`;
+  // DUI-22: a run held for its approval waits; it is not starting.
+  if (!op.terminal && op.state === "pending" && op.stateReason === "ApprovalNotVerified") return <StatusLabel tone="neutral" text="Waiting for approval" title={title} />;
   if (!op.terminal) return <StatusLabel tone="progress" text={IN_PROGRESS[op.state] ?? "In progress"} title={title} />;
   switch (op.state) {
     case "succeeded":

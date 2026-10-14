@@ -25,7 +25,11 @@ import {
   DescriptionListTerm,
   ExpandableSection,
   FormGroup,
+  FormHelperText,
+  HelperText,
+  HelperTextItem,
   Radio,
+  TextArea,
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { yamlString, type DetailEntry, type TopicConfiguration } from "../../api/switchovers";
@@ -48,12 +52,14 @@ export function TopicConfigurationChoice({
   onChange,
   target,
   ownersAsked = false,
+  error,
 }: {
   value: TopicConfigurationValue;
   onChange: (v: TopicConfigurationValue) => void;
   target: string;
-  /** The preview refused TopicOwnerNotChecked: the point recorded no owner detection. */
+  /** DUI-17: the point's backup did not look for owners, so the plan must state them. */
   ownersAsked?: boolean;
+  error?: string | undefined;
 }) {
   return (
     <FormGroup role="radiogroup" isStack label="Topic configuration" fieldId="topic-configuration">
@@ -75,13 +81,51 @@ export function TopicConfigurationChoice({
             description="Off: the topics keep Logweir's settings; the source's are reported, not applied."
           />
           {ownersAsked && (
-            <Checkbox
-              id="topic-configuration-owners"
-              isChecked={value.noOwners}
-              onChange={(_e, on) => onChange({ ...value, noOwners: on })}
-              label="No topic here is managed by an owner such as a Strimzi KafkaTopic"
-              description="The recovery point did not look for owners, so the restore asks you (owners: []). It is signed into the plan."
-            />
+            <FormGroup role="radiogroup" isStack fieldId="topic-configuration-owners" label="Declarative owners" className="lw-gap-top">
+              <Content component="p" className="lw-subtle lw-small">
+                The recovery point did not look for owners, so the restore asks you; the runner refuses a plan that does not say
+                (TopicOwnerNotChecked). Your answer is signed into the plan.
+              </Content>
+              <Radio
+                id="topic-configuration-owners-none"
+                name="topic-configuration-owners"
+                label="No topic here is managed by an owner such as a Strimzi KafkaTopic"
+                description="Nor by a GitOps or Terraform definition. Signed as owners: []."
+                isChecked={value.owners === "none"}
+                onChange={() => onChange({ ...value, owners: "none" })}
+              />
+              <Radio
+                id="topic-configuration-owners-named"
+                name="topic-configuration-owners"
+                label="Some are: name them"
+                description="Their settings are left to their owner, which adopts the topic afterwards."
+                isChecked={value.owners === "named"}
+                onChange={() => onChange({ ...value, owners: "named" })}
+              />
+              {value.owners === "named" && (
+                <TextArea
+                  id="topic-configuration-owner-lines"
+                  aria-label="Owners, one per line: topic, kind, where it is defined"
+                  value={value.ownerLines}
+                  onChange={(_e, text) => onChange({ ...value, ownerLines: text })}
+                  placeholder="orders strimzi kafka/orders"
+                  resizeOrientation="vertical"
+                  validated={error ? "error" : "default"}
+                />
+              )}
+              <FormHelperText>
+                <HelperText>
+                  <HelperTextItem variant={error ? "error" : "default"}>
+                    {error ?? (value.owners === "named" ? "One per line: the topic, strimzi or external, and where it is defined (a KafkaTopic namespace/name, a Terraform address)." : "Choose one.")}
+                  </HelperTextItem>
+                </HelperText>
+              </FormHelperText>
+            </FormGroup>
+          )}
+          {!ownersAsked && error && (
+            <HelperText>
+              <HelperTextItem variant="error">{error}</HelperTextItem>
+            </HelperText>
           )}
         </div>
       )}
@@ -91,7 +135,7 @@ export function TopicConfigurationChoice({
         label={`${target}'s defaults`}
         description="The target's default replication factor and settings, as a restore always did."
         isChecked={value.transition === null}
-        onChange={() => onChange({ transition: null, noOwners: false })}
+        onChange={() => onChange(NO_TOPIC_CONFIGURATION)}
       />
     </FormGroup>
   );
@@ -229,7 +273,9 @@ function Keys({ values, empty = "None" }: { values: Record<string, string>; empt
     <ul className="lw-keys">
       {entries.map(([k, v]) => (
         <li key={k}>
-          {k}={msValue(k, v)}
+          {/* A narrow column breaks after the "=" first, never inside a setting's name. */}
+          {k}=<wbr />
+          {msValue(k, v)}
         </li>
       ))}
     </ul>

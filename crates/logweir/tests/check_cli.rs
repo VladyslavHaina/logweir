@@ -3490,6 +3490,85 @@ fn a_topic_the_broker_says_this_principal_may_not_read_blocks_the_backup_by_name
     );
 }
 
+/// **DUI-5: a selected topic the source does not hold blocks the Backup
+/// Preflight's `connection.topicsReadable`, by name**, ahead of a READ
+/// denial on another topic: a plan that cannot run at all. CONTROL: the same
+/// topic answered "not held" by a principal not seen to Describe the cluster
+/// is unknown, and the row stays execution-only.
+///
+/// KILLS: absence left unknown (the row would never block); a denial ranked
+/// before absence; the topic not named.
+#[test]
+fn dui5_a_selected_topic_the_source_does_not_hold_blocks_the_backup_by_name() {
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_presence("payments", TopicPresence::Present { partitions: 3 })
+        .with_topic_read("orders", TopicRead::Granted)
+        .with_topic_read("dui1-nosuch", TopicRead::Absent)
+        .with_topic_read(
+            "payments",
+            TopicRead::Denied(ReadDenied::OperationsExcludeRead),
+        );
+    let run = drive(
+        &mount(&capability_plan(
+            vec!["orders", "dui1-nosuch", "payments"],
+            Vec::new(),
+        )),
+        &readable_wiring(probe),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::NotReady,
+            Gating::Blocking,
+            CheckCode::TopicNotFound
+        ),
+        "{row:?}"
+    );
+    assert!(
+        row.message
+            .starts_with("topic `dui1-nosuch` does not exist on the source"),
+        "{}",
+        row.message
+    );
+    assert_eq!(
+        row.detail.as_ref().unwrap()["sample"],
+        serde_json::json!(["dui1-nosuch"])
+    );
+    assert!(row.remedy.contains("Correct the name"), "{}", row.remedy);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+
+    // CONTROL: "not held" without the cluster's Describe is not absence.
+    let probe = FakeProbe::new()
+        .with_presence("orders", TopicPresence::Present { partitions: 6 })
+        .with_topic_read(
+            "orders",
+            TopicRead::Unknown(
+                "the broker does not hold the topic, and whether this principal may Describe \
+                 the cluster was not reported"
+                    .into(),
+            ),
+        );
+    let run = drive(
+        &mount(&capability_plan(vec!["orders"], Vec::new())),
+        &readable_wiring(probe),
+    );
+    let row = run.row(CheckId::ConnectionTopicsReadable);
+    assert_eq!(
+        (row.state, row.gating, row.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{row:?}"
+    );
+}
+
 /// **CONTROLS: what the broker does not refuse stays what it was.** READ
 /// reported on every topic, and READ not known (a broker that computes no
 /// authorized operations), are both the execution-only row, `unknown`,
@@ -8204,6 +8283,81 @@ mod live {
         assert!(
             !run.everything().contains("not-the-minio-password"),
             "the refused secret reached a frame"
+        );
+    }
+
+    /// **DUI-1, live: the default access test dials the archive-write
+    /// credential.** A destination whose only grant is `archiveWrite`, tested
+    /// with no role named, is tested for
+    /// [`DestinationRole::access_test_defaults`] (what the API sends), the
+    /// plan's credential being that one Secret (`ArchiveRead` and
+    /// `EvidenceWrite` fall back to it). A key MinIO does not know is
+    /// `notReady`, `destination.archiveListable` `InvalidCredentials`; the
+    /// compose MinIO's own key is `ready` (the control). `ArchiveWrite` alone,
+    /// the set the API used to send, dials nothing and reads `ready` for the
+    /// same bad key: that is the defect, asserted here too.
+    #[test]
+    fn dui1_the_default_access_test_dials_the_archive_write_credential() {
+        use logweir_core::check_contract::{aggregate, OverallState};
+        std::env::set_var("AWS_REGION", "us-east-1");
+        let plan_for = |roles: Vec<DestinationRole>| {
+            plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
+                destination: minio_destination("dui1-access"),
+                roles,
+                write_probe: true,
+                evidence_write: None,
+                evidence_read: None,
+            }))
+        };
+        let default = mount(&plan_for(DestinationRole::access_test_defaults(false)));
+        let with_key = |id: &str, secret: &str, m: &Mounted| {
+            std::env::set_var("AWS_ACCESS_KEY_ID", id);
+            std::env::set_var(MINIO_PASSWORD_VAR, secret);
+            let run = drive_live(m);
+            std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
+            std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
+            run
+        };
+
+        // The bad key: notReady, and the archive list says why.
+        let run = with_key(
+            "dui1-unknown-access-key",
+            "dui1-not-the-minio-password",
+            &default,
+        );
+        assert_eq!(run.code, ExitCode::Ok, "stdout:\n{}", run.stdout);
+        let listed = run.row(CheckId::DestinationArchiveListable);
+        assert_eq!(
+            (listed.state, listed.code),
+            (CheckState::NotReady, CheckCode::InvalidCredentials),
+            "{listed:?}"
+        );
+        assert_eq!(aggregate(&run.result().checks), OverallState::NotReady);
+        assert!(
+            !run.everything().contains("dui1-not-the-minio-password"),
+            "the refused secret reached a frame"
+        );
+
+        // The old default, `ArchiveWrite` alone: nothing dialled, ready.
+        let alone = mount(&plan_for(vec![DestinationRole::ArchiveWrite]));
+        let run = with_key(
+            "dui1-unknown-access-key",
+            "dui1-not-the-minio-password",
+            &alone,
+        );
+        assert_eq!(aggregate(&run.result().checks), OverallState::Ready);
+
+        // CONTROL: the key MinIO knows is ready.
+        let run = with_key(MINIO_USER, "minioadmin", &default);
+        assert_eq!(
+            run.row(CheckId::DestinationArchiveListable).code,
+            CheckCode::ArchiveListable
+        );
+        assert_eq!(
+            aggregate(&run.result().checks),
+            OverallState::Ready,
+            "stdout:\n{}",
+            run.stdout
         );
     }
 
@@ -14800,5 +14954,33 @@ fn a_restore_preflight_previews_the_topic_configuration_diff() {
     assert!(
         details.contains("\"refusal\":\"TopicConfigurationNotRecorded: "),
         "{details}"
+    );
+}
+
+/// **DUI-26: a sampled topic name, or `<topic>/<partition>`, is a NAME**: a
+/// 60-character topic survives the bounded `detail` of a Preflight row (a
+/// missing topic, a mapped topic that exists, an empty partition) whole.
+/// CONTROL: a segment key whose component is a 60-character run is still
+/// redacted, as before.
+///
+/// KILLS: the sample redacted as free text; every sample kept.
+#[test]
+fn dui26_a_sampled_topic_name_is_kept_and_a_long_key_component_is_not() {
+    let topic = format!("dui26-settlement-ledger-eu-west-orders-{}", "t".repeat(21));
+    assert_eq!(topic.len(), 60);
+    let key = format!("logweir-archive/{}/segment-0001", "Q1w2E3r4".repeat(8));
+    let d = logweir::check::kinds::readiness::detail(&[
+        topic.clone(),
+        format!("{topic}/3"),
+        key.clone(),
+    ]);
+    assert_eq!(d["sample"][0], topic.as_str(), "{d}");
+    assert_eq!(d["sample"][1], format!("{topic}/3"), "{d}");
+    assert_ne!(d["sample"][2], key.as_str(), "{d}");
+    assert!(
+        d["sample"][2]
+            .as_str()
+            .is_some_and(|s| s.contains(logweir_core::check_contract::REDACTED)),
+        "{d}"
     );
 }

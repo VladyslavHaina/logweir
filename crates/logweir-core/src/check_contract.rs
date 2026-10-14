@@ -3027,6 +3027,137 @@ pub fn redact(s: &str) -> String {
     cap(&apply_rules(s, redaction_rules()))
 }
 
+// ---------------------------------------------------------------------------
+// DUI-26: Kafka NAMES in typed fields are names, not free text.
+// ---------------------------------------------------------------------------
+
+/// Whether `name` is relayed as a Kafka TOPIC name, unredacted: what a broker
+/// accepts, `[a-zA-Z0-9._-]{1,249}` and not `.` or `..`
+/// ([`crate::guard::topic_name_is_kafka_legal`]).
+///
+/// A topic name is the adopter's NAME for its data and every reader binds to
+/// it byte for byte: a 43-character restored topic went through the
+/// long-run rule as `[redacted]`, and a switchover planned over it was refused
+/// `PlanDisagreesWithMapping` (DUI-26). A value carried in a typed name field
+/// that is NOT a legal name is free text and takes the free-text redactor.
+#[must_use]
+pub fn is_relayable_topic_name(name: &str) -> bool {
+    crate::guard::topic_name_is_kafka_legal(name)
+}
+
+/// Whether `id` is relayed as a Kafka consumer GROUP id, unredacted: not
+/// blank, at most [`crate::consumer_positions::MAX_GROUP_ID_BYTES`] bytes (the
+/// bound a selection and the catalog hold a group id to), and only printable
+/// ASCII (a space included). An id outside that (a control character, a line
+/// break, a non-ASCII or bidirectional character) is free text and takes the
+/// free-text redactor, which keeps it unless it carries a secret's shape.
+#[must_use]
+pub fn is_relayable_group_id(id: &str) -> bool {
+    !id.trim().is_empty()
+        && id.len() <= crate::consumer_positions::MAX_GROUP_ID_BYTES
+        && id.chars().all(|c| c == ' ' || c.is_ascii_graphic())
+}
+
+/// The name of the one rule a Kafka name in a typed field does not pass.
+pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
+
+/// **A Kafka name in a typed field, redacted as a NAME** (DUI-26): every
+/// secret-SHAPE rule ([`redaction_rules`]: PEM, S3 XML, URL userinfo, a
+/// keyed value, an AWS access key id) and NOT the long-run rule, which reads
+/// any run of 40 characters as a credential and so ate every ordinary long
+/// topic and group name. An access key id planted in a topic name is still
+/// removed; a 60-character name with no secret's shape is the name, byte for
+/// byte. Pass it only a value [`is_relayable_topic_name`] or
+/// [`is_relayable_group_id`] accepted.
+#[must_use]
+pub fn redact_name(name: &str) -> String {
+    redaction_rules()
+        .iter()
+        .filter(|r| r.name != LONG_RUN_RULE)
+        .fold(name.to_string(), |acc, r| (r.apply)(&acc))
+}
+
+/// A details line's keys whose string values are Kafka TOPIC names.
+pub const DETAIL_TOPIC_KEYS: &[&str] = &["topic", "mappedTopicExists"];
+
+/// A details line's keys whose string values are Kafka consumer GROUP ids:
+/// the switchover review's source `group` and its `target` group.
+pub const DETAIL_GROUP_KEYS: &[&str] = &["group", "target"];
+
+/// **One details line, its Kafka names redacted as names and everything else
+/// as free text** (DUI-26). A line that is a JSON object is walked: a string
+/// under a [`DETAIL_TOPIC_KEYS`] key that [`is_relayable_topic_name`] accepts,
+/// or under a [`DETAIL_GROUP_KEYS`] key that [`is_relayable_group_id`]
+/// accepts, goes through [`redact_name`] (no long-run rule); every other
+/// string, and every object key, goes through `free_text` (an array under a
+/// name key holds names). A line that is not a JSON object goes through
+/// `free_text` whole, as before.
+///
+/// The runner passes its key-path redactor (`logweir::check::redact_path`)
+/// and the controller [`redaction_rules`], so each side keeps the free-text
+/// rule it had; only the names stop going through it.
+///
+/// The walk hands a key and its value to `free_text` apart, so the
+/// `secret-key-value` rule, which matches `"password":"…"` as ONE string,
+/// would never see the pair. It runs once more over the re-serialised line:
+/// `{"sasl.password":"hunter2"}` loses its value, as under the whole-line
+/// pass. No name key (`topic`, `mappedTopicExists`, `group`, `target`) is a
+/// secret keyword, and a name already passed that rule in [`redact_name`].
+#[must_use]
+pub fn redact_detail_line(line: &str, free_text: &dyn Fn(&str) -> String) -> String {
+    fn walk(v: &mut serde_json::Value, key: Option<&str>, free_text: &dyn Fn(&str) -> String) {
+        match v {
+            serde_json::Value::String(s) => {
+                let named = match key {
+                    Some(k) if DETAIL_TOPIC_KEYS.contains(&k) => is_relayable_topic_name(s),
+                    Some(k) if DETAIL_GROUP_KEYS.contains(&k) => is_relayable_group_id(s),
+                    _ => false,
+                };
+                *s = if named { redact_name(s) } else { free_text(s) };
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, key, free_text);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let entries = std::mem::take(map);
+                for (k, mut item) in entries {
+                    walk(&mut item, Some(&k), free_text);
+                    map.insert(free_text(&k), item);
+                }
+            }
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(mut v @ serde_json::Value::Object(_)) => {
+            walk(&mut v, None, free_text);
+            redact_key_values(&v.to_string())
+        }
+        _ => free_text(line),
+    }
+}
+
+/// [`redact_detail_line`] over every line of a details document: the
+/// controller's pass over the relayed `details` stream before its
+/// `ConfigMap`, with [`redaction_rules`] and no cap (a cut JSON line is
+/// unparseable).
+#[must_use]
+pub fn redact_detail_lines(text: &str) -> String {
+    let free_text = |s: &str| apply_rules(s, redaction_rules());
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, end) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        out.push_str(&redact_detail_line(body, &free_text));
+        out.push_str(end);
+    }
+    out
+}
+
 /// [`redact`] with an explicit rule list — the entry point the mutant tests
 /// use to delete one rule and observe the leak.
 #[must_use]

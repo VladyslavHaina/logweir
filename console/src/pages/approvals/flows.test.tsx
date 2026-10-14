@@ -71,6 +71,37 @@ async function restore(over: Record<string, unknown> = {}) {
 }
 
 const pending = () => structuredClone(pendingFixture.item);
+
+/** DUI-27: a Switchover held for its approval, and the two-person request a second person is shown. */
+const swo = (over: Record<string, unknown> = {}) => ({
+  name: "swo-1",
+  namespace: "team-a",
+  uid: "swo-uid",
+  approvalName: "swo-approval-1",
+  planHash: `sha256:${"d".repeat(64)}`,
+  restore: { name: "restore-x", uid: "uid-x" },
+  groups: [],
+  phase: "Pending",
+  reason: "ApprovalNotVerified",
+  ...over,
+});
+const swoRequest = (over: Record<string, unknown> = {}) => ({
+  switchover: "swo-1",
+  switchoverUid: "swo-uid",
+  namespace: "team-a",
+  approvalName: "swo-approval-1",
+  confirmationName: "swo-approval-1-confirmation",
+  confirmationSha256: `sha256:${"e".repeat(64)}`,
+  policy: "prod-pair",
+  policyDigest: `sha256:${"f".repeat(64)}`,
+  requester: "https://idp.example#alice",
+  issuedAt: "2026-09-07T14:05:00Z",
+  state: "pending",
+  stateSentence: "Waiting for a second person.",
+  scopeComplete: true,
+  approve: { offered: true, sentence: "Approve to run it." },
+  ...over,
+});
 const approvalX = (over: Record<string, unknown> = {}) => ({ ...approvalFixture.item, name: "approval-x", subjectRef: { kind: "Restore", name: "restore-x" }, ...over });
 
 interface World {
@@ -84,6 +115,9 @@ interface World {
   approvals?: Record<string, unknown>[] | "error";
   restores?: Record<string, unknown>[];
   requests?: Record<string, Record<string, unknown>>;
+  /** DUI-27: the namespace's Switchovers, and their two-person requests by name. */
+  switchovers?: Record<string, unknown>[];
+  switchoverRequests?: Record<string, Record<string, unknown>>;
   post?: (path: string, body: unknown) => Response;
 }
 
@@ -98,6 +132,9 @@ function serve(w: World) {
       return w.approvals === "error" ? json(500, { code: "internal", detail: "the list failed", requestId: "q" }) : json(200, { items: w.approvals ?? [], page: { limit: 200 }, requestId: "r" });
     }
     if (path.startsWith("/namespaces/team-a/restores?")) return json(200, { items: w.restores ?? [], page: { limit: 200 }, requestId: "r" });
+    if (path.startsWith("/namespaces/team-a/switchovers?")) return json(200, { items: w.switchovers ?? [], page: { limit: 200 }, requestId: "r" });
+    const swReq = path.match(/^\/namespaces\/team-a\/switchovers\/([^/]+)\/approval-request$/);
+    if (swReq) return w.switchoverRequests?.[swReq[1]!] ? ok(w.switchoverRequests[swReq[1]!]) : json(404, { code: "not_found", detail: "none" });
     if (path === "/namespaces/team-a/restores/restore-x") return w.restore === null ? json(404, { code: "not_found", detail: "none" }) : ok(w.restore ?? (await restore()));
     if (path === "/namespaces/team-a/approvals/approval-x") {
       if (w.approval === "error") return json(500, { code: "internal", detail: "the read failed", requestId: "q" });
@@ -364,6 +401,24 @@ describe("the Approvals list", () => {
     expect(screen.getAllByText("Unknown: not readable")).toHaveLength(2);
   });
 
+  it("DUI-27: lists a switchover that waits for this approver, opening its own approval page", async () => {
+    serve({
+      policy: TWO_PERSON,
+      restores: [],
+      approvals: [],
+      switchovers: [swo(), swo({ name: "swo-2", uid: "swo-2-uid", phase: "Succeeded", reason: "Succeeded" })],
+      switchoverRequests: { "swo-1": swoRequest() },
+    });
+    renderAt("/team-a/approvals");
+    await screen.findByText("Waits for you");
+    expect(screen.getByText("Waiting for approval (1)")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "swo-1" }).getAttribute("href")).toContain("/team-a/approvals/switchover/swo-1");
+    expect(screen.getByText("Switchover of restore restore-x")).toBeTruthy();
+    expect(screen.queryByText("Nothing waits for approval")).toBeNull();
+    // CONTROL: an ended switchover does not wait, and is not listed.
+    expect(screen.queryByRole("link", { name: "swo-2" })).toBeNull();
+  });
+
   it("under confirm shows no waiting card, and every recorded approval with its verdict", async () => {
     serve({ policy: CONFIRM, restores: [], approvals: [approvalFixture.item] });
     renderAt("/team-a/approvals");
@@ -403,5 +458,19 @@ describe("the navigation's count", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(confirm.result.current).toBeUndefined();
     expect(net.sent.some((s) => s.path.endsWith("/approval-request"))).toBe(false);
+  });
+
+  it("DUI-27: counts a switchover that waits for this session, as a restore", async () => {
+    serve({ policy: TWO_PERSON, restores: [], switchovers: [swo()], switchoverRequests: { "swo-1": swoRequest() } });
+    const waiting = hook();
+    await waitFor(() => expect(waiting.result.current).toEqual({ n: 1, tone: "brand", text: "1 request waits for you" }));
+    waiting.unmount();
+    net.sent = [];
+    // CONTROL: the requester's own switchover is not offered to them, so nothing waits for this session.
+    serve({ policy: TWO_PERSON, restores: [], switchovers: [swo()], switchoverRequests: { "swo-1": swoRequest({ approve: { offered: false, refusal: "requester", sentence: "s" } }) } });
+    const own = hook();
+    await waitFor(() => expect(net.sent.some((s) => s.path === "/namespaces/team-a/switchovers/swo-1/approval-request")).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(own.result.current).toBeUndefined();
   });
 });

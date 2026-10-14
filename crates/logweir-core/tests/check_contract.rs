@@ -3283,3 +3283,126 @@ fn a_switchover_readiness_plan_is_bounded_and_closed() {
         "grantBindings",
     );
 }
+
+/// **DUI-26: a Kafka name in a typed field of a relayed detail is a NAME.**
+/// A 60-character consumer group id and topic name are each one run of the
+/// long-run rule's alphabet; through the free-text redactor they became
+/// `[redacted]`, and a switchover planned over them was always refused
+/// `PlanDisagreesWithMapping`. Under the details line's typed keys (`group`,
+/// `target`, `topic`, `mappedTopicExists`) a legal name now survives byte for
+/// byte, on the runner's pass and on the controller's.
+///
+/// CONTROLS, the free text: a secret-shaped run in `message`, or under any
+/// key that is not a name, is still `[redacted]`; a value under a name key
+/// that is NOT a legal name (a `/`-bearing run, a control character) takes
+/// the free-text rule; a name still passes every secret-SHAPE rule but the
+/// long-run one (an access key id planted in a topic name is removed); a line
+/// that is not a JSON object is redacted whole.
+///
+/// KILLS: names sent through the free-text redactor (the defect); every
+/// string kept (the key check dropped); a group id with a control character
+/// kept.
+#[test]
+fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
+    use logweir_core::check_contract::{
+        is_relayable_group_id, is_relayable_topic_name, redact, redact_detail_line,
+        redact_detail_lines, redact_long_runs_in_keys, LONG_RUN_RULE, REDACTED,
+    };
+    let group = "dui3-billing-reconciliation-consumer-eu-west-1-settlement-01";
+    let topic = "dui3r-dui3-settlement-ledger-eu-west-orders-partitioned-0002";
+    assert_eq!((group.len(), topic.len()), (60, 60));
+    // The defect: the free-text redactor eats both.
+    assert_eq!(redact(group), REDACTED);
+    assert_eq!(redact(topic), REDACTED);
+    let secret = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+    let line = serde_json::json!({
+        "group": group,
+        "target": group,
+        "topic": topic,
+        "admissible": false,
+        "message": format!("GroupActive: the store answered {secret} for {group}"),
+        "note": secret,
+        "positions": [{"partition": 0, "class": "exact", "offset": 40}], // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
+    })
+    .to_string();
+    let free = |s: &str| redact(s);
+    for kept in [
+        redact_detail_line(&line, &free),
+        redact_detail_lines(&format!("{line}\n")),
+    ] {
+        let v: serde_json::Value = serde_json::from_str(kept.trim_end()).expect("JSON");
+        assert_eq!(v["group"], group, "{kept}");
+        assert_eq!(v["target"], group, "{kept}");
+        assert_eq!(v["topic"], topic, "{kept}");
+        assert_eq!(v["positions"][0]["offset"], 40, "{kept}"); // engine-token-ok: a JSON field of the review's details line, not an engine subcommand
+
+        // CONTROL: the free text is still redacted.
+        assert_eq!(v["note"], REDACTED, "{kept}");
+        let message = v["message"].as_str().unwrap();
+        assert!(!message.contains(secret), "{message}");
+        assert!(
+            message.starts_with("GroupActive: the store answered [redacted]"),
+            "{message}"
+        );
+    }
+    // A value under a name key that is not a legal name is free text.
+    let forged = serde_json::json!({
+        "topic": format!("{secret}/x+y"),
+        "group": format!("g\u{7} {secret}"),
+    })
+    .to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(&redact_detail_line(&forged, &free)).expect("JSON");
+    assert_eq!(v["topic"], REDACTED);
+    assert_eq!(v["group"], format!("g\u{7} {REDACTED}"));
+    // A name passes every secret-SHAPE rule but the long-run one: an access
+    // key id planted in a legal topic name is still removed.
+    let planted = format!("restore-o-AKIA{}", "FAKE".repeat(4));
+    let v: serde_json::Value = serde_json::from_str(&redact_detail_line(
+        &serde_json::json!({"topic": planted}).to_string(),
+        &free,
+    ))
+    .expect("JSON");
+    assert_eq!(v["topic"], format!("restore-o-{REDACTED}"));
+    // A line that is not a JSON object is redacted whole, as before.
+    assert_eq!(redact_detail_line(secret, &free), REDACTED);
+    // CONTROL (the DUI review's L1): a secret-named key's value is redacted
+    // on the runner's pass (its key-path redactor, rebuilt here as
+    // `logweir::check::redact_path` composes it) and on the controller's,
+    // although the walk hands the key and the value to the free-text rule
+    // apart; a 60-character topic beside them survives.
+    let shape: Vec<_> = redaction_rules()
+        .iter()
+        .filter(|r| r.name != LONG_RUN_RULE)
+        .copied()
+        .collect();
+    let runner_free = |s: &str| redact_long_runs_in_keys(&apply_rules(s, &shape));
+    let probe = serde_json::json!({
+        "check": "x",
+        "diff": {"sasl.password": "hunter2", "token": "abc123"},
+        "topic": topic,
+    })
+    .to_string();
+    for kept in [
+        redact_detail_line(&probe, &runner_free),
+        redact_detail_lines(&format!("{probe}\n")),
+    ] {
+        assert!(
+            !kept.contains("hunter2") && !kept.contains("abc123"),
+            "{kept}"
+        );
+        let v: serde_json::Value = serde_json::from_str(kept.trim_end()).expect("JSON");
+        assert_eq!(v["diff"]["sasl.password"], REDACTED, "{kept}");
+        assert_eq!(v["diff"]["token"], REDACTED, "{kept}");
+        assert_eq!(v["topic"], topic, "{kept}");
+    }
+    // The two predicates' bounds.
+    assert!(is_relayable_topic_name(topic) && !is_relayable_topic_name(".."));
+    assert!(!is_relayable_topic_name(&"t".repeat(250)));
+    assert!(is_relayable_group_id(group) && is_relayable_group_id("billing app"));
+    assert!(is_relayable_group_id(&"g".repeat(255)));
+    for bad in ["", "  ", "a\tb", "a\u{202e}b", "café"] {
+        assert!(!is_relayable_group_id(bad), "{bad:?}");
+    }
+    assert!(!is_relayable_group_id(&"g".repeat(256)));
+}

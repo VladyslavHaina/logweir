@@ -90,6 +90,11 @@ const KINDS: &[(&str, &str, &str)] = &[
         "VICTIM0000000000000000",
     ),
     ("reachable=", "false", "true"),
+    (
+        "failure-detail=",
+        "engine: operational: exited 1: ERROR the store refused",
+        "forged: the operator deleted the archive",
+    ),
 ];
 
 /// **Every line kind forged from a plan string, a client log or another Job
