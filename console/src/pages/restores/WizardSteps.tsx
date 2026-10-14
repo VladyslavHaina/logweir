@@ -830,7 +830,11 @@ export function CheckStep({
                         · <Prose text={checkMessage(c.message)} />
                       </span>
                     ) : null}
-                    {c.state !== "ready" && c.remedy ? <div className="lw-small">{c.remedy}</div> : null}
+                    {c.state !== "ready" && c.remedy ? (
+                      <div className="lw-small">
+                        <Prose text={c.remedy} />
+                      </div>
+                    ) : null}
                     {c.code && c.state !== "ready" ? <div className="lw-subtle lw-small">{c.code}{!isBlockingRow(c) ? " (advisory)" : ""}</div> : null}
                   </span>
                   <CheckRowStatus c={c} />
@@ -845,7 +849,7 @@ export function CheckStep({
           )}
           {r && r.executionOnly.length > 0 && (
             <Content component="p" className="lw-subtle lw-small">
-              Only the run can answer: {r.executionOnly.map((x) => `${x.id} (${x.note})`).join("; ")}. Ready never means these passed.
+              <Prose text={`Only the run can answer: ${r.executionOnly.map((x) => `${x.id} (${x.note})`).join("; ")}. Ready never means these passed.`} />
             </Content>
           )}
           {r && r.stale && <Content component="p" className="lw-subtle lw-small">Stale: {r.staleReasons.map(staleReasonLine).join("; ")}.</Content>}

@@ -9,6 +9,7 @@ import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-circle-icon"
 import { When, count } from "../../components/When";
 import { ENFORCEMENT_WORDS, NEVER_DELETES, deletes, retentionOf } from "./model";
 import { Term } from "./parts";
+import { Prose } from "../../components/Prose";
 
 const GUARANTEES: Record<string, string> = {
   LogweirEnforced: "Enforced by Logweir",
@@ -33,7 +34,7 @@ function Covering({ policy }: { policy: RetentionPolicy }) {
       </Content>
       {policy.mode === "Enforce" && enforced?.status === "False" && (
         <Alert isInline isPlain variant="warning" title={`Not enforcing: ${enforced.reason ?? "no reason recorded"}`}>
-          {enforced.message}
+          <Prose text={enforced.message ?? ""} />
         </Alert>
       )}
       {policy.enforcementDegraded && (

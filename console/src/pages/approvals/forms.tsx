@@ -6,7 +6,7 @@
 //
 // A draft is kept in this page's memory until the Approval exists (through an
 // error, a lost answer or a visit to another page), never in browser storage.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Controller, useForm, type Control } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -39,7 +39,8 @@ import {
   type Written,
 } from "../../api/approvals";
 import { Refusal } from "./parts";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 
 type Field = "approvalBytes" | "sidecarBytes";
 
@@ -150,9 +151,13 @@ function DocumentField({
   );
 }
 
-/** What became of the last send, in the words a person reads. */
+/** What became of the last send, in the words a person reads; scrolled into view and focused (DUI-33). */
 function SendOutcome({ error, unmatched }: { error: unknown; unmatched: string[] }) {
-  if (!error) return null;
+  const body = error ? sendOutcomeBody(error, unmatched) : null;
+  return body ? <Revealed when={error}>{body}</Revealed> : null;
+}
+
+function sendOutcomeBody(error: unknown, unmatched: string[]): ReactNode {
   const outcome = outcomeOf(error);
   if (outcome === "unknown") {
     return (
@@ -166,7 +171,9 @@ function SendOutcome({ error, unmatched }: { error: unknown; unmatched: string[]
       <Refusal title="Not recorded: the service refused these values">
         <ul className="lw-plain-list">
           {unmatched.map((u) => (
-            <li key={u}>{u}</li>
+            <li key={u}>
+              <Prose text={u} />
+            </li>
           ))}
         </ul>
       </Refusal>

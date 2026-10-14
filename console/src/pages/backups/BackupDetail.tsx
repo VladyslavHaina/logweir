@@ -47,7 +47,8 @@ import { When, count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { ConsumerGroups } from "../../components/ConsumerGroups";
 import { CompactList, useNarrow } from "../../components/CompactList";
-import { BackupStatus, Commands, Term, Value, VerdictLabel, useFlags } from "./parts";
+import { BackupStatus, Commands, MessageValue, Term, Value, VerdictLabel, useFlags } from "./parts";
+import { Prose } from "../../components/Prose";
 import { Trigger } from "./BackupList";
 import "./evidence.css";
 import {
@@ -295,7 +296,7 @@ function Diagnoses({ op }: { op: OperationView }) {
               <StatusLabel tone={d.severity === "Error" ? "danger" : "warning"} text={d.code} title={d.severity} />
             </Td>
             <Td dataLabel="Message" className="lw-break">
-              <Value value={d.message} />
+              <MessageValue value={d.message} />
             </Td>
             <Td dataLabel="About">{d.object ? `${d.object.kind} ${d.object.name}` : <span className="lw-subtle">Not recorded</span>}</Td>
             <Td dataLabel="Seen">
@@ -326,7 +327,7 @@ function OperationCard({ op }: { op: OperationView }) {
             <Value value={op.stage} />
           </Term>
           <Term term="Message">
-            <Value value={op.message} />
+            <MessageValue value={op.message} />
           </Term>
           <Term term="Last update">
             <When value={op.lastUpdatedAt} exact />
@@ -376,7 +377,11 @@ function OperationCard({ op }: { op: OperationView }) {
                       <When value={c.lastTransitionTime} />
                     </FlexItem>
                   </Flex>
-                  {c.message && <div className="lw-break">{c.message}</div>}
+                  {c.message && (
+                    <div className="lw-break">
+                      <Prose text={c.message} />
+                    </div>
+                  )}
                 </li>
               ))}
             </ol>
@@ -464,7 +469,11 @@ function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView 
           <Term term="Signature key">{e.sidecarKey ? <span className="lw-ev-key">{e.sidecarKey}</span> : <Value value={null} />}</Term>
             </>
           )}
-          {v.detail && <Term term="Detail">{v.detail}</Term>}
+          {v.detail && (
+            <Term term="Detail">
+              <Prose text={v.detail} />
+            </Term>
+          )}
         </DescriptionList>
         <div>
           <Content component="h3" className="lw-small">
@@ -630,7 +639,7 @@ export function BackupDetail() {
             isInline
             title={`This run ${b.operation.state === "refused" ? "was refused" : "failed"}: ${b.operation.stateReason ?? "no reason recorded"}`}
           >
-            <p>{op?.message ?? "The controller recorded no further detail."}</p>
+            <p>{op?.message ? <Prose text={op.message} /> : "The controller recorded no further detail."}</p>
             <p>
               No recovery point was made by this run.{" "}
               {retries.length > 0 ? (
@@ -665,7 +674,7 @@ export function BackupDetail() {
                 <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl">
                   <Term term="Source">{b.sourceRef.name}</Term>
                   <Term term="Topics">
-                    <LabelGroup numLabels={6}>
+                    <LabelGroup numLabels={6} aria-label="Topics" className="lw-names">
                       {b.topics.map((t) => (
                         <Label key={t} isCompact variant="outline">
                           {t}

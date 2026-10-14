@@ -39,6 +39,7 @@ import {
 } from "../../api/backups";
 import { CATALOG_MODE_HELP, CONNECT_SENTENCE, INTENT_USED_SENTENCE, SYNC_MODES, catalogOf, connectFieldOf, isIntentConflict } from "./model";
 import { Prose } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 
 /** A DNS-1123 subdomain, the catalog name's rule. */
 const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
@@ -268,9 +269,11 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
           </Form>
         )}
         {localError && (
-          <Alert isInline variant="danger" title="Nothing was sent" className="lw-gap-top">
-            {localError}
-          </Alert>
+          <Revealed when={localError}>
+            <Alert isInline variant="danger" title="Nothing was sent" className="lw-gap-top">
+              {localError}
+            </Alert>
+          </Revealed>
         )}
         {connect.isPending && (
           <Content component="p" className="lw-subtle lw-gap-top" role="status">
@@ -278,27 +281,31 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
           </Content>
         )}
         {connect.isError && !made && (
-          <Alert
-            isInline
-            variant={outcomeOf(connect.error) === "unknown" ? "warning" : "danger"}
-            title={outcomeOf(connect.error) === "unknown" ? "The outcome is unknown" : "The catalog was not created"}
-            className="lw-gap-top"
-          >
-            <p><Prose text={connectRefusalWords(connect.error, connect.variables?.body.name ?? "")} /></p>
-            {unmatched.length > 0 && (
-              <ul>
-                {unmatched.map((m) => (
-                  <li key={m}>{m}</li>
-                ))}
-              </ul>
-            )}
-            {connect.error instanceof ApiError && (
-              <p className="lw-subtle lw-small">
-                {connect.error.status} {connect.error.code}
-                {connect.error.requestId ? ` · request ${connect.error.requestId}` : ""}
-              </p>
-            )}
-          </Alert>
+          <Revealed when={connect.error}>
+            <Alert
+              isInline
+              variant={outcomeOf(connect.error) === "unknown" ? "warning" : "danger"}
+              title={outcomeOf(connect.error) === "unknown" ? "The outcome is unknown" : "The catalog was not created"}
+              className="lw-gap-top"
+            >
+              <p><Prose text={connectRefusalWords(connect.error, connect.variables?.body.name ?? "")} /></p>
+              {unmatched.length > 0 && (
+                <ul>
+                  {unmatched.map((m) => (
+                    <li key={m}>
+                      <Prose text={m} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {connect.error instanceof ApiError && (
+                <p className="lw-subtle lw-small">
+                  {connect.error.status} {connect.error.code}
+                  {connect.error.requestId ? ` · request ${connect.error.requestId}` : ""}
+                </p>
+              )}
+            </Alert>
+          </Revealed>
         )}
       </ModalBody>
       <ModalFooter>

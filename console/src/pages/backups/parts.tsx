@@ -17,6 +17,7 @@ import { grantOf, useSessionDoc } from "../../api/session";
 import type { Backup } from "../../api/backups";
 import type { Capabilities } from "../../api/types";
 import { StatusLabel } from "../../components/Status";
+import { Prose } from "../../components/Prose";
 import { CASE_WORDS, listVerdict, progressWord, type Verdict } from "./verdict";
 
 /** The session's capability flags in `ns` (`implemented && allowed`), or null without a grant there. */
@@ -42,6 +43,12 @@ export function Term({ term, children }: { term: string; children: ReactNode }) 
 export function Value({ value }: { value: string | number | null | undefined }) {
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
   return <>{typeof value === "number" ? value.toLocaleString("en-US") : value}</>;
+}
+
+/** A server sentence (a controller or runner message): its code spans as code, never raw backticks (DUI-35). */
+export function MessageValue({ value }: { value: string | null | undefined }) {
+  if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
+  return <Prose text={value} />;
 }
 
 /**

@@ -47,6 +47,7 @@ import { BackUpNow } from "./BackUpNow";
 import { RetentionCard } from "./Retention";
 import { cadenceWords, latestPoint, outcomeOf, runsOf, zoneOf } from "./model";
 import { NextRuns, ScheduleStatus, Term, WriteAlert, useGrant } from "./parts";
+import { Prose } from "../../components/Prose";
 
 function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; canRestore: boolean; label: string }) {
   const narrow = useNarrow();
@@ -250,7 +251,7 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
         ) : s.topics.length === 0 ? (
           <StatusLabel tone="danger" text="None" title="No topic and no dynamic selection: no run backs anything up" />
         ) : (
-          <LabelGroup numLabels={8}>
+          <LabelGroup numLabels={8} aria-label="Topics" className="lw-names">
             {s.topics.map((t) => (
               <Label key={t} isCompact variant="outline">
                 {t}
@@ -309,7 +310,11 @@ function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
           <>
             {ready.status === "True" ? "Ready" : ready.status === "False" ? "Not ready" : "Unknown"}
             {ready.reason ? <span className="lw-reason"> {ready.reason}</span> : null}
-            {ready.message && <div className="lw-subtle lw-small">{ready.message}</div>}
+            {ready.message && (
+              <div className="lw-subtle lw-small">
+                <Prose text={ready.message} />
+              </div>
+            )}
           </>
         ) : (
           <span className="lw-subtle">Not evaluated yet</span>

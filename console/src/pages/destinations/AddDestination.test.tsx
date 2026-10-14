@@ -163,16 +163,29 @@ describe("Rotate access", () => {
   });
 
   it("is refused, not applied, when the destination moved since this page read it", async () => {
-    const stale = primary();
-    stale.generation -= 1;
-    const { onRotated } = rotate(stale);
-    fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
-    await screen.findByText("The destination changed since this page read it. Nothing was written.");
-    expect(onRotated).not.toHaveBeenCalled();
-    // Control: the same rotation from the generation as it is now lands.
-    cleanup();
-    const fresh = rotate(primary());
-    fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
-    await waitFor(() => expect(fresh.onRotated).toHaveBeenCalled());
+    // DUI-33: jsdom has no scrollIntoView; the refusal asks for it, so it is recorded here.
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      const stale = primary();
+      stale.generation -= 1;
+      const { onRotated } = rotate(stale);
+      fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
+      const title = await screen.findByText("The destination changed since this page read it. Nothing was written.");
+      expect(onRotated).not.toHaveBeenCalled();
+      // DUI-33: the refusal is brought into view at the foot of the long dialog and takes focus, so it is read out.
+      await waitFor(() => expect(document.activeElement?.contains(title)).toBe(true));
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      expect(scrolled.mock.contexts[0]).toBe(document.activeElement);
+      // Control: the same rotation from the generation as it is now lands, and moves nothing.
+      cleanup();
+      scrolled.mockClear();
+      const fresh = rotate(primary());
+      fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
+      await waitFor(() => expect(fresh.onRotated).toHaveBeenCalled());
+      expect(scrolled).not.toHaveBeenCalled();
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
   });
 });

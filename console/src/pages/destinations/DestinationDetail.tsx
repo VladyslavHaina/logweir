@@ -40,7 +40,7 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { CheckResult, Field, Instant, LastTestLine, NotRecorded, Term, WriteOutcome } from "../connections/parts";
 import { DestinationVerdict, TransportStatus } from "./DestinationList";
 import { RotateAccess } from "./RotateAccess";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 const MODE_WORDS: Record<string, string> = {
   secretKeys: "Secret",
@@ -93,7 +93,7 @@ function Location({ d }: { d: Destination }) {
               <span className="lw-subtle"> (the controller last judged generation {d.status.observedGeneration})</span>
             )}
           </Term>
-          <Term term="Controller message">{d.status.message ?? <NotRecorded />}</Term>
+          <Term term="Controller message">{d.status.message ? <Prose text={d.status.message} /> : <NotRecorded />}</Term>
           <Term term="Created">
             <Instant value={d.createdAt} exact />
           </Term>

@@ -404,6 +404,39 @@ describe("FX-45: the backup readiness check", () => {
     expect(text).not.toContain("[detail:");
   });
 
+  const GROUP_TYPES = "this endpoint serves ListGroups v0-v4, and a group's type is named only from v5: it cannot say whether a group is a classic consumer group, so a backup records every selected consumer group as excluded (GroupTypeNotCaptured) and archives no position for it.";
+  const ready = (rows: S["CheckEntryView"][]) => ({ ...check(rows), state: "ready" }) as S["Preflight"];
+  const authenticated: S["CheckEntryView"] = { id: "connection.authenticated", state: "ready", code: "Authenticated", gating: "blocking", message: "the connection resolves to 1 broker address(es)" };
+  const groupTypes: S["CheckEntryView"] = { id: "connection.groupTypes", state: "notReady", code: "GroupTypesNotListed", gating: "advisory", message: GROUP_TYPES };
+
+  it("DUI-36: lists blocking and advisory rows apart, as Test connection does; an advisory row not met is a warning, never a red Not met", () => {
+    render(<Verdict preflight={ready([authenticated, groupTypes])} groupsSelected />);
+    expect(screen.getByText("Ready: every blocking check passed")).toBeTruthy();
+    const advisory = screen.getByRole("list", { name: "Advisory checks" });
+    expect(advisory.textContent).toContain("ListGroups v0-v4");
+    const label = within(advisory).getByText("Not met (advisory)").closest(".pf-v6-c-label")!;
+    expect(label.className).toMatch(/pf-m-warning/);
+    expect(label.className).not.toMatch(/pf-m-danger/);
+    expect(screen.queryByText("Not met")).toBeNull();
+    const blocking = screen.getByRole("list", { name: "Blocking checks" });
+    expect(blocking.textContent).toContain("resolves to 1 broker");
+    expect(blocking.textContent).not.toContain("ListGroups");
+    // Control: a blocking row that is not met is still red "Not met".
+    cleanup();
+    render(<Verdict preflight={check([{ ...groupTypes, id: "connection.topicsDescribable", gating: "blocking", code: "TopicNotFound", message: "1 of 2 selected topic(s) answered TopicNotFound" }])} />);
+    const red = within(screen.getByRole("list", { name: "Blocking checks" })).getByText("Not met").closest(".pf-v6-c-label")!;
+    expect(red.className).toMatch(/pf-m-danger/);
+  });
+
+  it("DUI-36: tells a draft that selects no consumer group nothing about excluded groups; one that selects a group sees the row (the control)", () => {
+    render(<Verdict preflight={ready([authenticated, groupTypes])} groupsSelected={false} />);
+    expect(document.body.textContent).not.toContain("records every selected consumer group as excluded");
+    expect(screen.queryByRole("list", { name: "Advisory checks" })).toBeNull();
+    cleanup();
+    render(<Verdict preflight={ready([authenticated, groupTypes])} groupsSelected />);
+    expect(document.body.textContent).toContain("records every selected consumer group as excluded");
+  });
+
   it("leaves an execution-only row in the execution-only list, with its message", () => {
     const note = "the broker reports READ for this principal on all 2 selected topic(s)";
     render(<Verdict preflight={check([{ id: "connection.topicsReadable", state: "unknown", code: "ReadVerifiedOnlyAtExecution", gating: "executionOnly", message: note }], [{ id: "connection.topicsReadable", note }])} />);
@@ -434,6 +467,23 @@ describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
     // DUI-12: what it backs up links to the objects it names, not to their lists.
     expect(screen.getByRole("link", { name: "source" }).getAttribute("href")).toMatch(/\/team-a\/connections\/source$/);
     expect(screen.getByRole("link", { name: "dest" }).getAttribute("href")).toMatch(/\/team-a\/destinations\/dest$/);
+  });
+
+  it("DUI-37: names its topic chips, and shows a 38-character topic whole in its chip, not only in a tooltip", async () => {
+    const LONG = "rc1-settlement-ledger-eu-west-1-orders";
+    expect(LONG).toHaveLength(38);
+    formNetwork((r, path) => {
+      if (r.method === "GET" && path === "/namespaces/team-a/schedules/nightly") return json(200, { item: schedule({ topics: [LONG, "orders"] }), requestId: "r" });
+      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/schedules/nightly");
+    const topics = await screen.findByRole("list", { name: "Topics" });
+    // The chip's own text is the whole name, and its group wraps names (styles.css .lw-names) rather than cutting them.
+    expect(within(topics).getByText(LONG)).toBeTruthy();
+    expect(topics.closest(".lw-names")).not.toBeNull();
+    // Control: no chip group on the page is left with PatternFly's unnamed "Label group category".
+    expect(screen.queryByRole("list", { name: "Label group category" })).toBeNull();
   });
 
   it("is pending only while the next runs are absent or computed from an older revision (the control)", () => {

@@ -365,7 +365,36 @@ describe("one backup's page", () => {
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
     const title = await screen.findByText("This run was refused: GuardRefused");
     const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
-    await within(alert).findByText(REFUSAL);
+    // DUI-35: the sentence is the runner's, word for word, and its code span is code, never raw backticks.
+    const said = REFUSAL.replace(/`/g, "");
+    await waitFor(() => expect(alert.textContent).toContain(said));
+    expect(within(alert).getByText("payments", { selector: "code" })).toBeTruthy();
+    expect(alert.textContent).not.toContain("`");
+    // The same message under "Where it stands", and in a condition and a diagnosis, is prose too.
+    const where = screen.getByRole("heading", { name: "Where it stands" }).closest(".pf-v6-c-card") as HTMLElement;
+    expect(where.textContent).toContain(said);
+    expect(within(where).getAllByText("payments", { selector: "code" }).length).toBeGreaterThan(0);
+    expect(where.textContent).not.toContain("`");
+  });
+
+  it("DUI-35: a message with an unpaired backtick is shown as it came, never guessed into code (the control)", async () => {
+    const ODD = "the runner's own reason: topic `orders does not exist";
+    const doc = copy(backupDoc);
+    doc.item.operation = { state: "refused", stateReason: "GuardRefused", terminal: true, verificationState: "notAttempted", verifiedSuccess: false };
+    const op = copy(operationBackup) as { item: Record<string, unknown> };
+    Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: ODD, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
+      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, op);
+      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    const title = await screen.findByText("This run was refused: GuardRefused");
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    await waitFor(() => expect(alert.textContent).toContain(ODD));
+    expect(alert.querySelector("code")).toBeNull();
   });
 
   it("tells a role that cannot restore who can, instead of offering the action", async () => {

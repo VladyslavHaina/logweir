@@ -40,6 +40,7 @@ import {
 import { Field, WriteOutcome, controlState, withProblems } from "../connections/parts";
 import { grantsSchema } from "./AddDestination";
 import { GrantFields, clearGrantSecrets, type GrantsForm } from "./GrantFields";
+import { Revealed } from "../../components/Revealed";
 
 export function RotateAccess({
   ns,
@@ -189,25 +190,27 @@ export function RotateAccess({
               </Content>
             )}
             {moved ? (
-              <Alert
-                isInline
-                variant="warning"
-                title="The destination changed since this page read it. Nothing was written."
-                actionLinks={
-                  <Button
-                    variant="link"
-                    isInline
-                    onClick={() => {
-                      setAdopting(true);
-                      onReRead();
-                    }}
-                  >
-                    Re-read the destination
-                  </Button>
-                }
-              >
-                Re-read it, check the grants again, and rotate again. The credential fields were cleared; type them again.
-              </Alert>
+              <Revealed when={rotate.error}>
+                <Alert
+                  isInline
+                  variant="warning"
+                  title="The destination changed since this page read it. Nothing was written."
+                  actionLinks={
+                    <Button
+                      variant="link"
+                      isInline
+                      onClick={() => {
+                        setAdopting(true);
+                        onReRead();
+                      }}
+                    >
+                      Re-read the destination
+                    </Button>
+                  }
+                >
+                  Re-read it, check the grants again, and rotate again. The credential fields were cleared; type them again.
+                </Alert>
+              </Revealed>
             ) : (
               rotate.isError && <WriteOutcome error={rotate.error} subject="the access rotation" verb="rotate" credentials unmatched={unmatched} />
             )}

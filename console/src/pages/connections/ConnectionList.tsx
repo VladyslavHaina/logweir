@@ -162,7 +162,8 @@ export function ConnectionList() {
                             <ProbeLabels state={probe} />
                             <div className="lw-subtle lw-small">
                               {probe.observedAt ? <Instant value={probe.observedAt} /> : "No observation recorded"}
-                              {probe.reason && probe.verdict !== "reachable" && probe.verdict !== "probing" ? (
+                              {/* A later probe's reason is said once, below, never as the reading's too (DUI-31.6). */}
+                              {probe.reason && !probe.laterReason && probe.verdict !== "reachable" && probe.verdict !== "probing" ? (
                                 <>
                                   {" · "}
                                   <code>{probe.reason}</code>

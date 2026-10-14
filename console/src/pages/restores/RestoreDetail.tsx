@@ -532,7 +532,10 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                       { term: "Result", value: `${op.result.status}${typeof op.result.exitCode === "number" ? `, exit ${op.result.exitCode}` : ""}${op.result.exitReason ? ` (${op.result.exitReason})` : ""}` },
                       { term: "Outcome", value: <Claim value={outcomeShown(op)} verified={signed} /> },
                       { term: "Last phase completed", value: shown(op.result.lastPhaseCompleted) },
-                      { term: "Signature", value: `${op.verification.state}${op.verification.detail ? `: ${op.verification.detail}` : ""}` },
+                      {
+                        term: "Signature",
+                        value: op.verification.detail ? <Prose text={`${op.verification.state}: ${op.verification.detail}`} /> : op.verification.state,
+                      },
                       { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
                       op.verification.matchedKeyId ? { term: "Signed by key", value: <Ident value={op.verification.matchedKeyId} label="signer key id" /> } : null,
                       { term: "Trust", value: `${op.trust.state}, basis ${op.trust.basis}${op.trust.keyState ? `, key ${op.trust.keyState}` : ""}${op.trust.policy?.name ? `, policy ${op.trust.policy.name}` : ""}` },

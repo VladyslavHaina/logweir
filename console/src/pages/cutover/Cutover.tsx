@@ -81,7 +81,8 @@ import { useNarrow } from "../../components/CompactList";
 import { Legend, OutcomeCounts, OutcomeTable, PlanBlock, ReviewCards, ReviewTable, RollbackCard, planCounts, plural } from "./parts";
 import { PhaseLabel } from "./status";
 import "./cutover.css";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 import { exactUtc } from "../../components/When";
 
 /** Why this restore cannot be switched over, from the restore alone (§3.4's admission). */
@@ -450,20 +451,23 @@ function Confirm({
                 </FormHelperText>
               )}
             </FormGroup>
-            {err && outcomeUnknown(err) && (
-              <Alert isInline variant="warning" title="The outcome is not known">
-                {UNKNOWN_OUTCOME}
-              </Alert>
-            )}
-            {err && !outcomeUnknown(err) && (
-              <Alert isInline variant="danger" title={reasonWords(err.message) ? "Refused" : "The service refused the switchover"}>
-                <ErrorText error={err} />
-                {fieldErrors.filter((f) => f.field !== "ticket").map((f) => (
-                  <div key={f.field + f.code} className="lw-small">
-                    <span className="lw-mono">{f.field}</span>: {f.message}
-                  </div>
-                ))}
-              </Alert>
+            {err && (
+              <Revealed when={err}>
+                {outcomeUnknown(err) ? (
+                  <Alert isInline variant="warning" title="The outcome is not known">
+                    {UNKNOWN_OUTCOME}
+                  </Alert>
+                ) : (
+                  <Alert isInline variant="danger" title={reasonWords(err.message) ? "Refused" : "The service refused the switchover"}>
+                    <ErrorText error={err} />
+                    {fieldErrors.filter((f) => f.field !== "ticket").map((f) => (
+                      <div key={f.field + f.code} className="lw-small">
+                        <span className="lw-mono">{f.field}</span>: <Prose text={f.message} />
+                      </div>
+                    ))}
+                  </Alert>
+                )}
+              </Revealed>
             )}
             <Flex gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
               <FlexItem>
@@ -539,18 +543,26 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
           {s.phase === "Refused" && (
             <Alert isInline variant="danger" title={`Refused: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
               <p>{reasonWords(s.reason) ?? "The switchover was refused."} Nothing was committed.</p>
-              {s.message && <p className="lw-break">{s.message}</p>}
+              {s.message && (
+                <p className="lw-break">
+                  <Prose text={s.message} />
+                </p>
+              )}
             </Alert>
           )}
           {s.phase === "Failed" && (
             <Alert isInline variant="danger" title={`Failed: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
               <p>{reasonWords(s.reason) ?? "The switchover run failed; its signed record says what it applied."}</p>
-              {s.message && <p className="lw-break">{s.message}</p>}
+              {s.message && (
+                <p className="lw-break">
+                  <Prose text={s.message} />
+                </p>
+              )}
             </Alert>
           )}
           {groupsPartial(s) && (
             <Alert isInline variant="warning" title="Not every group is listed here" className="lw-gap-below">
-              {s.message}
+              <Prose text={s.message ?? ""} />
             </Alert>
           )}
           <OutcomeTable sw={s} plan={plan} target={target} />
@@ -789,8 +801,12 @@ function CutoverFlow() {
             {state.checks.every((c) => evidenceUnreadable(c.message)) && <p>{EVIDENCE_UNREADABLE_WORDS}</p>}
             {state.checks.map((c) => (
               <div key={c.id}>
-                <span className="lw-reason">{c.code ?? c.id}</span> {c.message}
-                {c.remedy && <div className="lw-subtle lw-small">{c.remedy}</div>}
+                <span className="lw-reason">{c.code ?? c.id}</span> <Prose text={checkMessage(c.message ?? "")} />
+                {c.remedy && (
+                  <div className="lw-subtle lw-small">
+                    <Prose text={c.remedy} />
+                  </div>
+                )}
               </div>
             ))}
           </Alert>

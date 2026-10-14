@@ -899,3 +899,21 @@ body {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* DUI-37: a chip that holds a name (a topic) shows it whole. PatternFly cuts a
+   label's text with an ellipsis and puts the rest only in a tooltip; in a narrow
+   column ("What it backs up") a 38-character topic read "rc1-settlement-ledger-e…".
+   Here the name wraps inside its chip instead. */
+.lw-names .pf-v6-c-label,
+.lw-names .pf-v6-c-label__text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+/* DUI-34: the session warning sits above the page header and pushes it down; it
+   covers nothing. Its section has no bottom padding: the header's own spacing follows. */
+.lw-session-warning {
+  flex-shrink: 0;
+}
+.pf-v6-c-page__main-section.lw-session-warning__section {
+  --pf-v6-c-page__main-section--PaddingBlockEnd: 0;
+}

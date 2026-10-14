@@ -42,7 +42,7 @@ import { StatusLabel } from "../../components/Status";
 import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -222,8 +222,13 @@ export function ApprovalRecord({ approval, packet, grant, heading = "The approva
           <Term term="Verdict">
             {verified ? (
               <>
-                {verified.reason ?? "Not recorded"}
-                {verified.message && <div className="lw-subtle lw-small lw-break">{verified.message}</div>}
+                {/* DUI-31.6: "Not recorded" only when the condition carries neither a reason nor a message. */}
+                {verified.reason ?? (verified.message ? null : "Not recorded")}
+                {verified.message && (
+                  <div className="lw-subtle lw-small lw-break">
+                    <Prose text={verified.message} />
+                  </div>
+                )}
               </>
             ) : (
               <span className="lw-subtle">The controller has not decided yet.</span>

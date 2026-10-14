@@ -243,7 +243,7 @@ describe("DUI-4: the session's end", () => {
 
   it("warns about two minutes before the end, offering a sign-in in a new tab; not ten minutes before", async () => {
     read.mockResolvedValue(withExpiry(90_000));
-    renderForm();
+    renderAt("/team-a");
     const warning = await screen.findByText(/Your session ends in 1 min (2|3)\d s/);
     expect(warning).toBeTruthy();
     const link = screen.getByRole("link", { name: "Sign in again in a new tab" });
@@ -251,9 +251,28 @@ describe("DUI-4: the session's end", () => {
     cleanup();
     // The control: ten minutes left is no warning.
     read.mockResolvedValue(withExpiry(600_000));
-    renderForm();
-    expect(await screen.findByLabelText("Topic names")).toBeTruthy();
+    renderAt("/team-a");
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(screen.queryByText(/Your session ends in/)).toBeNull();
+  });
+
+  it("DUI-34: the warning is inline at the top of the page, above its header, and covers nothing; its close dismisses it", async () => {
+    read.mockResolvedValue(withExpiry(90_000));
+    renderAt("/team-a");
+    const title = await screen.findByText(/Your session ends in 1 min (2|3)\d s/);
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    // Not a toast over the page: an inline alert inside the page's own content.
+    expect(alert.className).toMatch(/pf-m-inline/);
+    expect(document.querySelector(".pf-v6-c-alert-group.pf-m-toast")).toBeNull();
+    expect(document.getElementById("lw-main")!.contains(alert)).toBe(true);
+    // It comes before the page header, so it pushes the header's actions down rather than lying over them.
+    const heading = await screen.findByRole("heading", { name: "Overview", level: 1 });
+    expect(alert.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Its text and its two actions are kept.
+    expect(alert.textContent).toContain("Signing in again in a new tab renews it for this tab too");
+    fireEvent.click(within(alert).getByRole("button", { name: "Close the session warning" }));
+    await waitFor(() => expect(screen.queryByText(/Your session ends in/)).toBeNull());
+    expect(screen.getByRole("heading", { name: "Overview", level: 1 })).toBeTruthy();
   });
 
   it("puts the words of the time left in minutes and seconds", () => {

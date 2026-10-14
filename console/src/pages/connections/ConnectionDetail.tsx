@@ -38,7 +38,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { Discovery } from "./Discovery";
-import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ReasonText, Term, WriteOutcome } from "./parts";
+import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ProbeReason, Term, WriteOutcome } from "./parts";
 
 export const CONNECTION_CHECK_SENTENCE =
   "Test connection starts a readiness check: an isolated Job that projects this connection's own credential and dials these brokers now. What it records is that Job's own result at the moment it ran. It is not a promise about the next run, and Ready authorises nothing: every guard still runs when a backup or restore executes.";
@@ -62,13 +62,7 @@ function Probe({ c, onReRead, reading }: { c: Connection; onReRead: () => void; 
           </Term>
           <Term term="Cluster id">{p.clusterId ? <Ident value={p.clusterId} label="Cluster id" /> : <NotRecorded />}</Term>
           <Term term="Reason">
-            <ReasonText reason={p.laterReason ? "" : p.reason} />
-            {p.laterReason && (
-              <>
-                <code>{p.laterReason}</code>
-                <span className="lw-subtle">: {p.laterGloss}</span>
-              </>
-            )}
+            <ProbeReason state={p} />
           </Term>
         </DescriptionList>
         {p.stale && (

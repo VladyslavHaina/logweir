@@ -147,8 +147,9 @@ export function SessionGate({ children }: { children: (session: Session) => Reac
   const ended = query.isError && query.error instanceof ApiError && query.error.signedOut;
   return (
     <SessionProvider session={session}>
-      {children(session)}
-      <SessionClock session={session} ended={ended} recheck={() => query.refetch()} />
+      <SessionClock session={session} ended={ended} recheck={() => query.refetch()}>
+        {children(session)}
+      </SessionClock>
     </SessionProvider>
   );
 }

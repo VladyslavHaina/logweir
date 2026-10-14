@@ -7,8 +7,8 @@ import connectionsList from "../../fixtures/console/connections-list.json";
 import policiesList from "../../fixtures/console/protection-policies-list.json";
 import type { Backup, Connection, PointView, ProtectionPolicy, Restore } from "../api/types";
 import { newestFirst } from "../api/queries";
-import { attentionItems, failedLastDay, failedRunsLink, pointAgeSeconds } from "../app/attention";
-import { activity, backupDay, freshestPoint, newestPoint, protectionCount, scheduleOf, strip } from "./overviewData";
+import { attentionItems, didNotBackUp, failedLastDay, failedRunsLink, notBackedUpWords, pointAgeSeconds } from "../app/attention";
+import { activity, backupDay, backupDayTile, freshestPoint, newestPoint, protectionCount, scheduleOf, strip } from "./overviewData";
 
 const BACKUP = backupsList.items[0] as unknown as Backup;
 const RESTORE = restoresList.items[0] as unknown as Restore;
@@ -92,8 +92,27 @@ describe("backups", () => {
   });
 
   it("count the last 24 hours: verified, failed, and every run still moving", () => {
-    expect(backupDay(runs, NOW)).toEqual({ verified: 2, failed: 2, running: 1 });
+    expect(backupDay(runs, NOW)).toEqual({ verified: 2, failed: 2, refused: 0, running: 1, missedWords: "2 failed" });
     expect(failedLastDay(runs, NOW).map((b) => b.name)).toEqual(["orders-hourly-d", "orders-hourly-b"]);
+  });
+
+  it("DUI-32: count a refused run as one that did not back up, in its own word, and never show a green check over it", () => {
+    const day = [
+      run("orders-hourly-a", 30, "succeeded"),
+      run("orders-hourly-b", 20, "succeeded"),
+      run("orders-hourly-c", 10, "succeeded"),
+      run("orders-manual-p6qzd", 5, "refused"),
+    ];
+    const counted = backupDay(day, NOW);
+    expect([counted.verified, counted.failed, counted.refused]).toEqual([3, 0, 1]);
+    expect(backupDayTile(counted)).toEqual({ value: "3 verified", detail: "1 refused", tone: "warning" });
+    expect(failedLastDay(day, NOW).map((b) => b.name)).toEqual(["orders-manual-p6qzd"]);
+    // The two states stay two words.
+    expect(notBackedUpWords([...day, run("orders-hourly-d", 1, "failed")])).toBe("1 failed, 1 refused");
+    expect(backupDayTile(backupDay([...day, run("orders-hourly-d", 1, "failed")], NOW)).detail).toBe("1 failed · 1 refused");
+    // Control: every run verified is the green check, "0 failed".
+    expect(backupDayTile(backupDay(day.slice(0, 3), NOW))).toEqual({ value: "3 verified", detail: "0 failed", tone: "success" });
+    expect(didNotBackUp(run("x", 1, "cancelled"))).toBe(false);
   });
 
   it("draw a schedule's strip oldest first, a retried failure once, linked to its retry", () => {

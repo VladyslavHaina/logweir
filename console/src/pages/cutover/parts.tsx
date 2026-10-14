@@ -45,6 +45,7 @@ import { MappingStatus, VerdictStatus } from "../../components/Status";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { count } from "../../components/When";
 import { OutcomeLabel } from "./status";
+import { Prose } from "../../components/Prose";
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -130,7 +131,12 @@ export function Partitions({ g }: { g: ReviewGroup }) {
       {g.reason && verdictOf(g).verdict !== "ready" && (
         <Content component="p" className="lw-inset__note">
           <span className="lw-reason">{g.reason}</span> {reasonWords(g.reason) ?? ""}
-          {g.message && <span className="lw-subtle"> ({g.message})</span>}
+          {g.message && (
+            <span className="lw-subtle">
+              {" "}
+              (<Prose text={g.message} />)
+            </span>
+          )}
         </Content>
       )}
       {unavailablePositions(g).length > 0 && offered(g) && (
