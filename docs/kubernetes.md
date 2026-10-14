@@ -1389,8 +1389,8 @@ an ordinary restore only when it is `Available` and `Verified` or
   `spec.syncRequest` after a trust change.
 - `status.counts` does not sum to `total`: `unverified` folds `NotAttempted` and
   `NoEvidence`; `Partial`, `Revoked` and `VerifiedHistorical` are counted in the
-  `Synced` message. `catalog-counts` also carries `unreadableOverReadCap` and
-  `unreadableMalformed`.
+  `Synced` message. `catalog-counts` carries `unreadableOverReadCap` and
+  `unreadableMalformed` when non-zero.
 - A point whose record gave no facts is listed by its point id alone and is
   never selectable. A walk that never started relays nothing; the controller
   reads that as `ResultUnreadable` and keeps the previous view.

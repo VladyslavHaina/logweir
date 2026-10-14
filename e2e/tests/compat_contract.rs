@@ -19,6 +19,7 @@
 //! | `an_unreachable_advertised_address_is_not_a_reachable_cluster` | profile `confluent` | a listener that advertises a dead address: the probe answers `reachable=false`, `brokers-answered=0/1`, naming the address (FX-46), the Test connection and the readiness check say the bootstrap answered and the advertised brokers did not, the capability rows are blocked behind it, and a backup fails with no receipt |
 //! | `a_backup_principal_without_read_is_refused_by_name_before_the_engine` | profile `acl` | FX-45: a principal without `Read` on the source topic (with `Describe`, and without it): the Backup Preflight's `connection.topicsReadable` is `notReady` naming the topic, and `backup run` refuses by name before the engine, exit 3, no receipt; with `Read` it backs up |
 //! | `a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` | profile `cluster3` | the engine-protocol row answers for a cluster only when every broker of it answered: `3 of 3` from three addresses and from one, every round; with one broker frozen it is `unknown`, naming `2 of 3` and the broker, never `ready`; and it recovers |
+//! | `a_backup_of_a_topic_the_source_does_not_hold_is_refused_by_name` | the stack as CI runs it | DUI-5: a selected topic the source does not hold: the Backup Preflight's `connection.topicsReadable` is `notReady` `TopicNotFound` naming it, and `backup run` refuses it by name before the engine, exit 3, nothing written; the existing topic alone backs up |
 //! | `a_backup_whose_id_spells_a_credential_code_is_a_backup` | the stack as CI runs it | a backup whose id (and so every archive key) spells a credential code exits 0 with a receipt: MinIO's `404 NoSuchKey` echoing the key is an absent object, not a refused credential |
 //!
 //! Every row but the first is `#[ignore]`d, like `config_coverage`'s: each
@@ -3129,6 +3130,170 @@ fn a_backup_principal_without_read_is_refused_by_name_before_the_engine() {
             &topic,
         ],
     );
+}
+
+// ============================================================ DUI-5: a missing topic, named before the engine
+
+/// **DUI-5: a backup of a selected topic the source does not hold is refused
+/// by name before the engine**, on the default broker (no authorizer, so
+/// DescribeCluster reports Describe on the cluster for every principal).
+/// It used to reach the engine and fail "exited 1 (operational)" with no
+/// cause.
+///
+/// * The Backup Preflight's `connection.topicsReadable` is BLOCKING
+///   `notReady`, `TopicNotFound`: "topic `x` does not exist on the source".
+/// * `backup run` of `[existing, missing]` exits 3 with
+///   `refusal-reason=GuardRefused` and a `refusal-detail=` line naming the
+///   missing topic; it writes no receipt, never starts the engine, and the
+///   bucket holds no key under the backup's id.
+///
+/// CONTROL: the existing topic alone: the row stays execution-only and says
+/// the broker reports READ, and the backup exits 0 with a receipt.
+#[test]
+#[ignore = "two backups with the engine on a topic of its own; run it by name (module doc)"]
+fn a_backup_of_a_topic_the_source_does_not_hold_is_refused_by_name() {
+    let n = nonce();
+    let topic = format!("compat-dui5-{n}");
+    let missing = format!("compat-dui5-{n}-nosuch");
+    create_topic(&topic, 3);
+    let auth = Auth::plaintext();
+    let bootstrap = bootstrap();
+    produce(&bootstrap, &auth, &topic, 10);
+    let storage = Storage::minio();
+    let readiness = |topics: &[&str]| {
+        let (_, result) = check_run(
+            &capability_plan(
+                CheckOperation::Backup,
+                auth.connection_plan(&bootstrap),
+                topics,
+                &[],
+            ),
+            None,
+        );
+        row(&result, CheckId::ConnectionTopicsReadable)
+    };
+    let keys_of = |backup_id: &str| -> Vec<String> {
+        let o = mc(&[
+            "--json",
+            "ls",
+            "--recursive",
+            &format!("local/{ARCHIVE_BUCKET}"),
+        ]);
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v["key"].as_str().map(str::to_string))
+            .filter(|k| k.contains(backup_id))
+            .collect()
+    };
+    let take = |tag: &str, topics: &str| {
+        let backup_id = format!("compat-dui5-{n}-{tag}");
+        let spec = backup_spec(&bootstrap, &auth, topics, &backup_id, &storage);
+        let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
+        let out = backup(&spec, &receipt, &auth, &[]);
+        (backup_id, out, receipt.exists())
+    };
+    let engine_started = |out: &Output| text(out).contains("starting the engine");
+
+    // The missing topic, beside one that exists.
+    let refused = readiness(&[topic.as_str(), missing.as_str()]);
+    assert_eq!(
+        (refused.state, refused.gating, refused.code),
+        (
+            CheckState::NotReady,
+            Gating::Blocking,
+            CheckCode::TopicNotFound
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        refused
+            .message
+            .starts_with(&format!("topic `{missing}` does not exist on the source")),
+        "{refused:?}"
+    );
+    assert_eq!(refused.detail.as_ref().unwrap()["sample"], json!([missing]));
+    // A YAML flow sequence: `topics: [<topic>, <missing>]`.
+    let (backup_id, out, receipt) = take("refused", &format!("{topic}, {missing}"));
+    let all = text(&out);
+    assert_eq!(out.status.code(), Some(3), "{}", tail(&all, 3000));
+    let detail_line = all
+        .lines()
+        .find(|l| l.starts_with("refusal-detail="))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        detail_line.contains(&format!("topic `{missing}` does not exist on the source"))
+            && detail_line.contains("\"code\":\"GuardRefused\"")
+            && all.contains("refusal-reason=GuardRefused")
+            && !all.contains(&format!("topic `{topic}` does not exist")),
+        "the refusal names the missing topic, and only it:\n{}",
+        tail(&all, 3000)
+    );
+    assert!(!receipt, "a refused backup writes no receipt");
+    assert!(
+        !engine_started(&out),
+        "the engine never started:\n{}",
+        tail(&all, 3000)
+    );
+    let written = keys_of(&backup_id);
+    assert!(written.is_empty(), "a refused backup wrote: {written:?}");
+
+    // CONTROL: the existing topic alone.
+    let readable = readiness(&[topic.as_str()]);
+    assert_eq!(
+        (readable.state, readable.gating, readable.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{readable:?}"
+    );
+    assert!(
+        readable
+            .message
+            .contains("the broker reports READ for this principal on all 1 selected topic(s)"),
+        "{readable:?}"
+    );
+    let (control_id, control, control_receipt) = take("control", &topic);
+    assert_eq!(
+        control.status.code(),
+        Some(0),
+        "{}",
+        tail(&text(&control), 4000)
+    );
+    assert!(control_receipt && engine_started(&control));
+    evidence(
+        "a_backup_of_a_topic_the_source_does_not_hold_is_refused_by_name",
+        &json!({
+            "broker": "kafka (the stack's default broker, no authorizer)",
+            "topic": topic,
+            "missing": missing,
+            "refused": {
+                "connection.topicsReadable": refused,
+                "backup": {
+                    "id": backup_id,
+                    "exit": out.status.code(),
+                    "receipt": receipt,
+                    "refusal_detail": detail_line,
+                    "reads": how_it_reads(&out),
+                    "keys_written": written,
+                },
+            },
+            "control": {
+                "connection.topicsReadable": readable,
+                "backup": {"id": control_id, "exit": control.status.code(), "receipt": control_receipt},
+            },
+        }),
+    );
+    let _ = kafka_topics(&[
+        "--bootstrap-server",
+        "kafka-broker-1:9094",
+        "--delete",
+        "--topic",
+        &topic,
+    ]);
 }
 
 // ============================================================ a backup id that spells a credential code

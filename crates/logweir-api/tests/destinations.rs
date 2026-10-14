@@ -755,7 +755,12 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
     // to the archive-write credential, so it is tested too.
     assert_eq!(
         stored["spec"]["request"]["destinationAccess"]["roles"],
-        json!(["ArchiveWrite", "ArchiveRead", "EvidenceWrite", "EvidenceRead"])
+        json!([
+            "ArchiveWrite",
+            "ArchiveRead",
+            "EvidenceWrite",
+            "EvidenceRead"
+        ])
     );
     assert_eq!(
         stored["metadata"]["annotations"][ACTOR_ANNOTATION],
@@ -780,8 +785,7 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
 /// defect); `EvidenceRead` added with no grant to answer it. CONTROL: a named
 /// role set is sent as named.
 #[tokio::test]
-async fn dui1_a_default_test_exercises_the_roles_that_fall_back_to_the_archive_write_credential()
-{
+async fn dui1_a_default_test_exercises_the_roles_that_fall_back_to_the_archive_write_credential() {
     let app = TestApp::new();
     app.fake.seed(
         "backupdestinations",

@@ -443,6 +443,25 @@ async fn an_old_shape_create_retried_under_its_key_replays() {
 #[tokio::test]
 async fn create_and_replace_refuse_the_same_policy_faults_with_the_same_errors() {
     let app = TestApp::new();
+    // The replace reads the schedule for its generation precondition before
+    // any field rule (DUI-2), so it needs one to replace.
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        json!({
+            "metadata": {"name": "nightly", "generation": 1},
+            "spec": {
+                "schedule": "0 3 * * *",
+                "sourceRef": {"name": "source"},
+                "topics": ["orders"],
+                "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+                "concurrencyPolicy": "Forbid",
+                "suspend": false
+            },
+            "status": {"observedGeneration": 1}
+        }),
+    );
+    let stored = app.fake.object("backupschedules", NS_A, "nightly");
     let faults = json!({
         "schedule": "61 * * * *",
         "timeZone": "Mars/Olympus",
@@ -500,5 +519,10 @@ async fn create_and_replace_refuse_the_same_policy_faults_with_the_same_errors()
         on_create, on_replace,
         "the two routes validate the same policy differently"
     );
-    assert_eq!(app.fake.count("backupschedules", NS_A), 0);
+    assert_eq!(app.fake.count("backupschedules", NS_A), 1);
+    assert_eq!(
+        app.fake.object("backupschedules", NS_A, "nightly"),
+        stored,
+        "a refused replace changed the schedule"
+    );
 }

@@ -8286,6 +8286,81 @@ mod live {
         );
     }
 
+    /// **DUI-1, live: the default access test dials the archive-write
+    /// credential.** A destination whose only grant is `archiveWrite`, tested
+    /// with no role named, is tested for
+    /// [`DestinationRole::access_test_defaults`] (what the API sends), the
+    /// plan's credential being that one Secret (`ArchiveRead` and
+    /// `EvidenceWrite` fall back to it). A key MinIO does not know is
+    /// `notReady`, `destination.archiveListable` `InvalidCredentials`; the
+    /// compose MinIO's own key is `ready` (the control). `ArchiveWrite` alone,
+    /// the set the API used to send, dials nothing and reads `ready` for the
+    /// same bad key: that is the defect, asserted here too.
+    #[test]
+    fn dui1_the_default_access_test_dials_the_archive_write_credential() {
+        use logweir_core::check_contract::{aggregate, OverallState};
+        std::env::set_var("AWS_REGION", "us-east-1");
+        let plan_for = |roles: Vec<DestinationRole>| {
+            plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
+                destination: minio_destination("dui1-access"),
+                roles,
+                write_probe: true,
+                evidence_write: None,
+                evidence_read: None,
+            }))
+        };
+        let default = mount(&plan_for(DestinationRole::access_test_defaults(false)));
+        let with_key = |id: &str, secret: &str, m: &Mounted| {
+            std::env::set_var("AWS_ACCESS_KEY_ID", id);
+            std::env::set_var(MINIO_PASSWORD_VAR, secret);
+            let run = drive_live(m);
+            std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
+            std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
+            run
+        };
+
+        // The bad key: notReady, and the archive list says why.
+        let run = with_key(
+            "dui1-unknown-access-key",
+            "dui1-not-the-minio-password",
+            &default,
+        );
+        assert_eq!(run.code, ExitCode::Ok, "stdout:\n{}", run.stdout);
+        let listed = run.row(CheckId::DestinationArchiveListable);
+        assert_eq!(
+            (listed.state, listed.code),
+            (CheckState::NotReady, CheckCode::InvalidCredentials),
+            "{listed:?}"
+        );
+        assert_eq!(aggregate(&run.result().checks), OverallState::NotReady);
+        assert!(
+            !run.everything().contains("dui1-not-the-minio-password"),
+            "the refused secret reached a frame"
+        );
+
+        // The old default, `ArchiveWrite` alone: nothing dialled, ready.
+        let alone = mount(&plan_for(vec![DestinationRole::ArchiveWrite]));
+        let run = with_key(
+            "dui1-unknown-access-key",
+            "dui1-not-the-minio-password",
+            &alone,
+        );
+        assert_eq!(aggregate(&run.result().checks), OverallState::Ready);
+
+        // CONTROL: the key MinIO knows is ready.
+        let run = with_key(MINIO_USER, "minioadmin", &default);
+        assert_eq!(
+            run.row(CheckId::DestinationArchiveListable).code,
+            CheckCode::ArchiveListable
+        );
+        assert_eq!(
+            aggregate(&run.result().checks),
+            OverallState::Ready,
+            "stdout:\n{}",
+            run.stdout
+        );
+    }
+
     /// `catalogSync` against REAL MinIO. A real backend matches a prefix on a
     /// PATH SEGMENT basis, contracts **no ordering at all**, and
     /// `list_with_offset` pushes the cursor into the request; the day-shard

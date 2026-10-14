@@ -124,6 +124,12 @@ shared-mode console needs a signed-in browser state in
 through the identity provider, Back up now, a restore to Verified, approvals)
 are run on the PoC.
 
+That storage state is a live session. Run a shared-mode console with
+`npx playwright test --trace off`: a failed spec's `trace.zip` keeps the
+session cookie, and a failed request can print its `cookie` header in the log.
+Delete the state file and `e2e-results/` after the run, and redact the log
+before it goes anywhere.
+
 `scripts/emit-restore-body.mjs` and `scripts/emit-schema-dependency.mjs` run the
 console's own code under `node --experimental-strip-types` for the Helm demo and
 an e2e row.

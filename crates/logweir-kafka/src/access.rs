@@ -367,14 +367,20 @@ mod tests {
         // Describe (a leader change, a timeout, an unknown code).
         for code in [5, 6, 7, 41, 100] {
             assert!(
-                matches!(topic_read(&answer("t", Some(code), None), Some(true)), TopicRead::Unknown(_)),
+                matches!(
+                    topic_read(&answer("t", Some(code), None), Some(true)),
+                    TopicRead::Unknown(_)
+                ),
                 "{code}"
             );
         }
         // One verdict per name, the absent one among them.
         let got = join_reads(
             &["orders".to_string(), "nosuch".to_string()],
-            &[answer("nosuch", Some(3), None), answer("orders", None, Some(vec![3, 8]))],
+            &[
+                answer("nosuch", Some(3), None),
+                answer("orders", None, Some(vec![3, 8])),
+            ],
             Some(true),
         );
         assert_eq!(
@@ -385,7 +391,7 @@ mod tests {
             ]
         );
         // DescribeCluster is needed only when a name answered "not held".
-        assert!(needs_cluster_describe(&[missing.clone()]));
+        assert!(needs_cluster_describe(std::slice::from_ref(&missing)));
         assert!(!needs_cluster_describe(&[
             answer("t", Some(29), None),
             answer("u", None, Some(vec![3, 8])),

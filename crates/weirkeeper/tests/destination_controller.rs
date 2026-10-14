@@ -770,6 +770,37 @@ fn the_role_defaulting_table() {
     );
 }
 
+/// **DUI-1: the default access-test set is exactly the roles this resolver
+/// gives a credential**, the fallbacks to `archiveWrite` included. The API
+/// tests [`DestinationRole::access_test_defaults`] when an operator names no
+/// role; it used to test only the roles a destination SETS, so `dest-b` (one
+/// `archiveWrite` Secret) was tested for `ArchiveWrite` alone, which no check
+/// may probe, and a key the endpoint did not know read Ready.
+///
+/// KILLS: a fallback added here (or removed) without the default set
+/// following it; `EvidenceRead` tested with no grant to answer it.
+#[test]
+fn dui1_the_default_access_test_is_every_role_that_resolves_to_a_credential() {
+    let policy = Policy::defaults();
+    for (dest, evidence_read_set) in [(dest_b(), false), (dest_a(), true)] {
+        let defaults = DestinationRole::access_test_defaults(evidence_read_set);
+        for role in DestinationRole::ALL {
+            let grant = destination::resolve(&dest, role, &policy)
+                .unwrap_or_else(|e| panic!("{role:?} resolves: {e}"))
+                .grant;
+            assert_eq!(
+                defaults.contains(&role),
+                grant != ResolvedGrant::NotConfigured,
+                "{role:?} on {:?}: {grant:?}",
+                dest.metadata.name
+            );
+        }
+    }
+    // The defect's own destination: its one credential is tested by a role
+    // that dials (the archive list), not by `ArchiveWrite` alone.
+    assert!(DestinationRole::access_test_defaults(false).contains(&DestinationRole::ArchiveRead));
+}
+
 /// `evidenceRead: ArchiveReadGrant` without an explicit `archiveRead` is
 /// refused HERE as well as by CEL rule R9: a write grant is never reused for
 /// verification.

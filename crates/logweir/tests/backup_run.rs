@@ -1448,10 +1448,8 @@ fn a_topic_the_principal_may_not_read_is_refused_before_the_engine_by_name() {
 #[test]
 fn dui5_a_selected_topic_the_source_does_not_hold_is_refused_before_the_engine() {
     let f = ok_fixture("mvp-demo");
-    let reader = StubReader::answering("SOURCE-CLUSTER-00000001").with_reads(&[(
-        "orders",
-        TopicRead::Absent,
-    )]);
+    let reader = StubReader::answering("SOURCE-CLUSTER-00000001")
+        .with_reads(&[("orders", TopicRead::Absent)]);
     let engine = RecordingEngine::one_topic();
     let (store, _k, _b) = archive_for("mvp-demo");
     assert_eq!(
@@ -1470,10 +1468,8 @@ fn dui5_a_selected_topic_the_source_does_not_hold_is_refused_before_the_engine()
         "a refused plan must never reach the engine"
     );
     // Several are counted and each named.
-    let several = logweir::backup::phase_minus1_admit::absent_refusal(
-        &["a".to_string(), "b".to_string()],
-        3,
-    );
+    let several =
+        logweir::backup::phase_minus1_admit::absent_refusal(&["a".to_string(), "b".to_string()], 3);
     assert!(
         several.starts_with("2 of 3 selected topics do not exist on the source: `a`, `b`"),
         "{several}"
