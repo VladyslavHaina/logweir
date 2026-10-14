@@ -254,7 +254,7 @@ fn evaluate_engine_version(
 /// and its ledger, `CONTRACT_ENGINE`, the fake
 /// engine `doctor`'s tests run and the documented standalone identity must all
 /// name it, and `crates/logweir/tests/engine_pin.rs` fails when any does not.
-pub const ENGINE_PIN: &str = "0.23.3+logweir.3";
+pub const ENGINE_PIN: &str = "0.23.3+logweir.4";
 
 /// The OSO release Logweir's build is made from, and the version OSO's own
 /// binary prints: the vendored tarball, `scripts/extract-engine.sh`'s tag and
@@ -265,9 +265,9 @@ pub const ENGINE_UPSTREAM_RELEASE: &str = "0.23.3";
 ///
 /// Global Constraint 8 pins an EXACT version: the output is split on ASCII
 /// whitespace and one token must EQUAL the version. `kafka-backup
-/// 0.23.3+logweir.3` names [`ENGINE_PIN`]; `0.23.3+logweir.30`,
-/// `0.23.3+logweir`, `0.23.3+build`, `v0.23.3+logweir.3` and
-/// `0.23.3+logweir.3,` do not.
+/// 0.23.3+logweir.4` names [`ENGINE_PIN`]; `0.23.3+logweir.40`,
+/// `0.23.3+logweir`, `0.23.3+build`, `v0.23.3+logweir.4` and
+/// `0.23.3+logweir.4,` do not.
 fn names_exactly(s: &str, version: &str) -> bool {
     s.split_ascii_whitespace().any(|token| token == version)
 }
@@ -979,18 +979,18 @@ mod tests {
     #[test]
     fn version_matches_accepts_only_the_exact_pin() {
         assert_eq!(
-            ENGINE_PIN, "0.23.3+logweir.3",
-            "the pin is Logweir's build of OSO 0.23.3 with patches 0001 to 0003"
+            ENGINE_PIN, "0.23.3+logweir.4",
+            "the pin is Logweir's build of OSO 0.23.3 with patches 0001 to 0003, rustls 0.23.46"
         );
         assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
         assert!(
             ENGINE_PIN.starts_with(&format!("{ENGINE_UPSTREAM_RELEASE}+logweir.")),
             "Logweir's build names the OSO release it is made from"
         );
-        assert!(version_matches("kafka-backup 0.23.3+logweir.3"));
-        assert!(version_matches("kafka-backup 0.23.3+logweir.3\n"));
-        assert!(version_matches("0.23.3+logweir.3"));
-        assert!(version_matches("kafka-backup\t0.23.3+logweir.3\r\n"));
+        assert!(version_matches("kafka-backup 0.23.3+logweir.4"));
+        assert!(version_matches("kafka-backup 0.23.3+logweir.4\n"));
+        assert!(version_matches("0.23.3+logweir.4"));
+        assert!(version_matches("kafka-backup\t0.23.3+logweir.4\r\n"));
         // OSO's own release of the same source is NOT the pin: it is the
         // rollback, which `evaluate_engine_version` names separately.
         assert!(!version_matches("kafka-backup 0.23.3"));
@@ -1004,17 +1004,20 @@ mod tests {
         // The build before patch 0003, whose restore checkpoint
         // ignores its interval and hashes its own paths.
         assert!(!version_matches("kafka-backup 0.23.3+logweir.2"));
+        // The build before patch 0001 moved rustls to 0.23.46
+        // (RUSTSEC-2026-0346 to -0349).
+        assert!(!version_matches("kafka-backup 0.23.3+logweir.3"));
         // So are Logweir's other builds, and the pin's sibling releases: an
         // engine with another patch set must not pass as this one.
         for sibling in [
             "kafka-backup 0.23.3+logweir.0",
-            "kafka-backup 0.23.3+logweir.2",
-            "kafka-backup 0.23.3+logweir.4",
-            "kafka-backup 0.23.3+logweir.30",
-            "kafka-backup 0.23.3+logweir.31",
-            "kafka-backup 0.23.2+logweir.3",
-            "kafka-backup 0.23.4+logweir.3",
-            "kafka-backup 0.24.3+logweir.3",
+            "kafka-backup 0.23.3+logweir.3",
+            "kafka-backup 0.23.3+logweir.5",
+            "kafka-backup 0.23.3+logweir.40",
+            "kafka-backup 0.23.3+logweir.41",
+            "kafka-backup 0.23.2+logweir.4",
+            "kafka-backup 0.23.4+logweir.4",
+            "kafka-backup 0.24.3+logweir.4",
             "kafka-backup 0.23.0",
             "kafka-backup 0.23.4",
         ] {
@@ -1024,14 +1027,14 @@ mod tests {
         for other in [
             "kafka-backup 0.23.3+logweir",
             "kafka-backup 0.23.3+logweir.",
-            "kafka-backup 0.23.3+logweir.3.1",
-            "kafka-backup 0.23.3+logweir.3-rc1",
+            "kafka-backup 0.23.3+logweir.4.1",
+            "kafka-backup 0.23.3+logweir.4-rc1",
             "kafka-backup 0.23.3+anything",
-            "kafka-backup v0.23.3+logweir.3",
-            "kafka-backup 0.23.3+logweir.3,",
-            "kafka-backup=0.23.3+logweir.3",
-            "kafka-backup 10.23.3+logweir.3",
-            "kafka-backup 0.23.31+logweir.3",
+            "kafka-backup v0.23.3+logweir.4",
+            "kafka-backup 0.23.3+logweir.4,",
+            "kafka-backup=0.23.3+logweir.4",
+            "kafka-backup 10.23.3+logweir.4",
+            "kafka-backup 0.23.31+logweir.4",
             "",
         ] {
             assert!(!version_matches(other), "must reject `{other}`");
@@ -1079,7 +1082,7 @@ mod tests {
         let out = fake_output(0, "kafka-backup 0.19.1\n", "");
         let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
-            e.contains("version mismatch: expected 0.23.3+logweir.3"),
+            e.contains("version mismatch: expected 0.23.3+logweir.4"),
             "got: {e}"
         );
         // The old pin is a mismatch, named as one.
@@ -1087,7 +1090,7 @@ mod tests {
         let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
             e.contains(
-                "version mismatch: expected 0.23.3+logweir.3, engine reports `kafka-backup 0.21.0`"
+                "version mismatch: expected 0.23.3+logweir.4, engine reports `kafka-backup 0.21.0`"
             ),
             "got: {e}"
         );
@@ -1095,11 +1098,11 @@ mod tests {
 
     #[test]
     fn evaluate_engine_version_passes_on_an_exact_pin_match_and_names_logweirs_build() {
-        let out = fake_output(0, "kafka-backup 0.23.3+logweir.3\n", "");
+        let out = fake_output(0, "kafka-backup 0.23.3+logweir.4\n", "");
         for d in [
             None,
-            Some(declared("0.23.3+logweir.3", IdentitySource::Image)),
-            Some(declared("0.23.3+logweir.3", IdentitySource::Environment)),
+            Some(declared("0.23.3+logweir.4", IdentitySource::Image)),
+            Some(declared("0.23.3+logweir.4", IdentitySource::Environment)),
         ] {
             let ok =
                 evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, d.as_ref()).unwrap();
@@ -1117,7 +1120,7 @@ mod tests {
         let out = fake_output(0, "kafka-backup 0.23.3\n", "");
         let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
-            e.contains("version mismatch: expected 0.23.3+logweir.3")
+            e.contains("version mismatch: expected 0.23.3+logweir.4")
                 && e.contains("OSO's release binary, not Logweir's build"),
             "got: {e}"
         );

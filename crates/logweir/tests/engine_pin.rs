@@ -1,7 +1,7 @@
 //! **The engine pin is ONE build, and everything that names it agrees.**
 //!
 //! What ships is LOGWEIR'S BUILD of OSO's 0.23.3 vendored source
-//! (`0.23.3+logweir.3`, patches 0002 and 0003), and OSO's own binary is kept
+//! (`0.23.3+logweir.4`, patches 0001 to 0003), and OSO's own binary is kept
 //! as the one-release rollback.
 //! So there are two values, and each place names the one it should:
 //!
@@ -298,6 +298,11 @@ const SHIPPED_BUILDS: &[(&str, &str)] = &[
         "0.23.3+logweir.3",
         "sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4",
     ),
+    // Patch 0001 moves rustls to 0.23.46 (RUSTSEC-2026-0346 to -0349).
+    (
+        "0.23.3+logweir.4",
+        "sha256:c8b6fee435621f63672e8ec25f893a9774775e6099dec95e09e7aae5474f9662",
+    ),
 ];
 
 fn check_ledger_keeps_shipped(ledger: &str, shipped: &[(&str, &str)]) -> Result<(), String> {
@@ -348,7 +353,7 @@ fn third_party_names() -> Vec<String> {
 fn the_pin_is_logweirs_build_of_the_release_prod_00_3f_evaluated() {
     // Moving either value is a decision with a record (sections 12 and 13 of
     // the engine route); these lines make the next move touch this file too.
-    assert_eq!(ENGINE_PIN, "0.23.3+logweir.3");
+    assert_eq!(ENGINE_PIN, "0.23.3+logweir.4");
     assert_eq!(ENGINE_UPSTREAM_RELEASE, "0.23.3");
     assert_eq!(
         digest_file(),
@@ -474,7 +479,7 @@ fn every_check_refuses_a_copy_that_lags() {
             env.replace(
                 &format!("ENGINE_VERSION={ENGINE_PIN}"),
                 // The build before the pin.
-                "ENGINE_VERSION=0.23.3+logweir.2",
+                "ENGINE_VERSION=0.23.3+logweir.3",
             ),
             "another build",
         ),

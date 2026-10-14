@@ -1,7 +1,7 @@
-Reason: RUSTSEC-2026-0285 (rustls 0.23.45) and RUSTSEC-2026-0258 (h2 0.4.19) in the shipped graph, and the yanked spin 0.9.8 (0.9.9): a lockfile-only bump; oracle: the engine cargo-deny gate in scripts/ci-check.sh and the PROD-00.2 parity suites
+Reason: RUSTSEC-2026-0285 and RUSTSEC-2026-0346 to -0349 (rustls 0.23.46), RUSTSEC-2026-0258 (h2 0.4.19) in the shipped graph, and the yanked spin 0.9.8 (0.9.9): a lockfile-only bump; oracle: the engine cargo-deny gate in scripts/ci-check.sh and the PROD-00.2 parity suites
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 5273137..81a3137 100644
+index 5273137..4b7ff91 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1072,7 +1072,7 @@ checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
@@ -30,10 +30,10 @@ index 5273137..81a3137 100644
  [[package]]
  name = "rustls"
 -version = "0.23.43"
-+version = "0.23.45"
++version = "0.23.46"
  source = "registry+https://github.com/rust-lang/crates.io-index"
 -checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
-+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
++checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
  dependencies = [
   "aws-lc-rs",
   "log",
