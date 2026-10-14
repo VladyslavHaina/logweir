@@ -2323,15 +2323,25 @@ back to `evidenceWrite` and says so; that write grant then needs `s3:GetObject`
 on `logweir/*`. A `Switchover`'s `status.message` now ends with the runner's
 own sentence for any whole-run refusal or failure, and a clone's
 `RemovalFailed` reason names the last attempt's cause, pointing at
-`status.teardown.failed` only when topics were left.
+`status.teardown.failed` only when topics were left. That cause is cleaned
+before it is printed and again before it is stored: access key ids, S3 error
+bodies and URL queries never reach `status.clone.reason`. A cleanup attempt
+rebuilt from an older template (the run Job, or a cleanup Job an older
+controller built) runs this controller's runner image; one copied from this
+build's own attempt keeps that attempt's image. The `Switchover` Job mounts the
+restore's plan `ConfigMap` at `/plan`, so an evidence destination with a
+private CA (`spec.transport.caBundle`) resolves its CA file there, as the
+restore's own Job did.
 **Do:** give the evidence destination an `evidenceRead` grant a pod can hold
 (`SecretKeys` or `WorkloadIdentity`, `s3:GetObject` on `<bucket>/logweir/*`)
 before relying on a switchover or a clone, and roll the controller and the
 runner image together: the controller passes the new flag. After the upgrade a
 cleanup Job an older controller built is never started. A suspended one is
 replaced by the next attempt, built with this release's grants and runner
-image, at the clone's expiry; a clone such a Job left `RemovalFailed` gets one
-more attempt automatically, and holds as before if that attempt fails too. A
+image, at the clone's expiry; a clone such a Job left `RemovalFailed` is
+re-armed automatically: at least one more attempt, retried as any failed
+attempt is up to the third (exactly one when the older build held it at
+attempt 3), and it holds as before if the last one fails too. A
 `Switchover` the older build refused `MappingDigestMismatch` is terminal:
 create a new one with the same plan and a new approval.
 **Scope:** unit rows on the grant table, its fallback and the renderer list,
@@ -2342,8 +2352,10 @@ suspended cleanup Job replaced, a `RemovalFailed` clone re-armed once, each
 with its control); compose rows on Kafka 4.3.1 with the PoC's least-privilege
 MinIO policies (a switchover and a clone cleanup succeed with the read grant;
 the write grant alone fails `EvidenceUnreadable` by name, nothing committed or
-deleted). 13 mutants were killed.
-[UNVERIFIED — not yet run on a cluster; the PoC re-run runs P1, P2, P5, P7, P8 and the D4 upgrade row.]
+deleted); after the fix round's review, rows for a rewired retry's image (with
+a copied attempt's as the control), the cleaned cause on both sides, and the
+`Switchover` Job's plan mount with its CA paths. 17 mutants were killed.
+[UNVERIFIED — not yet run on a cluster; the PoC re-run runs P1, P2, P5, P7, P8, the D4 upgrade row and a clone that fails its attempt 1 under the older build before the upgrade.]
 **Rollback:** an older controller builds both Jobs with the write grant again,
 and an older runner refuses the new flag, so roll both together. Nothing
 stored changes.
@@ -2357,8 +2369,9 @@ object's `Approval` is answered `409 state_conflict` before the `Restore` or
 Before, the subject was created and then refused, and it failed
 `ApprovalSubjectMismatch`. A replay of an interrupted request is unchanged.
 **Do:** nothing; submit again under another approval name.
-**Scope:** API rows for both kinds, each with its control under a free name,
-and the replay rows; 4 mutants were killed.
+**Scope:** API rows for both kinds and one under a Governed policy, whose
+taken name is the `-confirmation`, each with its control under a free name,
+and the replay rows; 5 mutants were killed.
 **Rollback:** an older API creates the subject before refusing again.
 
 #### 100. Both verifiers read a public key file the same way (L1)
@@ -2366,12 +2379,15 @@ and the replay rows; 4 mutants were killed.
 **Changed.** `logweir drill verify --public-key` accepts whitespace after the
 `-----END PUBLIC KEY-----` line, so an extra blank line no longer refuses the
 key, as `verify_scorecard.py` already accepted it; `verify_scorecard.py` 1.34.0
-refuses text after the block, as `drill verify` already did. RFC 7468's
-explanatory text before the block stays ignored by both.
+refuses text after the block, as `drill verify` already did. Whitespace is the
+same five characters to both (space, tab, line feed, form feed, carriage
+return); a vertical tab is text, refused by both. RFC 7468's explanatory text
+before the block stays ignored by both.
 **Do:** nothing.
 **Scope:** a key-file loop in the reader-parity gate
 (`scripts/check-verifier-parity.sh`: plain, trailing blank lines, text before,
-text after); 2 mutants were killed.
+text after, a trailing form feed, a trailing vertical tab); 3 mutants were
+killed.
 **Rollback:** an older `drill verify` refuses the extra blank line again, and an
 older `verify_scorecard.py` accepts text after the block.
 

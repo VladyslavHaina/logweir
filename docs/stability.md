@@ -340,8 +340,9 @@ cleaned up and deleting its `Restore` waits until the finalizer is removed by
 hand ([the steps](kubernetes.md#safe-clones-a-scratch-restore-kept-for-a-declared-time)).
 Upward, a cleanup Job an older controller built (it reads the scorecard with
 the run's write grant) is never started by this one: the next attempt is built
-with this release's grants, and a clone such a Job left `RemovalFailed` gets
-one more attempt.
+with this release's grants, and a clone such a Job left `RemovalFailed` is
+re-armed: at least one more attempt, retried as any failed attempt is up to the
+third.
 Every scorecard of a run that created topics is now 1.10.0 (2.2.0 for a
 subset), carrying `target.creation`; older readers accept it and ignore the
 block.

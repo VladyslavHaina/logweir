@@ -1277,11 +1277,15 @@ last attempt left topics there; one that deleted nothing says so.
 built reads with the run's write grant and runs the older runner: it is never
 started. A suspended one is replaced by the next attempt, built with this
 release's grants and runner image, at the clone's expiry. A clone already in
-`RemovalFailed` whose last cleanup Job is such a Job gets **one** more attempt,
+`RemovalFailed` whose last cleanup Job is such a Job is re-armed,
 automatically, the first time this controller reconciles it: `status.clone`
 goes to `Removing` on the next attempt number and its old reason is cleared.
-That attempt's own Job names its grant (`--evidence-read-grant`), so if it fails
-too, the clone holds as any `RemovalFailed` does.
+The re-armed attempt counts against the same budget of three: if it fails, it
+is retried as any attempt is while fewer than three have run. So a clone the
+older build held at attempt 1 gets up to two more attempts, and one held at
+attempt 3 gets exactly one. Each such Job names its grant
+(`--evidence-read-grant`), so when the last one fails too, or one is refused,
+the clone holds as any `RemovalFailed` does.
 
 **On `RemovalFailed`**, check the target for topics with the clone's
 prefix, delete any the run created (`status.teardown.failed` and the scorecard's
@@ -3166,11 +3170,11 @@ back:
   `ApprovalNotVerified`, until they are gone. Record them, then delete them:
 
   ```bash
-  kubectl --context docker-desktop get approvals -A -o json \
+  kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o json \
     | jq '[.items[] | select(.spec.subjectRef.kind == "Switchover")]' > switchover-approvals.json
-  kubectl --context docker-desktop get approvals -A -o json \
+  kubectl --context "$LOGWEIR_CONTEXT" get approvals -A -o json \
     | jq -r '.items[] | select(.spec.subjectRef.kind == "Switchover") | "-n \(.metadata.namespace) \(.metadata.name)"' \
-    | xargs -L1 kubectl --context docker-desktop delete approval
+    | xargs -r -L1 kubectl --context "$LOGWEIR_CONTEXT" delete approval
   ```
 
   This loses the approvals of switchovers not yet admitted: after rolling
