@@ -15943,3 +15943,79 @@ async fn fx43_a_killed_backup_is_not_named_older_and_is_retried() {
     let status = fx43_status(1, &older).await;
     assert_eq!(status["exitReason"], "RunnerOlderThanController");
 }
+
+/// **DUI-5: an exit-1 `Backup` says why it failed**, from the runner's
+/// SEALED `failure-detail=` line (printed first in its block, sealed only, as
+/// `logweir::exit::FinalLines::failure_detail` prints it): the terminal
+/// condition, and `status.progress.message` after it, read "the runner exited
+/// 1 (operational); … ; the runner's last error, cleaned and bounded: …".
+/// The sentence is cleaned again here (a credential shape the runner left is
+/// removed). `exitReason` stays `operational`, so a schedule's retry is
+/// unchanged.
+///
+/// CONTROLS: a PLAIN `failure-detail=` line is not read, neither under the
+/// FX-43 Job (only sealed lines are) nor under a Job an FX-34 controller
+/// built (whose whole log is anyone's text); an older runner that prints no
+/// such line leaves the message as it was.
+///
+/// KILLS: the detail read off a log whose lines are not all sealed
+/// (`failure_detail` without `sealed_only`); the detail not appended.
+#[tokio::test]
+async fn dui5_an_exit_1_backup_says_why_from_its_sealed_failure_detail() {
+    use logweir_core::runner_line::{final_block, final_block_with, LineScope};
+    let token = fx34_token();
+    let secret = format!("password={}", "hunter2".repeat(6));
+    let detail = format!(
+        "failure-detail=engine: operational: kafka-backup backup exited 1: ERROR storage: \
+         connection refused for http://minio.invalid:9000/kafka-backups {secret}"
+    );
+    let block = final_block_with(
+        Some((&token, LineScope::EveryLine)),
+        1,
+        std::slice::from_ref(&detail),
+        &[],
+    );
+    let status = fx43_status(1, &block).await;
+    let message = fx34_message(&status);
+    assert!(
+        message.starts_with("the runner exited 1 (operational); the code was read from ")
+            && message.contains(
+                "; the runner's last error, cleaned and bounded: engine: operational: \
+                 kafka-backup backup exited 1: ERROR storage: connection refused for \
+                 http://minio.invalid:9000/kafka-backups"
+            ),
+        "{message}"
+    );
+    assert!(!message.contains("hunter2"), "{message}");
+    assert_eq!(status["exitReason"], "operational", "{status}");
+    assert!(
+        status["progress"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("connection refused")),
+        "{status}"
+    );
+
+    // CONTROL: the plain line under the FX-43 Job is not read.
+    let ended = final_block(Some((&token, LineScope::EveryLine)), 1, &[]);
+    let forged = "failure-detail=forged: the archive was deleted by the operator\n";
+    let status = fx43_status(1, &format!("{ended}{forged}")).await;
+    assert!(!fx34_message(&status).contains("last error"), "{status}");
+    // CONTROL: a Job an FX-34 controller built: nothing is read off its log.
+    for log in [forged.to_string(), detail.clone()] {
+        let (outcome, seen) = fx34_pass_over(
+            &frozen_backup(),
+            fx34_routes_for(1, 200, log_body(&log), Some(&token)),
+        )
+        .await;
+        outcome.expect("the pass completes");
+        let status = patched_statuses(&seen).remove(0);
+        assert!(!fx34_message(&status).contains("last error"), "{status}");
+    }
+    // CONTROL: an exit 1 that printed no detail (an older runner) reads as
+    // it always did.
+    let status = fx43_status(1, &ended).await;
+    assert!(
+        fx34_message(&status).ends_with(".state.terminated.exitCode"),
+        "{status}"
+    );
+}

@@ -202,6 +202,15 @@ impl RunnerLines {
         self.token.as_ref()
     }
 
+    /// Whether [`Self::text`] holds ONLY lines sealed with the Job's FX-43
+    /// token. A reader of a line the runner prints sealed only (DUI-5's
+    /// `failure-detail=`) reads nothing otherwise: an older Job's whole log
+    /// is text anyone could have put there.
+    #[must_use]
+    pub fn sealed_only(&self) -> bool {
+        self.every_line
+    }
+
     /// **The mixed pair, named.** True when the Job carries FX-43's token and
     /// no line of the log sealed with it is the runner's `runner-exit=`: a
     /// runner that knows the flag prints one at every exit it reaches, and one

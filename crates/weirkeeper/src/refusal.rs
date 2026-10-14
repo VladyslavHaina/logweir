@@ -101,6 +101,10 @@ pub enum RunnerReason {
         /// The API server's status code, when it answered.
         status: Option<u16>,
     },
+    /// **Why an exit-1 run failed** (DUI-5): the sentence of the runner's
+    /// `failure-detail=` line, read only SEALED with the Job's FX-43 token
+    /// ([`failure_detail`]), cleaned and bounded again here. Exit 1 only.
+    Failed(String),
 }
 
 impl RunnerReason {
@@ -150,8 +154,33 @@ impl RunnerReason {
                  HTTP status"
                     .to_string()
             }
+            Self::Failed(sentence) => {
+                format!("; the runner's last error, cleaned and bounded: {sentence}")
+            }
         }
     }
+}
+
+/// **Why an exit-1 run failed** (DUI-5): the last `failure-detail=` line of
+/// `lines`, when the Job carries FX-43's token so that every line read is
+/// one the runner SEALED ([`RunnerLines::sealed_only`]). Its sentence is
+/// cleaned and bounded again ([`logweir_core::refusal_detail::clean_message`]):
+/// the runner cleaned it, and this is the pass the controller relies on.
+/// `None` at any other exit code, for a Job an older controller built, for an
+/// older runner that prints no such line, and for a line with nothing
+/// printable in it: the message then stays what it was.
+#[must_use]
+pub fn failure_detail(exit_code: i32, lines: &RunnerLines) -> Option<RunnerReason> {
+    if exit_code != 1 || !lines.sealed_only() {
+        return None;
+    }
+    let raw = runner_log::key_values(
+        lines.text(),
+        logweir_core::runner_line::FAILURE_DETAIL_PREFIX,
+    )
+    .pop()?;
+    let sentence = logweir_core::refusal_detail::clean_message(raw);
+    (!sentence.trim().is_empty()).then_some(RunnerReason::Failed(sentence))
 }
 
 /// The runner's reason, from a log body that WAS read whole, of a run of kind

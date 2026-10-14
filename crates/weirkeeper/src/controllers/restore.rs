@@ -6832,6 +6832,10 @@ async fn reconcile_restore_inner(
         runner_reason = Some(crate::refusal::RunnerReason::RunnerOlderThanController);
     }
     let older = runner_reason == Some(crate::refusal::RunnerReason::RunnerOlderThanController);
+    // DUI-5: why an exit-1 run failed, from its sealed `failure-detail=`.
+    if runner_reason.is_none() {
+        runner_reason = crate::refusal::failure_detail(exit_code, &lines);
+    }
     let log = lines.text();
     let keys = restore_evidence_keys(log);
     // An exit-1 run whose last line names a state on the Restore's closed

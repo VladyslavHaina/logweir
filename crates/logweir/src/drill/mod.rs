@@ -1038,10 +1038,17 @@ fn report(args: &RunArgs, run_id: &str, outcome: Result<RestoreOutcome, DrillErr
         Err(DrillError::CreationStopped(stop)) => Some(stop.as_ref()),
         _ => None,
     };
+    // DUI-5: the error an exit-1 run ended on, for its sealed
+    // `failure-detail=` line.
+    let failure_detail = match &outcome {
+        Err(e) if code == ExitCode::Operational => Some(e.to_string()),
+        _ => None,
+    };
     exiting(
         run_id,
         code,
         refusal_message.as_deref(),
+        failure_detail.as_deref(),
         evidence,
         preflight,
         sc,
@@ -1078,10 +1085,12 @@ fn publish(args: &RunArgs, run_id: &str, code: ExitCode, sc: Option<&Scorecard>)
 /// pods` shows every non-zero code as "Error"), so this log line is the one
 /// place exit 1 (no artifact) and exit 2 (read the signed scorecard) stay
 /// distinct in a log aggregator.
+#[allow(clippy::too_many_arguments)]
 fn exiting(
     run_id: &str,
     code: ExitCode,
     refusal_message: Option<&str>,
+    failure_detail: Option<&str>,
     evidence: Option<&EvidenceKeys>,
     topic_preflight: Option<&phase0_admit::TopicPreflight>,
     scorecard: Option<&Scorecard>,
@@ -1112,6 +1121,11 @@ fn exiting(
             logweir_core::refusal_detail::RefusingRun::Restore,
             refusal_message.unwrap_or(""),
         );
+    }
+    // DUI-5: why an exit-1 run failed, SEALED only and first in the sealed
+    // block, so the stopped creation step's pair below keeps its place.
+    if let (ExitCode::Operational, Some(error)) = (code, failure_detail) {
+        last.failure_detail(error);
     }
     // The stopped creation step, named. Exit 1 like any operational failure,
     // but the controller lifts `failure-reason=` onto `status.exitReason` and
@@ -5290,7 +5304,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None, None, None, None, None),
+                exiting("01TEST", c, None, None, None, None, None, None),
                 c,
                 "exiting must not alter the code"
             );
