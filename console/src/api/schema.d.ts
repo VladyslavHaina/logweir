@@ -1866,7 +1866,7 @@ export interface components {
              * @description When the view was last refreshed.
              */
             syncedAt?: string | null;
-            /** @description Whether the archive holds more points than the view carries. */
+            /** @description Whether the archive holds more points than the view carries, or may: `true` also when the catalog has not said (no view published yet, or a status written before the field existed). A view not known to be whole is never published as whole (FX-38). */
             truncated: boolean;
             /** @description The Kubernetes UID. */
             uid: string;
@@ -3554,7 +3554,7 @@ export interface components {
         PointPageResponse: {
             /** @description Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the namespace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work. */
             backupVerdictsIncomplete?: components["schemas"]["BackupVerdictsIncomplete"];
-            /** @description Whether a ConfigMap page named by this view disappeared while it was being read. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent. */
+            /** @description Whether a ConfigMap page named by this view disappeared while it was being read, or a line on a page could not be read as a view entry (FX-38): the list is then partial. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent. */
             incomplete?: boolean | null;
             /** @description The points, newest first, in the order the view materialised them. */
             items: components["schemas"]["PointView"][];
@@ -3562,7 +3562,7 @@ export interface components {
             page: components["schemas"]["Page"];
             /** @description The request ID. */
             requestId: string;
-            /** @description Whether the archive holds more points than the view carries. */
+            /** @description Whether the archive holds more points than the view carries, or may: `true` also when the catalog has not said (FX-38). */
             truncated: boolean;
             /** @description Whether the view has aged out. An empty `items` with this `true` means "the window is gone", never "the archive is empty". */
             viewExpired: boolean;
@@ -5258,6 +5258,8 @@ export interface components {
             /** Format: int32 */
             exitCode?: number | null;
             groups: components["schemas"]["SwitchoverGroupView"][];
+            /** @description The sentence beside `reason`. It says when `groups` is partial: a group line the controller could not read, or a run log it did not read at all (FX-38). Then the signed record names every group. */
+            message?: string | null;
             name: string;
             namespace: string;
             phase?: string | null;
@@ -5294,10 +5296,15 @@ export interface components {
              *     A LIST AND NOT A COUNT. D3 §2.2 declares `deleted: [string]`, and the incident question is "which topics went", not "how many": a count cannot be reconciled against the names the run created. The first round published the length.
              */
             deleted?: string[];
-            /** @description Whether `deleted` was cut short by this projection's row bound. */
+            /** @description Whether `deleted` is not every topic removed: cut short by this projection's row bound, or the status counts more (FX-38). */
             deletedTruncated: boolean;
-            /** @description The ones that could not be removed. */
+            /** @description The ones that could not be removed: at most 256 of them. */
             failed?: components["schemas"]["TeardownFailureView"][];
+            /**
+             * Format: int64
+             * @description How many topics could not be removed, when the status says (FX-38); more than `failed` lists means the list is cut. Absent on a status written before the field: then a list of 256 may be cut.
+             */
+            failedCount?: number | null;
         };
         /** @description `POST .../destinations/{name}:test`. */
         TestDestinationRequest: {
