@@ -1959,6 +1959,62 @@ fn projections() -> Projections {
     }
 }
 
+/// **D6: the pod rows of a check whose runner is older than the controller
+/// say that the pod RAN.** The runner exited 1 and relayed nothing this
+/// controller reads (`CheckContractMismatch`, `RunnerOlderThanController`);
+/// the rows said "the check pod has not started". Now `runner.image` names the
+/// older runner, `runner.pod` says it ran and exited 1, and
+/// `connection.credentialProjected` says its projection was in place.
+/// CONTROL: with no exit code (the pod never ran) the rows stand.
+///
+/// KILLS: `ran_on_an_older_runner` ignoring the exit code (the rows keep
+/// "not started"), or rewriting the rows of a pod that never ran.
+#[test]
+fn an_older_runners_pod_rows_say_the_pod_ran() {
+    let older = "RunnerOlderThanController: the check runner printed no line sealed with this \
+                 Job's line token (exit 1)";
+    let rows_after = |exit: Option<i32>| {
+        let (mut rows, _) = pod_outcomes(
+            PreflightOperation::Backup,
+            None,
+            &projections(),
+            false,
+            None,
+            now(),
+        );
+        pf::ran_on_an_older_runner(PreflightOperation::Backup, &mut rows, exit, older, now());
+        rows
+    };
+    let row = |rows: &[CheckOutcome], id: CheckId| {
+        rows.iter().find(|r| r.id == id).cloned().expect("the row")
+    };
+    let ran = rows_after(Some(1));
+    let image = row(&ran, CheckId::RunnerImage);
+    assert_eq!(image.state, CheckState::NotReady);
+    assert_eq!(image.code, CheckCode::CheckContractMismatch);
+    assert!(
+        image.message.starts_with("RunnerOlderThanController"),
+        "{}",
+        image.message
+    );
+    let pod = row(&ran, CheckId::RunnerPod);
+    assert_eq!(pod.code, CheckCode::PodStarted);
+    assert!(
+        pod.message.contains("ran and its runner exited 1"),
+        "{}",
+        pod.message
+    );
+    let projected = row(&ran, CheckId::ConnectionCredentialProjected);
+    assert_eq!(projected.state, CheckState::Ready);
+    assert!(ran.iter().all(|r| !r.message.contains("has not started")));
+
+    // CONTROL: no exit code, no rewrite.
+    let never = rows_after(None);
+    assert!(never.iter().all(
+        |r| r.code == CheckCode::PodNotStarted && r.message == "the check pod has not started"
+    ));
+}
+
 fn waiting(code: CheckCode, secret: Option<&str>) -> Waiting {
     Waiting {
         code,

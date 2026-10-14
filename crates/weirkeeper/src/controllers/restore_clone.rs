@@ -35,12 +35,28 @@
 //! finalizer. A finalizer on a plan that parses and is not a clone is
 //! released on deletion.
 //!
+//! **The cleanup Job's grants (theme A's D1).** A copy of the run Job's pod
+//! would read the scorecard with the run's `evidenceWrite` grant, which a
+//! least-privilege writer cannot do. So the copy's store environment is
+//! re-rendered: the evidence destination's `evidenceRead` grant in the archive
+//! slot, its `evidenceWrite` grant in the evidence slot
+//! ([`crate::destination::EvidenceAccessEnv`]), the read grant named with
+//! `--evidence-read-grant`, and this build's runner image. A cleanup Job that
+//! carries that flag was built this way; one that does not was built by an
+//! older controller and is never started: a suspended one is replaced by the
+//! next attempt, built this way, and a clone whose last attempt was such a Job
+//! and ended `RemovalFailed` gets ONE more attempt, built this way
+//! ([`Step::Hold`]'s re-arm). That is the way out for a clone an older build's
+//! grant could not clean; any other `RemovalFailed` keeps its finalizer for
+//! the operator.
+//!
 //! THE CONTROLLER DELETES NO TOPIC. It starts a runner Job; the runner
 //! deletes only what the run's signed scorecard records, on the cluster it
 //! records, while each topic's ID is the recorded one.
 
 use super::{parse_plan, status_is_terminal, Requeue, RestoreError, RestoreOutcome};
 use crate::crds::restore::Restore;
+use crate::destination::{DestinationRefusal, EvidenceAccessEnv};
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::batch::v1::Job;
 use kube::api::{Api, Patch, PatchParams, PostParams};
@@ -210,6 +226,7 @@ pub fn cleanup_argv(run_args: &[String], run_id: &str, attempt: i64) -> Option<V
         ("--signing-key", true),
         ("--evidence-keys", false),
         ("--store-contract-version", false),
+        (READ_GRANT_ARG, false),
     ] {
         match value(flag) {
             Some(v) => argv.extend([flag.to_string(), v.clone()]),
@@ -287,6 +304,188 @@ pub fn cleanup_job(
         spec: Some(spec),
         status: None,
     })
+}
+
+/// The flag a cleanup Job built by this build names its read grant with.
+pub const READ_GRANT_ARG: &str = crate::controllers::switchover::READ_GRANT_ARG;
+
+/// **Whether `job` was built with this build's grants**: its runner names
+/// the read grant. A cleanup Job an older controller built does not, and its
+/// pod reads the scorecard with the run's write grant.
+#[must_use]
+pub fn carries_read_grant(job: &Job) -> bool {
+    job.spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|p| {
+            p.containers
+                .iter()
+                .find(|c| c.name == crate::job::CONTAINER_NAME)
+        })
+        .and_then(|c| c.args.as_ref())
+        .is_some_and(|args| args.iter().any(|a| a == READ_GRANT_ARG))
+}
+
+/// What a cleanup Job reads and writes the evidence with (D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wiring {
+    /// The store environment of a destination-backed restore; `None` for an
+    /// inline one, whose copied pod already reads and writes with the plan's
+    /// own archive credential.
+    pub env: Option<EvidenceAccessEnv>,
+    /// The read grant, as the runner names it in a failure.
+    pub read_grant: String,
+}
+
+impl Wiring {
+    /// An inline restore's: the copied pod's own credential.
+    #[must_use]
+    pub fn inline() -> Self {
+        Self {
+            env: None,
+            read_grant: crate::controllers::switchover::INLINE_READ_GRANT.to_string(),
+        }
+    }
+}
+
+/// **The evidence destination's read and write grants** for a Job that
+/// reads `restore`'s evidence (the `Switchover` Job, a clone's cleanup Job):
+/// `Ok(None)` for an inline restore, the refusal when the destination no
+/// longer resolves.
+///
+/// # Errors
+///
+/// [`kube::Error`] for a failed read.
+pub async fn evidence_access(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<Result<Option<EvidenceAccessEnv>, DestinationRefusal>, kube::Error> {
+    use crate::destination::{self, DestinationRole, ResolveError};
+    let Some(reference) = restore.spec.evidence_destination_ref.as_ref() else {
+        return Ok(Ok(None));
+    };
+    let load = crate::check::policy::load(
+        client,
+        crate::controllers::topic_discovery::configured_policy_ref().as_ref(),
+        &crate::check::policy::PolicyCache::new(),
+        now,
+    )
+    .await?;
+    let roles = match destination::resolve_ref_roles(
+        client,
+        namespace,
+        &reference.name,
+        DestinationRole::EvidenceWrite,
+        DestinationRole::EvidenceRead,
+        load.policy(),
+    )
+    .await
+    {
+        Ok(roles) => roles,
+        Err(ResolveError::Api(e)) => return Err(e),
+        Err(ResolveError::Refused(refusal)) => return Ok(Err(*refusal)),
+    };
+    if let Err(refusal) = roles.primary.check_job_namespace(namespace) {
+        return Ok(Err(refusal));
+    }
+    Ok(destination::evidence_access_env(&roles.primary, roles.secondary.as_ref().ok()).map(Some))
+}
+
+/// [`evidence_access`] as a cleanup [`Wiring`], or the reason the clone
+/// records when the evidence destination no longer resolves.
+async fn wiring_of(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<Result<Wiring, String>, RestoreError> {
+    Ok(
+        match evidence_access(restore, client, namespace, now)
+            .await
+            .map_err(RestoreError::Api)?
+        {
+            Ok(None) => Ok(Wiring::inline()),
+            Ok(Some(env)) => Ok(Wiring {
+                read_grant: env.read_grant.clone(),
+                env: Some(env),
+            }),
+            Err(refusal) => Err(format!(
+                "the cleanup Job could not be given the evidence destination's grants ({refusal}); \
+                 nothing was deleted. Fix the BackupDestination; the next pass tries again"
+            )),
+        },
+    )
+}
+
+/// **`job` with this build's grants** (D1), pure: the copied store
+/// environment dropped ([`crate::destination::STORE_ENV_NAMES`]) and the
+/// wiring's read and write grants rendered in its place (and their
+/// ServiceAccount, for a workload identity), the read grant named on the
+/// argv, and `image`.
+#[must_use]
+pub fn rewire(mut job: Job, wiring: &Wiring, image: &str) -> Job {
+    let Some(pod) = job.spec.as_mut().and_then(|s| s.template.spec.as_mut()) else {
+        return job;
+    };
+    if let Some(sa) = wiring
+        .env
+        .as_ref()
+        .and_then(EvidenceAccessEnv::service_account_name)
+    {
+        pod.service_account_name = Some(sa.to_string());
+    }
+    let Some(container) = pod
+        .containers
+        .iter_mut()
+        .find(|c| c.name == crate::job::CONTAINER_NAME)
+    else {
+        return job;
+    };
+    container.image = Some(image.to_string());
+    if let Some(env) = wiring.env.as_ref() {
+        let mut vars: Vec<k8s_openapi::api::core::v1::EnvVar> = container
+            .env
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| !crate::destination::STORE_ENV_NAMES.contains(&v.name.as_str()))
+            .collect();
+        for slot in [&env.read, &env.write] {
+            vars.extend(slot.literals.iter().map(|(name, value)| {
+                k8s_openapi::api::core::v1::EnvVar {
+                    name: name.clone(),
+                    value: Some(value.clone()),
+                    value_from: None,
+                }
+            }));
+            vars.extend(
+                slot.from_secret
+                    .iter()
+                    .map(|e| k8s_openapi::api::core::v1::EnvVar {
+                        name: e.name.clone(),
+                        value: None,
+                        value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+                            secret_key_ref: Some(k8s_openapi::api::core::v1::SecretKeySelector {
+                                name: e.secret_name.clone(),
+                                key: e.key.clone(),
+                                optional: e.optional.then_some(true),
+                            }),
+                            ..k8s_openapi::api::core::v1::EnvVarSource::default()
+                        }),
+                    }),
+            );
+        }
+        container.env = Some(vars);
+    }
+    let mut args = container.args.take().unwrap_or_default();
+    if let Some(i) = args.iter().position(|a| a == READ_GRANT_ARG) {
+        args.drain(i..(i + 2).min(args.len()));
+    }
+    args.extend([READ_GRANT_ARG.to_string(), wiring.read_grant.clone()]);
+    container.args = Some(args);
+    job
 }
 
 /// What a clone needs next, from its stored status alone. Pure.
@@ -377,19 +576,62 @@ pub enum Ended {
 }
 
 /// Read one ended attempt: its exit code and its `clone-cleanup=` line. Pure.
+///
+/// A failed attempt's reason carries the cause its line names (`error`, for
+/// example `EvidenceUnreadable: …`), and its report reaches
+/// `status.teardown` only when it says what happened to a topic: a line that
+/// names only the cause lists nothing.
 #[must_use]
 pub fn ended(exit_code: Option<i32>, report: Option<CloneCleanupReport>) -> Ended {
+    let failed = |how: String, r: Option<CloneCleanupReport>| {
+        let why = match r.as_ref().and_then(|r| r.error.as_deref()) {
+            Some(cause) => format!("{how}: {cause}"),
+            None => how,
+        };
+        let acted = r.filter(|r| {
+            !r.deleted.is_empty()
+                || !r.already_absent.is_empty()
+                || !r.left.is_empty()
+                || r.attestation_key.is_some()
+        });
+        Ended::Failed(why, acted)
+    };
     match (exit_code, report) {
         (Some(0), Some(r)) => Ended::Removed(r),
         (Some(3), r) => Ended::Refused(
             r.and_then(|r| r.refused)
                 .unwrap_or_else(|| "the cleanup refused (exit 3) and printed no reason".into()),
         ),
-        (Some(code), r) => Ended::Failed(format!("the cleanup Job exited {code}"), r),
-        (None, r) => Ended::Failed(
+        (Some(code), r) => failed(format!("the cleanup Job exited {code}"), r),
+        (None, r) => failed(
             "the cleanup Job ended with no exit code (deadline, eviction or a crash)".into(),
             r,
         ),
+    }
+}
+
+/// **The reason a clone records when its last attempt failed** (the PoC's
+/// D4), pure. It names the last attempt's cause (`why`), and points at
+/// `status.teardown.failed` only when that attempt's report listed topics it
+/// left; an attempt that deleted nothing says so, and what the operator does.
+#[must_use]
+pub fn removal_failed_reason(
+    why: &str,
+    attempts: i64,
+    report: Option<&CloneCleanupReport>,
+) -> String {
+    if report.is_some_and(|r| !r.left.is_empty()) {
+        format!(
+            "{why}; {attempts} attempts failed, so the topics named in status.teardown.failed \
+             are left: delete them yourself, then remove the finalizer {FINALIZER}"
+        )
+    } else {
+        format!(
+            "{why}; {attempts} attempts failed and the last deleted nothing. Fix the cause (for \
+             EvidenceUnreadable, the evidence destination's evidenceRead grant), delete the \
+             topics the clone's scorecard lists under target.creation yourself, then remove the \
+             finalizer {FINALIZER}"
+        )
     }
 }
 
@@ -608,7 +850,8 @@ async fn advance(
     let uid = restore.uid().unwrap_or_default();
     let ttl_i64 = i64::try_from(ttl).unwrap_or(i64::MAX);
     match step(restore, ttl, deleting, now) {
-        Step::Wait | Step::Hold => Ok(Requeue::AwaitChange),
+        Step::Wait => Ok(Requeue::AwaitChange),
+        Step::Hold => rearm(restore, client, &jobs, &uid, image, now).await,
         Step::Release => {
             if has_finalizer(restore) {
                 set_finalizer(&restores, restore, false).await?;
@@ -631,7 +874,7 @@ async fn advance(
         Step::Keep(expires_at) => {
             // The suspended attempt-1 Job, built now while the run Job is
             // certainly still there.
-            let built = build_attempt(restore, &jobs, &uid, 1, true, image).await?;
+            let built = build_attempt(restore, client, &jobs, &uid, 1, true, image, now).await?;
             let mut clone = json!({
                 "ttlSeconds": ttl_i64,
                 "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -661,10 +904,20 @@ async fn advance(
         }
         Step::Until(at) => Ok(Requeue::After(seconds_until(at, now))),
         Step::Start(attempt) => {
+            // A suspended attempt-1 Job an older controller built reads with
+            // the run's write grant: it is never resumed, and the next
+            // attempt is built with this build's grants instead (D1).
+            let older = attempt == 1
+                && jobs
+                    .get_opt(&cleanup_job_name(&uid, 1))
+                    .await
+                    .map_err(RestoreError::Api)?
+                    .is_some_and(|j| !carries_read_grant(&j));
+            let attempt = if older { 2 } else { attempt };
             let started = if attempt == 1 {
                 resume(&jobs, &cleanup_job_name(&uid, 1)).await?
             } else {
-                build_attempt(restore, &jobs, &uid, attempt, false, image).await?
+                build_attempt(restore, client, &jobs, &uid, attempt, false, image, now).await?
             };
             match started {
                 Ok(job_name) => {
@@ -830,10 +1083,8 @@ async fn watch(
                     &restores,
                     &name,
                     json!({"phase": PHASE_REMOVAL_FAILED,
-                           "reason": bounded_reason(&format!(
-                               "{why}; {attempts} attempts failed, so the topics named in \
-                                status.teardown.failed are left: delete them yourself, then \
-                                remove the finalizer {FINALIZER}"))}),
+                           "reason": bounded_reason(&removal_failed_reason(
+                               &why, attempts, report.as_ref()))}),
                     teardown,
                 )
                 .await?;
@@ -851,8 +1102,17 @@ async fn watch(
                 .and_then(|s| s.template.spec.as_ref())
                 .and_then(|p| p.containers.first())
                 .and_then(|c| c.image.clone());
-            let started =
-                build_attempt(restore, &jobs, &uid, attempts + 1, false, image.as_deref()).await?;
+            let started = build_attempt(
+                restore,
+                client,
+                &jobs,
+                &uid,
+                attempts + 1,
+                false,
+                image.as_deref(),
+                now,
+            )
+            .await?;
             let mut clone = json!({"attempts": attempts + 1, "reason": bounded_reason(&why)});
             match started {
                 Ok(job_name) => clone["jobRef"] = json!({"name": job_name}),
@@ -867,16 +1127,79 @@ async fn watch(
     }
 }
 
+/// **The way out of a `RemovalFailed` an older build caused** (D1, the
+/// PoC's D4): when the clone's last cleanup Job was built by an older
+/// controller ([`carries_read_grant`] is false), its failure says nothing
+/// about this build's grants, so ONE more attempt is built with them. Its
+/// own Job carries the flag, so a failure of it holds for good, as every
+/// other `RemovalFailed` does: the finalizer stays for the operator.
+async fn rearm(
+    restore: &Restore,
+    client: &kube::Client,
+    jobs: &Api<Job>,
+    uid: &str,
+    image: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Requeue, RestoreError> {
+    let clone = restore.status.as_ref().and_then(|s| s.clone.as_ref());
+    let (Some(attempts), Some(last)) = (
+        clone.and_then(|c| c.attempts),
+        clone
+            .and_then(|c| c.job_ref.as_ref())
+            .map(|r| r.name.clone()),
+    ) else {
+        return Ok(Requeue::AwaitChange);
+    };
+    let Some(last_job) = jobs.get_opt(&last).await.map_err(RestoreError::Api)? else {
+        return Ok(Requeue::AwaitChange);
+    };
+    if carries_read_grant(&last_job) || !crate::evidence_fetch::is_owned(&last_job, &owner(restore))
+    {
+        return Ok(Requeue::AwaitChange);
+    }
+    let attempt = attempts + 1;
+    let restores: Api<Restore> =
+        Api::namespaced(client.clone(), &restore.namespace().unwrap_or_default());
+    match build_attempt(restore, client, jobs, uid, attempt, false, image, now).await? {
+        Ok(job_name) => {
+            tracing::info!(
+                restore = %restore.name_any(),
+                job = %job_name,
+                "a RemovalFailed clone whose last cleanup Job an older controller built gets one \
+                 more attempt with this build's grants"
+            );
+            patch_clone(
+                &restores,
+                &restore.name_any(),
+                json!({"phase": PHASE_REMOVING, "attempts": attempt,
+                       "jobRef": {"name": job_name}, "reason": null}),
+                None,
+            )
+            .await?;
+            Ok(Requeue::After(POLL_SECONDS))
+        }
+        // Nothing to build from: the clone keeps its recorded reason.
+        Err(_) => Ok(Requeue::AwaitChange),
+    }
+}
+
 /// Create the cleanup Job for `attempt` from the run Job (attempt 1) or the
-/// first cleanup Job (later attempts, once the run Job may be gone). The
-/// inner `Err` is a reason the clone records: nothing to copy, or no run id.
+/// first cleanup Job (later attempts, once the run Job may be gone). A
+/// template that does not carry this build's grants ([`carries_read_grant`]:
+/// the run Job, or a cleanup Job an older controller built) is
+/// [`rewire`]d, with `current_image`; one that does is copied with `image`.
+/// The inner `Err` is a reason the clone records: nothing to copy, no run
+/// id, or an evidence destination that no longer resolves.
+#[allow(clippy::too_many_arguments)]
 async fn build_attempt(
     restore: &Restore,
+    client: &kube::Client,
     jobs: &Api<Job>,
     uid: &str,
     attempt: i64,
     suspend: bool,
     image: Option<&str>,
+    now: DateTime<Utc>,
 ) -> Result<Result<String, String>, RestoreError> {
     let name = cleanup_job_name(uid, attempt);
     if let Some(existing) = jobs.get_opt(&name).await.map_err(RestoreError::Api)? {
@@ -939,11 +1262,19 @@ async fn build_attempt(
             "the run Job's argv names no plan or signing key to copy".to_string(),
         ));
     };
-    let Some(job) = cleanup_job(&template, &name, argv, suspend, image) else {
+    let Some(mut job) = cleanup_job(&template, &name, argv, suspend, image) else {
         return Ok(Err(
             "the run Job has no runner container to copy".to_string()
         ));
     };
+    if !carries_read_grant(&template) {
+        let namespace = restore.namespace().unwrap_or_default();
+        let wiring = match wiring_of(restore, client, &namespace, now).await? {
+            Ok(w) => w,
+            Err(why) => return Ok(Err(why)),
+        };
+        job = rewire(job, &wiring, image.unwrap_or(crate::job::RUNNER_IMAGE));
+    }
     // FX-43: a fresh line token for this attempt's Job (the argv was built
     // fresh, so the run Job's token is not copied).
     jobs.create(&PostParams::default(), &crate::job::tokened(job))
