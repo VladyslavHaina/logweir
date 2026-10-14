@@ -10,13 +10,14 @@
 //! | `the_default_broker_answers_every_capability_check` | the stack as CI runs it | the shipped `logweir check run` reads the broker's ApiVersions through a real connection, plaintext and SASL, and each capability row agrees with the broker's own tool; a plan that lists none gets none |
 //! | `the_default_broker_backs_up_restores_and_verifies` | any broker line (`--kafka`) | the generic row: probe, capability checks, backup, restore, verify, on Apache Kafka. The control for the two rows below |
 //! | `confluent_platform_backs_up_restores_and_verifies` | profile `confluent` | the same generic row on Confluent Platform 8.3.2, with no difference |
-//! | `redpanda_backs_up_and_refuses_a_restore_before_it_starts` | profile `redpanda` | Redpanda v26.2.4: probe and backup work; its groups cannot be typed and the receipt says so; its broker resource reports no timestamp bound; `target.engineProtocol` is `notReady` naming Produce v8, and the restore it predicts cannot run does fail, signing nothing |
+//! | `redpanda_backs_up_and_refuses_a_restore_before_it_starts` | profile `redpanda` | Redpanda v26.2.4: probe and backup work; its groups cannot be typed and the receipt says so; its broker resource reports no timestamp bound; `target.engineProtocol` is `notReady` naming Produce v8, and `drill run` refuses the restore by that row's name at phase 0 (FX-45), creating nothing and signing nothing; the Test connection says "usable as a source, not as a target" (FX-46); `doctor` check 8 names it |
 //! | `redpanda_authenticates_both_scram_mechanisms` | profile `redpanda` | SCRAM-SHA-256 and SCRAM-SHA-512 against Redpanda's own SCRAM, on both clients; a wrong password is refused |
 //! | `seaweedfs_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `objectstore` | the maintained object store, through Logweir: conditional create, the pinned manifest version on a versioned bucket, backup, restore, verify |
 //! | `rustfs_takes_a_backup_a_restore_and_refuses_a_second_claim`, `versitygw_takes_a_backup_a_restore_and_refuses_a_second_claim` | profile `rustfs`, `versitygw` | the same round trip on the other two S3 servers (PROD-01.2a) |
 //! | `a_directory_archive_backs_up_restores_and_verifies` | the stack as CI runs it | a directory as the archive (`backend: filesystem`): backup, restore, both readers, with the real engine (PROD-01.2a) |
 //! | `the_minimum_acls_for_probe_backup_and_restore` | profile `acl` | the minimum-permission profile: exactly the listed ACLs work, and each one removed fails or degrades the way the record says |
-//! | `an_unreachable_advertised_address_is_not_a_reachable_cluster` | profile `confluent` | a listener that advertises a dead address: the probe still answers `reachable=true`, the readiness check says the bootstrap answered and the advertised brokers did not, the capability rows are blocked behind it, and a backup fails with no receipt |
+//! | `an_unreachable_advertised_address_is_not_a_reachable_cluster` | profile `confluent` | a listener that advertises a dead address: the probe answers `reachable=false`, `brokers-answered=0/1`, naming the address (FX-46), the Test connection and the readiness check say the bootstrap answered and the advertised brokers did not, the capability rows are blocked behind it, and a backup fails with no receipt |
+//! | `a_backup_principal_without_read_is_refused_by_name_before_the_engine` | profile `acl` | FX-45: a principal without `Read` on the source topic (with `Describe`, and without it): the Backup Preflight's `connection.topicsReadable` is `notReady` naming the topic, and `backup run` refuses by name before the engine, exit 3, no receipt; with `Read` it backs up |
 //! | `a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` | profile `cluster3` | the engine-protocol row answers for a cluster only when every broker of it answered: `3 of 3` from three addresses and from one, every round; with one broker frozen it is `unknown`, naming `2 of 3` and the broker, never `ready`; and it recovers |
 //! | `a_backup_whose_id_spells_a_credential_code_is_a_backup` | the stack as CI runs it | a backup whose id (and so every archive key) spells a credential code exits 0 with a receipt: MinIO's `404 NoSuchKey` echoing the key is an absent object, not a refused credential |
 //!
@@ -51,7 +52,7 @@ use logweir_core::check_contract::{
     capability_checks_for, CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlan,
     CheckRequest, CheckResult, CheckState, ConnectionPlan, CredentialMode, DestinationPlan,
     FrameExpectations, Gating, OperationReadinessRequest, RestorePreflightRequest,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    SourceConnectionRequest, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, StorageProvider, TransportSecurity,
@@ -1032,6 +1033,14 @@ fn allowlist_for(cluster_id: &str) -> PathBuf {
 
 /// `logweir cluster-probe`: interface I14's two lines and its exit code.
 fn probe(bootstrap: &str, auth: &Auth) -> (Option<i32>, String, String) {
+    let (exit, lines, _) = probe_lines(bootstrap, auth);
+    let line = |key: &str| lines.get(key).cloned().unwrap_or_default();
+    (exit, line("cluster-id"), line("reachable"))
+}
+
+/// `logweir cluster-probe`: its exit code, every `key=value` stdout line
+/// (FX-46 adds `brokers-answered`), and its stderr.
+fn probe_lines(bootstrap: &str, auth: &Auth) -> (Option<i32>, BTreeMap<String, String>, String) {
     let mut c = Command::new(bin());
     c.args(["cluster-probe", "--bootstrap", bootstrap, "--auth-mode"])
         .arg(auth.mode)
@@ -1043,15 +1052,33 @@ fn probe(bootstrap: &str, auth: &Auth) -> (Option<i32>, String, String) {
         c.env("LOGWEIR_SOURCE_PASSWORD", p);
     }
     let out = output_within(c, 120);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let line = |key: &str| {
-        stdout
-            .lines()
-            .find_map(|l| l.strip_prefix(key))
-            .unwrap_or("")
-            .to_string()
-    };
-    (out.status.code(), line("cluster-id="), line("reachable="))
+    let lines = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    (
+        out.status.code(),
+        lines,
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// FX-46: the plan the controller renders for a `SourceConnection` Preflight,
+/// the console's Test connection: the connection, and every capability row a
+/// connection test asks.
+fn source_connection_plan(connection: ConnectionPlan) -> CheckPlan {
+    CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.to_string(),
+        contract_version: CHECK_CONTRACT_VERSION,
+        subject_uid: "fx-46-connection-test".into(),
+        timeout_seconds: 60,
+        policy_digest: None,
+        request: CheckRequest::SourceConnection(SourceConnectionRequest {
+            connection,
+            capability_checks: capability_checks_for(CheckOperation::SourceConnection).to_vec(),
+        }),
+    }
 }
 
 /// A simple classic consumer group with one committed position, made by a
@@ -1567,8 +1594,12 @@ fn dial(bootstrap: &str) -> logweir_kafka::inventory::KafkaInventory {
 ///   `target.timestampBound`'s `TimestampBoundNotReported` and of phase 0 no
 ///   longer recording `CreateTime` for it.
 /// * It serves Produce up to v7 and the engine sends v8: `target.engineProtocol`
-///   is `notReady`, blocking, naming both, BEFORE any restore; and the restore
-///   it says cannot run is then run, and fails with exit 1 and no scorecard.
+///   is `notReady`, blocking, naming both, BEFORE any restore; and (FX-45) the
+///   restore it says cannot run is refused by `drill run` at phase 0 by that
+///   row's name, exit 3, with nothing created and no scorecard (it used to
+///   create its scratch topic and fail in the engine with "early eof").
+/// * FX-46: the console's Test connection passes and says "usable as a
+///   source, not as a target"; and `doctor`'s check 8 names the row.
 ///
 /// CONTROL: `confluent_platform_backs_up_restores_and_verifies` and
 /// `the_default_broker_backs_up_restores_and_verifies`, the same generic row
@@ -1618,7 +1649,7 @@ fn redpanda_backs_up_and_refuses_a_restore_before_it_starts() {
     }
     seen["broker_config_keys_reported"] = json!(broker.keys().collect::<Vec<_>>());
 
-    // The restore: predicted impossible, and impossible.
+    // The restore: predicted impossible, and (FX-45) refused before it starts.
     assert!(
         !g.replay_ok,
         "Redpanda now serves Produce v8: this row's premise changed, re-measure the matrix"
@@ -1627,56 +1658,169 @@ fn redpanda_backs_up_and_refuses_a_restore_before_it_starts() {
         seen["capabilities"]["target.engineProtocol"]["code"],
         "EngineProtocolUnsupported"
     );
+    // FX-45: `drill run` runs `target.engineProtocol` at phase 0 and refuses
+    // by the row's name, exit 3, before anything is created. It used to get
+    // past phase 0, create its scratch topic and fail in the engine with
+    // "early eof" and no version (PROD-01.2 §4.3).
     assert_eq!(
         g.drill_exit,
-        Some(1),
-        "the restore the check refuses must not succeed:\n{}",
+        Some(3),
+        "the restore the check refuses is refused before it starts:\n{}",
+        tail(&g.drill_output, 3000)
+    );
+    assert!(
+        g.drill_output.contains(
+            "target.engineProtocol is notReady (EngineProtocolUnsupported): the engine sends"
+        ) && g.drill_output.contains("Produce v8")
+            && g.drill_output.contains("Produce v0-v7")
+            && g.drill_output.contains("refusal-reason=GuardRefused"),
+        "the refusal names the row, the request and the range:\n{}",
         tail(&g.drill_output, 3000)
     );
     assert!(
         g.scorecard.is_none(),
-        "a restore that could not write signs NOTHING: {:?}",
+        "a restore refused before it started signs NOTHING: {:?}",
         g.scorecard
     );
-    // PHASE 0 RECORDED NO TIMESTAMP TYPE FOR IT. The drill got past phase 0
-    // (it failed in the engine), and phase 0 read this broker's nine keys:
-    // it says the type is not recorded, and nothing in the run's output
-    // claims `CreateTime` was observed.
-    assert!(
-        g.drill_output
-            .contains("does not report log.message.timestamp.type"),
-        "phase 0 says the target did not report its timestamp type:\n{}",
-        tail(&g.drill_output, 3000)
+    assert_eq!(
+        seen["restore"]["scratch_topics_left_after_the_run"],
+        json!([]),
+        "refused at phase 0: no scratch topic was created, so none is left"
     );
     assert!(
-        !g.drill_output.contains("\"timestampType\":\"CreateTime\""),
-        "a timestamp type Redpanda never reported is written down as CreateTime:\n{}",
+        !g.drill_output.contains("early eof"),
+        "the engine never ran:\n{}",
         tail(&g.drill_output, 3000)
     );
-    seen["restore"]["phase_0_timestamp_type"] = json!("not recorded: the broker did not report it");
-
-    // The engine's own account names no version: this is why the check does.
-    let engine_said = g
+    seen["restore"]["refused_at_phase_0"] = json!(g
         .drill_output
         .lines()
-        .rev()
-        .find(|l| l.contains("Restore completed with") || l.contains("early eof"))
-        .unwrap_or("")
-        .to_string();
-    assert!(
-        !engine_said.is_empty() && !engine_said.contains("v8") && !engine_said.contains("version"),
-        "the engine reports a transport error and no version: {engine_said}"
+        .find(|l| l.contains("target.engineProtocol is notReady"))
+        .map(|l| tail(l, 600)));
+
+    // FX-46: the console's Test connection says what Redpanda can be used
+    // for. The connection answers; usable as a source, not as a target.
+    let bootstrap = (REDPANDA.bootstrap)();
+    let (_, tested) = check_run(
+        &source_connection_plan(Auth::plaintext().connection_plan(&bootstrap)),
+        None,
     );
-    seen["restore"]["engine_said"] = json!(tail(&engine_said, 400));
+    let state = |id: CheckId| {
+        let r = row(&tested, id);
+        (r.state, r.gating)
+    };
+    assert_eq!(
+        state(CheckId::ConnectionAuthenticated),
+        (CheckState::Ready, Gating::Blocking)
+    );
+    assert_eq!(
+        state(CheckId::ConnectionEngineProtocol),
+        (CheckState::Ready, Gating::Advisory),
+        "usable as a backup source"
+    );
+    assert_eq!(
+        state(CheckId::TargetEngineProtocol),
+        (CheckState::NotReady, Gating::Advisory),
+        "not as a restore target"
+    );
+    assert_eq!(
+        state(CheckId::ConnectionGroupTypes),
+        (CheckState::NotReady, Gating::Advisory)
+    );
+    assert!(
+        row(&tested, CheckId::TargetEngineProtocol)
+            .message
+            .contains("Produce v8"),
+        "{:?}",
+        row(&tested, CheckId::TargetEngineProtocol)
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&tested.checks),
+        logweir_core::check_contract::OverallState::Ready,
+        "the connection test passes: it is not failed by what the endpoint cannot be used for"
+    );
+    seen["connection_test"] = json!(tested
+        .checks
+        .iter()
+        .map(|c| json!({"id": c.id, "state": c.state, "code": c.code, "gating": c.gating}))
+        .collect::<Vec<_>>());
+
+    // FX-45: `doctor` names it too (check 8, `target engine`).
+    let (doctor_exit, doctor_said) = doctor_against(&bootstrap, &seen["cluster_id"]);
+    assert_eq!(doctor_exit, Some(1), "{doctor_said}");
+    assert!(
+        doctor_said.contains("ok    target ")
+            && doctor_said.contains(&format!(
+                "FAIL  {:<18} target.engineProtocol is notReady (EngineProtocolUnsupported)",
+                "target engine"
+            ))
+            && doctor_said.contains("Produce v8"),
+        "{doctor_said}"
+    );
+    seen["doctor"] = json!({"exit": doctor_exit, "said": tail(&doctor_said, 1200)});
     evidence(
         "redpanda_backs_up_and_refuses_a_restore_before_it_starts",
         &seen,
     );
     eprintln!(
-        "[prod-01-2] redpanda: backup ok, group {}, target.engineProtocol notReady, restore exit 1 \
-         with no scorecard",
+        "[fx-45] redpanda: backup ok, group {}, target.engineProtocol notReady, restore refused \
+         at phase 0 (exit 3, nothing created), Test connection usable as a source only, doctor \
+         check 8 FAIL",
         seen["backup"]["group"]["reason"]
     );
+}
+
+/// `logweir doctor` against `bootstrap` as a restore TARGET: a spec whose
+/// archive is a local directory holding one set (so check 6 passes with no
+/// store), the allowlist naming `cluster_id`, the stub engine of
+/// `crates/logweir/tests/doctor.rs` (checks 1 and 2). Its exit code and its
+/// whole output.
+fn doctor_against(bootstrap: &str, cluster_id: &Value) -> (Option<i32>, String) {
+    let dir = demo_dir().join(format!("compat-doctor-{}", nonce()));
+    let archive = dir.join("archive");
+    std::fs::create_dir_all(archive.join("b-0001")).unwrap();
+    std::fs::write(archive.join("b-0001/manifest.json"), "{}").unwrap();
+    let spec = dir.join("drill.yaml");
+    std::fs::write(
+        &spec,
+        format!(
+            "source:\n  storage:\n    backend: filesystem\n    path: {archive}\n  \
+             backup: latestCompleted\n  topics: [orders]\n\
+             target:\n  bootstrap_servers: [\"{bootstrap}\"]\n  marker_topic: {MARKER_TOPIC}\n  \
+             topic_mapping_prefix: \"drill-\"\n  default_replication_factor: 1\n  \
+             teardown: delete\n\
+             sample:\n  window_start: \"2026-08-29T00:00:00Z\"\n  \
+             window_end: \"2026-08-30T02:00:00Z\"\n  records_per_partition: 25\n\
+             objectives:\n  rto_seconds: 900\n  rpo_seconds: 300\n  pass_rate: 1.0\n\
+             evidence:\n  backend: filesystem\n  path: {evidence}\n",
+            archive = archive.display(),
+            evidence = dir.join("evidence").display(),
+        ),
+    )
+    .unwrap();
+    let allow = dir.join("allowed.json");
+    std::fs::write(
+        &allow,
+        serde_json::to_vec(&json!({"allowed_cluster_ids": [cluster_id]})).unwrap(),
+    )
+    .unwrap();
+    let mut c = Command::new(bin());
+    c.arg("doctor")
+        .arg("--spec")
+        .arg(&spec)
+        .arg("--allowed-clusters")
+        .arg(&allow)
+        .arg("--approver-key")
+        .arg(root().join("e2e/fixtures/signed/public.pem"))
+        .env(
+            "LOGWEIR_ENGINE_BIN",
+            root().join("e2e/fixtures/fake-engine-ok.sh"),
+        )
+        .env_remove("LOGWEIR_TARGET_PASSWORD")
+        .env_remove("LOGWEIR_ENGINE_VERSION")
+        .env_remove("LOGWEIR_ENGINE_DIGEST");
+    let out = output_within(c, 180);
+    (out.status.code(), text(&out))
 }
 
 /// Redpanda's own SCRAM implementation, both mechanisms, both clients: a
@@ -2841,6 +2985,217 @@ fn the_minimum_acls_for_probe_backup_and_restore() {
     );
 }
 
+// ============================================================ FX-45: READ before the engine
+
+/// **FX-45: a backup principal without `Read` on a source topic is named
+/// before the engine**, on the `acl` profile's StandardAuthorizer broker with
+/// the restricted SCRAM principal. The topic and the cluster are first
+/// CLOSED (a binding for another principal), as in
+/// [`the_minimum_acls_for_probe_backup_and_restore`].
+///
+/// * `Describe` and `DescribeConfigs`, no `Read` (a principal that may see
+///   the topic and not consume it): the Backup Preflight's
+///   `connection.topicsReadable` is BLOCKING `notReady`,
+///   `TopicAuthorizationFailed`, naming the topic and the grant; and
+///   `backup run` exits 3 naming READ and the topic, writes no receipt, and
+///   never starts the engine.
+/// * `DescribeConfigs` alone, PROD-01.2 §3's "Read removed" row (Read takes
+///   Describe with it): the same, and the message says the principal may not
+///   even Describe it. That row used to read "kafka-backup backup exited 1".
+///
+/// CONTROL: with `Read` and `DescribeConfigs` (the minimum) the row stays
+/// execution-only and says the broker reports READ, and the backup exits 0
+/// with a receipt.
+#[test]
+#[ignore = "needs the stack's `acl` profile; see the module doc"]
+fn a_backup_principal_without_read_is_refused_by_name_before_the_engine() {
+    let listed = acl_cli("--list", &[]);
+    assert!(
+        listed.status.success() && !text(&listed).contains("SecurityDisabled"),
+        "kafka-acl is not running an authorizer: start the stack with the `acl` profile\n{}",
+        tail(&text(&listed), 800)
+    );
+    let n = nonce();
+    let topic = format!("fx45-{n}-src");
+    let super_user = Auth::plaintext();
+    let restricted = Auth::scram("scramSha512", SCRAM_USER, SCRAM_PASSWORD);
+    let (plain, sasl) = (bootstrap_acl(), bootstrap_acl_sasl());
+    let created = exec_in(
+        "kafka-acl",
+        &[
+            "/opt/kafka/bin/kafka-topics.sh",
+            "--bootstrap-server",
+            "kafka-acl:9094",
+            "--create",
+            "--topic",
+            &topic,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+        ],
+    );
+    assert!(created.status.success(), "{}", tail(&text(&created), 800));
+    await_created_on(&plain, &topic, 1);
+    produce(&plain, &super_user, &topic, 10);
+
+    let mut grants = Grants(Vec::new());
+    for g in [
+        Grant::topic(OTHER, "Describe", &topic),
+        Grant::cluster(OTHER, "Describe"),
+    ] {
+        grants.add(&g);
+    }
+    let storage = Storage::minio();
+    let readiness = || {
+        let (_, result) = check_run(
+            &capability_plan(
+                CheckOperation::Backup,
+                restricted.connection_plan(&sasl),
+                &[topic.as_str()],
+                &[],
+            ),
+            restricted.password.as_deref(),
+        );
+        row(&result, CheckId::ConnectionTopicsReadable)
+    };
+    let take = |tag: &str| {
+        let backup_id = format!("compat-fx45-{n}-{tag}");
+        let spec = backup_spec(&sasl, &restricted, &topic, &backup_id, &storage);
+        let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
+        let started = Instant::now();
+        let out = backup(&spec, &receipt, &restricted, &[]);
+        (out, receipt.exists(), started.elapsed())
+    };
+    let engine_started = |out: &Output| text(out).contains("starting the engine");
+
+    let describe = Grant::topic(RESTRICTED, "Describe", &topic);
+    let describe_configs = Grant::topic(RESTRICTED, "DescribeConfigs", &topic);
+    let read = Grant::topic(RESTRICTED, "Read", &topic);
+    let mut cases = Vec::new();
+    for (case, bindings, hidden) in [
+        ("describe-only", vec![&describe, &describe_configs], false),
+        ("no-describe", vec![&describe_configs], true),
+    ] {
+        for g in &bindings {
+            grants.add(g);
+        }
+        let readable = readiness();
+        assert_eq!(
+            (readable.state, readable.gating, readable.code),
+            (
+                CheckState::NotReady,
+                Gating::Blocking,
+                CheckCode::TopicAuthorizationFailed
+            ),
+            "{case}: {readable:?}"
+        );
+        assert!(
+            readable
+                .message
+                .contains("may not READ 1 of 1 selected topic(s)")
+                && readable.message.contains("may not even Describe") == hidden
+                && readable
+                    .remedy
+                    .starts_with("Grant READ on each named topic"),
+            "{case}: {readable:?}"
+        );
+        assert_eq!(
+            readable.detail.as_ref().unwrap()["sample"],
+            json!([topic]),
+            "{case}"
+        );
+        let (out, receipt, took) = take(case);
+        let all = text(&out);
+        assert_eq!(out.status.code(), Some(3), "{case}:\n{}", tail(&all, 3000));
+        assert!(
+            all.contains(&format!("may not READ 1 of 1 selected topic(s): `{topic}`"))
+                && all.contains("Grant READ on each named topic")
+                && all.contains("refusal-reason=GuardRefused"),
+            "{case}: the refusal names the topic and the grant:\n{}",
+            tail(&all, 3000)
+        );
+        assert!(!receipt, "{case}: a refused backup writes no receipt");
+        assert!(
+            !engine_started(&out),
+            "{case}: the engine never started:\n{}",
+            tail(&all, 3000)
+        );
+        cases.push(json!({
+            "case": case,
+            "bindings": bindings.iter().map(|g| g.spelled()).collect::<Vec<_>>(),
+            "connection.topicsReadable": readable,
+            "backup": {
+                "exit": out.status.code(),
+                "receipt": receipt,
+                "seconds": took.as_secs_f64(),
+                "reads": how_it_reads(&out),
+            },
+        }));
+        for g in &bindings {
+            grants.remove(g);
+        }
+    }
+
+    // CONTROL: the minimum (Read implies Describe).
+    grants.add(&read);
+    grants.add(&describe_configs);
+    let readable = readiness();
+    assert_eq!(
+        (readable.state, readable.gating, readable.code),
+        (
+            CheckState::Unknown,
+            Gating::ExecutionOnly,
+            CheckCode::ReadVerifiedOnlyAtExecution
+        ),
+        "{readable:?}"
+    );
+    assert!(
+        readable
+            .message
+            .contains("the broker reports READ for this principal on all 1 selected topic(s)"),
+        "{readable:?}"
+    );
+    let (out, receipt, took) = take("full");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "Read and DescribeConfigs back it up:\n{}",
+        tail(&text(&out), 4000)
+    );
+    assert!(receipt && engine_started(&out));
+    assert!(
+        text(&out)
+            .contains("the broker reports READ for the backup principal on every selected topic"),
+        "the run asked, and the broker said yes"
+    );
+    evidence(
+        "a_backup_principal_without_read_is_refused_by_name_before_the_engine",
+        &json!({
+            "broker": "kafka-acl (profile acl), StandardAuthorizer, restricted principal User:logweir over SCRAM-SHA-512",
+            "topic": topic,
+            "refused": cases,
+            "control": {
+                "bindings": [read.spelled(), describe_configs.spelled()],
+                "connection.topicsReadable": readable,
+                "backup": {"exit": out.status.code(), "receipt": receipt, "seconds": took.as_secs_f64()},
+            },
+        }),
+    );
+    drop(grants);
+    let _ = exec_in(
+        "kafka-acl",
+        &[
+            "/opt/kafka/bin/kafka-topics.sh",
+            "--bootstrap-server",
+            "kafka-acl:9094",
+            "--delete",
+            "--topic",
+            &topic,
+        ],
+    );
+}
+
 // ============================================================ a backup id that spells a credential code
 
 /// **PROD-01.2 review, M1, live: a backup whose id spells a credential code
@@ -3221,20 +3576,76 @@ fn a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all() {
 /// CONTROL: the SAME broker over its EXTERNAL listener, in
 /// `confluent_platform_backs_up_restores_and_verifies`, where the same check
 /// is `ready` and the same backup succeeds.
+/// FX-46 (it was PROD-01.2's measurement): `cluster-probe` now asks the
+/// broker the OFFNET listener advertises, on `127.0.0.1:1`, and answers
+/// `reachable=false`, exit 1, `brokers-answered=0/1`, naming the address and
+/// `advertised.listeners`. CONTROL: the same broker's EXTERNAL listener is
+/// `reachable=true`, `1/1`. The console's Test connection (a
+/// `sourceConnection` plan as the controller renders it) says the same:
+/// `connection.authenticated` `notReady`, and its capability rows blocked
+/// behind it, advisory.
 #[test]
 #[ignore = "needs the stack's `confluent` profile; see the module doc"]
 fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
     let bootstrap = bootstrap_confluent_offnet();
     let auth = Auth::plaintext();
-    let (exit, id, reachable) = probe(&bootstrap, &auth);
+    let started = Instant::now();
+    let (exit, lines, said) = probe_lines(&bootstrap, &auth);
+    let probe_took = started.elapsed();
+    let line = |k: &str| lines.get(k).cloned().unwrap_or_default();
+    let (id, reachable) = (line("cluster-id"), line("reachable"));
     let real_id = client(&bootstrap_confluent(), &auth)
         .cluster_id()
         .expect("the EXTERNAL listener");
     assert_eq!(
-        (exit, reachable.as_str(), id.as_str()),
-        (Some(0), "true", real_id.as_str()),
-        "the probe certifies that a bootstrap broker answered, and nothing more"
+        (
+            exit,
+            reachable.as_str(),
+            line("brokers-answered").as_str(),
+            id.as_str()
+        ),
+        (Some(1), "false", "0/1", real_id.as_str()),
+        "FX-46: the bootstrap answered, the advertised broker did not: not reachable\n{said}"
     );
+    assert!(
+        said.contains("(127.0.0.1:1)") && said.contains("advertised.listeners"),
+        "the diagnostic names the advertised address and the remedy: {said}"
+    );
+    // CONTROL: the EXTERNAL listener of the same broker.
+    let (control_exit, control, _) = probe_lines(&bootstrap_confluent(), &auth);
+    assert_eq!(
+        (
+            control_exit,
+            control.get("reachable").map(String::as_str),
+            control.get("brokers-answered").map(String::as_str)
+        ),
+        (Some(0), Some("true"), Some("1/1")),
+        "{control:?}"
+    );
+
+    // The console's Test connection, as the controller renders it.
+    let (_, tested) = check_run(
+        &source_connection_plan(auth.connection_plan(&bootstrap)),
+        None,
+    );
+    let test_auth = row(&tested, CheckId::ConnectionAuthenticated);
+    assert_eq!(
+        (test_auth.state, test_auth.code),
+        (CheckState::NotReady, CheckCode::BrokerUnreachable),
+        "{test_auth:?}"
+    );
+    for id in capability_checks_for(CheckOperation::SourceConnection) {
+        let r = row(&tested, *id);
+        assert_eq!(
+            (r.state, r.code, r.gating),
+            (
+                CheckState::Unknown,
+                CheckCode::BlockedByPrerequisite,
+                Gating::Advisory
+            ),
+            "{r:?}"
+        );
+    }
 
     let started = Instant::now();
     let (_, result) = check_run(
@@ -3300,7 +3711,18 @@ fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
         "an_unreachable_advertised_address_is_not_a_reachable_cluster",
         &json!({
             "listener": "kafka-cp OFFNET, advertised as 127.0.0.1:1",
-            "probe": {"exit": exit, "cluster_id": id, "reachable": reachable},
+            "probe": {
+                "exit": exit,
+                "cluster_id": id,
+                "reachable": reachable,
+                "brokers_answered": line("brokers-answered"),
+                "stderr": tail(&said, 600),
+                "seconds": probe_took.as_secs_f64(),
+            },
+            "probe_external_control": control,
+            "connection_test": tested.checks.iter()
+                .map(|c| json!({"id": c.id, "state": c.state, "code": c.code, "gating": c.gating}))
+                .collect::<Vec<_>>(),
             "check_seconds": check_took.as_secs_f64(),
             "connection.authenticated": authenticated,
             "capability_rows": "each unknown / BlockedByPrerequisite",

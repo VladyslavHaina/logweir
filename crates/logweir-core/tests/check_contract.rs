@@ -967,8 +967,9 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
     )
     .validate()
     .expect_err("a connection test names no topic");
-    // The operations that dial no engine list none.
-    for operation in [CheckOperation::DestinationAccess] {
+    // The operation that dials no engine lists none.
+    {
+        let operation = CheckOperation::DestinationAccess;
         readiness(operation, Vec::new(), Vec::new())
             .validate()
             .unwrap_or_else(|e| panic!("{operation:?} with no list is a valid plan: {e}"));
