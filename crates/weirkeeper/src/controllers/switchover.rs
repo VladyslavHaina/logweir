@@ -611,7 +611,16 @@ pub fn status_from_run(exit_code: i32, log: &str, job_name: &str) -> SwitchoverS
         exit_code: Some(exit_code),
         exit_reason: reason_word.clone(),
         reason: Some(reason_word.unwrap_or_else(|| phase.to_string())),
-        message: Some(format!("the switchover Job exited {exit_code}: {phase}")),
+        // The runner's own sentence for a whole-run refusal or failure (D1:
+        // `EvidenceUnreadable` names the key and the grant), cleaned and
+        // bounded as every relayed message is.
+        message: Some(match last(crate_line::DETAIL) {
+            Some(detail) => format!(
+                "the switchover Job exited {exit_code}: {phase}: {}",
+                logweir_core::refusal_detail::clean_message(&detail)
+            ),
+            None => format!("the switchover Job exited {exit_code}: {phase}"),
+        }),
         job_ref: Some(job_name.to_string()),
         groups,
         counts: Some(counts),
@@ -628,6 +637,7 @@ mod crate_line {
     pub const GROUP: &str = "switchover-group=";
     pub const OUTCOME: &str = "switchover-outcome=";
     pub const RECORD: &str = "switchover-record-key=";
+    pub const DETAIL: &str = "switchover-detail=";
 }
 
 /// A reconcile's failure: a Kubernetes API error, retried.
@@ -1271,6 +1281,43 @@ mod tests {
         assert_eq!(
             status_from_run(0, "", "sw").phase.as_deref(),
             Some(so::SUCCEEDED)
+        );
+    }
+
+    /// **D1: a store that refused the evidence is `Failed`, named, and the
+    /// status says which grant could not read what.** The runner's exit 1,
+    /// `failure-reason=EvidenceUnreadable` and its `switchover-detail=`
+    /// sentence reach `reason`, `exitReason` and `message`. CONTROL: without
+    /// a detail line the message is the exit and the phase, as before.
+    ///
+    /// KILLS: the detail line not read (the console shows only "exited 1").
+    #[test]
+    fn an_unreadable_evidence_is_failed_and_names_the_grant() {
+        let log = "switchover-run-id=X\n\
+             switchover-group={\"source\":\"a\",\"target\":\"a\",\"outcome\":\"untouched\",\"reason\":null,\"created\":false,\"committed\":false,\"partitions\":[]}\n\
+             switchover-record-key=logweir/switchovers/X.record.json\n\
+             switchover-outcome=Failed\n\
+             switchover-counts=applied=0 alreadyApplied=0 refused=0 failed=0 untouched=1\n\
+             switchover-detail=EvidenceUnreadable: could not read logweir/drills/R.json with grant evidenceRead of BackupDestination ns/d: AccessDenied; the store refused the read, so the evidence was not judged\n\
+             failure-reason=EvidenceUnreadable\n";
+        let st = status_from_run(1, log, "sw");
+        assert_eq!(st.phase.as_deref(), Some(so::RUN_FAILED));
+        assert_eq!(st.reason.as_deref(), Some("EvidenceUnreadable"));
+        assert_eq!(st.exit_reason.as_deref(), Some("EvidenceUnreadable"));
+        let message = st.message.unwrap_or_default();
+        assert!(
+            message.starts_with(
+                "the switchover Job exited 1: Failed: EvidenceUnreadable: could not read \
+                 logweir/drills/R.json with grant evidenceRead of BackupDestination ns/d: \
+                 AccessDenied"
+            ),
+            "{message}"
+        );
+        assert_eq!(
+            status_from_run(1, "failure-reason=Operational\n", "sw")
+                .message
+                .as_deref(),
+            Some("the switchover Job exited 1: Failed")
         );
     }
 

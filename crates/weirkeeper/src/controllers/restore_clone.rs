@@ -413,7 +413,9 @@ async fn wiring_of(
             }),
             Err(refusal) => Err(format!(
                 "the cleanup Job could not be given the evidence destination's grants ({refusal}); \
-                 nothing was deleted. Fix the BackupDestination; the next pass tries again"
+                 nothing was deleted. Look for topics with the clone's prefix on the target, \
+                 delete any its run created (target.creation in its scorecard), then remove the \
+                 finalizer {FINALIZER}"
             )),
         },
     )
