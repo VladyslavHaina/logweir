@@ -265,6 +265,13 @@ one are NOT compared, and the signed block says `covered: false` with the
 reason; the verdict is then never `pass`. **Complete coverage is never
 silently replaced by sampling.** Absent means no bound.
 
+**Per-segment caps** (FX-30). Each archived segment is streamed, each record
+hashed as it is decoded and never held whole. A segment over 1 GiB stored is
+not read, and one whose body decompresses past 1 GiB (a corrupt segment, or a
+decompression bomb) is not decoded: its partition is not compared, the segment
+is listed as unverified, and `covered: false` names both caps. It is never a
+crash, and never a `pass`.
+
 **Refused at phase 0** (exit 3, before anything runs), because each asks for
 two verifications at once:
 

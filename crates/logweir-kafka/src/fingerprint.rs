@@ -68,25 +68,60 @@ pub fn record_digest_ordered(
     headers: &[(String, Option<Vec<u8>>)],
     timestamp_ms: i64,
 ) -> [u8; 32] {
-    fn feed(h: &mut Sha256, part: Option<&[u8]>) {
-        match part {
-            None => h.update(u64::MAX.to_be_bytes()),
-            Some(b) => {
-                h.update((b.len() as u64).to_be_bytes());
-                h.update(b);
-            }
+    let mut d = OrderedDigest::new();
+    d.part(key);
+    d.part(value);
+    d.count(headers.len() as u64);
+    for (k, v) in headers {
+        d.part(Some(k.as_bytes()));
+        d.part(v.as_deref());
+    }
+    d.finish(timestamp_ms)
+}
+
+/// [`record_digest_ordered`]'s layout fed one piece at a time, so a reader
+/// that streams a record (FX-30's complete lane) never holds its key or value.
+/// A component is [`OrderedDigest::length`] (or `None` for a null) followed by
+/// exactly that many [`OrderedDigest::bytes`]; [`OrderedDigest::part`] does
+/// both for bytes in hand.
+#[derive(Clone, Default)]
+pub struct OrderedDigest(Sha256);
+
+impl OrderedDigest {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A component's length prefix; `None` is a null, which has no bytes.
+    pub fn length(&mut self, len: Option<u64>) {
+        self.0.update(len.unwrap_or(u64::MAX).to_be_bytes());
+    }
+
+    /// Bytes of the component whose length was fed last.
+    pub fn bytes(&mut self, b: &[u8]) {
+        self.0.update(b);
+    }
+
+    /// A whole component.
+    pub fn part(&mut self, part: Option<&[u8]>) {
+        self.length(part.map(|b| b.len() as u64));
+        if let Some(b) = part {
+            self.bytes(b);
         }
     }
-    let mut h = Sha256::new();
-    feed(&mut h, key);
-    feed(&mut h, value);
-    h.update((headers.len() as u64).to_be_bytes());
-    for (k, v) in headers {
-        feed(&mut h, Some(k.as_bytes()));
-        feed(&mut h, v.as_deref());
+
+    /// The header count, before the headers.
+    pub fn count(&mut self, n: u64) {
+        self.0.update(n.to_be_bytes());
     }
-    h.update(timestamp_ms.to_be_bytes());
-    h.finalize().into()
+
+    /// The digest, closed with the record's timestamp.
+    #[must_use]
+    pub fn finish(mut self, timestamp_ms: i64) -> [u8; 32] {
+        self.0.update(timestamp_ms.to_be_bytes());
+        self.0.finalize().into()
+    }
 }
 
 #[cfg(test)]

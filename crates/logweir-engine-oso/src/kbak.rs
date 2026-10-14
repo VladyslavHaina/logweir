@@ -24,6 +24,7 @@
 //! them, matching upstream's own `format.rs:238-243, 253-258, 282-287,
 //! 299-305`, which check `data.len() < len` before every `split_to`.
 use logweir_core::engine::EngineError;
+use logweir_kafka::fingerprint::OrderedDigest;
 
 const MAGIC: &[u8; 4] = b"KBAK";
 const MAGIC_END: &[u8; 4] = b"BKAE";
@@ -555,6 +556,8 @@ struct Capped<R> {
     exceeded: bool,
     deadline: Option<std::time::Instant>,
     timed_out: bool,
+    /// A record frame's declared length that the cap could not hold.
+    declared: Option<u64>,
 }
 
 impl<R: std::io::Read> std::io::Read for Capped<R> {
@@ -608,8 +611,10 @@ impl<R: std::io::Read> std::io::Read for Capped<R> {
 ///   is `TooLarge` before it is decoded;
 /// - lz4 is decoded as a stream that keeps the 64 KiB a match can reach, never
 ///   the whole body;
-/// - every codec's output stops at `limits.max_decompressed` (`TooLarge`), and
-///   every read stops once `limits.deadline` passes (`TimedOut`).
+/// - every codec's output stops at `limits.max_decompressed` (`TooLarge`), a
+///   record frame declaring more than the cap still allows is `TooLarge`
+///   before it is decoded, and every read stops once `limits.deadline` passes
+///   (`TimedOut`).
 ///
 /// The envelope checks are [`decode_segment`]'s: magic, version, end magic and
 /// the CRC32 over the bytes held.
@@ -618,6 +623,56 @@ pub fn scan_segment(
     limits: &ScanLimits,
     prefix: usize,
     visit: &mut dyn FnMut(RecordPrefix) -> bool,
+) -> Result<u64, ScanError> {
+    scan_records(
+        bytes,
+        limits,
+        &mut |frame| read_prefix_record(frame, prefix),
+        visit,
+    )
+}
+
+/// What [`digest_segment`] keeps of one record: never its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordDigest {
+    pub offset: i64,
+    /// The record's own timestamp, epoch milliseconds, as archived.
+    pub timestamp: i64,
+    /// `logweir_kafka::fingerprint::record_digest_ordered` over the record.
+    pub digest: [u8; 32],
+    /// The value of the record's LAST header named as the caller asked, when
+    /// that value is exactly 8 bytes; `None` when it carries no such header,
+    /// or the last one is null or of another length.
+    pub kept: Option<[u8; 8]>,
+}
+
+/// **Streams** a KBAK v1 segment's records in order, handing each one's
+/// [`RecordDigest`] to `visit` (`false` stops early), within [`scan_segment`]'s
+/// bounds: no record is held, only one header key (at most 64 KiB) at a time.
+/// Returns how many records were handed over. The complete verification's
+/// reader (FX-30): every byte of every record is hashed as it streams past.
+pub fn digest_segment(
+    bytes: &[u8],
+    limits: &ScanLimits,
+    keep: &str,
+    visit: &mut dyn FnMut(RecordDigest) -> bool,
+) -> Result<u64, ScanError> {
+    scan_records(
+        bytes,
+        limits,
+        &mut |frame| read_digest_record(frame, keep),
+        visit,
+    )
+}
+
+/// The envelope checks, the bounded body stream and the record loop that
+/// [`scan_segment`] and [`digest_segment`] share; `read_one` reads one record
+/// from its frame.
+fn scan_records<T>(
+    bytes: &[u8],
+    limits: &ScanLimits,
+    read_one: &mut dyn FnMut(&mut dyn std::io::Read) -> std::io::Result<T>,
+    visit: &mut dyn FnMut(T) -> bool,
 ) -> Result<u64, ScanError> {
     use std::io::Read as _;
     let unreadable = |m: String| ScanError::Unreadable(m);
@@ -690,14 +745,25 @@ pub fn scan_segment(
         exceeded: false,
         deadline: limits.deadline,
         timed_out: false,
+        declared: None,
     });
     let mut visited: u64 = 0;
     while visited < record_count {
         let mut len = [0u8; 4];
         let step = reader.read_exact(&mut len).and_then(|()| {
             let total_len = u64::from(u32::from_le_bytes(len));
+            // A frame longer than what the cap still allows is refused before
+            // a byte of it is decoded (FX-30): reading it would pass the cap.
+            let allowed = reader
+                .get_ref()
+                .left
+                .saturating_add(reader.buffer().len() as u64);
+            if total_len > allowed {
+                reader.get_mut().declared = Some(total_len);
+                return Err(std::io::Error::other("a frame longer than the cap allows"));
+            }
             let mut frame = (&mut reader).take(total_len);
-            let r = read_prefix_record(&mut frame, prefix)?;
+            let r = read_one(&mut frame)?;
             if frame.limit() != 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -712,6 +778,13 @@ pub fn scan_segment(
         });
         let record = match step {
             Ok(r) => r,
+            Err(_) if reader.get_ref().declared.is_some() => {
+                return Err(ScanError::TooLarge(format!(
+                    "record {visited} declares a {}-byte frame, past what the \
+                     {max_decompressed}-byte cap leaves",
+                    reader.get_ref().declared.unwrap_or_default()
+                )))
+            }
             Err(_) if reader.get_ref().exceeded => return Err(too_large()),
             Err(_) if reader.get_ref().timed_out => {
                 return Err(ScanError::TimedOut(format!(
@@ -733,10 +806,76 @@ pub fn scan_segment(
     Ok(visited)
 }
 
+/// One record from its frame, every byte fed to the ordered digest as it is
+/// read; the value of the last header named `keep` is kept when it is 8 bytes.
+/// A header key is held whole (at most 64 KiB), because the digest hashes it
+/// as `decode_segment` presents it: through `String::from_utf8_lossy`.
+fn read_digest_record(frame: &mut dyn std::io::Read, keep: &str) -> std::io::Result<RecordDigest> {
+    use byteorder::{ReadBytesExt, LE};
+    let timestamp = frame.read_i64::<LE>()?;
+    let offset = frame.read_i64::<LE>()?;
+    let mut d = OrderedDigest::new();
+    let key_len = frame.read_i32::<LE>()?;
+    digest_field(frame, &mut d, key_len)?;
+    let value_len = frame.read_i32::<LE>()?;
+    digest_field(frame, &mut d, value_len)?;
+    let header_count = frame.read_u16::<LE>()?;
+    d.count(u64::from(header_count));
+    let mut kept = None;
+    for _ in 0..header_count {
+        let hk_len = frame.read_u16::<LE>()?;
+        let mut hk = vec![0u8; usize::from(hk_len)];
+        frame.read_exact(&mut hk)?;
+        let hk = String::from_utf8_lossy(&hk);
+        d.part(Some(hk.as_bytes()));
+        let hv_len = frame.read_i32::<LE>()?;
+        if hk == keep {
+            kept = None;
+            if hv_len == 8 {
+                let mut v = [0u8; 8];
+                frame.read_exact(&mut v)?;
+                d.part(Some(&v));
+                kept = Some(v);
+                continue;
+            }
+        }
+        digest_field(frame, &mut d, hv_len)?;
+    }
+    Ok(RecordDigest {
+        offset,
+        timestamp,
+        digest: d.finish(timestamp),
+        kept,
+    })
+}
+
+/// A nullable field (`len < 0` is a null, as `decode_segment` reads it), its
+/// bytes fed to `d` a chunk at a time; a short read is an error.
+fn digest_field(
+    frame: &mut dyn std::io::Read,
+    d: &mut OrderedDigest,
+    len: i32,
+) -> std::io::Result<()> {
+    let Ok(len) = u64::try_from(len) else {
+        d.length(None);
+        return Ok(());
+    };
+    d.length(Some(len));
+    let mut chunk = [0u8; 16 << 10];
+    let mut left = len;
+    while left > 0 {
+        let n = usize::try_from(left.min(chunk.len() as u64)).unwrap_or(chunk.len());
+        frame.read_exact(&mut chunk[..n])?;
+        d.bytes(&chunk[..n]);
+        left -= n as u64;
+    }
+    Ok(())
+}
+
 /// One record from its frame, keeping `prefix` bytes of the key and value and
 /// skipping everything else without holding it.
 fn read_prefix_record(
-    frame: &mut impl std::io::Read,
+    frame: &mut dyn std::io::Read,
     prefix: usize,
 ) -> std::io::Result<RecordPrefix> {
     use byteorder::{ReadBytesExt, LE};
@@ -769,7 +908,7 @@ fn read_prefix_record(
 
 /// A nullable field's first `prefix` bytes (`-1` is `None`), the rest skipped.
 fn prefix_of(
-    frame: &mut impl std::io::Read,
+    frame: &mut dyn std::io::Read,
     len: i32,
     prefix: usize,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -785,8 +924,8 @@ fn prefix_of(
 }
 
 /// Reads and discards exactly `n` bytes; a short read is an error.
-fn skip(frame: &mut impl std::io::Read, n: u64) -> std::io::Result<()> {
-    let mut bounded = <&mut _ as std::io::Read>::take(&mut *frame, n);
+fn skip(frame: &mut dyn std::io::Read, n: u64) -> std::io::Result<()> {
+    let mut bounded = std::io::Read::take(&mut *frame, n);
     let copied = std::io::copy(&mut bounded, &mut std::io::sink())?;
     if copied != n {
         return Err(std::io::Error::new(

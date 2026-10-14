@@ -7,8 +7,9 @@
 //! 1. **Archive integrity, every segment.** Every segment the manifest lists
 //!    for the partition — not the segments a sample window overlaps, and not
 //!    a `max_partitions` subset of the partitions — is read back from the store,
-//!    its sha256 compared with the manifest, its records decoded with
-//!    Logweir's own `kbak` decoder, and its decoded count and offsets
+//!    its sha256 compared with the manifest, its records streamed through
+//!    Logweir's own `kbak` decoder (`kbak::digest_segment`: each record
+//!    hashed as it is read, never held), and its decoded count and offsets
 //!    compared with the manifest's.
 //! 2. **The expected output, from each record's OWN timestamp.** An archived
 //!    record is expected when its timestamp is at or before the window's end
@@ -47,6 +48,11 @@
 //!   would take the decoded total past it. Its segments are `unverified`, its
 //!   records lane `Unverified`, `complete.covered` is false and its
 //!   `incomplete_reason` names the bound.
+//! - **A per-segment cap** (FX-30): a segment over [`SEGMENT_STORED_CAP`] is
+//!   not read, and one whose body decompresses past
+//!   [`SEGMENT_DECOMPRESSED_CAP`] (a large segment, or a decompression bomb)
+//!   is not decoded. The segment is `unverified`, the partition is not
+//!   compared, and `incomplete_reason` names both caps.
 //! - **An expected output that cannot be established**: a segment with no
 //!   sha256 (written before 0.21), one the decoder does not read, one that
 //!   failed its check, a source offset archived twice, or archived records
@@ -57,7 +63,10 @@
 //! # Memory
 //!
 //! One partition at a time: a 32-byte digest per expected record and an
-//! 8-byte offset per restored record, never the records themselves.
+//! 8-byte offset per restored record, never the records themselves. One
+//! stored segment is held while it is read (at most [`SEGMENT_STORED_CAP`]),
+//! with the decoder's window (at most 8 MiB for zstd) and, per record of it,
+//! no more than the manifest lists, its digest.
 use super::{Evidence, SelectionVerdict};
 use crate::drill::DrillError;
 use logweir_core::engine::{BackupSetFacts, PartitionFacts, RestorePlan, WindowFloorSource};
@@ -66,10 +75,26 @@ use logweir_core::scorecard::{
     ArchiveIntegrity, CompleteVerification, CompleteWindow, OffsetRange, PartitionVerification,
     ReplayComparison, PARTITION_FINDINGS_CAP,
 };
-use logweir_engine_oso::storage::{Store, StoreError};
+use logweir_engine_oso::kbak::{digest_segment, RecordDigest, ScanError, ScanLimits};
+use logweir_engine_oso::storage::{caps, Store, StoreError};
 use logweir_kafka::fingerprint::record_digest_ordered;
 use logweir_kafka::reader::ClusterReader;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+/// FX-30: the most stored bytes one archived segment may hold for this lane to
+/// read it (the store's segment ceiling); past it the segment is not read.
+pub const SEGMENT_STORED_CAP: u64 = caps::SEGMENT;
+/// FX-30: the most bytes one segment's body may decompress to; past it the
+/// stream stops. The pre-restore archive pass (`drill::archive_scan`) reads
+/// every segment under the same cap.
+pub const SEGMENT_DECOMPRESSED_CAP: u64 = caps::SEGMENT;
+
+fn segment_limits() -> ScanLimits {
+    ScanLimits {
+        max_decompressed: SEGMENT_DECOMPRESSED_CAP,
+        deadline: None,
+    }
+}
 
 /// How many restored records one `consume_range` call reads. The reader's
 /// own deadline is per call, so a whole large partition is never one read.
@@ -159,6 +184,8 @@ struct ArchiveSide {
     /// The decoder's own reason, when a segment's format is one it does not
     /// read (a legacy segment): the selection's downgrade.
     downgrade: Option<String>,
+    /// Segments past a per-segment cap (FX-30), not read or not decoded.
+    capped: u64,
 }
 
 /// How many source offsets in `[lo, hi]` the ranges cover.
@@ -208,6 +235,7 @@ fn archive_side(
         expected: BTreeMap::new(),
         unknown: None,
         downgrade: None,
+        capped: 0,
     };
     let Some(p) = p else {
         return Ok(side);
@@ -235,9 +263,9 @@ fn archive_side(
             );
             continue;
         }
-        // Under the segment ceiling; an object over it is a read failure
-        // below, never a pass.
-        let bytes = match store.get_capped(&seg.key, logweir_engine_oso::storage::caps::SEGMENT) {
+        // Under the stored cap: an object over it is not read, and the
+        // partition is not compared (FX-30), never a pass and never exit 1.
+        let bytes = match store.get_capped(&seg.key, SEGMENT_STORED_CAP) {
             Ok((bytes, _)) => bytes,
             Err(StoreError::NotFound(_)) => {
                 side.failed.push(seg.key.clone());
@@ -248,6 +276,20 @@ fn archive_side(
                 unknown(
                     &mut side,
                     format!("segment {} is missing from the store", seg.key),
+                );
+                continue;
+            }
+            Err(StoreError::TooLarge { .. }) => {
+                side.unverified.push(seg.key.clone());
+                side.capped += 1;
+                findings.push(format!(
+                    "segment {} is larger than the {SEGMENT_STORED_CAP}-byte stored cap per \
+                     segment and was not read",
+                    seg.key
+                ));
+                unknown(
+                    &mut side,
+                    format!("segment {} is past the stored cap", seg.key),
                 );
                 continue;
             }
@@ -273,27 +315,57 @@ fn archive_side(
             );
             continue;
         }
-        let records = match logweir_engine_oso::kbak::decode_segment(&bytes) {
-            Ok(r) => r,
-            Err(e) => {
+        // Streamed: each record is hashed as it is decoded and never held,
+        // and no more records are kept than the manifest lists (one more
+        // stops the read: the segment disagrees with the manifest).
+        let listed = usize::try_from(seg.record_count).unwrap_or(0);
+        let mut records: Vec<RecordDigest> = Vec::new();
+        let mut more = false;
+        let read = digest_segment(&bytes, &segment_limits(), LINEAGE_HEADER, &mut |r| {
+            if records.len() == listed {
+                more = true;
+                return false;
+            }
+            records.push(r);
+            true
+        });
+        drop(bytes);
+        match read {
+            Ok(_) => {}
+            Err(ScanError::Unreadable(e)) => {
                 side.unverified.push(seg.key.clone());
                 findings.push(format!("segment {} could not be decoded: {e}", seg.key));
-                side.downgrade.get_or_insert_with(|| e.to_string());
+                side.downgrade.get_or_insert(e);
                 unknown(
                     &mut side,
                     format!("segment {} could not be decoded", seg.key),
                 );
                 continue;
             }
-        };
+            Err(e @ (ScanError::TooLarge(_) | ScanError::TimedOut(_))) => {
+                side.unverified.push(seg.key.clone());
+                side.capped += 1;
+                findings.push(format!(
+                    "segment {} was not decoded: its body is past the \
+                     {SEGMENT_DECOMPRESSED_CAP}-byte decompressed cap per segment ({e})",
+                    seg.key
+                ));
+                unknown(
+                    &mut side,
+                    format!("segment {} is past the decompressed cap", seg.key),
+                );
+                continue;
+            }
+        }
         let in_range = records
             .iter()
             .all(|r| r.offset >= seg.start_offset && r.offset <= seg.end_offset);
-        if records.len() as i64 != seg.record_count || !in_range {
+        if more || records.len() as i64 != seg.record_count || !in_range {
             side.failed.push(seg.key.clone());
             findings.push(format!(
-                "segment {} decodes to {} records, the manifest says {} in offsets {}..={}{}",
+                "segment {} decodes to {}{} records, the manifest says {} in offsets {}..={}{}",
                 seg.key,
+                if more { "more than " } else { "" },
                 records.len(),
                 seg.record_count,
                 seg.start_offset,
@@ -328,16 +400,12 @@ fn archive_side(
                 }
                 continue;
             }
-            if lineage_offset(&r.headers) != Some(r.offset) {
+            // `lineage_offset`'s rule, kept by the stream: the LAST header,
+            // and only an 8-byte one.
+            if r.kept.map(i64::from_le_bytes) != Some(r.offset) {
                 lineage_missing += 1;
             }
-            let digest = record_digest_ordered(
-                r.key.as_deref(),
-                r.value.as_deref(),
-                &r.headers,
-                r.timestamp,
-            );
-            if side.expected.insert(r.offset, digest).is_some() {
+            if side.expected.insert(r.offset, r.digest).is_some() {
                 findings.push(format!(
                     "source offset {} is archived more than once",
                     r.offset
@@ -542,6 +610,7 @@ pub(super) fn run(
     let mut stopped_at: Option<String> = None;
     let mut not_compared = 0u64;
     let mut budget_used = 0u64;
+    let mut capped = 0u64;
 
     for ((src, pid), (tgt, hi)) in &parts {
         let id = format!("{src}/{pid}");
@@ -653,6 +722,7 @@ pub(super) fn run(
             .extend(side.unverified.iter().cloned());
         archive.records_decoded += side.decoded;
         archive.offset_holes += side.offset_holes;
+        capped += side.capped;
 
         // Segments lane. POSITIVE first, and non-vacuous over a listed
         // partition: every one of its segments verified. A partition the
@@ -761,18 +831,29 @@ pub(super) fn run(
     }
 
     let covered = not_compared == 0;
-    let incomplete_reason = (!covered).then(|| match &stopped_at {
-        Some(first) => format!(
-            "{not_compared} of {} partitions were not compared: the verification stopped at \
-             sample.complete_max_records = {} decoded records, first at {first}",
-            partitions.len(),
-            max_records.unwrap_or_default()
-        ),
-        None => format!(
-            "{not_compared} of {} partitions were not compared because their expected output \
-             could not be established (their findings say why)",
-            partitions.len()
-        ),
+    let incomplete_reason = (!covered).then(|| {
+        let mut why = match &stopped_at {
+            Some(first) => format!(
+                "{not_compared} of {} partitions were not compared: the verification stopped \
+                 at sample.complete_max_records = {} decoded records, first at {first}",
+                partitions.len(),
+                max_records.unwrap_or_default()
+            ),
+            None => format!(
+                "{not_compared} of {} partitions were not compared because their expected \
+                 output could not be established (their findings say why)",
+                partitions.len()
+            ),
+        };
+        // FX-30: a cap is named, so "not compared" never reads as an archive
+        // fault the operator should go looking for.
+        if capped > 0 {
+            why.push_str(&format!(
+                "; {capped} segment(s) are past the per-segment caps ({SEGMENT_STORED_CAP} \
+                 bytes stored, {SEGMENT_DECOMPRESSED_CAP} bytes decompressed) and were not read"
+            ));
+        }
+        why
     });
     gaps.sort();
     pruned.sort();
