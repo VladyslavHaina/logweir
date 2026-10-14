@@ -4318,8 +4318,9 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
 /// principal" beside a topics row reading `TopicNotFound`, which sends an
 /// operator to grant an ACL on a topic that is not there.
 ///
-/// CONTROL: a topic the principal may not describe still says exactly that,
-/// and never that it does not exist.
+/// CONTROLS: a topic the principal may not describe still says exactly that,
+/// and never that it does not exist; a topic with no answer in the budget says
+/// its presence could not be told, neither absent nor refused.
 #[test]
 fn dui36_an_absent_topic_blocks_the_configuration_row_as_absent_not_undescribable() {
     let m = mount(&capability_plan(
@@ -4371,6 +4372,22 @@ fn dui36_an_absent_topic_blocks_the_configuration_row_as_absent_not_undescribabl
         row.message
     );
     assert!(!row.message.contains("does not exist"), "{}", row.message);
+
+    // CONTROL (DUI-36 review L3): no answer in the budget. The topic may well
+    // exist, so the row says it could not be told, never that it is absent
+    // and never that it was refused.
+    let run = drive(&m, &capability_wiring(probe(TopicPresence::Unknown)));
+    assert_eq!(
+        run.row(CheckId::ConnectionTopicsDescribable).code,
+        CheckCode::TopicVisibilityUnknown
+    );
+    let row = run.row(CheckId::ConnectionTopicConfigsReadable);
+    assert!(row.message.contains("could not be told"), "{}", row.message);
+    assert!(
+        !row.message.contains("does not exist") && !row.message.contains("describable"),
+        "{}",
+        row.message
+    );
 }
 
 /// **A bootstrap that answers and advertised brokers that do not**
