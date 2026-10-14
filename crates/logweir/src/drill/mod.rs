@@ -2153,6 +2153,7 @@ fn execute_with_validated_approval(
             creator,
             deleter,
             &c.original_name,
+            chrono::Utc::now(),
         )
     })?;
     let mut topic_preflight = admitted.topic_preflight.clone();

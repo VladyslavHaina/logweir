@@ -766,6 +766,12 @@ pub struct Store {
     /// be implemented without naming its delete, which this crate never does
     /// (G-RET, `scripts/check-no-archive-write.sh`).
     misreport: Option<Arc<Misreport>>,
+    /// TEST DOUBLE ONLY — `Some` for a store [`Store::logging_reads`] returned
+    /// and `None` for every production constructor. Every read this handle
+    /// sends the backend (a GET, a version GET, a HEAD, a listing) is
+    /// recorded, so a row can show that a refusal decided from a plan or a
+    /// record read nothing at all (FX-36).
+    reads: Option<ReadLog>,
 }
 
 /// What [`Store::in_memory_misreporting_size`] reports, and its meter.
@@ -874,6 +880,7 @@ impl Store {
             errors_on_existing_key: false,
             versions: None,
             misreport: None,
+            reads: None,
         })
     }
 
@@ -898,6 +905,7 @@ impl Store {
             errors_on_existing_key: false,
             versions: None,
             misreport: None,
+            reads: None,
         })
     }
 
@@ -920,6 +928,7 @@ impl Store {
             errors_on_existing_key: false,
             versions: None,
             misreport: None,
+            reads: None,
         })
     }
 
@@ -943,6 +952,7 @@ impl Store {
             errors_on_existing_key: false,
             versions: None,
             misreport: None,
+            reads: None,
         })
     }
 
@@ -1136,6 +1146,7 @@ impl Store {
             errors_on_existing_key: false,
             versions: None,
             misreport: None,
+            reads: None,
         }
     }
 
@@ -1249,8 +1260,45 @@ impl Store {
             errors_on_existing_key: false,
             versions: Some(log.clone()),
             misreport: None,
+            reads: None,
         };
         (store, VersionedBucket { backend, log, rt })
+    }
+
+    /// A TEST DOUBLE's read log (FX-36): a second handle on THIS store's
+    /// backend, configured as this one is, with every read it sends the
+    /// backend recorded in the returned [`ReadLog`] — `get <key>`,
+    /// `get <key>?versionId=<id>`, `head <key>`, `list <prefix>` — in order.
+    /// Writes are not recorded, and reads through `self` are not. Built over
+    /// any in-memory double, so a row can count reads on a versioned or a
+    /// misreporting bucket too. No production path calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn logging_reads(&self) -> (Self, ReadLog) {
+        let log = ReadLog::default();
+        let handle = Self {
+            inner: Arc::clone(&self.inner),
+            prefix: self.prefix.clone(),
+            conditional_put: self.conditional_put,
+            rt: Arc::clone(&self.rt),
+            read_only: self.read_only,
+            ignores_create_mode: self.ignores_create_mode,
+            errors_on_existing_key: self.errors_on_existing_key,
+            versions: self.versions.clone(),
+            misreport: self.misreport.clone(),
+            reads: Some(log.clone()),
+        };
+        (handle, log)
+    }
+
+    /// Record one read in the test double's log, when there is one.
+    fn note_read(&self, what: &str, key: &str) {
+        if let Some(log) = &self.reads {
+            log.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(format!("{what} {key}"));
+        }
     }
 
     /// ONE runtime for the life of the store, built in every constructor and
@@ -1312,6 +1360,7 @@ impl Store {
         key: &str,
         max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        self.note_read("get", key);
         // The one whole-body GET outside a version read (clippy.toml
         // forbids it everywhere else): its body is taken through
         // `read_within`'s two fences, never collected whole.
@@ -1342,6 +1391,7 @@ impl Store {
     /// XML `<Code>`: a caller that must CLASSIFY a refusal (the readiness
     /// probe) keeps a GET with [`caps::PROBE`] instead.
     pub fn head(&self, key: &str) -> Result<ObjectHead, StoreError> {
+        self.note_read("head", key);
         let rt = &self.rt;
         rt.block_on(async {
             let meta = self
@@ -1379,6 +1429,7 @@ impl Store {
         max_bytes: u64,
         within: Option<std::time::Duration>,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.note_read("get", key);
         let rt = &self.rt;
         rt.block_on(async {
             let path = OPath::from(key);
@@ -1442,6 +1493,9 @@ impl Store {
         version: &str,
         max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        if self.reads.is_some() {
+            self.note_read("get", &format!("{key}?versionId={version}"));
+        }
         if let Some(log) = &self.versions {
             // The test double's version log: see `versions`.
             if let Some(fault) = log.version_read_fault() {
@@ -1501,6 +1555,7 @@ impl Store {
     /// deleting `out.sort()` leaves the suite green.
     pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         use futures::StreamExt as _;
+        self.note_read("list", prefix);
         let rt = &self.rt;
         rt.block_on(async {
             let mut out = Vec::new();
@@ -1552,6 +1607,7 @@ impl Store {
         if max == 0 {
             return Ok((Vec::new(), None));
         }
+        self.note_read("list", prefix);
         let rt = &self.rt;
         rt.block_on(async {
             let p = OPath::from(prefix);
@@ -2086,6 +2142,24 @@ impl VersionedBucket {
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct StreamMeter(Arc<std::sync::atomic::AtomicU64>);
+
+/// TEST DOUBLE ONLY: the reads a [`Store::logging_reads`] store sent its
+/// backend, in order (FX-36).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct ReadLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ReadLog {
+    /// Every read so far: `get <key>`, `get <key>?versionId=<id>`,
+    /// `head <key>` or `list <prefix>`.
+    #[must_use]
+    pub fn reads(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 impl StreamMeter {
     /// The body bytes taken so far.

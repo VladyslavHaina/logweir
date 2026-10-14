@@ -1699,7 +1699,7 @@ async fn evidence_fetch_pass(
                                 payload_type,
                             };
                             let result = crate::verification::verify_relayed(
-                                client, &reference, &payload, &sidecar,
+                                client, &reference, &payload, &sidecar, now,
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
@@ -1895,11 +1895,14 @@ async fn read_verdict(
     reference: EvidenceRef,
     verify: VerifyOracle<'_>,
     client: &kube::Client,
+    now: DateTime<Utc>,
 ) -> VerificationResult {
     match source {
         EvidenceSource::Destination(store) => {
-            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
-                .await
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone(), now)(
+                reference,
+            )
+            .await
         }
         _ => verify(reference).await,
     }
@@ -2115,6 +2118,7 @@ async fn controller_read_pass(
                 },
                 reads.verify,
                 client,
+                now,
             )
             .await
         }
@@ -5159,7 +5163,7 @@ async fn reconcile_backup_inner(
             (
                 source @ (EvidenceSource::GlobalHandle | EvidenceSource::Destination(_)),
                 Some(reference),
-            ) => Some(read_verdict(source, reference, verify, client).await),
+            ) => Some(read_verdict(source, reference, verify, client, now).await),
             // GC11's no-artifact case, and a fetch that returned no digest: no
             // document, no opinion, no block.
             _ => None,
@@ -5409,7 +5413,7 @@ pub async fn reconcile_in_context_pooled(
                 .flatten()
         })
     };
-    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
+    let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone(), now);
     // The handle's own location, read beside the handle; see
     // `reconcile_backup_at`.
     let archive_url =
@@ -5485,6 +5489,10 @@ async fn reconcile_with_trust(
         let status = value.as_ref().and_then(|v| v.get("status"));
         if crate::verification::has_trust_verdict(status) {
             if let Some(namespace) = backup.namespace() {
+                // The hook's one clock read: the signing-time plan, the
+                // destination read and the re-derived verdict are judged at
+                // one instant (FX-12).
+                let now = Utc::now();
                 let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
                     policies.state().into_iter().map(|p| (*p).clone()).collect();
                 let resolution =
@@ -5495,8 +5503,7 @@ async fn reconcile_with_trust(
                 // goes through the same evidence path as the original verdict,
                 // so a destination-backed run reads its own bucket, and one
                 // whose grant only a pod may hold reads nothing and says so.
-                let signing_time = match crate::verification::signing_time_need(status, Utc::now())
-                {
+                let signing_time = match crate::verification::signing_time_need(status, now) {
                     crate::verification::ReadPlan::None => {
                         crate::verification::SigningTime::NotNeeded
                     }
@@ -5513,9 +5520,7 @@ async fn reconcile_with_trust(
                         // reason no read was attempted, and the verdict is still
                         // re-derived.
                         let (handle, unread) =
-                            match evidence_source(&backup, &ctx.client, &namespace, Utc::now())
-                                .await
-                            {
+                            match evidence_source(&backup, &ctx.client, &namespace, now).await {
                                 Ok(EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
                                 Ok(EvidenceSource::Destination(store)) => (Some(store), None),
                                 Ok(EvidenceSource::NotAttempted { detail }) => (None, Some(detail)),
@@ -5543,7 +5548,7 @@ async fn reconcile_with_trust(
                     &*backup,
                     &resolution,
                     crate::verification::backup_badge,
-                    Utc::now(),
+                    now,
                     &signing_time,
                 )
                 .await?;

@@ -130,15 +130,26 @@ pub async fn reconcile_destination(
     dest: &BackupDestination,
     client: &kube::Client,
 ) -> Result<DestinationVerdict, ReconcileError> {
+    reconcile_destination_at(dest, client, Utc::now()).await
+}
+
+/// [`reconcile_destination`] at `now`, the caller's one clock read: two could
+/// put a verdict and the condition that reports it on either side of the same
+/// instant (FX-12, Global Constraint 1).
+///
+/// # Errors
+///
+/// As [`reconcile_destination`].
+pub async fn reconcile_destination_at(
+    dest: &BackupDestination,
+    client: &kube::Client,
+    now: chrono::DateTime<Utc>,
+) -> Result<DestinationVerdict, ReconcileError> {
     let name = dest.name_any();
     let namespace = dest
         .namespace()
         .filter(|n| !n.is_empty())
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
-
-    // One clock read: two could put a verdict and the condition that reports it
-    // on either side of the same instant.
-    let now = Utc::now();
 
     // The CA read is the only I/O, and it happens before the verdict, so
     // `evaluate` stays a pure function of a spec and one observation. No bundle

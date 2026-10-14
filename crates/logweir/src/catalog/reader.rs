@@ -243,6 +243,20 @@ pub fn cross_check(
     }
     let mut disagreements =
         ReceiptFacts::of_record(point).disagreements(&ReceiptFacts::of_receipt(receipt));
+    // **The identity, re-derived (FX-36 review L1).** A point id is the
+    // receipt's content (D3 §5.1), so a record whose `point_id` does not
+    // derive from the bytes it names is another point's receipt relabelled:
+    // a copy of point B's facts, digest included, under point A's id. It is
+    // a contradiction of one of the record's claims, so `RecordMismatch`
+    // (`Conflict`), not `WrongReceipt`: the digests agree, and that variant's
+    // `claimed`/`actual` pair is about digests.
+    let derived = crate::catalog::record::point_id(receipt_bytes);
+    if derived != point.point_id {
+        disagreements.push(format!(
+            "point_id: {:?} vs {derived:?} derived from the receipt",
+            point.point_id
+        ));
+    }
     // **The pin, one way round.** A record that carries
     // `archive.manifest_version_id` must carry the RECEIPT's: a different pin,
     // or one the receipt does not have, would send a reader to the wrong

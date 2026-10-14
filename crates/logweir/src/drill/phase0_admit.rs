@@ -221,6 +221,33 @@ pub fn run(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
 ) -> Result<Admitted, DrillError> {
+    run_at(
+        spec,
+        spec_text,
+        allowed,
+        reader,
+        creator,
+        deleter,
+        chrono::Utc::now(),
+    )
+}
+
+/// [`run`] at `now`, the caller's one clock read: the target's timestamp
+/// bound (guard G-TS) is judged at it, so a row can admit a plan at a fixed
+/// instant (FX-12, Global Constraint 1).
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_at(
+    spec: &DrillSpec,
+    spec_text: &str,
+    allowed: &AllowedClusters,
+    reader: &dyn ClusterReader,
+    creator: &dyn TopicCreator,
+    deleter: &dyn TopicDeleter,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Admitted, DrillError> {
     run_with_original_name(
         spec,
         spec_text,
@@ -229,6 +256,7 @@ pub fn run(
         creator,
         deleter,
         &OriginalNameInputs::default(),
+        now,
     )
 }
 
@@ -238,6 +266,7 @@ pub fn run(
 /// an original-name plan "nothing known" refuses (`OriginalNameOwnerNotChecked`
 /// unless the plan states its owners; the cluster condition then needs
 /// auto-creation proven disabled).
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_original_name(
     spec: &DrillSpec,
     spec_text: &str,
@@ -246,6 +275,7 @@ pub fn run_with_original_name(
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
     original: &OriginalNameInputs,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Admitted, DrillError> {
     // `?` on purpose: the scan FAILS CLOSED. A spec text this scanner cannot
     // parse is a spec it did not scan, and that is a `GuardRefusal` (exit 3),
@@ -679,6 +709,7 @@ pub fn run_with_original_name(
         reader,
         creator,
         deleter,
+        now,
     )?;
 
     Ok(Admitted {
@@ -786,6 +817,7 @@ fn target_topic_preflight(
     reader: &dyn ClusterReader,
     creator: &dyn TopicCreator,
     deleter: &dyn TopicDeleter,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<TopicPreflight, DrillError> {
     // 1 — read the BROKER's defaults.
     let broker = reader.broker_configs()?;
@@ -847,7 +879,7 @@ fn target_topic_preflight(
             None => ("sample.window_end", spec.sample.window_end),
         };
         let window_end_ms = window_end.timestamp_millis();
-        let oldest_accepted_ms = chrono::Utc::now().timestamp_millis().saturating_sub(bound);
+        let oldest_accepted_ms = now.timestamp_millis().saturating_sub(bound);
         if window_end_ms < oldest_accepted_ms {
             return Err(target_topic_refusal(format!(
                 "the target broker bounds how far in the past a CreateTime record may be \

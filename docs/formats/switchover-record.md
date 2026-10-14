@@ -27,7 +27,9 @@ groups:
 ```
 
 Bounds: 1 to 100 groups, 1 to 8,192 positions, 256 KiB, distinct target ids,
-offsets not negative. A forward plan's every offset is the mapping's, mapped
+offsets not negative. A rollback plan's `rollback_of.key` is exactly
+`logweir/switchovers/<run_id>.record.json` (the run id letters, digits, `-` and
+`_`), or the plan is refused before anything is read (FX-36). A forward plan's every offset is the mapping's, mapped
 (`PlanDisagreesWithMapping` otherwise); its `expected` is a precondition only.
 A rollback plan's every offset is the record's prior and its `expected` the
 record's readback, for a group the record applied.

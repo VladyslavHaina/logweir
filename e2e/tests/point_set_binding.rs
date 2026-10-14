@@ -14,6 +14,11 @@
 //! | `edited` | as `copy`, over a copy whose manifest carries one more trailing newline | exit 3 before phase 0 | exit 3 after `describe` | restores it under A's receipt |
 //! | `nested` | review M-1: point N's set NESTED under the plan's prefix (`<nest>/a/N/`), another set with the same id where the engine reads (`<nest>/N/`) | exit 3 before phase 0, naming both keys and `<nest>/a` | **restores the other set (45) under N's receipt (60)**: M-1 | the same |
 //!
+//! A second row, `a_bound_restore_reads_only_its_own_sets_receipt_and_answers_once`
+//! (FX-36), binds plans to a receipt key outside the point's set, to an
+//! absent, an altered and an oversized receipt, and to the point itself (its
+//! control); see its doc.
+//!
 //! The binding (receipt digest, point id, signature under the mounted
 //! evidence keyring, the manifest at the receipt's key) verifies in EVERY run:
 //! each refused plan is approved, signed, and bound to a real point. What
@@ -887,4 +892,151 @@ fn a_bound_restore_restores_its_points_set_or_nothing() {
     )
     .expect("written");
     eprintln!("[fx16] evidence: {}", p.display());
+}
+
+/// **FX-36, live on MinIO: a bound restore reads only a receipt of its own
+/// set, and an absent, altered or oversized receipt gets one answer.**
+///
+/// Point A, then four plans bound to it that differ from the approved one in
+/// one field each:
+///
+/// | run | `receipt_key` | `receipt_sha256` | expected |
+/// |---|---|---|---|
+/// | `outside` | a byte-identical copy of A's receipt and signature OUTSIDE A's set's receipts | A's | exit 3 `PointBindingMismatch`, "it was not read" (a build that read it would verify it) |
+/// | `absent` | a receipt key of A's set holding nothing | zeros | exit 3, the one answer |
+/// | `altered` | A's own | zeros | exit 3, the same answer |
+/// | `oversized` | a receipt key of A's set holding 64 MiB + 1 | zeros | exit 3, the same answer |
+/// | `bound` | A's own | A's | exit 0 `pass` (the CONTROL) |
+///
+/// The three answers are the same text but for the key the plan named, and
+/// no refused run reaches phase 0 or creates its target.
+#[test]
+fn a_bound_restore_reads_only_its_own_sets_receipt_and_answers_once() {
+    let n = nonce();
+    let topic = format!("fx36src-{n}");
+    let mut topics = Topics(vec![topic.clone()]);
+    create_source_topic(&topic);
+    let bucket = harness::ARCHIVE_BUCKET;
+    let prefix = format!("fx36-{n}");
+    produce(&topic, 10, "a");
+    let a = backup(&format!("fx36-{n}-a"), &prefix, &topic);
+    let window = (a.receipt.covered.from_ms, a.receipt.covered.to_ms);
+    let sig = |key: &str| key.replace(".receipt.json", ".receipt.sig");
+
+    let foreign = format!(
+        "logweir/fx36-{n}/elsewhere/{}.receipt.json",
+        a.receipt.run_id
+    );
+    for (from, to) in [
+        (a.receipt_key.clone(), foreign.clone()),
+        (sig(&a.receipt_key), sig(&foreign)),
+    ] {
+        mc_ok(
+            &[
+                "cp",
+                &format!("local/{bucket}/{from}"),
+                &format!("local/{bucket}/{to}"),
+            ],
+            &format!("copy {from} to {to}"),
+        );
+    }
+    assert_eq!(archive_get(&prefix, &foreign), a.receipt_bytes, "a copy");
+    let absent = format!(
+        "logweir/backups/{}/fx36-absent-{n}.receipt.json",
+        a.backup_id
+    );
+    let oversized = format!("logweir/backups/{}/fx36-big-{n}.receipt.json", a.backup_id);
+    let cap = logweir_engine_oso::storage::caps::SIGNED_DOCUMENT;
+    let big = vec![b' '; usize::try_from(cap + 1).expect("fits")];
+    let piped = mc_with_stdin(&["pipe", &format!("local/{bucket}/{oversized}")], &big);
+    assert!(piped.status.success(), "mc pipe:\n{}", text(&piped));
+
+    let bound_digest = logweir_core::ids::sha256_prefixed(&a.receipt_bytes);
+    let zeros = format!("sha256:{}", "0".repeat(64));
+    let plan = |name: &str, key: &str, digest: &str| {
+        let naming = format!("fx36{name}-{n}-");
+        let spec = restore_spec(&a, &prefix, &a.backup_id, &topic, &naming, window)
+            .replace(
+                &format!("receipt_key: {}", a.receipt_key),
+                &format!("receipt_key: {key}"),
+            )
+            .replace(&bound_digest, digest);
+        (spec, format!("{naming}{topic}"))
+    };
+
+    let mut evidence = serde_json::Map::new();
+    let mut answers = Vec::new();
+    for (name, key, digest) in [
+        ("outside", foreign.as_str(), bound_digest.as_str()),
+        ("absent", absent.as_str(), zeros.as_str()),
+        ("altered", a.receipt_key.as_str(), zeros.as_str()),
+        ("oversized", oversized.as_str(), zeros.as_str()),
+    ] {
+        let (spec, target) = plan(name, key, digest);
+        topics.0.push(target.clone());
+        let r = restore(&bin(), &spec, &format!("fx36-{n}-{name}"));
+        let t = text(&r.out);
+        evidence.insert(
+            name.into(),
+            json!({"receipt_key": key, "exit": r.out.status.code(), "lines": kept(&r.out)}),
+        );
+        assert_eq!(r.out.status.code(), Some(3), "{name}: exit 3:\n{t}");
+        assert!(t.contains("refusal-reason=GuardRefused"), "{name}:\n{t}");
+        assert!(
+            !t.contains("progress-phase="),
+            "{name}: before phase 0:\n{t}"
+        );
+        assert!(!harness::topic_exists(&target), "{name}: nothing created");
+        assert_eq!(r.scorecard, Value::Null, "{name}: nothing signed");
+        // The refusal's own text, out of whichever line carries it (the log
+        // line also carries its instant and run id).
+        let line = t
+            .lines()
+            .find(|l| l.contains("PointBindingMismatch. "))
+            .unwrap_or_else(|| panic!("{name}: no PointBindingMismatch line:\n{t}"));
+        let from = &line[line.find("PointBindingMismatch. ").expect("found")..];
+        let end = "no data operation was started.";
+        let refusal = from[..from.find(end).map_or(from.len(), |i| i + end.len())].to_string();
+        if name == "outside" {
+            assert!(refusal.contains("it was not read"), "{refusal}");
+        } else {
+            assert!(
+                refusal.contains("it is absent, its bytes do not hash to the bound"),
+                "{name}: {refusal}"
+            );
+            answers.push(refusal.replace(key, "<receipt key>"));
+        }
+    }
+    assert!(
+        answers.windows(2).all(|w| w[0] == w[1]),
+        "one answer for absent, altered and oversized: {answers:#?}"
+    );
+
+    // CONTROL: the approved binding restores.
+    let (spec, target) = plan("bound", &a.receipt_key, &bound_digest);
+    topics.0.push(target.clone());
+    let r = restore(&bin(), &spec, &format!("fx36-{n}-bound"));
+    evidence.insert(
+        "bound".into(),
+        json!({"exit": r.out.status.code(), "outcome": r.scorecard["outcome"],
+               "lines": kept(&r.out)}),
+    );
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "the control:\n{}",
+        text(&r.out)
+    );
+    assert_eq!(r.scorecard["outcome"], "pass");
+    assert_eq!(records_on(&target), 30);
+
+    let dir = demo_dir().join("point-set-binding");
+    std::fs::create_dir_all(&dir).expect("the evidence directory");
+    let p = dir.join(format!("fx36-{n}.json"));
+    std::fs::write(
+        &p,
+        serde_json::to_vec_pretty(&Value::Object(evidence)).expect("serialises"),
+    )
+    .expect("written");
+    eprintln!("[fx36] evidence: {}", p.display());
 }

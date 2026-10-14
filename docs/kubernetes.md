@@ -1351,6 +1351,10 @@ an ordinary restore only when it is `Available` and `Verified` or
 - A point whose record gave no facts is listed by its point id alone and is
   never selectable. A walk that never started relays nothing; the controller
   reads that as `ResultUnreadable` and keeps the previous view.
+- A record is read for keys only where a receipt can be: its receipt key must
+  be `logweir/backups/<set>/<run>.receipt.json` (each id one plain path
+  segment) and its sidecar key the `.receipt.sig` beside it. Any other record
+  is `Unreadable` (`unreadableMalformed`) and neither key is read (FX-36).
 - `deepCheck: ManifestDigest` is the default. `deepCheck: None` makes a point
   `Available` once its record and receipt read. `deepCheck: SegmentSample` is
   honoured as `ManifestDigest` (`catalogSegmentSample: notImplemented`).
@@ -1414,6 +1418,10 @@ storage. This path reads no `Backup`, `BackupSchedule` or source `KafkaCluster`.
    receipt, re-derives the point id, compares both digests, verifies the
    signature against the evidence keyring in the approval bundle
    (`evidence-keys.json`) and reads the manifest back.
+   - A receipt key that is not `logweir/backups/<source.backup>/<run id>.receipt.json`
+     is exit 3 `PointBindingMismatch` with nothing read. An absent receipt,
+     other bytes or one over the 64 MiB cap are one answer, exit 3
+     `PointBindingMismatch` (FX-36).
    - A digest mismatch, or a pinned version this bucket holds that is no longer
      current, is exit 3 `PointBindingMismatch`. A pinned version this bucket
      does not hold is logged `PointPinUnchecked` and the digest decides.

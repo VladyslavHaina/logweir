@@ -780,6 +780,8 @@ struct FakeWiring {
     /// When set, EVERY `objects` handle is this real `Store` (see
     /// [`SharedStore`]) instead of a `FakeObjects`.
     shared_store: Option<Arc<logweir_engine_oso::storage::Store>>,
+    /// The instant `Wiring::now` answers; the file's [`now`] when unset.
+    at: Option<DateTime<Utc>>,
 }
 
 fn role_key(role: DestinationRole) -> &'static str {
@@ -787,6 +789,12 @@ fn role_key(role: DestinationRole) -> &'static str {
 }
 
 impl FakeWiring {
+    /// The check runs at `t` (FX-12: a check's `now` is the wiring's).
+    fn at(mut self, t: DateTime<Utc>) -> Self {
+        self.at = Some(t);
+        self
+    }
+
     fn with_probe(mut self, p: FakeProbe) -> Self {
         self.probe = Some(p);
         self
@@ -943,7 +951,7 @@ impl Wiring for FakeWiring {
     }
 
     fn now(&self) -> DateTime<Utc> {
-        now()
+        self.at.unwrap_or_else(now)
     }
 }
 
@@ -2810,6 +2818,106 @@ fn switchover_review_plan() -> CheckPlan {
             groups: Vec::new(),
         },
     )))
+}
+
+/// **FX-12 review L3: a switchover review judges the restore's evidence at
+/// the check's own instant (`Wiring::now`), never at a clock read of its
+/// own.** The signed scorecard fixture claims a signing time in 2026-09
+/// under a key open from 2000 to 2999: the review run at 2001 refuses it
+/// (the claim is in the future) and the same review at 2026-10 verifies it.
+/// A review that read the wall clock would verify at "2001".
+///
+/// KILLS: `restore_evidence(.., Utc::now())` in the check.
+#[test]
+fn a_switchover_review_judges_the_evidence_at_the_checks_instant() {
+    use logweir_core::execution_contract::{EvidenceKey, EvidenceKeyring};
+    use logweir_core::trust::{KeyState, KeyUsage, TrustedKey};
+    const RUN: &str = "01J9X2QK7C4V0R8YB3ZP6MTS5A";
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("an instant")
+            .with_timezone(&Utc)
+    };
+    let scorecard =
+        include_bytes!("../../../e2e/fixtures/invariants/positions_mapping_accepted.json").to_vec();
+    let mapping =
+        include_bytes!("../../../e2e/fixtures/invariants/positions_mapping_accepted.mapping.json")
+            .to_vec();
+    let doc: serde_json::Value = serde_json::from_slice(&scorecard).expect("json");
+    let signer = logweir_evidence::keys::SigningKey::generate_ed25519();
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &signer,
+        logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+        &scorecard,
+    )
+    .expect("signed");
+    let mut plan = switchover_review_plan();
+    if let CheckRequest::SwitchoverReadiness(r) = &mut plan.request {
+        r.scorecard_key = format!("logweir/drills/{RUN}.json");
+        r.restore_plan_sha256 = doc["approval"]["plan_hash"]
+            .as_str()
+            .expect("a plan hash")
+            .to_string();
+        r.keyring = EvidenceKeyring {
+            format_version: "1.0.0".to_string(),
+            keys: vec![EvidenceKey {
+                public_key_pem: signer.verifying_key().to_public_key_pem().expect("pem"),
+                trust: TrustedKey {
+                    key_id: signer.key_id(),
+                    principal_id: format!("install:{}", signer.key_id()),
+                    usages: vec![KeyUsage::EvidenceSigning],
+                    not_before: at("2000-01-01T00:00:00Z"),
+                    not_after: at("2999-01-01T00:00:00Z"),
+                    state: KeyState::Active,
+                    retired_at: None,
+                    revoked_at: None,
+                    revocation_reason: None,
+                    revocation_effective_from: None,
+                },
+            }],
+        };
+    } else {
+        unreachable!("a switchover review plan");
+    }
+    let m = mount(&plan);
+    let evidence = || {
+        FakeObjects::new()
+            .with_object(&format!("logweir/drills/{RUN}.json"), &scorecard)
+            .with_object(
+                &format!("logweir/drills/{RUN}.sig"),
+                &serde_json::to_vec(&sidecar).expect("json"),
+            )
+            .with_object(
+                &logweir_core::positions_mapping::document_key(RUN),
+                &mapping,
+            )
+    };
+    let row_at = |t: DateTime<Utc>| {
+        let run = drive(
+            &m,
+            &FakeWiring::default()
+                .at(t)
+                .with_role(DestinationRole::EvidenceRead, evidence()),
+        );
+        run.row(CheckId::SwitchoverEvidence)
+    };
+    let early = row_at(at("2001-01-01T00:00:00Z"));
+    assert_eq!(
+        (early.state, early.code),
+        (CheckState::NotReady, CheckCode::RestoreEvidenceRefused),
+        "{early:?}"
+    );
+    assert!(
+        early.message.contains("trust refuses that key"),
+        "{}",
+        early.message
+    );
+    let late = row_at(at("2026-10-01T00:00:00Z"));
+    assert_eq!(
+        (late.state, late.code),
+        (CheckState::Ready, CheckCode::RestoreEvidenceVerified),
+        "{late:?}"
+    );
 }
 
 /// **PROD-04.2 §3.8: a switchover review emits its four rows on every
@@ -11544,6 +11652,167 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
         "the remedy states the size against the bound: {remedy}"
     );
     assert!(!remedy.contains("grant"), "a size names no grant: {remedy}");
+}
+
+/// **FX-36 review L1: a record relabelled onto another point's receipt is
+/// not `Available`.** The record at point A's key copies point B's facts,
+/// digest, receipt key and sidecar key (set B's real receipt, which verifies)
+/// and keeps A's `point_id`. Every copied fact agrees with B's receipt, so
+/// only the identity re-derived from the receipt bytes tells: A is
+/// `Conflict`, and B, read from its own record, stays `Available`.
+///
+/// CONTROL: the records as written list both points `Available`.
+///
+/// KILLS: the `point_id` re-derivation in `reader::cross_check` removed (A
+/// is listed `Available` with `backupId: set-b`).
+#[test]
+fn a_catalog_record_relabelled_onto_another_points_receipt_is_not_available() {
+    let availability = |body: &str, point_id: &str| -> serde_json::Value {
+        entries_of(body)
+            .into_iter()
+            .find(|e| e["pointId"] == point_id)
+            .unwrap_or_else(|| panic!("{point_id} is listed: {body}"))["availability"]
+            .clone()
+    };
+    // CONTROL.
+    let (objects, newer, older) = two_point_objects();
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        availability(&body, &newer.point.point_id),
+        "Available",
+        "{body}"
+    );
+    assert_eq!(
+        availability(&body, &older.point.point_id),
+        "Available",
+        "{body}"
+    );
+
+    // A's key now holds B's record under A's id.
+    let (objects, newer, older) = two_point_objects();
+    let mut relabelled = older.point.clone();
+    relabelled.point_id = newer.point.point_id.clone();
+    let objects = objects.with_object(
+        &newer.record_key,
+        &relabelled.canonical_bytes().expect("serialises"),
+    );
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        availability(&body, &newer.point.point_id),
+        "Conflict",
+        "{body}"
+    );
+    assert_eq!(
+        availability(&body, &older.point.point_id),
+        "Available",
+        "{body}"
+    );
+}
+
+/// **FX-36: a catalog record's receipt and signature keys are read only
+/// when they are a receipt's and the signature beside it.** A record is
+/// written by whoever holds a catalog write grant; read on its word, the walk
+/// would answer per key of the writer's choice (another tenant's prefix
+/// included) whether an object exists and whether its bytes hash to the
+/// record's digest. Each record below names a key that is not a receipt key,
+/// or a signature that is not beside its receipt, and THAT key holds the
+/// point's real receipt (or sidecar), so a walk that read it would list the
+/// point `Available`. Each is listed `Unreadable` (the record is another
+/// document), and neither named key is read.
+///
+/// CONTROL: the record as written is read at its own keys and is `Available`.
+///
+/// KILLS: `names_a_receipt` removed (the named keys are read and the point is
+/// `Available`); its sidecar half dropped (the foreign sidecar is read).
+#[test]
+fn a_catalog_record_naming_another_receipt_key_reads_nothing_it_names() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let own_sidecar = f.sidecar_key.clone();
+    let cases: Vec<(String, String)> = [
+        "tenant-b/logweir/backups/set-a/run-a.receipt.json",
+        "/logweir/backups/set-a/run-a.receipt.json",
+        "logweir/backups/set-a/../set-b/run-a.receipt.json",
+        "logweir/backups/set-a/nested/run-a.receipt.json",
+        "logweir/catalog/v1/points/lwp1-00000000000000000000000000000000/record.json",
+        "kafka-backups/set-a/manifest.json",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), k.replace(".json", ".sig")))
+    .chain([
+        // The receipt key is the record's own; its sidecar key is not.
+        (
+            f.receipt_key.clone(),
+            "tenant-b/logweir/backups/set-a/run-a.receipt.sig".to_string(),
+        ),
+        (
+            f.receipt_key.clone(),
+            "logweir/backups/set-b/run-a.receipt.sig".to_string(),
+        ),
+    ])
+    .collect();
+    for (receipt_key, sidecar_key) in cases {
+        let mut point = f.point.clone();
+        point.receipt.key = receipt_key.clone();
+        point.receipt.sidecar_key = sidecar_key.clone();
+        let objects = place(FakeObjects::new(), &f)
+            .with_object(&f.record_key, &point.canonical_bytes().expect("serialises"))
+            .with_object(&receipt_key, &f.receipt_bytes)
+            .with_object(&sidecar_key, &f.sidecar_bytes);
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        );
+        let body = body_of(&run);
+        let entries = entries_of(&body);
+        assert_eq!(entries.len(), 1, "{receipt_key}: {body}");
+        assert_eq!(
+            entries[0]["availability"], "Unreadable",
+            "{receipt_key}: {body}"
+        );
+        let calls = objects.calls();
+        for named in [&receipt_key, &sidecar_key] {
+            if *named != f.receipt_key && *named != own_sidecar {
+                assert!(
+                    !calls.contains(&format!("get {named}")),
+                    "{named} was read: {calls:?}"
+                );
+            }
+        }
+        assert!(
+            !calls.contains(&format!("get {}", f.receipt_key))
+                && !calls.contains(&format!("get {own_sidecar}")),
+            "{receipt_key}: nothing past the record is read: {calls:?}"
+        );
+    }
+
+    // CONTROL: the record as written.
+    let objects = place(FakeObjects::new(), &f);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    assert_eq!(entries_of(&body)[0]["availability"], "Available", "{body}");
+    let calls = objects.calls();
+    assert!(
+        calls.contains(&format!("get {}", f.receipt_key))
+            && calls.contains(&format!("get {own_sidecar}")),
+        "{calls:?}"
+    );
 }
 
 /// **The catalog walk READS under its caps**, not only measures after: the
