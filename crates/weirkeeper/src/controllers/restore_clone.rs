@@ -412,10 +412,14 @@ pub fn teardown_value(report: &CloneCleanupReport, earlier: &[String]) -> Value 
             deleted.push(name);
         }
     }
+    // The lists are cut at the CRD's bound; the counts say how many there
+    // were, so a cut list never reads as whole (FX-38).
+    t.insert("deletedCount".into(), json!(deleted.len()));
     t.insert(
         "deleted".into(),
         json!(deleted.into_iter().take(256).collect::<Vec<_>>()),
     );
+    t.insert("failedCount".into(), json!(report.left.len()));
     t.insert(
         "failed".into(),
         json!(report
@@ -1391,7 +1395,27 @@ mod tests {
         assert_eq!(
             teardown_value(&report, &[]),
             json!({"attestationKey": "logweir/drills/r.cleanup.json", "deleted": ["c-a"],
+                   "deletedCount": 1, "failedCount": 1,
                    "failed": [{"topic": "c-b", "error": "CloneTargetReplaced: x"}]})
+        );
+        // FX-38: past the CRD's 256 the lists are cut and the counts say how
+        // many there were. KILLS: a count of the cut list.
+        let many = CloneCleanupReport {
+            deleted: (0..300).map(|i| format!("c-d{i}")).collect(),
+            left: (0..300)
+                .map(|i| logweir_core::target_creation::CloneCleanupLeft {
+                    topic: format!("c-l{i}"),
+                    reason: "x".into(),
+                })
+                .collect(),
+            ..report.clone()
+        };
+        let cut = teardown_value(&many, &[]);
+        assert_eq!(cut["deleted"].as_array().map(Vec::len), Some(256));
+        assert_eq!(cut["failed"].as_array().map(Vec::len), Some(256));
+        assert_eq!(
+            (cut["deletedCount"].clone(), cut["failedCount"].clone()),
+            (json!(300), json!(300))
         );
         // An earlier attempt's deletions stay listed (review LOW-4); KILLS a
         // later attempt's list replacing them.

@@ -1867,13 +1867,13 @@ async fn fx38_an_unreadable_view_line_marks_the_points_page_incomplete() {
     assert!(v.get("incomplete").is_none(), "CONTROL");
 }
 
-/// **FX-38 (6): an absent `status.truncated` is unknown, never `false`.** A
-/// catalog that has not said whether its view is a window publishes no
-/// `truncated`, on the catalog and on its points page.
-/// CONTROL: a catalog that said `false` publishes `false`.
+/// **FX-38 (6): an absent `status.truncated` is never published as `false`.**
+/// A catalog that has not said whether its view is a window is published as
+/// one (`true`, "not known to be whole"), on the catalog and on its points
+/// page. CONTROL: a catalog that said `false` publishes `false`.
 #[tokio::test]
 async fn fx38_an_absent_truncated_is_not_published_as_false() {
-    for (said, published) in [(None, None), (Some(false), Some(false))] {
+    for (said, published) in [(None, Some(true)), (Some(false), Some(false))] {
         let fake = seeded();
         let lines = entry_lines();
         let digest = seed_page(&fake, "primary-g1-p0", &lines);

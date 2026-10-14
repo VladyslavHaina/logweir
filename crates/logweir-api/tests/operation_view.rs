@@ -795,6 +795,27 @@ fn the_completion_panel_carries_the_counts_the_scorecard_recorded() {
     assert!(!teardown.deleted_truncated);
     assert_eq!(teardown.failed.len(), 1);
     assert_eq!(teardown.failed[0].topic, "scram-restored-payments");
+    // FX-38: a status that does not count publishes no count.
+    assert_eq!(teardown.failed_count, None);
+
+    // FX-38: the counts the controller wrote are published, and a deleted
+    // list shorter than its count says it was cut. CONTROL: above.
+    set(
+        &mut object,
+        "/status/teardown",
+        json!({
+            "deleted": ["scram-restored-orders"], "deletedCount": 300,
+            "failed": [{"topic": "scram-restored-payments", "error": "x"}], "failedCount": 300
+        }),
+    );
+    let teardown = restore_view(&restore_from(&object), now())
+        .teardown
+        .expect("the teardown outcome is published");
+    assert_eq!(teardown.failed_count, Some(300));
+    assert!(
+        teardown.deleted_truncated,
+        "the status counts 300 deleted, one listed"
+    );
 }
 
 /// **A Restore held for an approval says so.**

@@ -1290,7 +1290,7 @@ after `status.cursor.rescanStartAfter`.
 
 | Bound | Value |
 |---|---|
-| `spec.sync.viewLimit` | 100–5000, default 2000: how many newest points are materialised. The rest are counted, and `status.truncated` says the view is a window. |
+| `spec.sync.viewLimit` | 100–5000, default 2000: how many newest points are materialised. The rest are counted, and `status.truncated` says the view is a window. `truncated` is also set for entries that did not fit the view's pages or one page, which a larger `viewLimit` does not cure; the `Synced` message names each cause. The product API publishes an absent `truncated` as `true`. |
 | `spec.sync.maxObjectsPerRun` | 1000–1000000, default 100000: the object budget of one sync Job; a walk that does not finish persists its cursor (`ScanIncomplete`, `catalogStoppedFor: objectBudget`) |
 | `status.pages[]` | at most 8 immutable `ConfigMap`s, entries one JSON per line under `entries.jsonl`, each with its `sha256` |
 | `status.indexConfigMap` | one fence-pointer `ConfigMap`: per page, the point-id and recovery-point ranges |
@@ -1564,7 +1564,10 @@ which keeps the verdict `unknown`. A `Preflight` over a draft plan has no
   `RecoveryPointNotFound`, `CatalogPointViewUnavailable`,
   `CatalogPointRefusedByController`, `CatalogPointNotSelectable`,
   `CatalogPointSignerUntrusted`, `CatalogPointSignerUnknown`,
-  `CatalogPointBindingMismatch` or `CatalogPointSelectable`.
+  `CatalogPointBindingMismatch` or `CatalogPointSelectable`. A view that does
+  not list the point and holds a line the check cannot read is
+  `CatalogPointViewUnavailable`, never `RecoveryPointNotFound`: the line may be
+  the point.
 - **A point-bound plan's archive** is judged as the runner will judge it.
   Nothing is read unless the binding is well formed, `source.backup` is the set
   the check reads (never `latestCompleted`), and the receipt key is exactly
@@ -2663,10 +2666,15 @@ is its newest record.
   way. With no catalog or no row, `Protected=Unknown`, reason
   `PointFactsUnread`, and an open `Staleness` entry stays open.
 - An entry whose axes are empty is `CatalogUnreadable`, so `Unknown`. A deleted
-  page reads the same, never a pass.
+  page, or a page line the controller cannot parse, reads the same, never a
+  pass.
 - Bounds: 16 ledger entries (8 recoveries), 16 schedules, 64 topics on
   `lastAvailablePoint` (`topicsTruncated: true` beyond), and the newest 50 runs
-  over at most 5 API pages of 200.
+  over at most 5 API pages of 200. The API server lists `Backup`s by name, so
+  past 1,000 in the namespace the newest runs may be the ones not read: the
+  verdict is then `Unknown`, reason `BackupHistoryTooLarge`, never a verdict
+  over the runs it saw. Delete old terminal `Backup` objects (the archive keeps
+  their points) and the policy evaluates again.
 - The console's `#/protection` page shows this read-only.
 
 ## The installation policy and roles

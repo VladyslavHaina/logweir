@@ -3004,17 +3004,32 @@ pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 /// `status.teardown.failed` from the runner's last `teardown-failed=` line,
 /// held to this Restore's mapped target names: a topic its plan does not map
 /// is not this run's to name. `None` when there is no line or nothing in it
-/// survives.
+/// survives. `failedCount` from its `teardown-failed-count=` line (FX-38): the
+/// list carries at most 256 names, and the count says how many were left,
+/// held between the names kept and the names the plan maps.
 #[must_use]
 pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
-    use logweir_core::execution_contract::{parse_teardown_failed, TEARDOWN_FAILED_PREFIX};
+    use logweir_core::execution_contract::{
+        parse_teardown_failed, TEARDOWN_FAILED_COUNT_PREFIX, TEARDOWN_FAILED_PREFIX,
+    };
     let raw = runner_log::key_values(log, TEARDOWN_FAILED_PREFIX).pop()?;
     let kept: Vec<Value> = parse_teardown_failed(raw)?
         .into_iter()
         .filter(|f| mapped.iter().any(|m| m == &f.topic))
         .map(|f| json!({"topic": f.topic, "error": f.error}))
         .collect();
-    (!kept.is_empty()).then(|| json!({ "failed": kept }))
+    if kept.is_empty() {
+        return None;
+    }
+    let mut teardown = json!({ "failed": kept });
+    if let Some(count) = runner_log::key_values(log, TEARDOWN_FAILED_COUNT_PREFIX)
+        .pop()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        let count = count.min(mapped.len()).max(kept.len());
+        teardown["failedCount"] = json!(count);
+    }
+    Some(teardown)
 }
 
 /// **PROD-05.2.** `status.topicConfiguration` from the runner's last

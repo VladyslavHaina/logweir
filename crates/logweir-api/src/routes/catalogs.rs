@@ -238,12 +238,11 @@ pub struct CatalogView {
     pub cursor: Option<SyncCursorView>,
     /// What it found.
     pub counts: CatalogCountsView,
-    /// Whether the archive holds more points than the view carries. ABSENT
-    /// when the catalog has not said (no view published yet, or a status
-    /// written before the field existed): unknown, never "the view is the
-    /// whole archive" (FX-38).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
+    /// Whether the archive holds more points than the view carries, or may:
+    /// `true` also when the catalog has not said (no view published yet, or
+    /// a status written before the field existed). A view not known to be
+    /// whole is never published as whole (FX-38).
+    pub truncated: bool,
     /// How many points the materialised view actually holds.
     pub view_points: i64,
     /// Points per day.
@@ -323,7 +322,8 @@ pub fn view(catalog: &RecoveryCatalog, now: DateTime<Utc>) -> CatalogView {
             deleted: c.deleted,
             unsupported_format: c.unsupported_format,
         }),
-        truncated: status.and_then(|s| s.truncated),
+        // Absent is not "whole" (FX-38).
+        truncated: status.and_then(|s| s.truncated).unwrap_or(true),
         view_points: status
             .and_then(|s| s.pages.as_ref())
             .into_iter()
@@ -786,10 +786,9 @@ pub struct PointPageResponse {
     pub items: Vec<PointView>,
     /// Paging. `snapshot` is the view generation this page came from.
     pub page: Page,
-    /// Whether the archive holds more points than the view carries; absent
-    /// when the catalog has not said, which is unknown, never `false`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
+    /// Whether the archive holds more points than the view carries, or may:
+    /// `true` also when the catalog has not said (FX-38).
+    pub truncated: bool,
     /// Whether the view has aged out. An empty `items` with this `true` means
     /// "the window is gone", never "the archive is empty".
     pub view_expired: bool,

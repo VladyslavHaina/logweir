@@ -1181,6 +1181,11 @@ spec:
                     maxItems: 256
                     nullable: true
                     type: array
+                  deletedCount:
+                    description: How many topics it removed; `deleted` lists at most 256 of them. Absent on a status written before the field.
+                    format: int64
+                    nullable: true
+                    type: integer
                   failed:
                     description: The topics it could not.
                     items:
@@ -1200,6 +1205,11 @@ spec:
                     maxItems: 256
                     nullable: true
                     type: array
+                  failedCount:
+                    description: How many topics it could not remove; `failed` lists at most 256 of them. Absent on a status written before the field, or from a runner older than it.
+                    format: int64
+                    nullable: true
+                    type: integer
                 type: object
               timeBasis:
                 description: '**FX-8 (review M-2).** The signed scorecard''s `source.time_basis`, copied when the controller read the document, like `outcome` and `integrity`: a CLAIM until `evidence.verification` says `Valid`. ABSENT means not recorded — a scorecard before format 1.3.0, a run that signed none (a refusal), or one not read yet — and is never read as "every selection used the topics'' own clocks". Absent too when the document''s block is malformed or a list holds more than 256 topics: a partial list would be a claim the signed document does not make.'

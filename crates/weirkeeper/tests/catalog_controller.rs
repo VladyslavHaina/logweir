@@ -4744,3 +4744,77 @@ fn fx33_the_synced_message_counts_each_cause_by_name() {
         "{absurd}"
     );
 }
+
+/// **FX-38, L4's class: each cause of a truncated view says its own words.**
+/// A view cut only by page space is not "a window, the archive holds more":
+/// its `Synced` message names the entries left out and that `viewLimit` does
+/// not cure them. Only a view that dropped points for `viewLimit`, or a walk
+/// that counted more than it relayed, is called a WINDOW.
+/// CONTROLS: the same entries under a `viewLimit` that cuts them, and a walk
+/// that counted 50 points and relayed 40, are windows.
+#[test]
+fn fx38_a_view_cut_for_page_space_says_so_and_is_not_called_a_window() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let entries = || -> Vec<RunnerEntry> {
+        (0..40)
+            .map(|i| entry(&format!("lwp1-{i:032x}"), 1_000 + i64::from(i), "s3://b/p"))
+            .collect()
+    };
+    let message = |built: &view::View, total: i64| {
+        let body = view::SyncBody {
+            pages: Vec::new(),
+            counts: None,
+            cursor: None,
+            signers: Vec::new(),
+            skipped_entries: 0,
+        };
+        let tally = view::Tally {
+            counts: weirkeeper::crds::recovery_catalog::CatalogCounts {
+                total: Some(total),
+                ..Default::default()
+            },
+            unrepresented: Vec::new(),
+        };
+        ctrl::sync_message(built, &body, &tally)
+    };
+    let space = ViewLimits {
+        view_limit: 100,
+        page_max_bytes: 2000,
+        max_pages: 2,
+    };
+    let built = view::materialise(entries(), 40, &trust, &space, now());
+    assert!(built.truncated && built.dropped_for_space > 0, "{built:?}");
+    assert!(!built.beyond_window);
+    let said = message(&built, 40);
+    assert!(
+        said.contains(&format!(
+            "{} entr(y/ies) did not fit the view's 2 page(s) and are not listed; raising \
+             viewLimit does not list them",
+            built.dropped_for_space
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("WINDOW"), "{said}");
+
+    // CONTROL: a viewLimit that cuts the same entries is a window.
+    let limited = ViewLimits {
+        view_limit: 10,
+        page_max_bytes: view::PAGE_MAX_BYTES,
+        max_pages: view::MAX_PAGES,
+    };
+    let built = view::materialise(entries(), 40, &trust, &limited, now());
+    assert!(built.beyond_window && built.dropped_for_space == 0);
+    assert!(message(&built, 40).contains("The view is a WINDOW"));
+    // CONTROL: a walk that counted more than it relayed is a window.
+    let whole = ViewLimits {
+        view_limit: 100,
+        ..limited
+    };
+    let built = view::materialise(entries(), 50, &trust, &whole, now());
+    assert!(built.beyond_window);
+    assert!(message(&built, 50).contains("The view is a WINDOW"));
+    // And the whole archive is neither.
+    let built = view::materialise(entries(), 40, &trust, &whole, now());
+    assert!(!built.truncated && !built.beyond_window);
+    assert!(!message(&built, 40).contains("WINDOW"));
+}
