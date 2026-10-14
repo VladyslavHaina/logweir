@@ -15044,6 +15044,11 @@
               "$ref": "#/components/schemas/SwitchoverGroupView"
             }
           },
+          "message": {
+            "description": "The sentence beside `reason`. It says when `groups` is partial: a group line the controller could not read, or a run log it did not read at all (FX-38). Then the signed record names every group.",
+            "type": "string",
+            "nullable": true
+          },
           "name": {
             "type": "string"
           },

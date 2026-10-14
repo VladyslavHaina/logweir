@@ -3413,11 +3413,15 @@ fn an_empty_capture_is_never_a_policys_recovery_point() {
 /// **(4) A `Backup` listing cut at its bound is `Unknown`, never a verdict.**
 /// The API server lists by name, so past 1 000 `Backup`s the runs not read
 /// may be the newest: the point, the failure streak and the last attempt are
-/// all unknown. Every page here answers one fresh run and a `continue` token,
-/// so the walk stops at its five pages with more to read.
-/// CONTROL: the same run without the token is `Healthy`.
-/// MUTANTS: `list_backups` answering complete, or `evaluate` ignoring
-/// `backups_complete`, make the cut listing `Healthy`.
+/// all unknown, so none is published and none opens an alert; an alert
+/// already open stays open (`Unknown` resolves nothing). Every page here
+/// answers the same runs and a `continue` token, so the walk stops at its
+/// five pages with more to read.
+/// CONTROLS: the same runs without the token are a verdict: `Healthy` with
+/// the point, the attempt and a streak of 0; three failed runs open
+/// `BackupFailure`.
+/// MUTANTS: `list_backups` answering complete, `evaluate` ignoring
+/// `backups_complete`, or a streak published over the cut listing.
 #[test]
 fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
     let mut spec = spec_value();
@@ -3425,9 +3429,8 @@ fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
         &mut spec,
         &json!({"objectives": {"requireCatalogAvailability": false}}),
     );
-    let listing = |cut: bool| {
-        let mut list: Value =
-            serde_json::from_str(&backup_list(vec![backup("b-1", 2, json!({}))])).unwrap();
+    let listing = |backups: Vec<Value>, cut: bool| {
+        let mut list: Value = serde_json::from_str(&backup_list(backups)).unwrap();
         if cut {
             list["metadata"]["continue"] = json!("more");
         }
@@ -3441,7 +3444,11 @@ fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
         routes.push(patch(STATUS_PATH));
         routes
     };
-    let (outcome, recorder, bodies) = drive(&policy_with(spec.clone(), json!({})), listing(true));
+    let fresh = || vec![backup("b-1", 2, json!({}))];
+    let (outcome, recorder, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(fresh(), true),
+    );
     assert_eq!(outcome.health, p::Health::Unknown);
     assert_eq!(outcome.reason, p::FreshnessReason::BackupHistoryTooLarge);
     let lists = requests(&recorder)
@@ -3455,6 +3462,12 @@ fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
     );
     let status = last_status_patch(&bodies);
     assert_eq!(status["status"]["health"].as_str(), Some("Unknown"));
+    for field in ["lastAvailablePoint", "lastAttempt", "consecutiveFailedRuns"] {
+        assert!(
+            status["status"][field].is_null(),
+            "{field} is not published over a cut listing: {status}"
+        );
+    }
     let protected = condition(&status, "Protected");
     assert_eq!(protected["status"].as_str(), Some("Unknown"));
     assert_eq!(protected["reason"].as_str(), Some("BackupHistoryTooLarge"));
@@ -3465,9 +3478,64 @@ fn fx38_a_backup_listing_cut_at_its_bound_is_unknown() {
         "{protected}"
     );
 
-    // CONTROL: the whole listing is a verdict.
-    let (outcome, _, _) = drive(&policy_with(spec, json!({})), listing(false));
+    // CONTROL: the whole listing is a verdict, with its facts.
+    let (outcome, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(fresh(), false),
+    );
     assert_eq!(outcome.health, p::Health::Healthy);
+    let status = last_status_patch(&bodies);
+    assert!(
+        status["status"]["lastAvailablePoint"].is_object(),
+        "{status}"
+    );
+    assert!(status["status"]["lastAttempt"].is_object(), "{status}");
+    assert_eq!(status["status"]["consecutiveFailedRuns"], json!(0));
+
+    // Three failed runs: the whole listing opens `BackupFailure` (CONTROL)...
+    let failed = || {
+        [2, 3, 4]
+            .into_iter()
+            .map(|h| {
+                backup(
+                    &format!("f-{h}"),
+                    h,
+                    json!({"status": {"phase": "Failed", "exitCode": 1, "capture": null}}),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let open_failure = |status: &Value| {
+        status["status"]["alerts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|a| a["kind"] == "BackupFailure" && a["state"] == "Open")
+    };
+    let (_, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(failed(), false),
+    );
+    let whole = last_status_patch(&bodies);
+    assert!(open_failure(&whole), "{whole}");
+    // ...the cut one opens nothing,
+    let (_, _, bodies) = drive(
+        &policy_with(spec.clone(), json!({})),
+        listing(failed(), true),
+    );
+    let cut = last_status_patch(&bodies);
+    assert!(!open_failure(&cut), "{cut}");
+    // ...and an alert already open stays open, while the stored streak, point
+    // and attempt are cleared.
+    let stored = whole["status"].clone();
+    let (_, _, bodies) = drive(&policy_with(spec, stored), listing(failed(), true));
+    let after = last_status_patch(&bodies);
+    assert!(open_failure(&after), "{after}");
+    assert!(
+        after["status"]["consecutiveFailedRuns"].is_null(),
+        "{after}"
+    );
+    assert!(after["status"]["lastAttempt"].is_null(), "{after}");
 }
 
 /// **(5) A catalog line this build cannot read makes the view unreadable.**

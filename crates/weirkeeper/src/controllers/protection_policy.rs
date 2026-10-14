@@ -813,7 +813,7 @@ pub fn build_status(
         availability_basis: Some(verdict.basis.as_str().to_string()),
         last_available_point: verdict.point.as_ref().map(p::available_point_status),
         last_attempt: verdict.last_attempt.clone(),
-        consecutive_failed_runs: Some(verdict.consecutive_failed_runs),
+        consecutive_failed_runs: verdict.consecutive_failed_runs,
         missed: (verdict.missed.last_missed_slot.is_some()
             || verdict.missed.since_last_fire.is_some())
         .then(|| verdict.missed.clone()),

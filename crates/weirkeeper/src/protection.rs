@@ -742,8 +742,10 @@ pub struct Verdict {
     pub point: Option<AvailablePointFacts>,
     /// The most recent run, whatever became of it.
     pub last_attempt: Option<LastAttempt>,
-    /// Consecutive failed **slots** — a retry chain is one.
-    pub consecutive_failed_runs: i64,
+    /// Consecutive failed **slots** — a retry chain is one. `None` when the
+    /// runs were not all read ([`FreshnessReason::BackupHistoryTooLarge`]):
+    /// a streak over the runs read is not the policy's streak.
+    pub consecutive_failed_runs: Option<i64>,
     /// Missed-slot facts.
     pub missed: MissedSummary,
     /// The schedules, as this policy sees them.
@@ -1070,7 +1072,21 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         Freshness::Stale => Health::Unprotected,
     };
 
-    let open_kinds = open_alert_kinds(input, health, consecutive_failed_runs, newest, catalog);
+    let mut open_kinds = open_alert_kinds(input, health, consecutive_failed_runs, newest, catalog);
+    // FX-38 (4): a cut listing proves nothing about the runs it did not read,
+    // so its point, last attempt and streak are not published and open no
+    // alert. One already open stays open: `Unknown` resolves nothing.
+    let (point, last_attempt, streak) = if input.backups_complete {
+        (point, last_attempt, Some(consecutive_failed_runs))
+    } else {
+        open_kinds.retain(|k| {
+            !matches!(
+                k,
+                PolicyAlertKind::BackupFailure | PolicyAlertKind::ArchiveUnavailable
+            )
+        });
+        (None, None, None)
+    };
     let summary = summarize(
         spec,
         health,
@@ -1095,7 +1111,7 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         basis,
         point,
         last_attempt,
-        consecutive_failed_runs,
+        consecutive_failed_runs: streak,
         missed,
         schedules,
         rehearsal: rehearsal_summary(input.rehearsal),
