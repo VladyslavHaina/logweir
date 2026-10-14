@@ -579,6 +579,15 @@ pub async fn create(
             plan: GatedPlan::Restore(&request.plan_bytes),
         },
     )?;
+    refuse_taken_approval::<Restore>(
+        &state,
+        &ns,
+        &effective,
+        &request.approval_ref.name,
+        &super::deterministic_name(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key),
+        "Restore",
+    )
+    .await?;
     // Canonical form for the request hash: equivalent RFC 3339 spellings of
     // one instant are one request. `planBytes` is NOT canonicalised.
     request.point_in_time = point_in_time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
@@ -919,6 +928,72 @@ pub(crate) fn refuse_before_create(
     Ok(())
 }
 
+/// Where the console stores its signed document for a request naming
+/// `approval_name` under `policy`: the Approval itself under `confirm`, its
+/// `-confirmation` object under a policy an approver countersigns.
+fn approval_target(
+    policy: &logweir_core::approval_policy::ApprovalPolicy,
+    approval_name: &str,
+) -> Result<String, ApiError> {
+    Ok(if approval::route_of(policy)?.awaits_an_approver() {
+        approval::confirmation_name(approval_name)
+    } else {
+        approval_name.to_string()
+    })
+}
+
+/// **A create refused `state_conflict` leaves nothing behind** (theme A's
+/// PoC defect D3). Under a bound policy the console stores its signed
+/// document at [`approval_target`], and an Approval already there that this
+/// request did not produce is never adopted ([`authorize_submission`]). That
+/// was decided only AFTER the subject existed, so a refused request left a
+/// `Restore` (or a `Switchover`) behind, which then failed
+/// `ApprovalSubjectMismatch`. It is decided here, before anything is
+/// created: an Approval under the name can be this request's own only when
+/// the subject it was made for already exists under this request's own name
+/// `subject_name` (an interrupted earlier attempt, which the create replays
+/// and [`authorize_submission`] then judges, creating nothing). With no such
+/// subject the Approval binds another object's UID, never the UID a create
+/// would mint, so the request is refused and nothing is created.
+///
+/// The residual, stated: an Approval created under the name between this
+/// read and [`authorize_submission`]'s is still refused after the subject
+/// exists; the answer then says so.
+///
+/// # Errors
+///
+/// `state_conflict`, `policy_mismatch`, or the adapter's failure.
+pub(crate) async fn refuse_taken_approval<K: crate::kube::ProductResource>(
+    state: &AppState,
+    ns: &str,
+    effective: &EffectivePolicy,
+    approval_name: &str,
+    subject_name: &str,
+    title: &str,
+) -> Result<(), ApiError> {
+    let Some(policy) = effective.bound() else {
+        return Ok(());
+    };
+    let target = approval_target(policy, approval_name)?;
+    match state.kube().get::<Approval>(ns, &target).await {
+        Err(KubeFailure::NotFound) => return Ok(()),
+        Err(other) => return Err(other.into_api_error()),
+        Ok(_) => {}
+    }
+    match state.kube().get::<K>(ns, subject_name).await {
+        Ok(_) => Ok(()),
+        Err(KubeFailure::NotFound) => Err(ApiError::new(
+            ProblemCode::StateConflict,
+            format!(
+                "An Approval named {target} already exists in {ns} and was not made for this \
+                 request: it binds another object, and it is never adopted. Nothing was \
+                 created. Submit this {title} with another approval name."
+            ),
+        )),
+        Err(other) => Err(other.into_api_error()),
+    }
+}
+
 /// The v2 document an existing object carries, when it is THIS subject's
 /// under THIS policy — the replay test for a create sequence that was
 /// interrupted after the console signed.
@@ -1034,11 +1109,7 @@ pub(crate) async fn authorize_submission(
     // By the table: `confirm` is authorised by the console's signature
     // alone; `two-person` and `strict` leave a REQUEST and wait.
     let governed = approval::route_of(policy)?.awaits_an_approver();
-    let target = if governed {
-        approval::confirmation_name(approval_name)
-    } else {
-        approval_name.to_string()
-    };
+    let target = approval_target(policy, approval_name)?;
     let view = |doc: &RestoreAuthorization| RestoreRoutingView {
         mode: policy.mode.into(),
         operator_mode: ApprovalRoute::of(effective),
@@ -1058,12 +1129,19 @@ pub(crate) async fn authorize_submission(
     let conflict = || {
         ApiError::new(
             ProblemCode::StateConflict,
+            // `refuse_taken_approval` refused a taken name before the subject
+            // existed; reaching this means the subject is an earlier attempt's,
+            // or the name was taken between the two reads.
             format!(
                 "An Approval named {target} already exists in {namespace} and is not this \
-                 {}'s console confirmation under policy {}; it is never adopted. Submit with \
-                 another approval name.",
+                 {}'s console confirmation under policy {}; it is never adopted. {} {} existed \
+                 before this answer (an earlier attempt of this request, or the name was taken \
+                 concurrently) and will wait for an approval: submit again with another approval \
+                 name.",
                 subject.title(),
-                policy.name
+                policy.name,
+                subject.title(),
+                subject.name
             ),
         )
     };
