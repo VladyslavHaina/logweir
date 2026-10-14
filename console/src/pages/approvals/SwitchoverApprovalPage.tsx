@@ -12,7 +12,7 @@ import { SwitchoverApprovalSummary } from "../cutover/SwitchoverApprovalSummary"
 import { REFUSAL_TITLE } from "./ApprovalPage";
 import { Refusal, RequestStatus } from "./parts";
 import "./approvals.css";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 export function SwitchoverApprovalPage() {
   const { ns, name } = useParams({ from: "/$ns/approvals/switchover/$name" });
@@ -41,7 +41,7 @@ export function SwitchoverApprovalPage() {
                   <CardTitle component="h2">What approving commits</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <Content component="p" className="lw-subtle">{request.stateSentence}</Content>
+                  <Content component="p" className="lw-subtle"><Prose text={request.stateSentence} /></Content>
                   <SwitchoverApprovalSummary request={request} />
                 </CardBody>
               </Card>

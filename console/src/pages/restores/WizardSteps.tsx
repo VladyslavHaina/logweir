@@ -203,7 +203,16 @@ export function PointStep({
               <Tbody>
                 {matching.slice(0, limit).map((b, i) => (
                   <Tr key={b.uid} isClickable isRowSelected={field.value === pointKeyOf(b)} onRowClick={() => field.onChange(pointKeyOf(b))}>
-                    <Td select={{ rowIndex: i, variant: "radio", isSelected: field.value === pointKeyOf(b), onSelect: () => field.onChange(pointKeyOf(b)) }} />
+                    {/* PatternFly's own select cell names every radio "Select row N"; this one is named by its point (DUI-22). */}
+                    <Td className="pf-v6-c-table__check">
+                      <Radio
+                        id={`point-${i}`}
+                        name="recovery-point"
+                        aria-label={`Restore up to ${end(b) ? exactUtc(end(b)!) : b.name}, backup ${b.name}`}
+                        isChecked={field.value === pointKeyOf(b)}
+                        onChange={() => field.onChange(pointKeyOf(b))}
+                      />
+                    </Td>
                     <Td dataLabel="Restores up to">
                       <strong>{end(b) ? exactUtc(end(b)!) : <span className="lw-subtle">Not recorded</span>}</strong>
                       {b.uid === newest && <span className="lw-subtle"> · newest</span>}
@@ -629,7 +638,7 @@ export function TargetStep({
         />
         <FieldHelp id="scratch">{v.scratch ? SCRATCH_SENTENCE : modeMeaning("newTopic", original)}</FieldHelp>
         {v.scratch && connection && !connection.markerTopic && (
-          <Alert variant="warning" isInline isPlain title={SCRATCH_MARKER_WARNING} />
+          <Alert variant="info" isInline isPlain title={SCRATCH_MARKER_WARNING} className="lw-gap-top lw-gap-below" />
         )}
         {v.scratch && (
           <Controller

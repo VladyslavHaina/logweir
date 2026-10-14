@@ -291,7 +291,7 @@ export const CATALOG_TOPICS_SENTENCE =
   "Name the topics to restore, separated by commas. The readiness check reads the point's manifest for exactly these names, and the runner restores nothing the backup set does not hold.";
 
 export const SCRATCH_MARKER_WARNING =
-  "This connection declares no marker topic, and a scratch restore is refused at phase 0 unless the target proves it is scratch by carrying one.";
+  "This connection declares no marker topic, so the plan uses logweir.scratch: a scratch restore runs only on a target that carries that topic, which proves it is a scratch cluster. The readiness check says whether it does.";
 
 export const SCRATCH_SENTENCE =
   "A scratch restore is a rehearsal: the runner deletes the topics it created when the run ends. It is refused unless the target is among the trust policy's allowed clusters, differs from the source and carries its marker topic. A scratch restore is never under the original names.";

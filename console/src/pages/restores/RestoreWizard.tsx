@@ -619,6 +619,14 @@ function Footer({
   const { activeStep, goToNextStep, goToPrevStep, goToStepById } = useWizardContext();
   const id = String(activeStep.id) as StepId;
   const last = id === "review";
+  // DUI-22: a new step opens at its own top, not at the previous step's scroll offset.
+  const shownStep = useRef(id);
+  useEffect(() => {
+    if (shownStep.current === id) return;
+    shownStep.current = id;
+    document.querySelector(".pf-v6-c-wizard__main")?.scrollTo?.({ top: 0 });
+    document.querySelector(".lw-wizard-card")?.scrollIntoView?.({ block: "start" });
+  }, [id]);
   useEffect(() => {
     if (goTo && goTo !== id) goToStepById(goTo);
     if (goTo) onWent();

@@ -178,7 +178,7 @@ function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) 
     return (
       <Alert variant="info" isInline title="Waiting for a second person to approve" id="awaiting-approval">
         <p>
-          {req?.stateSentence ?? "The console recorded your request; a second person, signed in as an approver and not you, approves it."}{" "}
+          {req?.stateSentence ? <Prose text={req.stateSentence} /> : "The console recorded your request; a second person, signed in as an approver and not you, approves it."}{" "}
           {req?.expiresAt ? (
             <>
               It expires <Instant value={req.expiresAt} />.
@@ -464,7 +464,9 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     <Content component="p" className="lw-subtle lw-small lw-gap-top">
                       {op.terminal
                         ? "This run is final."
-                        : "Following this restore by re-reading it every second; you can leave this page and come back. Leaving cancels nothing."}
+                        : streaming
+                          ? "Following this restore through its event stream as it moves; you can leave this page and come back. Leaving cancels nothing."
+                          : "Following this restore by re-reading it every second (no event stream is open for this session); you can leave this page and come back. Leaving cancels nothing."}
                     </Content>
                   </>
                 ) : (

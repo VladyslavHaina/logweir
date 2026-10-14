@@ -14,7 +14,7 @@ export function proseSegments(text: string): { text: string; code: boolean }[] {
 export function Prose({ text }: { text: string }) {
   return (
     <span className="lw-prose">
-      {proseSegments(text).map((s, i) => (s.code ? <code key={i}>{s.text}</code> : <span key={i}>{s.text}</span>))}
+      {proseSegments(text).map((s, i) => (s.code ? <code key={i}>{s.text}</code> : <span key={i}>{plainInstants(s.text)}</span>))}
     </span>
   );
 }
@@ -37,6 +37,21 @@ export function checkMessage(text: string): string {
   } catch {
     return text;
   }
+}
+
+const RFC3339 = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g;
+
+/**
+ * DUI-22: the API's sentences carry raw RFC 3339 instants, to the nanosecond
+ * ("2026-10-14T14:06:44.284150630+00:00"). Each is written as the console writes an
+ * instant, in UTC to the minute; one this page cannot read is left as it came.
+ */
+export function plainInstants(text: string): string {
+  return text.replace(RFC3339, (raw) => {
+    // Date reads milliseconds at most: the digits past them change nothing at minute precision.
+    const ms = Date.parse(raw.replace(/(\.\d{3})\d+/, "$1"));
+    return Number.isNaN(ms) ? raw : new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  });
 }
 
 /** An error's message as prose: `ApiError` and every other `Error` carry one; anything else is stringified. */

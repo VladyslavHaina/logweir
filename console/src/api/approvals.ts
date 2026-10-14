@@ -246,6 +246,7 @@ export type ApprovalStateWord =
   | "revoked-after-use"
   | "expired"
   | "refused"
+  | "request-recorded"
   | "awaiting-verification";
 
 export interface Found {
@@ -286,6 +287,11 @@ export function recordState(approval: Approval): Found {
       consumedAt: consumed,
     };
   }
+  if (verified && verified.status === "False" && verified.reason === REQUEST_RECORD_REASON) {
+    // DUI-20: the console's own record of a two-person request: by design it authorises
+    // nothing until a second person approves. A record, never a refusal.
+    return { state: "request-recorded", reason: verified.reason, message: verified.message ?? "" };
+  }
   if (verified && verified.status === "False") {
     return { state: verified.reason === "KeyIdExpired" ? "expired" : "refused", reason: verified.reason ?? "", message: verified.message ?? "" };
   }
@@ -311,6 +317,9 @@ export function approvalState(approval: Approval | null, subject: Subject): Foun
 }
 
 /** The few words a table cell says for each state. */
+/** `Verified=False` on a two-person request's own record (`approval-<hash>-confirmation`). */
+export const REQUEST_RECORD_REASON = "GovernedApprovalRequired";
+
 export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   absent: "None recorded",
   "awaiting-verification": "Awaiting verification",
@@ -318,6 +327,7 @@ export const STATE_WORDS: Record<ApprovalStateWord, string> = {
   "revoked-after-use": "Signer revoked after use",
   expired: "Expired",
   refused: "Refused",
+  "request-recorded": "Request recorded",
   "foreign-subject": "Bound to another subject",
   "foreign-execution": "Bound to another run",
   "plan-mismatch": "Names another plan",
@@ -345,6 +355,8 @@ export function stateSentence(found: Found, subject: Subject): string {
       return `The controller refused Approval ${name} because the approver key is past its notAfter (reason KeyIdExpired): ${found.message}`;
     case "refused":
       return `The controller refused Approval ${name} (reason ${found.reason}): ${found.message} The Restore does not run while this stands. A refusal about the roster can clear once the roster is fixed; a refusal about the documents cannot, because an Approval's spec is immutable.`;
+    case "request-recorded":
+      return `Approval ${name} is the console's record of a two-person request, and authorises nothing by design (reason ${found.reason}): a second person, signed in as an approver, approves it.`;
     case "foreign-subject":
       return `Approval ${name} exists but names ${found.detail}, not this Restore. It cannot approve this Restore, and this page will not reuse it.`;
     case "foreign-execution":

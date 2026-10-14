@@ -2,10 +2,11 @@
 // Lists re-read while a run in them moves; one restore's page follows its operation
 // while it is not final. Every write carries the Idempotency-Key the plan's minted
 // name gives it, so a second click, a lost answer or a reload never makes a second object.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LIST_PAGE_BUDGET, LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
 import { keys, useBackups, useConnections, useDestinations, useOperation, useRestore, useRestores } from "./queries";
-import { grantOf, useSessionDoc } from "./session";
+import { grantOf, useCan, useSessionDoc } from "./session";
+import type { Clone } from "./switchovers";
 import type { components } from "./schema";
 
 type S = components["schemas"];
@@ -65,6 +66,38 @@ export const useRestoreItem = useRestore;
 
 /** THE LIVE WATCH: the run's operation (R1's read), re-read every second while it is not
  *  final unless the run's event stream (stream.ts) is carrying it. */
+/** How far back a scratch restore may still be a live clone: the longest lifetime (30 days) and a day for its run. */
+const CLONE_HORIZON_MS = 31 * 86_400_000;
+/** The most operation views the Restores list reads for clones. */
+export const CLONE_READS = 50;
+
+/**
+ * DUI-23: a list row carries no clone; its operation view does (`status.clone`). Each
+ * recent scratch restore's view is read, at most CLONE_READS, under the same key its page
+ * uses, so the two share one cache entry. A view that cannot be read leaves its row as it was.
+ */
+export function useClones(ns: string, restores: Restore[] | undefined): Map<string, Clone> {
+  const readable = useCan(ns, "operationsRead");
+  const since = Date.now() - CLONE_HORIZON_MS;
+  const wanted = readable
+    ? (restores ?? []).filter((r) => r.target.mode === "scratch" && (Date.parse(r.createdAt ?? "") || 0) >= since).slice(0, CLONE_READS)
+    : [];
+  const results = useQueries({
+    queries: wanted.map((r) => ({
+      queryKey: keys.operation(ns, "restore", r.name),
+      queryFn: async ({ signal }: { signal: AbortSignal }) =>
+        (await call(() => api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "restore", name: r.name } }, signal }))).item,
+      staleTime: 30_000,
+      retry: false,
+    })),
+  });
+  const out = new Map<string, Clone>();
+  results.forEach((q, i) => {
+    if (q.data?.clone) out.set(wanted[i]!.name, q.data.clone);
+  });
+  return out;
+}
+
 export function useRestoreOperation(ns: string, name: string, streaming = false) {
   return useOperation(ns, "restore", name, streaming);
 }

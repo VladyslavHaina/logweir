@@ -337,6 +337,21 @@ describe("the restore wizard", () => {
     expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("DUI-22: names each point's radio by its point, and opens each step at its top", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    renderAt("/team-a/restores/new");
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    const radios = screen.getAllByRole("radio", { name: /^Restore up to \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, backup / });
+    expect(radios.length).toBeGreaterThan(0);
+    expect(screen.queryByRole("radio", { name: /^Select row/ })).toBeNull();
+    // The control: nothing scrolls before a step changes.
+    expect(scrolled).not.toHaveBeenCalled();
+    await next();
+    await screen.findByRole("heading", { name: "What to restore" });
+    await waitFor(() => expect(scrolled).toHaveBeenCalledWith({ block: "start" }));
+  });
+
   it("a link to a Backup that is not a recovery point is refused by name, never replaced by another", async () => {
     renderAt("/team-a/restores/new?backup=orders-hourly-gone");
     await screen.findByText(/No Backup named orders-hourly-gone is in this namespace/);

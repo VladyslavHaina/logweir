@@ -74,7 +74,7 @@ import { StatusLabel } from "../../components/Status";
 import { ApprovalFilesForm, CountersignForm } from "./forms";
 import { ApprovalRecord, ApprovalStatus, ErrorLine, NotRecorded, Principal, Refusal, RequestStatus, ScopeCard, Term } from "./parts";
 import "./approvals.css";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 /** The sha256 of the Restore's plan bytes, computed here; undefined while it computes. */
 function usePlanHash(restore: Restore | null | undefined): string | undefined {
@@ -199,7 +199,7 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
           A second person, signed in as an approver and not the requester, approves here. No key is involved and nothing is pasted: the console records who approved and when, and signs that.
         </Content>
         <Content component="p" id="request-state">
-          {request.stateSentence}
+          <Prose text={request.stateSentence} />
         </Content>
         {shown && (
           <DescriptionList isCompact columnModifier={{ default: "1Col", lg: "2Col" }} className="lw-gap-top lw-approval-facts">
