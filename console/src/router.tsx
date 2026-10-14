@@ -18,6 +18,7 @@ import { Restores } from "./pages/restores/RestoreList";
 import { RestoreWizard, restoreSearch } from "./pages/restores/RestoreWizard";
 import { RestoreDetail } from "./pages/restores/RestoreDetail";
 import { NotFound } from "./pages/NotFound";
+import { PageError } from "./components/PageError";
 import { connectionRoutes } from "./pages/connections/routes";
 import { destinationRoutes } from "./pages/destinations/routes";
 import { scheduleRoutes } from "./pages/schedules/routes";
@@ -75,6 +76,8 @@ export function createConsoleRouter() {
     // Filled in by <RouterProvider context> once the session gate has a session.
     context: { session: undefined! },
     defaultPreload: false,
+    // Every route catches its own render errors: one page that cannot be shown leaves the shell (DUI-16).
+    defaultErrorComponent: PageError,
   });
 }
 

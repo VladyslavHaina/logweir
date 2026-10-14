@@ -81,6 +81,7 @@ import { Legend, OutcomeCounts, OutcomeTable, PlanBlock, ReviewCards, ReviewTabl
 import { PhaseLabel } from "./status";
 import "./cutover.css";
 import { ErrorText } from "../../components/Prose";
+import { exactUtc } from "../../components/When";
 
 /** Why this restore cannot be switched over, from the restore alone (§3.4's admission). */
 export function cutoverRefusal(r: Restore): { word: string; title: string; body: string } | null {
@@ -191,7 +192,7 @@ function Review({
             </Content>
           ))}
           <Content component="p" className="lw-subtle lw-small lw-gap-top">
-            Checked {pf.observedAt ? new Date(pf.observedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "just now"} by the
+            Checked {pf.observedAt ? exactUtc(pf.observedAt) : "just now"} by the
             switchover review ({pf.id}). Groups the backup did not capture, and groups with nothing mapped, are not listed.
           </Content>
         </CardBody>

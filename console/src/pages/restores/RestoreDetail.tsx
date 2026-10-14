@@ -61,6 +61,7 @@ import {
   SCORECARD_CLAIM_SENTENCE,
   completionGuidance,
   coverageWords,
+  timestampBoundWords,
   modeMeaning,
   evidenceCase,
   evidenceVerified,
@@ -637,7 +638,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     items={[
                       { term: "Target timestamp type", value: shown(r.topicPreflight.timestampType) },
                       { term: "Target retention.ms", value: shown(r.topicPreflight.retentionMs) },
-                      { term: "Oldest timestamp accepted", value: typeof r.topicPreflight.timestampBound === "number" ? exactUtc(r.topicPreflight.timestampBound) : shown(null) },
+                      { term: "Record age the target accepts", value: timestampBoundWords(r.topicPreflight.timestampBound) },
                     ]}
                   />
                 )}

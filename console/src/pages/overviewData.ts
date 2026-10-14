@@ -2,6 +2,7 @@
 // Pure functions of the documents and `now`; overviewData.test.ts pins them.
 import type { Backup, OperationSummary, PointView, ProtectionPolicy, Restore } from "../api/types";
 import { lastDay, pointAgeSeconds, pointVerified } from "../app/attention";
+import { utcIso } from "../components/When";
 
 export type Freshest = { policy: ProtectionPolicy; ageSeconds: number; withinObjective: boolean; verified: boolean };
 
@@ -96,7 +97,8 @@ export function strip(backups: Backup[], schedule: string): Cell[] {
     .map((b) => {
       const retry = runs.find((r) => r.trigger?.retryOf?.name === b.name);
       // Runs of a strip span days: each cell names its date as well as its time (DUI-12).
-      const at = b.createdAt ? new Date(b.createdAt).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "time not recorded";
+      const iso = utcIso(b.createdAt);
+      const at = iso ? iso.slice(0, 16).replace("T", " ") + " UTC" : b.createdAt ? "not a time" : "time not recorded";
       if (b.operation.state === "failed" && retry?.operation.verifiedSuccess) {
         return { backup: b, target: retry, cls: "retried", word: "failed, then verified on retry", at };
       }

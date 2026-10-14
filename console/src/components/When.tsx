@@ -2,12 +2,24 @@
 // in the <time> element, and `exact` for detail pages.
 import { useEffect, useState } from "react";
 
-export function exactUtc(value: string | number): string {
+/** What a value that is not an instant reads as. An API number outside the range a Date
+ *  holds (Kafka's Long.MAX "no limit", for one) must never throw and blank the page (DUI-16). */
+export const NOT_A_TIME = "not a time";
+
+/** The value as an ISO instant, or null when it is not one. Never throws. */
+export function utcIso(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined || value === "") return null;
   const d = new Date(value);
-  return d.toISOString().replace("T", " ").replace(/:\d{2}\.\d{3}Z$/, " UTC");
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+export function exactUtc(value: string | number): string {
+  const iso = utcIso(value);
+  return iso === null ? NOT_A_TIME : iso.replace("T", " ").replace(/:\d{2}\.\d{3}Z$/, " UTC");
 }
 
 export function relative(value: string | number, now = Date.now()): string {
+  if (utcIso(value) === null) return NOT_A_TIME;
   const ms = new Date(value).getTime() - now;
   const abs = Math.abs(ms);
   const future = ms > 0;
@@ -36,7 +48,8 @@ export function useNow(): number {
 export function When({ value, exact = false }: { value: string | number | null | undefined; exact?: boolean }) {
   const now = useNow();
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
-  const iso = new Date(value).toISOString();
+  const iso = utcIso(value);
+  if (iso === null) return <span className="lw-subtle" title={String(value)}>Not a time</span>;
   return (
     <time dateTime={iso} title={exactUtc(value)}>
       {exact ? `${exactUtc(value)} (${relative(value, now)})` : relative(value, now)}

@@ -32,8 +32,10 @@ import {
   selectionWords,
   signedTimeBasisText,
   teardownLeftWords,
+  timestampBoundWords,
   verificationScopeSentence,
 } from "./words";
+import { When, exactUtc, relative } from "../../components/When";
 import { RestoreDetail } from "./RestoreDetail";
 import { CheckStep } from "./WizardSteps";
 import { readinessRefusal, type Preflight } from "./model";
@@ -145,6 +147,13 @@ describe("a restore's page", () => {
     expect(screen.getAllByText("Not covered").length).toBeGreaterThan(0);
     expect(screen.queryByText("Restored and verified")).toBeNull();
     expect(screen.getByRole("button", { name: /Retry to a fresh target/ })).toBeTruthy();
+  });
+  it("DUI-16: a finished restore whose target sets no timestamp bound (Long.MAX) renders, and says so", async () => {
+    const r = R(subsetRestore);
+    showRestore({ ...r, topicPreflight: { ...r.topicPreflight!, timestampBound: 9223372036854775807 } }, O(subsetOperation));
+    await screen.findByText("Restored and verified");
+    expect(screen.getByText("Any age: the broker sets no bound (its default)")).toBeTruthy();
+    expect(screen.queryByText(/Oldest timestamp accepted/)).toBeNull();
   });
   it("a narrowed, verified restore is green and still says partial", async () => {
     showRestore(R(subsetRestore), O(subsetOperation));
@@ -305,5 +314,22 @@ describe("theme A's D6: the restore readiness check on an older runner", () => {
     expect(image.textContent).toContain("Not ready");
     expect(pod.textContent).toContain("Passed");
     expect(pod.textContent).toContain("the check pod ran and its runner exited 1");
+  });
+});
+
+describe("DUI-16: a value that is not a time never throws", () => {
+  it("prints an out-of-range instant as not a time, and a real one as a time (the control)", () => {
+    expect(exactUtc(9223372036854775807)).toBe("not a time");
+    expect(relative(9223372036854775807)).toBe("not a time");
+    expect(exactUtc("garbage")).toBe("not a time");
+    expect(exactUtc(Date.parse("2026-10-14T13:35:23Z"))).toBe("2026-10-14 13:35 UTC");
+    render(<When value={9223372036854775807} exact />);
+    expect(screen.getByText("Not a time")).toBeTruthy();
+  });
+
+  it("reads the timestamp bound as a duration, never as an instant", () => {
+    expect(timestampBoundWords(9223372036854775807)).toBe("Any age: the broker sets no bound (its default)");
+    expect(timestampBoundWords(7 * 86_400_000)).toBe("Up to 7 days old (604,800,000 ms); an older record is refused or rewritten");
+    expect(timestampBoundWords(null)).toBe("Not recorded");
   });
 });

@@ -3,6 +3,7 @@
 // the wizard shows. Ported from ui/render.js, ui/pages/history.js and operation.js.
 import { s3Arg, shellArg } from "../../lib/shell";
 import type { components } from "../../api/schema";
+import { NOT_A_TIME, duration, utcIso } from "../../components/When";
 
 type S = components["schemas"];
 export type Restore = S["Restore"];
@@ -102,7 +103,7 @@ export function coverageWords(
  *  narrowed restore as a restore of everything. */
 export function selectionWords(sel: Selection | null | undefined): string {
   if (!sel) return "";
-  const at = (ms: number | null | undefined) => (typeof ms === "number" ? new Date(ms).toISOString() : "Not recorded");
+  const at = (ms: number | null | undefined) => (typeof ms === "number" ? (utcIso(ms) ?? NOT_A_TIME) : "Not recorded");
   const window = typeof sel.windowStartMs === "number" ? `, from ${at(sel.windowStartMs)} (the plan's stated window start) to ${at(sel.windowEndMs)}` : "";
   const rows = sel.partitions ?? null;
   if (rows && rows.length > 0) {
@@ -389,4 +390,20 @@ export function signedTimeBasisText(tb: S["RestoreTimeBasisView"] | null | undef
     ...(tb.notRecorded.length ? [`selected by time with the timestamp type NOT RECORDED: ${tb.notRecorded.join(", ")}`] : []),
   ];
   return parts.length ? parts.join("; ") : "no topic was selected by producer time or with an unrecorded timestamp type";
+}
+
+/** At or past this a millisecond bound is a broker's "no limit" (Kafka's default is Long.MAX). */
+const NO_BOUND_MS = 2 ** 62;
+
+/**
+ * DUI-16: `topicPreflight.timestampBound` is the target broker's bound on how far in the
+ * past a record's CreateTime may be (`log.message.timestamp.before.max.ms`, else
+ * `…difference.max.ms`): a DURATION in milliseconds, not an instant. Its default is
+ * Long.MAX, which no Date can hold, so it was never a time to print.
+ */
+export function timestampBoundWords(ms: number | null | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "Not recorded";
+  if (ms >= NO_BOUND_MS) return "Any age: the broker sets no bound (its default)";
+  if (ms < 0) return `${ms} ms, not a bound this page can read`;
+  return `Up to ${duration(ms / 1000)} old (${ms.toLocaleString("en-US")} ms); an older record is refused or rewritten`;
 }

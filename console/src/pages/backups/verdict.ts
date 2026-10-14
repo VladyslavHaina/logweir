@@ -16,6 +16,7 @@
 // document, NotAttempted the controller, Untrusted the signer (D3 section 7.4).
 import { hasShape, s3Arg, shellArg } from "../../lib/shell";
 import type { Backup, OperationSummary, OperationView } from "../../api/backups";
+import { NOT_A_TIME, utcIso } from "../../components/When";
 
 /** The two combined trust words a green badge may carry (the API's own vocabulary). */
 export const GREEN_TRUST_STATES: readonly string[] = ["verified", "verifiedHistorical"];
@@ -238,7 +239,7 @@ export const QUEUED_RUN_SENTENCE =
 /** The covered window, both ends as UTC instants (end exclusive), or what is true instead. */
 export function windowWords(b: Pick<Backup, "windowCovered" | "operation">): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";
-  const t = (ms: number) => new Date(ms).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const t = (ms: number) => utcIso(ms)?.replace("T", " ").replace(/\.\d{3}Z$/, " UTC") ?? NOT_A_TIME;
   return `${t(b.windowCovered.fromMs)} to ${t(b.windowCovered.toMs)}`;
 }
 
@@ -253,6 +254,7 @@ export function backupSentence(b: Pick<Backup, "windowCovered" | "operation" | "
 export function windowShort(b: Pick<Backup, "windowCovered" | "operation">, now = Date.now()): string {
   if (!b.windowCovered) return b.operation.terminal ? "Not recorded" : "When it finishes";
   const { fromMs, toMs } = b.windowCovered;
+  if (utcIso(fromMs) === null || utcIso(toMs) === null) return NOT_A_TIME;
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
   const hm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
   const md = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
