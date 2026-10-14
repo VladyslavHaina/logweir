@@ -2290,6 +2290,8 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // DUI-7 to DUI-31 (item 115): layout and wording; a reason in words.
         ("layout and wording", "`DuplicateCatalog`"),
+        // Item 116: RUSTSEC-2026-0346 to -0349; the version that fixes them.
+        ("Logweir's binaries carry rustls 0.23.46", "rustls 0.23.46"),
     ];
     assert_eq!(
         items.len(),

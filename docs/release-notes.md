@@ -29,13 +29,13 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114 and 115. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115 and 116. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 115 landed after the `v0.3.0` tag and are in no
+is below. Items 102 to 116 landed after the `v0.3.0` tag and are in no
 release yet.
 
 ### Candidate record
@@ -2986,6 +2986,23 @@ over the rows were killed.
 **Rollback:** an older console image shows the old layout and words; nothing is
 stored.
 
+#### 116. Logweir's own binaries carry rustls 0.23.46 (RUSTSEC-2026-0346 to -0349)
+
+**Changed.** Every Logweir binary that speaks TLS (the runner, the controller,
+`logweir-api`, the retention worker) links rustls 0.23.46, for four advisories
+published against 0.23.45: a derived `Debug` that printed session secrets, data
+buffered before an ECH rejection sent to the outer server, a Brotli
+certificate decompressor that could allocate 1 GiB before authentication, and
+an unauthenticated ServerHello that could downgrade later key exchange. A
+lockfile-only change, as the 0.23.45 move for RUSTSEC-2026-0285 was; no
+Logweir code changes.
+**Do:** nothing beyond rolling the images.
+**Scope:** `cargo deny` over the workspace (advisories, licences, bans and
+sources pass), the workspace built against it, and the TLS suites (both
+`linkage` suites and `tls_ca`).
+[UNVERIFIED — the engine, build 3, still links rustls 0.23.45; its build 4 moves the engine's lockfile through patch 0001 and needs its compose rows (record semantics, the full drill, the support matrix's row) first.]
+**Rollback:** an older image links 0.23.45 again; nothing stored changes.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -3131,7 +3148,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114 and 115, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115 and 116, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3224,6 +3241,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 113 | the runner (details, catalog entries, samples) and the controller (the details pass) | the two rolled together; a re-sync of each catalog |
 | 114 | the console | nothing |
 | 115 | the console | nothing |
+| 116 | every Logweir binary's TLS library (rustls 0.23.46) | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
