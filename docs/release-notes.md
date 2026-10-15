@@ -3063,7 +3063,10 @@ The stream half has no automated row: jsdom has no EventSource.
 **Changed.** About 15 minutes after a switchover ran, the controller used to rewrite the switchover's Approval to `Verified=False AuthorizationExpired` and erase its approver, matched key and authorization. A succeeded, two-person-approved switchover then read "Refused", with no approver.
 - **Now:** an Approval a Switchover was admitted under is recorded `Consumed=True`, reason `SwitchoverAdmitted`, as a restore's is (`RestoreAdmitted`), and its expiry never rewrites it.
 - **What counts as admission:** the Switchover's own `Admitted=True` condition, which its controller writes once, after the bundle and before the Job; its time is the instant recorded. A Job named after the Switchover, its `status.jobRef` or a ConfigMap is never admission on its own.
-- **One admission per Switchover:** a Job named after a Switchover that its controller did not create for an admission is not adopted; the Switchover waits `Pending`, `SwitchoverJobNotAdmitted`, until it is gone. A run whose Job is deleted before it finishes ends `Failed`, `SwitchoverJobLost`, and is never admitted again on an approval that may have expired since; before this, an older build admitted it again.
+- **One admission per Switchover:**
+  - A Job named after a Switchover that is not yet admitted is not adopted: the Switchover waits `Pending`, `SwitchoverJobNotAdmitted`, until it is gone.
+  - Once admitted, a Job under its name is the run only when its one controller owner reference is this Switchover's UID. That covers a Job its own create found already there. Any other Job ends the Switchover `Refused`, `JobNameConflict`, and its `jobRef` is never recorded. An owner reference can be written by whoever may create Jobs, so this is the Restore's own check and no more.
+  - A run whose Job is deleted before it finishes ends `Failed`, `SwitchoverJobLost`, and is never admitted again on an approval that may have expired since; before this, an older build admitted it again.
 - **Unchanged:** an unused expired approval still authorises nothing new and is refused exactly as before.
 - **Approvals an earlier build already rewrote:** a Switchover an older build ran has no marker. After the upgrade, its Approval is re-verified from its signed bytes, and recorded again, only when the Switchover's status proves the run (a terminal phase with the run's own exit code, and its Job recorded) and its bundle is that build's: one owner, this Switchover, immutable, carrying this Approval's signed bytes and sidecar, made after the Approval. The bundle's creation is then the instant. Nothing is copied from an unsigned field, and `jobRef` alone never counts. Where the Switchover or its bundle is gone, the switchover's own signed record stays the evidence.
 - **The console** reads such an approval "Verified · used by swo-…".
@@ -3080,7 +3083,12 @@ The stream half has no automated row: jsdom has no EventSource.
   - an admission after the window.
 - `dui43_an_older_builds_run_is_rebuilt_only_from_what_proves_it_ran`, with eleven controls (no exit code, not finished, no bundle, another owner, a second owner, not immutable, other approval or signature bytes, an older bundle, an admission after the window).
 - `dui43_a_switchover_recreated_under_a_new_uid_consumes_nothing`.
-- `switchover_controller.rs`: the order bundle, marker, Job, `jobRef`; a lost Job, new and older, ends `SwitchoverJobLost` with no Approval read; a stranger's Job is not adopted.
+- `switchover_controller.rs`:
+  - the order: bundle, marker, Job, `jobRef`;
+  - a lost Job, new and older, ends `SwitchoverJobLost` with no Approval read;
+  - a stranger's Job before admission is not adopted;
+  - a Job raced in under the name during the admitting pass (no owner, or another UID) is refused `JobNameConflict` with no `jobRef`, and the control is the controller's own Job, which proceeds;
+  - an admitted Switchover's Job that is not its own is refused the same way.
 
 [UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 waits past a switchover approval's expiry on the PoC.]
 **Rollback:** an older controller rewrites consumed switchover approvals at their expiry again. The switchover's signed record is unaffected.
