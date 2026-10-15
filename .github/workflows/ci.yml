@@ -176,13 +176,23 @@ jobs:
       - run: ./scripts/e2e-seed.sh
       - run: cargo build --locked -p logweir
       - run: cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
-      - name: Kafka adapter and production timeout integration tests
+      # THE NAMED ROWS GO THROUGH scripts/run-named-tests.sh (FX-53), which
+      # refuses a name that matches no test: a bare `cargo test <filter>` exits
+      # 0 having run nothing. That is how this step ran `notify`'s
+      # `the_production_agent_gives_up_on_a_sink_that_never_replies` as
+      # `0 passed … 8 filtered out` on every run after f0f01777 withdrew the
+      # drill's notification post and that row with it (PROD-17.1 B2, OD-12).
+      # The post is gone, so the row has nothing left to prove and is removed;
+      # notify.rs's remaining rows run in `check`. A name is the test's full
+      # path, as `--list` prints it.
+      - name: Kafka adapter and doctor integration tests
         if: matrix.crates
         run: |
           cargo test --locked -p logweir-kafka --features e2e --test live -- --test-threads=1
-          cargo test --locked -p logweir --features e2e --lib check_storage_skips_a_genuinely_unreachable_endpoint
-          cargo test --locked -p logweir --features e2e --test doctor check_7_an_unreachable_target_is_named_as_a_target_problem
-          cargo test --locked -p logweir --features e2e --test notify the_production_agent_gives_up_on_a_sink_that_never_replies
+          CARGO_TEST_ARGS="--locked -p logweir --features e2e --lib" bash scripts/run-named-tests.sh \
+            doctor::tests::check_storage_skips_a_genuinely_unreachable_endpoint
+          CARGO_TEST_ARGS="--locked -p logweir --features e2e --test doctor" bash scripts/run-named-tests.sh \
+            check_7_an_unreachable_target_is_named_as_a_target_problem
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
       - if: always()
