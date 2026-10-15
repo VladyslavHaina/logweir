@@ -13,7 +13,7 @@ import { backupRoutes } from "./routes";
 import { BackUpNow, UNKNOWN_RUN_OUTCOME } from "./BackUpNow";
 import { ConnectArchive } from "../catalog/ConnectArchive";
 import { KEYS_FORBIDDEN_SENTENCE } from "../trust/model";
-import { DIFFERENT_RUN_SENTENCE } from "./BackupDetail";
+import { DIFFERENT_RUN_SENTENCE, LiveProgress } from "./BackupDetail";
 import { CASES } from "./verdict";
 import { CATALOG_WINDOW_SENTENCE, PARTIAL_POINTS_SENTENCE } from "../catalog/model";
 import catalogPoints from "../../../fixtures/console/catalog-points.json";
@@ -346,6 +346,28 @@ describe("one backup's page", () => {
     expect(document.body.textContent).toMatch(/this page holds no key and checks nothing itself/);
     expect(document.body.textContent).not.toMatch(/in your browser/);
     expect((screen.getByRole("button", { name: "Restore this point" }) as HTMLButtonElement).getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("DUI-48.4: the stepper never shows a step the run has not reached, and never moves back", () => {
+    const b = { ...(backupDoc.item as object), operation: { ...(backupDoc.item as { operation: object }).operation, state: "running", terminal: false } } as never;
+    const op = (stage: string) => ({ ...(operationBackup.item as object), state: "running", stage, terminal: false }) as never;
+    const steps = () =>
+      [...document.querySelectorAll("[aria-label='Backup progress'] li")].map(
+        (li) => `${li.textContent?.match(/^(Started|Preparing|Copying|Verifying)/)?.[1]}:${li.classList.contains("pf-m-current") ? "current" : li.classList.contains("pf-m-success") ? "done" : "-"}`,
+      );
+    // No operation view yet: the summary's "running" names no step; only Started is done.
+    const { rerender } = render(<LiveProgress b={b} op={undefined} />);
+    expect(steps()).toEqual(["Started:done", "Preparing:-", "Copying:-", "Verifying:-"]);
+    // The view says Preparing, then Copying.
+    rerender(<LiveProgress b={b} op={op("preparing")} />);
+    expect(steps()).toEqual(["Started:done", "Preparing:current", "Copying:-", "Verifying:-"]);
+    rerender(<LiveProgress b={b} op={op("running")} />);
+    expect(steps()).toEqual(["Started:done", "Preparing:done", "Copying:current", "Verifying:-"]);
+    // A failed read (the summary again) or an older stage never steps back.
+    rerender(<LiveProgress b={b} op={undefined} />);
+    expect(steps()).toEqual(["Started:done", "Preparing:done", "Copying:current", "Verifying:-"]);
+    rerender(<LiveProgress b={b} op={op("preparing")} />);
+    expect(steps()).toEqual(["Started:done", "Preparing:done", "Copying:current", "Verifying:-"]);
   });
 
   it("DUI-47: a verifying run's Evidence card gives the attempt's time, never a Verified at beside Not verified", async () => {

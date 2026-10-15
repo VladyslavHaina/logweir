@@ -3,7 +3,7 @@
 // and manual-run-queue.spec.js. Fixtures are the API's (console/fixtures/console/).
 // Every row has a negative control: a value that makes the assertion fail.
 import { describe, expect, it } from "vitest";
-import { liveStepIndex } from "./BackupDetail";
+import { liveStepIndex, summaryStepPosition } from "./BackupDetail";
 import type { Backup, OperationView } from "../../api/backups";
 import {
   backupSentence,
@@ -259,3 +259,15 @@ describe("DUI-47: the instant beside a verdict", () => {
     for (const state of ["valid", "invalid", "notAttempted", "noEvidence", "unknown"]) expect(verdictInstantTerm(state)).toBe("Verified at");
   });
 });
+
+describe("DUI-48.4: the stepper from a Backup's summary alone", () => {
+  it("names no step the summary does not name exactly, never Copying for running", () => {
+    expect(summaryStepPosition("running")).toBe(0.5);
+    expect(summaryStepPosition("pending")).toBe(0);
+    expect(summaryStepPosition("preparing")).toBe(1);
+    expect(summaryStepPosition("verifying")).toBe(3);
+    // CONTROL: an operation view's own stage still places Copying.
+    expect(liveStepIndex("running", "running")).toBe(2);
+  });
+});
+
