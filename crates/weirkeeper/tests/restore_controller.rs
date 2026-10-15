@@ -8822,6 +8822,57 @@ async fn the_shipped_reconcile_states_the_handle_location_it_read() {
     );
 }
 
+/// **The crash-window arm's third source (DUI-38 review L8): a
+/// `ControllerIdentity` destination**, which the controller reads itself.
+/// Asked of the arm's own rule (`crash_window_verdict`): resolving such a
+/// destination needs an installation policy that lists its location, which
+/// this binary does not configure (the other two sources are driven through
+/// the reconcile in `evidence_fetch_job`). The unread verdict is attempt 1 of
+/// a read schedule, so the read is tried again and the run is never left
+/// unread.
+///
+/// CONTROL: a source the controller does not read (a destination that lost its
+/// reader) records its sentence with no schedule.
+#[test]
+fn a_crash_window_restore_read_by_the_controller_schedules_its_read() {
+    use weirkeeper::controllers::backup::EvidenceSource;
+    use weirkeeper::controllers::restore::crash_window_verdict;
+    let now = utc(2026, 9, 10, 12, 30);
+    let read_by_controller = EvidenceSource::Destination(Arc::new(Store::in_memory("logweir/")));
+    let (result, observation) =
+        crash_window_verdict(&read_by_controller, SCORECARD_KEY, Some("ev"), now)
+            .expect("a controller read that cannot be made is recorded");
+    assert_eq!(result.result, VerificationVerdict::NotAttempted);
+    assert!(
+        result
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("BackupDestination ev") && d.contains(SCORECARD_KEY)),
+        "{result:?}"
+    );
+    assert_eq!(
+        observation["attempt"],
+        serde_json::json!(1),
+        "{observation}"
+    );
+    assert!(
+        observation["retryAfter"].as_str().is_some() && observation["mode"].as_str().is_some(),
+        "a scheduled controller read: {observation}"
+    );
+
+    let (result, observation) = crash_window_verdict(
+        &EvidenceSource::NotAttempted {
+            detail: "BackupDestination ev has no spec.access.evidenceRead".to_string(),
+        },
+        SCORECARD_KEY,
+        Some("ev"),
+        now,
+    )
+    .expect("the source's sentence is recorded");
+    assert_eq!(result.result, VerificationVerdict::NotAttempted);
+    assert!(observation.is_null(), "no read to schedule: {observation}");
+}
+
 /// **The unread-scorecard verdict is written for a run the CONTROLLER reads**:
 /// through the global handle, or through an evidence destination's own
 /// `ControllerIdentity` handle. It is a TRANSIENT `NotAttempted` in both cases
