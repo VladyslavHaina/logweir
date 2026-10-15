@@ -1,0 +1,39 @@
+name: ci-nightly
+# FX-53 §2.6: every night, the whole of ci.yml on main with `force: true`, which
+# ignores the gate markers, so every gate runs. It catches what no input hash
+# sees: new advisories (cargo deny, npm audit), mutable base and broker images,
+# the runner image and its apt packages. Its gates record fresh markers, which a
+# marker lookup accepts from this workflow only as `ci / <job>`
+# (scripts/ci-gate.sh, PROVERS). A red night is acted on before the next merge.
+#
+# `force` is an input ci.yml gains in FX-53 stage 4 (cicd-w1); until then GitHub
+# refuses this call ("force is not defined in the referenced workflow").
+#
+# IT PUBLISHES NOTHING. ci.yml's only publishing job, `publish`, runs only when
+# `github.event_name == 'push'` on main (workflow_lint pins that condition, and
+# that every ci.yml job with a write scope or a secret runs only on a main push).
+# In a called workflow `github.event_name` is this caller's event, `schedule` or
+# `workflow_dispatch`, so `publish` is skipped. No secret is passed either, so
+# nothing below could log in to a registry. The `id-token` and `attestations`
+# grants exist only because GitHub refuses to start a run whose called jobs
+# request more than the caller grants (`publish` declares both); no job that
+# runs here receives them.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  # The job id is the prefix of the gate jobs' names in this run (`ci / lint`,
+  # `ci / e2e 1`, ...), which the marker lookup requires.
+  ci:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/ci.yml
+    with:
+      force: true

@@ -466,3 +466,45 @@ fn no_gate_job_can_pass_on_a_failure() {
         found.join("\n")
     );
 }
+
+/// FX-53 §2.6: the nightly runs every gate (`force: true`) and publishes
+/// nothing. It calls ci.yml with no secret, only on main, from a schedule or a
+/// dispatch; ci.yml's only publishing job runs on a main push alone, and in a
+/// called workflow `github.event_name` is the caller's. Its job id `ci` is the
+/// `ci / ` prefix the marker lookup requires (scripts/ci-gate.sh, PROVERS).
+#[test]
+fn the_nightly_forces_every_gate_and_publishes_nothing() {
+    let read = |name: &str| -> serde_yaml::Value {
+        serde_yaml::from_str(&std::fs::read_to_string(root().join(name)).unwrap()).unwrap()
+    };
+    let nightly = read(".github/workflows/ci-nightly.yml");
+    let triggers: BTreeSet<&str> = nightly["on"]
+        .as_mapping()
+        .expect("on")
+        .keys()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(triggers, BTreeSet::from(["schedule", "workflow_dispatch"]));
+    let jobs = nightly["jobs"].as_mapping().expect("jobs");
+    assert_eq!(jobs.len(), 1, "the nightly is one call of ci.yml");
+    let ci = &nightly["jobs"]["ci"];
+    assert_eq!(ci["uses"].as_str(), Some("./.github/workflows/ci.yml"));
+    assert_eq!(ci["if"].as_str(), Some("github.ref == 'refs/heads/main'"));
+    assert!(ci["secrets"].is_null(), "the nightly passes no secret");
+    assert_eq!(ci["with"]["force"].as_bool(), Some(true));
+    assert_eq!(ci["with"].as_mapping().map(|m| m.len()), Some(1));
+    let main = read(".github/workflows/ci.yml");
+    for (id, job) in main["jobs"].as_mapping().unwrap() {
+        let id = id.as_str().unwrap();
+        if id == "publish" {
+            let condition = job["if"].as_str().unwrap_or_default();
+            assert!(
+                condition
+                    .starts_with("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+                "ci.yml publish must run on a main push only: {condition}"
+            );
+        } else {
+            assert!(job["secrets"].is_null(), "ci.yml job {id} takes secrets");
+        }
+    }
+}
