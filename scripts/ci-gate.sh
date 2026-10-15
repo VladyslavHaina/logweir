@@ -4,7 +4,9 @@
 # inputs in a same-repository run of ci.yml; otherwise it runs and leaves one.
 #
 #   ci-gate.sh hash <gate>                      the gate's input hash (hex)
-#   ci-gate.sh files <gate>                     the tracked files that hash covers
+#   ci-gate.sh files <gate>                     the tracked files whose contents it hashes
+#   ci-gate.sh exists <gate>                    the tracked files whose presence only
+#                                               it hashes (`exists` patterns)
 #   ci-gate.sh lookup <gate> <hash>             0 = a run proves it (prints
 #                                               proof-run=<url>); anything else = run
 #   ci-gate.sh record <gate> <hash> <dir>       write the marker file into <dir>;
@@ -28,7 +30,9 @@
 # [global] (the lockfile, toolchain, root manifest, the map, this script, the
 # local actions, and every workflow a proving run executes), its definition,
 # crate closures, paths, readers, walks and tests, plus every tracked file no
-# gate classifies. The runner is not hashed: a gate's job is one ci.yml job,
+# gate classifies; and, by PATH ONLY, the files its `exists` patterns name
+# (what the gate only looks for: cargo's target discovery, a walker's
+# is_dir). The runner is not hashed: a gate's job is one ci.yml job,
 # and its `runs-on` is in ci.yml, a global input; the nightly catches image drift.
 #
 # THE PROOF. A marker artifact `gate-<gate>-<hash>` is only an INDEX: any code
@@ -123,9 +127,9 @@ except ModuleNotFoundError:  # Python < 3.11: no TOML reader, so no hash
     print("ci-gate: python3 3.11 or later is needed (tomllib)", file=sys.stderr)
     sys.exit(4)
 
-SCHEME = "ci-gate/2"
+SCHEME = "ci-gate/3"
 MAP = "ci/gates.toml"
-GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "always"}
+GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "exists", "always"}
 # Pattern kinds that CLASSIFY a path. `walks` and `global` are inputs but say
 # nothing about who owns a file.
 CLASSIFYING = ("definition", "crates", "paths", "readers", "tests")
@@ -187,6 +191,9 @@ def load_map():
             raise MapError(f"{MAP}: gate {name}: always must be true or false")
     if not isinstance(gmap.get("global", {}).get("paths"), list):
         raise MapError(f"{MAP}: [global].paths is missing")
+    present = gmap["global"].get("exists", [])
+    if not isinstance(present, list) or not all(isinstance(v, str) and v for v in present):
+        raise MapError(f"{MAP}: [global].exists must be a list of strings")
     return gmap
 
 
@@ -320,6 +327,10 @@ def patterns(gmap, ws, name):
         "readers": list(gate.get("readers", [])),
         "walks": list(gate.get("walks", [])),
         "tests": [f"e2e/tests/{t}.rs" for t in gate.get("tests", [])],
+        # PRESENCE only: the gate's commands look whether these exist (cargo's
+        # target discovery, a walker's is_dir), not what they hold. The hash
+        # covers their paths, not their contents.
+        "exists": list(gmap["global"].get("exists", [])) + list(gate.get("exists", [])),
     }
     return kinds
 
@@ -345,13 +356,23 @@ def inputs(gmap, ws, tree, name, strict=True):
             matched = tree.match(pattern)
             if not matched:
                 empty.append(f"{kind}: {pattern}")
-            files |= matched
+            if kind != "exists":
+                files |= matched
     if strict and empty:
         # A definition or input that names nothing is stale: no sound hash.
         raise MapError(f"gate {name}: no tracked file matches " + "; ".join(empty))
     if not gmap["gates"][name].get("definition"):
         raise MapError(f"gate {name}: no definition")
     return files | unclaimed(gmap, ws, tree), empty
+
+
+def presence(gmap, ws, tree, name, files):
+    """The files the gate only checks for (its `exists` patterns), minus those
+    it reads: their paths are hashed, not their contents."""
+    present = set()
+    for pattern in patterns(gmap, ws, name)["exists"]:
+        present |= tree.match(pattern)
+    return present - files
 
 
 def gate_hash(gmap, ws, tree, name):
@@ -361,6 +382,8 @@ def gate_hash(gmap, ws, tree, name):
     for path in sorted(files):
         mode, blob = tree.all[path]
         digest.update(f"{mode} {blob} {path}\0".encode())
+    for path in sorted(presence(gmap, ws, tree, name, files)):
+        digest.update(f"exists {path}\0".encode())
     return digest.hexdigest()
 
 
@@ -682,6 +705,7 @@ def describe(gmap, ws, tree):
             "patterns": patterns(gmap, ws, name),
             "empty": empty,
             "files": sorted(files),
+            "exists": sorted(presence(gmap, ws, tree, name, files)),
         }
     out["unclaimed"] = sorted(unclaimed(gmap, ws, tree))
     return out
@@ -709,6 +733,11 @@ def main():
         if command == "hash" and len(rest) == 1:
             require_clean()
             print(gate_hash(gmap, ws, tree, rest[0]))
+            return EXIT_OK
+        if command == "exists" and len(rest) == 1:
+            require_clean()
+            files = inputs(gmap, ws, tree, rest[0])[0]
+            print("\n".join(sorted(presence(gmap, ws, tree, rest[0], files))))
             return EXIT_OK
         if command == "files" and len(rest) == 1:
             require_clean()

@@ -23,6 +23,9 @@
 # - walks: files the gate reads because it walks the tree. Walks are inputs of
 #   the gate, but they do not CLASSIFY a path (below).
 # - tests: e2e test binaries; each adds `e2e/tests/<name>.rs` to the inputs.
+# - exists ([global] and per gate): files the gate only LOOKS FOR (stat,
+#   access): hashed by path, so adding or removing one changes the hash and
+#   editing one does not. The traced run accepts only stat-like calls on them.
 # - job: the name of the ci.yml job that runs the gate, as the jobs API shows
 #   it (default: the gate's name; a caller prefixes `<caller job> / `).
 # - always = true: the result depends on time or the outside world (advisory
@@ -56,6 +59,15 @@ paths = [
   "crates/*/Cargo.toml",
   "xtask/Cargo.toml",
   "e2e/Cargo.toml",
+  # Every gate but `console` runs scripts/extract-engine.sh (ci-check.sh's
+  # `prepare`, each e2e shard's setup), which reads the OSO digest, checks
+  # that the licence and the source tarball are present, and greps the
+  # Dockerfile for the same pin (traced run 38817431902).
+  "scripts/extract-engine.sh",
+  "third_party/kafka-backup-binary.digest",
+  "third_party/LICENSE-MIT",
+  "third_party/kafka-backup-v*.tar.gz",
+  "Dockerfile",
   "ci/gates.toml",
   "scripts/ci-gate.sh",
   ".github/actions/**",
@@ -68,6 +80,17 @@ paths = [
   ".github/workflows/release.yml",
   ".github/workflows/release-drill.yml",
   ".github/workflows/ci-nightly.yml",
+]
+# Presence only: cargo's target discovery looks for every member's target
+# roots (and e2e's README) on every command, and a member with neither a lib
+# nor a bin fails the workspace load (traced run 38817431902: statx by cargo).
+# Their paths are hashed, not their contents.
+exists = [
+  "crates/*/src/lib.rs",
+  "crates/*/src/main.rs",
+  "xtask/src/main.rs",
+  "e2e/src/lib.rs",
+  "e2e/README.md",
 ]
 
 # ci.yml jobs that are plumbing, not gates: they read no product input.
@@ -126,10 +149,14 @@ readers = [
   "docs/**",
   "console/fixtures/**",
   "config/**",
-  # logweir-core topic_budget and logweir-store capped read these crates' text
+  # logweir-core topic_budget reads these crates' text
   "crates/weirkeeper/**",
   "crates/logweir/**",
+  # logweir-store's capped.rs reads every crate's src/**/*.rs (traced run
+  # 38817431902), and stats every entry it walks under crates/
+  "crates/*/src/**",
 ]
+exists = ["crates/**"]
 
 [gates.unit-logweir]
 covers = ["C16"]
@@ -185,6 +212,9 @@ readers = [
   # preflight_controller and schedule_controller read logweir's source text
   "crates/**",
   "xtask/**",
+  # linkage.rs copies crates/, e2e/ and xtask/ whole (`cp -a`) into the
+  # overlay it runs cargo in (traced run 38817431902)
+  "e2e/**",
 ]
 
 [gates.unit-api]
@@ -210,6 +240,9 @@ job = "unit-small"
 covers = ["C16"]
 definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["logweir-retention", "logweir-reaper"]
+# tests/worker.rs reads the controller's wire for the policy (traced run
+# 38817431902)
+readers = ["crates/weirkeeper/src/controllers/retention_policy.rs"]
 
 [gates.unit-xtask]
 job = "unit-small"
@@ -244,6 +277,9 @@ readers = [
   "console/src/**",
   "console/scripts/**",
   "console/package.json",
+  # stack_params walks every crates/**/*.rs for `--features e2e` rows (traced
+  # run 38817431902)
+  "crates/**",
 ]
 
 # ------------------------------------------------------------------ generated
@@ -414,6 +450,8 @@ readers = [
   # check_image reads the Dockerfiles and third_party/
   "Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper", ".dockerignore",
   "third_party/**",
+  # stack_params walks every crates/**/*.rs (traced run 38817431902)
+  "crates/**",
 ]
 
 # The `--features e2e` rows under crates/ (E5): logweir-kafka `live`, two
