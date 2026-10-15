@@ -12,6 +12,8 @@ import {
   carriesKeyMaterial,
   connectionBody,
   connectionField,
+  connectionReReadMs,
+  PROBE_RE_READS,
   connectionProblems,
   discoveryBody,
   followGap,
@@ -379,3 +381,21 @@ describe("DUI-31.6: a re-probe beside an earlier reading", () => {
     expect(probeState({ state: "unknown", reason: "ProbeRunning" }, NOW)).toMatchObject({ verdict: "probing", laterReason: "" });
   });
 });
+
+describe("DUI-48.1: a connection's first probe is followed", () => {
+  it("re-reads one with no probe recorded, as a probe in flight, within the bound; never one with a reading", () => {
+    const c = fixture<{ item: Connection }>("connection.json").item;
+    const unprobed = { ...c, reachability: { state: "unknown", reason: null, observedAt: null } } as unknown as Connection;
+    const running = { ...c, reachability: { ...c.reachability, reason: "ProbeRunning" } } as Connection;
+    expect(probeState(unprobed.reachability).verdict).toBe("never");
+    expect(connectionReReadMs(unprobed, 0)).toBe(4000);
+    expect(connectionReReadMs(running, 3)).toBe(4000);
+    // The bound: like DUI-38's, the page stops following.
+    expect(connectionReReadMs(unprobed, PROBE_RE_READS)).toBe(false);
+    // CONTROL: a connection with a reading is not re-read.
+    expect(probeState(c.reachability).verdict).toBe("reachable");
+    expect(connectionReReadMs(c, 0)).toBe(false);
+    expect(connectionReReadMs(undefined, 0)).toBe(false);
+  });
+});
+

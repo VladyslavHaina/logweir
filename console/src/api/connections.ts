@@ -454,16 +454,29 @@ export function forgetConnectionCredential(body: CreateConnectionRequest): void 
 // ----------------------------------------------------------------- reads
 
 /** While a probe is in flight the page re-reads every 4 s, for at most the probe Job's two-minute deadline. */
-const PROBE_RE_READ_MS = 4000;
-const PROBE_RE_READS = 30;
+export const PROBE_RE_READ_MS = 4000;
+export const PROBE_RE_READS = 30;
 
 function probing(c: Connection | undefined): boolean {
   return c?.reachability.reason === PROBE_RUNNING_REASON;
 }
 
-/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight. */
+/**
+ * DUI-48.1: a connection with no probe recorded yet (just created): its first probe is on
+ * its way, and the page follows it as it follows a probe in flight, within the same bound.
+ */
+function awaitingFirstProbe(c: Connection | undefined): boolean {
+  return c !== undefined && probeState(c.reachability).verdict === "never";
+}
+
+/** How soon a connection is read again: while a probe is in flight or its first is awaited, every 4 s for 30 reads; else never. */
+export function connectionReReadMs(c: Connection | undefined, reads: number): number | false {
+  return (probing(c) || awaitingFirstProbe(c)) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false;
+}
+
+/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight or awaited. */
 export function useConnectionList(ns: string) {
-  return useConnections(ns, (items, reads) => (items.some(probing) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false));
+  return useConnections(ns, (items, reads) => (items.some((c) => connectionReReadMs(c, reads) !== false) ? PROBE_RE_READ_MS : false));
 }
 
 export function useConnection(ns: string, name: string, enabled = true) {
@@ -473,7 +486,7 @@ export function useConnection(ns: string, name: string, enabled = true) {
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal }))).item,
     enabled: enabled && readable,
-    refetchInterval: (q) => (probing(q.state.data) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
+    refetchInterval: (q) => connectionReReadMs(q.state.data, q.state.dataUpdateCount),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
 }

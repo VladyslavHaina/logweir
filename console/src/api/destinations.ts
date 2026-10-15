@@ -466,6 +466,16 @@ export function rotationField(path: string): "caName" | "caKey" | GrantField | u
 /** The namespace's destinations: one list, shared with the schedule and catalog pick-lists. */
 export const useDestinationList = useDestinations;
 
+/**
+ * DUI-48.1's sweep: a destination its controller has not judged at this generation yet (just
+ * created or edited) is read again every 4 s, for at most 30 reads, so its verdict appears
+ * without a reload; a judged one is not re-read.
+ */
+export function destinationReReadMs(d: Destination | undefined, reads: number): number | false {
+  const unjudged = d !== undefined && d.status.observedGeneration !== d.generation;
+  return unjudged && reads < 30 ? 4000 : false;
+}
+
 export function useDestination(ns: string, name: string, enabled = true) {
   const readable = useCan(ns, "destinations");
   return useQuery({
@@ -473,6 +483,7 @@ export function useDestination(ns: string, name: string, enabled = true) {
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal }))).item,
     enabled: enabled && readable,
+    refetchInterval: (q) => destinationReReadMs(q.state.data, q.state.dataUpdateCount),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
 }
