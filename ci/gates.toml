@@ -51,6 +51,11 @@ paths = [
   "Cargo.toml",
   "rust-toolchain.toml",
   ".cargo/**",
+  # cargo loads every workspace member's manifest for any command, so one
+  # broken manifest breaks every cargo gate (the traced run sees the reads).
+  "crates/*/Cargo.toml",
+  "xtask/Cargo.toml",
+  "e2e/Cargo.toml",
   "ci/gates.toml",
   "scripts/ci-gate.sh",
   ".github/actions/**",

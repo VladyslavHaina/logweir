@@ -13,16 +13,33 @@ name: ci-trace
 # (scripts/test-ci-gate.py) and is proven live once ci.yml's gates use the
 # action (FX-53 stage 4).
 #
-# The weekly traced run of the unit and e2e gates (strace, every opened
-# tracked file against its gate's declared inputs) lands here next.
+# THE TRACED RUN (weekly, and on dispatch). Each unit gate and each e2e shard
+# runs its own command under strace (scripts/ci-trace.py run): the unit gates
+# `scripts/ci-check.sh <gate>`, as ci.yml's check rows do; the e2e shards only
+# the nextest run of their binaries from an archive (not docker, not cargo),
+# after the stack is up, as ci.yml's shards do. Every file the command opened,
+# stat'ed, probed or executed is mapped to the checkout's tracked files, and
+# the job FAILS when one is not among the gate's declared inputs
+# (`scripts/ci-gate.sh files <gate>`, taken before the command ran): that
+# gate would be skipped when the file changes, so ci/gates.toml must declare
+# it. target/, .git/, untracked files and paths outside the checkout are
+# ignored. A canary first traces a known command, so a change in strace's
+# output format fails the job instead of passing it. The gates and shards come
+# from ci/gates.toml (`describe`); this workflow publishes nothing and records
+# no marker. Not traced: the `--features e2e` crate rows under crates/ (they
+# run in shard 4 after the suite), and directory listings (getdents).
 on:
   pull_request:
     paths:
       - ci/gates.toml
       - scripts/ci-gate.sh
       - scripts/test-ci-gate.py
+      - scripts/ci-trace.py
+      - scripts/test-ci-trace.py
       - .github/actions/gate/**
       - .github/workflows/ci-trace.yml
+  schedule:
+    - cron: '41 4 * * 0'
   workflow_dispatch:
 permissions:
   contents: read
@@ -40,7 +57,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - name: The script's unit rows
-        run: python3 scripts/test-ci-gate.py
+        run: |
+          python3 scripts/test-ci-gate.py
+          python3 scripts/test-ci-trace.py
       - id: gate
         uses: ./.github/actions/gate
         with: { gate: docs }
@@ -91,3 +110,160 @@ jobs:
           grep -q "^run: a run of .github/workflows/ci-trace.yml" explain.out
           grep -q "^job 'gate-machinery': job 'gate-machinery' did not pass (in_progress)" explain.out
           grep -Eq "^tree [0-9a-f]{40}: (ok|its inputs at [0-9a-f]{40} hash to [0-9a-f]{64})$" explain.out
+
+  # The gates to trace, from the map: every unit gate, with the cache its ci.yml
+  # job restores, and every e2e shard, with the nextest filter of its binaries.
+  plan:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      unit: ${{ steps.plan.outputs.unit }}
+      e2e: ${{ steps.plan.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - id: plan
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          bash scripts/ci-gate.sh describe > "$RUNNER_TEMP/map.json"
+          unit="$(jq -c '[.gates | to_entries[] | select(.key | startswith("unit-")) | {gate: .key, cache: .value.job}]' "$RUNNER_TEMP/map.json")"
+          e2e="$(jq -c '[.gates | to_entries[] | select(.key | startswith("e2e-")) | {gate: .key, filter: ("(" + ([.value.tests[] | "binary(=" + . + ")"] | join(" | ")) + ") & not test(a_pod_really_reaches_the_k8s_listener)")}]' "$RUNNER_TEMP/map.json")"
+          [ "$(jq length <<< "$unit")" -ge 1 ] && [ "$(jq length <<< "$e2e")" -ge 1 ]
+          echo "unit=$unit" | tee -a "$GITHUB_OUTPUT"
+          echo "e2e=$e2e" | tee -a "$GITHUB_OUTPUT"
+
+  trace-unit:
+    needs: plan
+    name: trace ${{ matrix.gate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit) }}
+    # ci.yml's check rows' environment, so the gate runs as it does there.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+      GATE: ${{ matrix.gate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # Before anything writes a tracked file: `files` hashes a clean checkout.
+      - name: The gate's declared inputs
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt" && wc -l "$RUNNER_TEMP/inputs.txt"
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+      - uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ matrix.cache }}
+          save-if: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: '22' }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: '3.12' }
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-deny@0.20.2,cargo-nextest@0.9.148' }
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with: { version: v4.0.1 }
+      - run: sudo apt-get update && sudo apt-get install -y strace mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - run: pip install cryptography pytest
+      - name: The tracer reads this runner's strace
+        run: python3 scripts/ci-trace.py canary --root "$GITHUB_WORKSPACE"
+      - name: ${{ matrix.gate }}, traced
+        run: python3 scripts/ci-trace.py run --out "$RUNNER_TEMP/trace.txt" -- bash scripts/ci-check.sh "$GATE"
+      - name: Every tracked file it read is declared
+        if: ${{ !cancelled() }}
+        run: |
+          ls -l "$RUNNER_TEMP/trace.txt"
+          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/trace.txt"
+
+  trace-e2e:
+    needs: plan
+    name: trace ${{ matrix.gate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.e2e) }}
+    # ci.yml's e2e shards' environment.
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+      COMPOSE_PROFILES: auth
+      GATE: ${{ matrix.gate }}
+      FILTER: ${{ matrix.filter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # Before anything writes a tracked file (e2e-seed.sh refreshes fixtures).
+      - name: The gate's declared inputs
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt" && wc -l "$RUNNER_TEMP/inputs.txt"
+      - name: Pull Docker Hub images through a mirror
+        run: |
+          sudo mkdir -p /etc/docker
+          if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
+          echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+      - name: Free disk only when short (MinIO refuses writes below its free-space floor)
+        run: |
+          avail="$(df --output=avail -BG / | tail -1 | tr -dc 0-9)"
+          echo "available: ${avail}G"
+          if [ "$avail" -lt 40 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          fi
+      - uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e
+          save-if: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: '22' }
+      - run: sudo apt-get update && sudo apt-get install -y strace cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-nextest@0.9.148' }
+      - run: pip install cryptography
+      - name: The tracer reads this runner's strace
+        run: python3 scripts/ci-trace.py canary --root "$GITHUB_WORKSPACE"
+      - name: Extract the pinned engine, build Logweir's over it
+        run: |
+          ./scripts/extract-engine.sh
+          bash scripts/engine-source.sh build
+      # The CLI the harness drives, and the shard's binaries archived, so the
+      # traced command runs tests and compiles nothing (ci.yml's build-e2e).
+      - name: Build the CLI and archive the e2e test binaries
+        run: |
+          cargo build --locked -p logweir
+          cargo nextest archive --locked -p e2e --features e2e --archive-file "$RUNNER_TEMP/e2e.tar.zst"
+      - run: just e2e-up
+      - run: ./scripts/e2e-seed.sh
+      - name: ${{ matrix.gate }}'s binaries, traced
+        run: >-
+          python3 scripts/ci-trace.py run --out "$RUNNER_TEMP/trace.txt" --
+          cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE" --profile e2e -E "$FILTER"
+      - name: Every tracked file it read is declared
+        if: ${{ !cancelled() }}
+        run: |
+          ls -l "$RUNNER_TEMP/trace.txt"
+          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/trace.txt"
+      - if: always()
+        run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
