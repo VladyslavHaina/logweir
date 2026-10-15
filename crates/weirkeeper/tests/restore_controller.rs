@@ -4903,7 +4903,8 @@ fn the_restore_green_rule_reads_the_outcome() {
 /// states an operator scans a list for.
 ///
 /// 1. The SHIPPED CRD's `REASON` column names `.status.reason`, and the status
-///    schema declares the field (`Backup` has no `REASON` column).
+///    schema declares the field (`Backup`'s reads `exitReason`, with FAILED
+///    beside it, F1).
 /// 2. All five status-patch builders set `reason`, VERBATIM the reason of the
 ///    condition each writes about the run's state, never one of the
 ///    lowercase-hyphenated wire strings; one arm drives a real
@@ -4946,20 +4947,31 @@ async fn every_status_write_sets_the_scalar_reason() {
             .is_some(),
         "this fix ADDS a field; it does not take GC11's vocabulary away"
     );
-    // `Backup` IS UNAFFECTED, and this says so mechanically.
-    let backup_columns: Vec<String> = workspace_yaml("charts/logweir/crds/backups.yaml")["spec"]
-        ["versions"][0]["additionalPrinterColumns"]
+    // `Backup` (F1) has no `status.reason` and adds none (OD-11): its REASON
+    // reads `exitReason`, which carries the guard's own state, and the
+    // `-o wide` FAILED column beside it reads the Failed condition's reason,
+    // so a controller refusal behind an `operational` REASON is still named.
+    let backup_columns: Vec<(String, String)> = workspace_yaml("charts/logweir/crds/backups.yaml")
+        ["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Backup CRD declares printer columns")
         .iter()
-        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap_or_default().to_string(),
+                c["jsonPath"].as_str().unwrap_or_default().to_string(),
+            )
+        })
         .collect();
-    assert!(
-        !backup_columns.contains(&"REASON".to_string()),
-        "the `Backup` CRD does NOT have this defect and was NOT changed: it has no REASON column \
-         to repoint (PHASE/EXIT/RECORDS/SIGNED/AGE). If a later task adds one, it reads \
-         `.status.reason` and adds the field the same way. Got: {backup_columns:?}"
-    );
+    for (name, path) in [
+        ("REASON", ".status.exitReason"),
+        ("FAILED", ".status.conditions[?(@.type==\"Failed\")].reason"),
+    ] {
+        assert!(
+            backup_columns.contains(&(name.to_string(), path.to_string())),
+            "the `Backup` CRD prints {name} from {path}. Got: {backup_columns:?}"
+        );
+    }
 
     // ---- ARM 2: every builder, and the condition it must agree with -------
     let r = restore();
