@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Unit rows for scripts/ci-trace.py (FX-53 §2.6, the traced run).
 
-The samples are strace 6.x output in the shape ci-trace.yml records
-(`strace -f --seccomp-bpf -qq -y -s 4096 -o <file>`): one line per syscall,
-the pid first, `-y` paths in angle brackets, `<unfinished ...>` and
-`<... resumed>` pairs where processes interleave. The runner's own sample is
-checked live by ci-trace.yml's canary step on every traced run.
+Two kinds of sample:
+- RECORDED (scripts/fixtures/ci-trace/): real strace 6.1 output of the canary
+  and of `cargo test` on a small crate whose test reads by absolute and
+  relative path, from a thread, through a script that changes directory, and
+  through a child with its own current_dir. They were recorded in a throwaway
+  rust:1.89-bookworm container exactly as `ci-trace.py run` records, then
+  trimmed of system and target/ paths (every fork, chdir, exec and resumed
+  line kept; the reads are the same before and after).
+- WRITTEN in the same shape, for the cases a recording rarely shows: threads
+  under CLONE_FS, vfork, a fork whose parent changes directory after it,
+  truncation, undecorated dirfds, escapes.
+The runner's own strace is checked live by ci-trace.yml's canary on every
+traced run.
 """
 
 import os
@@ -59,6 +67,51 @@ SAMPLE = f"""\
 101 openat(AT_FDCWD, "ci/gates.toml", O_RDONLY) = -1 ENOENT (No such file or directory)
 100 --- SIGCHLD {{si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=101, si_uid=1001, si_status=0, ...}} ---
 """
+
+
+FIXTURES = ROOT / "scripts" / "fixtures" / "ci-trace"
+RECORDED_ROOT = "/work/co"
+
+
+class Recorded(unittest.TestCase):
+    def run_trace(self, *args):
+        return subprocess.run([sys.executable, str(TRACE), *args], capture_output=True, text=True)
+
+    def reads(self, name):
+        proc = self.run_trace("reads", "--root", RECORDED_ROOT, "--tracked",
+                              str(FIXTURES / "tracked.txt"), str(FIXTURES / name))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return [line for line in proc.stdout.split("\n") if line]
+
+    def test_the_recorded_canary_reads_its_three_files(self):
+        self.assertEqual(self.reads("canary.strace"), ["README.md", "ci/gates.toml", "justfile"])
+
+    def test_the_recorded_cargo_test_reads_every_file_it_touched(self):
+        self.assertEqual(self.reads("cargo-test.strace"), [
+            "README.md",                  # "../README.md" from the package dir
+            "ci/gates.toml",              # `cat gates.toml` with current_dir(ci)
+            "docs/caf\u00e9.md",          # the script's `[ -e caf\u00e9.md ]` after its cd
+            "docs/declared.md",           # an absolute path through CARGO_MANIFEST_DIR
+            "docs/install.md",            # the script's `cat install.md` after its cd
+            "docs/undeclared.md",         # a thread's metadata(), relative
+            "sample/Cargo.toml",          # cargo
+            "sample/src/lib.rs",          # cargo's freshness check
+            "sample/tests/reads.rs",
+            "scripts/read-docs.sh",       # bash opens the script it runs
+        ])
+
+    def test_the_recorded_cargo_test_fails_on_its_undeclared_read(self):
+        declared = [r for r in self.reads("cargo-test.strace") if r != "docs/undeclared.md"]
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("\n".join(declared) + "\n")
+        try:
+            proc = self.run_trace("check", "--root", RECORDED_ROOT, "--tracked", str(FIXTURES / "tracked.txt"),
+                                  "--inputs", fh.name, str(FIXTURES / "cargo-test.strace"))
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual([l for l in proc.stdout.split("\n") if l.startswith("UNDECLARED")],
+                         ["UNDECLARED docs/undeclared.md (statx)"])
 
 
 class Trace(unittest.TestCase):
