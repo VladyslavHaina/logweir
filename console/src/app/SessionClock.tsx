@@ -172,7 +172,7 @@ export function SessionClock({
     return () => clearInterval(timer);
   }, [due]);
 
-  // Back in this tab after signing in in another: read the session again.
+  // Back in this tab after signing in in another tab: read the session again.
   const near = ended || remaining <= WARN_BEFORE_MS;
   useEffect(() => {
     if (!near) return undefined;
