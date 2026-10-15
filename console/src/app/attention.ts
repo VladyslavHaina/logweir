@@ -6,6 +6,7 @@ import { useBackups, useConnections, useProtection } from "../api/queries";
 import { useCan } from "../api/session";
 import type { Backup, Connection, ProtectionPolicy } from "../api/types";
 import { duration } from "../components/When";
+import { LATER_PROBE_GLOSS, probeState } from "../api/connections";
 
 export const DAY_MS = 86_400_000;
 
@@ -84,6 +85,22 @@ export function failedRunsLink(ns: string, p: Pick<ProtectionPolicy, "consecutiv
     : { to: `/${ns}/backups?filter=unverified`, action: "See the runs that did not verify" };
 }
 
+/**
+ * DUI-49.2: why a connection reads unreachable, by `probeState` as its page words it (DUI-31.6,
+ * DUI-48.3). The reading's own reason is the reason the brokers were not reached; a later
+ * probe's reason (a new probe running, one that recorded no reading) is said as that, beside
+ * the earlier reading, never as the cause. A stale reading says so.
+ */
+export function unreachableWords(c: Connection, now = Date.now()): string {
+  const p = probeState(c.reachability, now);
+  const stale = p.stale ? " That reading is stale." : "";
+  if (p.laterReason) {
+    const gloss = LATER_PROBE_GLOSS[p.laterReason];
+    return `The controller's last reading could not reach its brokers; since then, ${p.laterReason}${gloss ? `: ${gloss}` : ""}.${stale}`;
+  }
+  return `The controller could not reach its brokers (${p.reason || "no reason given"}).${stale}`;
+}
+
 export function attentionItems(
   ns: string,
   policies: ProtectionPolicy[],
@@ -97,7 +114,7 @@ export function attentionItems(
       key: `conn-${c.name}`,
       tone: "danger",
       title: `${c.name} is unreachable`,
-      detail: `The controller could not reach its brokers (${c.reachability.reason ?? "no reason given"}). ${unreachableConsequence(c.role)}`,
+      detail: `${unreachableWords(c, now)} ${unreachableConsequence(c.role)}`,
       to: `/${ns}/connections/${c.name}`,
       action: "Open the connection",
     });

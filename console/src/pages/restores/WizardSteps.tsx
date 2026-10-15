@@ -24,7 +24,9 @@ import {
 } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import DownloadIcon from "@patternfly/react-icons/dist/esm/icons/download-icon";
-import { ReachStatus, StatusLabel } from "../../components/Status";
+import { StatusLabel } from "../../components/Status";
+import { ProbeLabels } from "../connections/parts";
+import { probeState } from "../../api/connections";
 import { LoadingRows } from "../../components/States";
 import { count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
@@ -569,7 +571,8 @@ export function TargetStep({
                 label={
                   <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }}>
                     <span>{c.name}</span>
-                    <ReachStatus state={c.reachability.state} />
+                    {/* DUI-49.3: the probe as its connection page reads it: stale, probing, refused, never "not checked yet". */}
+                    <ProbeLabels state={probeState(c.reachability)} />
                   </Flex>
                 }
                 description={`${c.bootstrapServers.length} ${c.bootstrapServers.length === 1 ? "broker address" : "broker addresses"} · ${c.bootstrapServers[0] ?? ""}`}
@@ -887,7 +890,7 @@ export function CheckStep({
       {connection && (
         <Facts
           items={[
-            { term: "Target probe (context)", value: <ReachStatus state={connection.reachability.state} /> },
+            { term: "Target probe (context)", value: <ProbeLabels state={probeState(connection.reachability)} /> },
             { term: "Cluster id", value: shown(connection.reachability.clusterId) },
             { term: "Observed", value: <Instant value={connection.reachability.observedAt} /> },
           ]}

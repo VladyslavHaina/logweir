@@ -387,6 +387,37 @@ pub struct Integrity {
     /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<RestoreSelection>,
+    /// **DUI-50.** Whether the signed scorecard binds a consumer positions
+    /// mapping (`integrity.verification.positions_mapping`, format 1.12.0 and
+    /// 2.4.0): the one fact a switchover's review requires of a restore. A
+    /// CLAIM until `evidence.verification` says `Valid`, like `result`.
+    ///
+    /// Written on every pass that read the scorecard: `bound: false` when the
+    /// document binds none (its point captured no consumer group, or the plan
+    /// was not bound to a recovery point) or names why none was written.
+    /// ABSENT means not recorded: a controller before this field, or a
+    /// scorecard not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_mapping: Option<PositionsMappingRecord>,
+}
+
+/// `status.integrity.positionsMapping` (DUI-50): what the signed scorecard
+/// binds about the consumer positions it mapped, copied, never recomputed.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionsMappingRecord {
+    /// `true` exactly when the block names a mapping document (its key and
+    /// digest): the restore has positions to switch over.
+    pub bound: bool,
+    /// The groups the mapping covers (the block's `groups`), when it states
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<u32>,
+    /// Why no document was written (the block's `omitted`): `bound` is then
+    /// `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub omitted: Option<String>,
 }
 
 /// `status.integrity.unsampledTopics`' `maxItems`.

@@ -173,6 +173,24 @@ describe("needs attention", () => {
     expect(attentionItems("team-a", [HEALTHY], [BACKUP], CONNECTIONS, NOW)).toEqual([]);
   });
 
+  it("DUI-49.2: words an unreachable reading beside a later probe by probeState, never the later reason as the cause", () => {
+    const at = new Date(NOW - 60_000).toISOString();
+    const conn = (reachability: Record<string, unknown>) => ({ ...CONNECTIONS[0]!, role: "source", reachability }) as Connection;
+    const running = attentionItems("team-a", [], [], [conn({ state: "unreachable", reason: "ProbeRunning", observedAt: at })], NOW)[0]!.detail;
+    expect(running).toBe(
+      "The controller's last reading could not reach its brokers; since then, ProbeRunning: a new probe is running now. Backups from it fail until it is reachable.",
+    );
+    expect(running).not.toContain("(ProbeRunning)");
+    const stale = new Date(NOW - 3_600_000).toISOString();
+    expect(attentionItems("team-a", [], [], [conn({ state: "unreachable", reason: "ProbeReportedUnreachable", observedAt: stale })], NOW)[0]!.detail).toContain(
+      "(ProbeReportedUnreachable). That reading is stale.",
+    );
+    // CONTROL: the reading's own reason, fresh, is the cause, in its own words.
+    expect(attentionItems("team-a", [], [], [conn({ state: "unreachable", reason: "ProbeReportedUnreachable", observedAt: at })], NOW)[0]!.detail).toBe(
+      "The controller could not reach its brokers (ProbeReportedUnreachable). Backups from it fail until it is reachable.",
+    );
+  });
+
   it("says why a policy is past its objective, and how many runs failed", () => {
     const stale = { ...HEALTHY, health: "Stale", consecutiveFailedRuns: 2 };
     const [item] = attentionItems("team-a", [stale], [], [], NOW + HOUR);

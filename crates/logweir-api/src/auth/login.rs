@@ -391,6 +391,22 @@ pub fn refused_sign_in_lead(code: &str) -> &'static str {
     }
 }
 
+/// DUI-49.1: the page's detail line for the refusals whose shared sentence
+/// ("did not start here, or took too long. Start again at /auth/login.")
+/// would contradict the lead above it, worded per cause as the lead is; the
+/// new sign-in is the page's own link. `None` keeps the refusal's own
+/// sentence. An API client's problem document is unchanged.
+#[must_use]
+pub fn refused_sign_in_page_detail(code: &str) -> Option<&'static str> {
+    match code {
+        "login_state_absent" => Some("No sign-in is waiting to finish in this browser."),
+        "login_state_invalid" => {
+            Some("This browser's sign-in could not be read, or it is older than ten minutes.")
+        }
+        _ => None,
+    }
+}
+
 /// The page's stylesheet and icon, served from `/ui/` (`crate::assets`): the
 /// console's font and colours with no inline style or script, so the API's
 /// Content-Security-Policy (`default-src 'self'`) needs no widening, and a
@@ -405,13 +421,22 @@ pub const SIGN_IN_PAGE_HEAD: &str = concat!(
 /// provider's words), and a link back to the console.
 fn refused_sign_in_page(code: &'static str, detail: &'static str) -> Response {
     let lead = refused_sign_in_lead(code);
+    let detail = refused_sign_in_page_detail(code).unwrap_or(detail);
+    // A new sign-in is offered as a link, never a path to type, except beside a
+    // mismatch: there a newer sign-in is open in another tab, and starting a
+    // third would replace it.
+    let again = if code == "state_mismatch" {
+        ""
+    } else {
+        " · <a href=\"/auth/login\">Sign in again</a>"
+    };
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" \
          content=\"width=device-width, initial-scale=1\"><title>Sign-in not completed</title>\
          {SIGN_IN_PAGE_HEAD}</head><body><main><p class=\"lw-brand\"><img src=\"/ui/favicon.svg\" \
          alt=\"\" width=\"28\" height=\"28\"> Logweir</p><h1>Sign-in not completed</h1>\
          <p>{lead}</p><p class=\"lw-detail\">{detail} <code>{code}</code></p>\
-         <p><a href=\"/ui/\">Back to the Logweir console</a></p></main></body></html>",
+         <p><a href=\"/ui/\">Back to the Logweir console</a>{again}</p></main></body></html>",
         detail = escape_html(detail),
     );
     let mut response = (

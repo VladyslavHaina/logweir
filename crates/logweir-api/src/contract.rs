@@ -1587,6 +1587,31 @@ pub struct RestoreCoverageView {
     /// Why `covered` is `false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_reason: Option<String>,
+    /// **DUI-50.** Whether the signed scorecard binds a consumer positions
+    /// mapping, the one fact a switchover's review requires: copied from
+    /// `status.integrity.positionsMapping`. A CLAIM until the evidence
+    /// verifies. ABSENT MEANS NOT RECORDED (a controller before this field, or
+    /// a scorecard not read), never bound and never unbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub positions_mapping: Option<PositionsMappingView>,
+}
+
+/// **DUI-50.** `Restore.coverage.positionsMapping`: what the signed scorecard
+/// binds about the consumer positions the restore mapped.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionsMappingView {
+    /// `true` exactly when the scorecard names a positions mapping document:
+    /// the restore has positions a switchover can apply. `false` when it binds
+    /// none: its point captured no consumer group, the plan was not bound to
+    /// a recovery point, or no document was written (`omitted`).
+    pub bound: bool,
+    /// The groups the mapping covers, when the scorecard states them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<u32>,
+    /// Why no mapping document was written (`tooLarge` or `writeFailed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<String>,
 }
 
 /// `Restore.targetTopicsAppeared`: what a stopped creation step left behind,

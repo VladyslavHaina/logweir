@@ -1040,8 +1040,10 @@ CLI needs `spec.coverage: complete` on the `Restore` too.
   carry `logweir_drill_integrity_complete_covered 0`. Alert on either.
 - The status copies `integrity.coverage` (absent means not recorded, read as
   sampled), `integrity.complete` (`covered`, `incompleteReason`, `maxRecords`,
-  archive counts, `replay` totals, up to 256 partition rows) and
-  `integrity.unsampledTopics`.
+  archive counts, `replay` totals, up to 256 partition rows),
+  `integrity.unsampledTopics`, and `integrity.positionsMapping` (`bound`,
+  `groups`, `omitted`): whether the signed scorecard binds a consumer positions
+  mapping, which a switchover requires.
 - **A narrowed restore says so.** A partition subset or a window from a stated
   start is copied to `integrity.selection` with `scope: partial` (the
   `SELECTION` column), `windowStartMs`, `windowEndMs`, `narrowedTopics`,

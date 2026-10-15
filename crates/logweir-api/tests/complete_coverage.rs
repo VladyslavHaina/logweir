@@ -83,6 +83,45 @@ fn a_complete_run_that_did_not_cover_reads_complete_and_not_passed_on_list_and_d
     }
 }
 
+/// **DUI-50: `coverage.positionsMapping` is the scorecard's own binding,
+/// copied.** A restore whose signed scorecard binds no mapping reads
+/// `bound: false`; one that names a document reads `bound: true` with its
+/// groups; one that names why none was written carries the reason. ABSENT
+/// (a controller before the field) stays absent: never bound, never unbound.
+///
+/// KILLS: `restore_coverage` dropping the field, or reading `bound` from
+/// anything but the status.
+#[test]
+fn dui50_the_positions_mapping_binding_is_copied_and_absent_stays_absent() {
+    let with = |record: Option<Value>| {
+        let mut value = uncovered();
+        match record {
+            Some(r) => value["status"]["integrity"]["positionsMapping"] = r,
+            None => {
+                value["status"]["integrity"]
+                    .as_object_mut()
+                    .expect("an integrity block")
+                    .remove("positionsMapping");
+            }
+        }
+        serde_json::to_value(restore(&cr(&value), false)).unwrap()["coverage"]["positionsMapping"]
+            .clone()
+    };
+    assert_eq!(with(Some(json!({"bound": false}))), json!({"bound": false}));
+    assert_eq!(
+        with(Some(json!({"bound": true, "groups": 2}))),
+        json!({"bound": true, "groups": 2})
+    );
+    assert_eq!(
+        with(Some(
+            json!({"bound": false, "groups": 9, "omitted": "tooLarge"})
+        )),
+        json!({"bound": false, "groups": 9, "omitted": "tooLarge"})
+    );
+    // CONTROL: not recorded is not a value.
+    assert_eq!(with(None), Value::Null);
+}
+
 /// **The operation view carries the per-partition exact counts.** The
 /// `verificationScope` of a complete run names the coverage, `covered`, the
 /// reason, the archive counts, the totals and one row per partition with its

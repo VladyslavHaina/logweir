@@ -839,6 +839,21 @@ async fn dui45_the_older_of_two_tabs_refused_first_leaves_the_newer_able_to_fini
             && text.contains("login_state_absent"),
         "{text}"
     );
+    // DUI-49.1: the detail line does not contradict the lead, and a new
+    // sign-in is a link, not a path to type.
+    assert!(
+        text.contains("No sign-in is waiting to finish in this browser.")
+            && !text.contains("did not start here, or took too long")
+            && text.contains("<a href=\"/auth/login\">Sign in again</a>"),
+        "{text}"
+    );
+    // CONTROL: the mismatch page offers no new sign-in, which would replace
+    // the newer one still open in its own tab.
+    assert!(
+        !refused.text().contains("/auth/login"),
+        "{}",
+        refused.text()
+    );
     assert_eq!(idp.token_calls(), 1);
 }
 

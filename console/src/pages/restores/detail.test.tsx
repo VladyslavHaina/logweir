@@ -39,7 +39,7 @@ import { When, exactUtc, relative } from "../../components/When";
 import { RestoreDetail, VERDICT_PENDING_SENTENCE } from "./RestoreDetail";
 import { VERDICT_FOLLOW_MS, useVerdictFollow, verdictPending } from "../../api/restores";
 import { CheckStep } from "./WizardSteps";
-import { NO_GROUPS_CAPTURED, cutoverRefusal } from "../cutover/Cutover";
+import { NO_GROUPS_CAPTURED, NO_MAPPING_BOUND, POINT_UNBOUND_REFUSAL, cutoverRefusal, mappingOmitted } from "../cutover/Cutover";
 import backupDoc from "../../../fixtures/console/backup.json";
 import { readinessRefusal, type Preflight } from "./model";
 
@@ -312,6 +312,46 @@ describe("DUI-42: a restore of a point that captured no consumer group", () => {
   });
 });
 
+describe("DUI-50: a switchover is offered only when the scorecard binds a positions mapping", () => {
+  const restore = (positionsMapping?: Record<string, unknown>): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" }, coverage: { ...r.coverage, ...(positionsMapping ? { positionsMapping } : {}) } } as Restore;
+  };
+  const source = (consumerGroups?: string[]) => ({
+    items: [{ ...(backupDoc.item as object), name: "orders-hourly-x", backupId: restore().backupSetRef, ...(consumerGroups ? { consumerGroups } : {}) }],
+    page: { limit: 200 },
+    requestId: "r",
+  });
+
+  it("a complete restore of a plan bound to the backup set only offers no switchover, and says why", async () => {
+    showRestore(restore({ bound: false }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(POINT_UNBOUND_REFUSAL))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    expect(screen.queryByText(/your consumer groups still point at their old positions/)).toBeNull();
+  });
+
+  it("a bound point with groups still offers it (the control), naming the groups its scorecard maps", async () => {
+    showRestore(restore({ bound: true, groups: 2 }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing", "orders-audit"]) });
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(await screen.findByText(/its signed scorecard maps the positions of 2 consumer groups/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain(POINT_UNBOUND_REFUSAL);
+  });
+
+  it("one rule: the binding decides, and the source only picks the sentence", () => {
+    const groups = { consumerGroups: ["g"] };
+    expect(cutoverRefusal(restore({ bound: false }), groups)?.body).toBe(POINT_UNBOUND_REFUSAL);
+    expect(cutoverRefusal(restore({ bound: false }), { consumerGroups: [] })?.body).toBe(NO_GROUPS_CAPTURED);
+    expect(cutoverRefusal(restore({ bound: false }), null)?.body).toBe(NO_MAPPING_BOUND);
+    expect(cutoverRefusal(restore({ bound: false, omitted: "tooLarge" }), groups)?.body).toBe(mappingOmitted("tooLarge"));
+    expect(cutoverRefusal(restore({ bound: false }), groups)?.word).toBe("NoPositionsMapping");
+    // A binding the API serves is the answer; one not recorded (an older controller) leaves the review to decide.
+    expect(cutoverRefusal(restore({ bound: true, groups: 1 }), groups)).toBeNull();
+    expect(cutoverRefusal(restore(), groups)).toBeNull();
+    expect(cutoverRefusal(restore(), null)).toBeNull();
+  });
+});
+
 describe("DUI-38: the follow is bounded", () => {
   function Probe({ pending }: { pending: boolean }) {
     const v = useVerdictFollow(pending);
@@ -492,6 +532,38 @@ describe("DUI-22.3: a check row's remediation line", () => {
     expect(within(list).getByText("TrustRoster.spec.signingKeys", { selector: "code" })).toBeTruthy();
     expect(list.textContent).toContain(REMEDY.replace(/`/g, ""));
     expect(list.textContent).toContain("Add it to `spec.allowedTargetClusterIds");
+  });
+});
+
+describe("DUI-49.3: the target probe beside the readiness check", () => {
+  const show = (reachability: Record<string, unknown>) =>
+    render(
+      <CheckStep
+        readiness={{ result: null, boundHash: null, boundKey: null, error: null, starting: false, stoppedAt: null } as never}
+        refusal={null}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={{ name: "orders-dr", uid: "c1", namespace: "t", role: "target", bootstrapServers: ["b:9092"], reachability } as never}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+  const probe = () =>
+    [...document.querySelectorAll("dt")]
+      .find((dt) => dt.textContent === "Target probe (context)")
+      ?.nextElementSibling?.textContent ?? "";
+
+  it("says a reading is stale, and a probe in flight is probing, as the connection page does", () => {
+    show({ state: "reachable", reason: "Reachable", observedAt: new Date(Date.now() - 23 * 60_000).toISOString() });
+    expect(probe()).toBe("ReachableStale");
+    cleanup();
+    show({ state: "unknown", reason: "ProbeRunning" });
+    expect(probe()).toBe("Probing");
+    cleanup();
+    // CONTROL: a fresh reading is just that.
+    show({ state: "reachable", reason: "Reachable", observedAt: new Date(Date.now() - 60_000).toISOString() });
+    expect(probe()).toBe("Reachable");
   });
 });
 

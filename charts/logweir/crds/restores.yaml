@@ -809,6 +809,30 @@ spec:
                     description: 'INTERFACE **I34**, second half. Why the integrity result is `partial`, naming itself: an archive returning zero or short fingerprints for a selection; a (topic, partition, window) the manifest claims exists but no segment matches; a pre-0.21 segment carrying no sha256; a consume-only selection whose target partition gave back less than the manifest claims. Produced by Task 20 from the scorecard''s `integrity.partial_reason`. Spec §8 requires the UI to render it — a `partial` with no reason is a badge an auditor cannot act on.'
                     nullable: true
                     type: string
+                  positionsMapping:
+                    description: |-
+                      **DUI-50.** Whether the signed scorecard binds a consumer positions mapping (`integrity.verification.positions_mapping`, format 1.12.0 and 2.4.0): the one fact a switchover's review requires of a restore. A CLAIM until `evidence.verification` says `Valid`, like `result`.
+
+                      Written on every pass that read the scorecard: `bound: false` when the document binds none (its point captured no consumer group, or the plan was not bound to a recovery point) or names why none was written. ABSENT means not recorded: a controller before this field, or a scorecard not read.
+                    nullable: true
+                    properties:
+                      bound:
+                        description: '`true` exactly when the block names a mapping document (its key and digest): the restore has positions to switch over.'
+                        type: boolean
+                      groups:
+                        description: The groups the mapping covers (the block's `groups`), when it states them.
+                        format: uint32
+                        minimum: 0
+                        nullable: true
+                        type: integer
+                      omitted:
+                        description: 'Why no document was written (the block''s `omitted`): `bound` is then `false`.'
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    required:
+                    - bound
+                    type: object
                   result:
                     description: '`pass`, `partial` or `fail`. `partial` is a selection whose evidence was inconclusive — something in the sample was not examined — and is NOT a pass.'
                     nullable: true
