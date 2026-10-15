@@ -51,7 +51,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      # ONE CACHE PER JOB KIND, SAVED BY main ONLY (FX-53). A pull request's
+      # cache lives under refs/pull/<n>/merge, which no other run can read, so
+      # saving it only filled the 10 GB limit; every run still restores main's.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - uses: actions/setup-python@v5
@@ -79,9 +85,83 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: just }
       - run: just console
-  # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's fifth), each on its own
-  # runner with its own stack, engine build and logweir build (the Rust cache
-  # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
+  # LOGWEIR'S ENGINE, BUILT ONCE PER RUN AND ONCE PER INPUT (FX-53). Every
+  # e2e shard runs it; before FX-53 each shard compiled it again (about 3
+  # minutes, five times a run, on identical inputs).
+  #
+  # WHAT SHIPS IS WHAT THE SHARDS TEST (PROD-00.2). The engine every shard's
+  # `logweir` runs is LOGWEIR'S BUILD, the one the runner image carries: the
+  # vendored tarball, verified, plus the patch folder, compiled natively by
+  # `scripts/engine-source.sh build`. This job runs exactly that command, in
+  # the environment the shards built it in (the same runner image, apt line
+  # and toolchain), or restores the binary that command produced from the same
+  # inputs. The cache key is every input of that build:
+  #   * `engine-source.sh digest`: the tarball's sha256 (which must equal its
+  #     `.sha256` file), each patch's name and sha256, and ENGINE_VERSION,
+  #     which `check` holds to the build env's ENGINE_DIGEST and the ledger;
+  #   * the recipe itself, `scripts/engine-source.sh`, and the build env;
+  #   * `rust-toolchain.toml` (the build runs from the repository root);
+  #   * the apt packages below, and the runner's OS, architecture, image and
+  #     image version (the C compiler and glibc of ring, aws-lc, zstd, SQLite).
+  # Only main saves it, as for the Rust caches. A shard installs the artifact
+  # over OSO's extracted binary and checks that it prints the build env's
+  # ENGINE_VERSION, which PROD-01.1's CONTRACT_ENGINE must equal
+  # (crates/logweir/tests/engine_pin.rs), so the record-semantics contract is
+  # asserted on the shipped engine on every run.
+  engine:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ENGINE_APT: cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The engine's build inputs, and the cache key they give
+        id: inputs
+        run: |
+          bash scripts/engine-source.sh check
+          digest="$(bash scripts/engine-source.sh digest)"
+          recipe="$(cat scripts/engine-source.sh third_party/kafka-backup-build.env rust-toolchain.toml | sha256sum | cut -c1-16)"
+          apt="$(printf '%s\n' "$ENGINE_APT" | sha256sum | cut -c1-12)"
+          key="engine-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${ImageVersion}-${digest#sha256:}-${recipe}-${apt}"
+          echo "key=$key" | tee -a "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .engine/kafka-backup
+          key: ${{ steps.inputs.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          read -ra packages <<< "$ENGINE_APT"
+          sudo apt-get update && sudo apt-get install -y "${packages[@]}"
+      - name: Build Logweir's engine from the vendored source
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/engine-source.sh build
+      - if: steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .engine/kafka-backup
+          key: ${{ steps.inputs.outputs.key }}
+      - name: The engine is the build the build env names
+        run: |
+          want="kafka-backup $(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)"
+          got=$(.engine/kafka-backup --version)
+          [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
+          echo "$got"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine
+          path: .engine/kafka-backup
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+  # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's
+  # fifth), each on its own runner with its own stack and logweir build (the
+  # Rust cache is shared; the engine is the `engine` job's artifact, FX-53).
+  # Every file under e2e/tests/ is in exactly one shard's `tests`:
   # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
   # per-binary times of a local run on the default line, 4.3.1 (86 minutes
   # of tests, 2026-10-10). Each shard's expected minutes of tests read
@@ -89,7 +169,7 @@ jobs:
   # of their local time. Setup takes about 15 minutes before any test runs.
   # `publish` needs every shard.
   e2e:
-    needs: changes
+    needs: [changes, engine]
     if: needs.changes.outputs.code == 'true'
     name: e2e ${{ matrix.shard }}
     timeout-minutes: 40
@@ -143,13 +223,36 @@ jobs:
           echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo systemctl restart docker
           docker info --format '{{json .RegistryConfig.Mirrors}}'
+      # FREE DISK ONLY WHEN SHORT (FX-53). MinIO refuses every PUT below its
+      # free-space floor (`XMinioStorageFull`, 2026-09-12, when the runner had
+      # 72 GB and 14 GB free); the toolchains removed here are ones this job
+      # never uses. Today's runner starts with about 86 GB free, so deleting
+      # them (42 to 260 s a shard) bought nothing. They go only when less than
+      # FREE_DISK_NEED_GB is free. The need is the shard's own use: the
+      # `Disk used by this shard` step below prints it at the end of every
+      # shard, before the stack goes down.
       - name: free disk space (MinIO refuses writes below its free-space floor)
+        env:
+          FREE_DISK_NEED_GB: 40
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
+          avail="$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)"
+          if [ "$avail" -lt "$FREE_DISK_NEED_GB" ]; then
+            echo "${avail} GB free, under ${FREE_DISK_NEED_GB} GB: removing unused toolchains"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+            df -h /
+          else
+            echo "${avail} GB free, at least ${FREE_DISK_NEED_GB} GB: nothing removed"
+          fi
       - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+      # One key for all five shards, saved by ONE of them on main (FX-53):
+      # the shards no longer race to reserve it ("Unable to reserve cache").
+      # Shard 4 saves, because its crate rows compile a superset of the others'
+      # dependencies.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.crates == true }}
       # The console rows (record_semantics, schema_dependency) run the
       # console's own TypeScript with node's types stripped: Node 22.6 or later.
       - uses: actions/setup-node@v4
@@ -164,14 +267,21 @@ jobs:
       # WHAT SHIPS IS WHAT THIS JOB TESTS (PROD-00.2). The extraction above
       # pins OSO's release, which the compose stack's `kafka-backup` service
       # uses to seed the drill archive. Every engine run by `logweir` below is
-      # LOGWEIR'S BUILD, the one the runner image carries: the vendored
-      # tarball, verified, plus the patch folder, compiled natively over
-      # `.engine/kafka-backup`. It prints the build env's ENGINE_VERSION
-      # (third_party/kafka-backup-build.env), which PROD-01.1's CONTRACT_ENGINE
-      # must equal (crates/logweir/tests/engine_pin.rs), so the record-semantics
-      # contract is asserted on the shipped engine on every run.
-      - name: Build Logweir's engine from the vendored source
-        run: bash scripts/engine-source.sh build
+      # LOGWEIR'S BUILD, the one the runner image carries, which the `engine`
+      # job built with `scripts/engine-source.sh build` from this commit's
+      # inputs; it goes over OSO's `.engine/kafka-backup` here, and must print
+      # the build env's ENGINE_VERSION (see the `engine` job).
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: engine
+          path: ${{ runner.temp }}/engine
+      - name: Install Logweir's engine over OSO's; it is the build the build env names
+        run: |
+          install -m 0755 "$RUNNER_TEMP/engine/kafka-backup" .engine/kafka-backup
+          want="kafka-backup $(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)"
+          got=$(.engine/kafka-backup --version)
+          [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
+          echo "$got"
       - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
       - run: cargo build --locked -p logweir
@@ -195,6 +305,14 @@ jobs:
             check_7_an_unreachable_target_is_named_as_a_target_problem
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
+      # The free-disk step's measurement: what this shard used, at its peak
+      # (everything built, the stack and its volumes still up).
+      - name: Disk used by this shard
+        if: always()
+        run: |
+          df -h /
+          du -sh target .engine 2>/dev/null || true
+          docker system df || true
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: 'compose-logs-${{ matrix.shard }}', path: /tmp/compose.log }

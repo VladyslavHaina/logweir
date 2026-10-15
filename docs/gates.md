@@ -10,11 +10,17 @@ pass. Release packaging adds checks for the artifacts users download.
 and manual dispatch. Other workflows can call the same checks.
 
 A change that touches only `docs/to-do/` (the roadmap trackers and decision
-records) starts no run: no build, test or image reads those files. A change
-that touches only other files under `docs/` still runs `check`, because its
-contract tests read `docs/api.md`, `docs/kubernetes.md`, `docs/install.md` and
-the doc footer and link lints, but it skips `e2e` and therefore `publish`: no
-binary embeds a document and no image copies one out of its build stage.
+records) starts no run: no build, test or image reads those files. The doc
+footer lint, the link check and the label and cosign scans do walk them, so a
+tracker-only commit is linted by the next run that starts; FX-53's docs gate
+and nightly full run close that gap. A change that touches only other files
+under `docs/` still runs `check`, because its contract tests read
+`docs/api.md`, `docs/kubernetes.md`, `docs/install.md` and the doc footer and
+link lints, but it skips `e2e` and therefore `publish`: no binary embeds a
+document and no image copies one out of its build stage. The verifier
+`docs/verify_scorecard.py` and its suite `docs/test_verify_scorecard.py` are
+the exception: they are code (every e2e harness user runs the verifier, and a
+release ships it), so a change to either runs everything.
 [scripts/ci-changes.sh](../scripts/ci-changes.sh) decides this from the diff
 and runs everything when it cannot tell (a new branch, a tag, a manual or
 release run). Root Markdown files such as `THIRD_PARTY_NOTICES.md` are not
@@ -22,10 +28,11 @@ under `docs/` and always run everything, since images copy them.
 
 | Job | Purpose |
 |---|---|
-| `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed. It also says whether the rebuilt console's inputs changed (`console/`, `console/fixtures/console/` or the product API's OpenAPI document) |
+| `changes` | Classifies the diff as docs-only or not; `engine`, `e2e` (and so `publish`) run only when something outside `docs/`, or the verifier, changed. It also says whether the rebuilt console's inputs changed (`console/`, `console/fixtures/console/` or the product API's OpenAPI document) |
 | `console` | Only when the console's inputs changed: `just console`, the rebuilt console's gates (lockfile install, API types, TypeScript, ESLint, Vitest, the build and its shape, `npm audit` and the licence allowlist) |
 | `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
-| `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with Logweir's build of the engine compiled from the vendored source (`scripts/engine-source.sh build`; OSO's pinned image seeds the archive) and both evidence readers; retains Compose logs and tears down the stack |
+| `engine` | Builds Logweir's engine once per run with `scripts/engine-source.sh build`, or restores the binary that command built from the same inputs (a cache keyed by `engine-source.sh digest`, the recipe, the toolchain, the build packages and the runner image; saved by `main` only); checks that it prints the build env's `ENGINE_VERSION` and hands it to the shards as an artifact |
+| `e2e` | Runs the feature-gated integration suite in shards against Docker Compose Kafka and MinIO, with the `engine` job's build over OSO's extracted binary (OSO's pinned image seeds the archive; each shard checks the engine's `--version` again) and both evidence readers; retains Compose logs and tears down the stack |
 | `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `check`, `e2e` and `console`, and a `console` job skipped for a change outside its inputs passes |
 
 The Compose suite excludes the test that requires a local `docker-desktop`

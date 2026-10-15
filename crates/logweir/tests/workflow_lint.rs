@@ -913,11 +913,17 @@ fn docs_only_changes_skip_what_they_cannot_affect() {
         "check must run on every change"
     );
     assert!(dependencies(&jobs["check"]).is_empty());
-    assert_eq!(dependencies(&jobs["e2e"]), ["changes"]);
-    assert_eq!(
-        jobs["e2e"]["if"].as_str(),
-        Some("needs.changes.outputs.code == 'true'")
-    );
+    // FX-53: the shards also wait for the run's one engine build, which runs
+    // exactly when they do.
+    assert_eq!(dependencies(&jobs["e2e"]), ["changes", "engine"]);
+    for job in ["e2e", "engine"] {
+        assert_eq!(
+            jobs[job]["if"].as_str(),
+            Some("needs.changes.outputs.code == 'true'"),
+            "{job}"
+        );
+    }
+    assert_eq!(dependencies(&jobs["engine"]), ["changes"]);
     let classify = jobs["changes"]["steps"]
         .as_sequence()
         .unwrap()
@@ -928,6 +934,163 @@ fn docs_only_changes_skip_what_they_cannot_affect() {
         .as_str()
         .unwrap()
         .starts_with("bash scripts/ci-changes.sh "));
+}
+
+/// FX-53: LOGWEIR'S ENGINE IS BUILT ONCE PER RUN, BY THE COMMAND THAT BUILT
+/// IT IN EVERY SHARD, AND RESTORED ONLY UNDER A KEY OF ITS INPUTS. The shards
+/// install the `engine` job's artifact over OSO's extracted binary and refuse
+/// one that does not print the build env's ENGINE_VERSION; none of them
+/// compiles it. Only main saves the cache.
+#[test]
+fn the_engine_is_built_once_per_run_from_its_inputs() {
+    let ci = workflow("ci.yml");
+    let engine = &ci["jobs"]["engine"];
+    let steps = engine["steps"].as_sequence().unwrap();
+    let run = |s: &Value| s["run"].as_str().unwrap_or("").to_string();
+    let uses = |s: &Value| s["uses"].as_str().unwrap_or("").to_string();
+    let at = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        steps
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("ci.yml's engine job has no {what}"))
+    };
+    let key = at(
+        &|s| run(s).contains("bash scripts/engine-source.sh digest"),
+        "key step built from `engine-source.sh digest`",
+    );
+    let key_run = run(&steps[key]);
+    for input in [
+        "bash scripts/engine-source.sh check",
+        "scripts/engine-source.sh",
+        "third_party/kafka-backup-build.env",
+        "rust-toolchain.toml",
+        "$ENGINE_APT",
+        "${RUNNER_OS}",
+        "${RUNNER_ARCH}",
+        "${ImageOS}",
+        "${ImageVersion}",
+    ] {
+        assert!(
+            key_run.contains(input),
+            "the engine cache key leaves out `{input}`: {key_run}"
+        );
+    }
+    let restore = at(
+        &|s| uses(s).starts_with("actions/cache/restore@"),
+        "cache restore",
+    );
+    let build = at(
+        &|s| run(s) == "bash scripts/engine-source.sh build",
+        "`bash scripts/engine-source.sh build`",
+    );
+    let save = at(&|s| uses(s).starts_with("actions/cache/save@"), "cache save");
+    let identity = at(
+        &|s| {
+            run(s).contains("third_party/kafka-backup-build.env")
+                && run(s).contains(".engine/kafka-backup --version")
+        },
+        "identity check against the build env",
+    );
+    let upload = at(
+        &|s| uses(s).starts_with("actions/upload-artifact@"),
+        "artifact upload",
+    );
+    assert!(key < restore && restore < build && build < save && save < identity && identity < upload);
+    let miss = "steps.cache.outputs.cache-hit != 'true'";
+    assert_eq!(steps[build]["if"].as_str(), Some(miss));
+    assert_eq!(
+        steps[save]["if"].as_str(),
+        Some("steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'"),
+        "only main saves the engine cache"
+    );
+    for step in [restore, save] {
+        assert_eq!(steps[step]["with"]["path"].as_str(), Some(".engine/kafka-backup"));
+        assert_eq!(
+            steps[step]["with"]["key"].as_str(),
+            Some("${{ steps.inputs.outputs.key }}")
+        );
+    }
+    assert_eq!(steps[upload]["with"]["name"].as_str(), Some("engine"));
+    assert_eq!(steps[upload]["with"]["path"].as_str(), Some(".engine/kafka-backup"));
+
+    let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
+    let text = serde_yaml::to_string(&ci["jobs"]["e2e"]).unwrap();
+    assert!(
+        !text.contains("engine-source.sh build"),
+        "a shard compiles the engine again: {text}"
+    );
+    let shard_at = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        e2e.iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("ci.yml's e2e job has no {what}"))
+    };
+    let extract = shard_at(&|s| run(s) == "./scripts/extract-engine.sh", "OSO extraction");
+    let download = shard_at(
+        &|s| uses(s).starts_with("actions/download-artifact@") && s["with"]["name"] == "engine",
+        "download of the `engine` artifact",
+    );
+    let install = shard_at(
+        &|s| {
+            run(s).contains(".engine/kafka-backup")
+                && run(s).contains("third_party/kafka-backup-build.env")
+                && run(s).contains("--version")
+        },
+        "install over OSO's binary with the identity check",
+    );
+    let up = shard_at(&|s| run(s) == "just e2e-up", "`just e2e-up`");
+    assert!(extract < download && download < install && install < up);
+}
+
+/// FX-53: EVERY RUST CACHE IN ci.yml IS ONE KEY PER JOB KIND, SAVED BY main
+/// ONLY. A pull request's cache lives where no other run can read it; and the
+/// shards share one key that exactly one of them saves.
+#[test]
+fn rust_caches_are_shared_per_job_kind_and_saved_by_main_only() {
+    let ci = workflow("ci.yml");
+    let mut kinds = Vec::new();
+    for (name, job) in ci["jobs"].as_mapping().unwrap() {
+        let Some(steps) = job["steps"].as_sequence() else {
+            continue;
+        };
+        for step in steps {
+            let Some(uses) = step["uses"].as_str() else {
+                continue;
+            };
+            if !uses.starts_with("Swatinem/rust-cache@") {
+                continue;
+            }
+            let sha = uses.split_once('@').unwrap().1;
+            assert!(
+                sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{name:?}: `{uses}` is not pinned by commit"
+            );
+            let save_if = step["with"]["save-if"].as_str().unwrap_or_default();
+            assert!(
+                save_if.starts_with("${{ github.ref == 'refs/heads/main'"),
+                "{name:?}: rust-cache must save on main only, not `{save_if}`"
+            );
+            kinds.push(step["with"]["shared-key"].as_str().unwrap().to_string());
+        }
+    }
+    kinds.sort();
+    assert_eq!(kinds, ["check", "e2e"]);
+    let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
+    let cache = e2e
+        .iter()
+        .find(|s| s["uses"].as_str().is_some_and(|u| u.starts_with("Swatinem/rust-cache@")))
+        .unwrap();
+    assert_eq!(
+        cache["with"]["save-if"].as_str(),
+        Some("${{ github.ref == 'refs/heads/main' && matrix.crates == true }}"),
+        "one shard saves the shared e2e key"
+    );
+    let savers = ci["jobs"]["e2e"]["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter(|row| row["crates"].as_bool() == Some(true))
+        .count();
+    assert_eq!(savers, 1, "exactly one shard saves the e2e cache");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
