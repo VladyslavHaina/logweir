@@ -3036,6 +3036,56 @@ pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
     Some(teardown)
 }
 
+/// The longest `teardown-key=` value read; a genuine key is
+/// `logweir/drills/<run id>.teardown.json`.
+const TEARDOWN_KEY_MAX_BYTES: usize = 512;
+
+/// `status.teardown` for a finished run (F2): [`teardown_failed`], and what
+/// an attested phase 9 removed, from the runner's SEALED lines only
+/// (`sealed_only`, FX-43): the attestation's key from `teardown-key=`, and
+/// its `teardown-deleted=` list and `teardown-deleted-count=`, held to this
+/// Restore's mapped target names as `failed` is. A Job an older controller
+/// built (its whole log is text anyone could have put there) gets only what
+/// [`teardown_failed`] reads. `None` when there is nothing to record.
+#[must_use]
+pub fn teardown_status(log: &str, sealed_only: bool, mapped: &[String]) -> Option<Value> {
+    use logweir_core::execution_contract::{
+        parse_teardown_deleted, TEARDOWN_DELETED_COUNT_PREFIX, TEARDOWN_DELETED_PREFIX,
+        TEARDOWN_KEY_PREFIX,
+    };
+    let mut teardown = teardown_failed(log, mapped).unwrap_or_else(|| json!({}));
+    let key = sealed_only
+        .then(|| runner_log::key_values(log, TEARDOWN_KEY_PREFIX).pop())
+        .flatten()
+        .filter(|k| {
+            k.len() <= TEARDOWN_KEY_MAX_BYTES
+                && k.strip_prefix("logweir/drills/")
+                    .and_then(|r| r.strip_suffix(".teardown.json"))
+                    .is_some_and(|id| {
+                        !id.is_empty() && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+                    })
+        });
+    if let Some(key) = key {
+        teardown["attestationKey"] = json!(key);
+        if let Some(names) = runner_log::key_values(log, TEARDOWN_DELETED_PREFIX)
+            .pop()
+            .and_then(parse_teardown_deleted)
+        {
+            let kept: Vec<String> = names.into_iter().filter(|t| mapped.contains(t)).collect();
+            let count = runner_log::key_values(log, TEARDOWN_DELETED_COUNT_PREFIX)
+                .pop()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map_or(kept.len(), |c| c.min(mapped.len()).max(kept.len()));
+            teardown["deleted"] = json!(kept);
+            teardown["deletedCount"] = json!(count);
+        }
+    }
+    teardown
+        .as_object()
+        .is_some_and(|m| !m.is_empty())
+        .then_some(teardown)
+}
+
 /// **PROD-05.2.** `status.topicConfiguration` from the runner's last
 /// `topic-configuration=` line, held to this Restore's mapped target names and
 /// re-shaped into exactly the CRD's fields (a typed round trip): a topic the
@@ -7081,9 +7131,10 @@ async fn reconcile_restore_inner(
         (Some(_), None) => with_unread_creation_stop(finished),
         (None, None) => finished,
     };
-    // What the run's teardown left, on any exit code.
-    if let Some(teardown) = teardown_failed(
+    // What the run's teardown removed and what it left, on any exit code.
+    if let Some(teardown) = teardown_status(
         log,
+        lines.sealed_only(),
         topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
     ) {
         if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
