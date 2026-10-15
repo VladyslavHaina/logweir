@@ -4921,7 +4921,9 @@ fn the_printer_columns_are_the_contract() {
 /// status patch. Two shapes only, the two the Backup columns use: a dotted
 /// path and `.status.conditions[?(@.type=="X")].reason`.
 fn printed_column(column: &serde_yaml::Value, patch: &serde_json::Value) -> Option<String> {
-    let path = column["jsonPath"].as_str().expect("a column has a jsonPath");
+    let path = column["jsonPath"]
+        .as_str()
+        .expect("a column has a jsonPath");
     if let Some(rest) = path.strip_prefix(".status.conditions[?(@.type==\"") {
         let (kind, field) = rest.split_once("\")].").expect("a condition filter");
         return patch["status"]["conditions"]

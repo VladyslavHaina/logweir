@@ -13983,7 +13983,11 @@ async fn f2_a_partial_teardown_records_what_it_removed_and_what_it_left() {
     );
     let (_, status) = fx43_pass(0, fx43_block(0, &lines)).await;
     let t = &status["teardown"];
-    assert_eq!(t["deleted"], serde_json::json!(["drill-orders"]), "{status}");
+    assert_eq!(
+        t["deleted"],
+        serde_json::json!(["drill-orders"]),
+        "{status}"
+    );
     assert_eq!(t["deletedCount"], serde_json::json!(1), "{status}");
     assert_eq!(t["failed"][0]["topic"], "drill-payments", "{status}");
     assert_eq!(t["failedCount"], serde_json::json!(1), "{status}");

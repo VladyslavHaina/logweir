@@ -3008,9 +3008,9 @@ fn teardown(
         // `teardown-key=`, sealed: the controller copies it to
         // `status.teardown.deleted` (F2).
         if persisted {
-            crate::exit::print_lines(
-                &logweir_core::execution_contract::teardown_deleted_lines(&a.topics_deleted),
-            );
+            crate::exit::print_lines(&logweir_core::execution_contract::teardown_deleted_lines(
+                &a.topics_deleted,
+            ));
         }
         Ok((a, persisted))
     });

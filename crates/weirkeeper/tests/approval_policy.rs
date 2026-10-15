@@ -1272,8 +1272,7 @@ async fn f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding(
     let mut stored = live.clone();
     stored.status = Some(approval::status_for(&live, &expired, after_expiry()));
     let stored_json = serde_json::to_value(stored.status.as_ref()).ok();
-    let ltt = condition(stored.status.as_ref().expect("a status"), "Verified")
-        .last_transition_time;
+    let ltt = condition(stored.status.as_ref().expect("a status"), "Verified").last_transition_time;
 
     let (client, _recorder) = mock_client_recording(routes_over(restore_body()));
     for (label, policies, when) in [

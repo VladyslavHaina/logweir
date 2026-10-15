@@ -775,7 +775,10 @@ fn only_the_wide_columns_carry_a_priority() {
         for c in cols {
             let priority = c.get("priority").and_then(Value::as_i64).unwrap_or(0);
             if priority != 0 {
-                assert_eq!(priority, 1, "{kind}: a wide column is priority 1; got {c:?}");
+                assert_eq!(
+                    priority, 1,
+                    "{kind}: a wide column is priority 1; got {c:?}"
+                );
                 let name = c.get("name").and_then(Value::as_str).unwrap_or_default();
                 got.push((kind.to_string(), name.to_string()));
             }

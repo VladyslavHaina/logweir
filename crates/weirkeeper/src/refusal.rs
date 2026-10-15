@@ -297,7 +297,9 @@ pub fn reason_of(run: RefusingRun, exit_code: i32, lines: &RunnerLines) -> Runne
         return RunnerReason::RunnerOlderThanController;
     }
     match runner_reason(run, lines.token(), lines.text()) {
-        RunnerReason::NotStated if runner_log::vouches_for_exit(exit_code) && lines.no_sealed_end() => {
+        RunnerReason::NotStated
+            if runner_log::vouches_for_exit(exit_code) && lines.no_sealed_end() =>
+        {
             RunnerReason::NoSealedEnd(exit_code)
         }
         reason => reason,

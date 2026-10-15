@@ -1725,7 +1725,10 @@ pub fn keep_expired(approval: &Approval, outcome: ApprovalOutcome) -> ApprovalOu
         detail: String::new(),
     }
     .reason();
-    let stored = approval.status.as_ref().filter(|s| s.verified == Some(false));
+    let stored = approval
+        .status
+        .as_ref()
+        .filter(|s| s.verified == Some(false));
     match stored.and_then(|s| current_condition(s.conditions.as_ref(), CONDITION_VERIFIED)) {
         Some(c)
             if c.status == "False"

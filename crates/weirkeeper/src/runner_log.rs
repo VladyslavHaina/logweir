@@ -246,9 +246,13 @@ impl RunnerLines {
 #[must_use]
 pub fn refuses_line_token_flag(line: &str) -> bool {
     line.contains(logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG)
-        && ["unexpected argument", "unrecognised argument", "unrecognized argument"]
-            .iter()
-            .any(|m| line.contains(m))
+        && [
+            "unexpected argument",
+            "unrecognised argument",
+            "unrecognized argument",
+        ]
+        .iter()
+        .any(|m| line.contains(m))
 }
 
 /// Whether a container exit code is one a runner reaches through its own

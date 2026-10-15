@@ -3435,7 +3435,10 @@ fn f5_a_long_topic_name_in_the_template_position_survives_and_tokens_do_not() {
             "topic `{topic}` does not exist on the source (the broker answered \
              UNKNOWN_TOPIC_OR_PARTITION)"
         ));
-        assert!(one.starts_with(&format!("topic `{topic}` does not exist")), "{one}");
+        assert!(
+            one.starts_with(&format!("topic `{topic}` does not exist")),
+            "{one}"
+        );
         let list = clean(&format!(
             "topics `{topic}`, `{other}` do not exist on the source (2 of the 3 selected)"
         ));
