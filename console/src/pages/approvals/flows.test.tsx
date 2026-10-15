@@ -419,6 +419,25 @@ describe("the Approvals list", () => {
     expect(screen.queryByRole("link", { name: "swo-2" })).toBeNull();
   });
 
+  it("DUI-46: a switchover's recorded approval opens its two-person page only in a two-person namespace", async () => {
+    const used = {
+      ...(approvalFixture.item as Record<string, unknown>),
+      name: "swo-approval-1",
+      subjectRef: { kind: "Switchover", name: "swo-1" },
+    };
+    serve({ policy: CONFIRM, restores: [], approvals: [used] });
+    renderAt("/team-a/approvals");
+    const link = await screen.findByRole("link", { name: "swo-1" });
+    expect(link.getAttribute("href")).toBe("#/team-a/switchovers/swo-1");
+    expect(net.sent.some((r) => r.path.includes("/approval-request"))).toBe(false);
+    cleanup();
+    // CONTROL: in a two-person namespace the record opens the switchover's approval page.
+    serve({ policy: TWO_PERSON, restores: [], approvals: [used], switchovers: [] });
+    renderAt("/team-a/approvals");
+    const twoPerson = await screen.findByRole("link", { name: "swo-1" });
+    expect(twoPerson.getAttribute("href")).toBe("#/team-a/approvals/switchover/swo-1");
+  });
+
   it("under confirm shows no waiting card, and every recorded approval with its verdict", async () => {
     serve({ policy: CONFIRM, restores: [], approvals: [approvalFixture.item] });
     renderAt("/team-a/approvals");

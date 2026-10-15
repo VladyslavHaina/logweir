@@ -35,13 +35,23 @@ import { StatusLabel } from "../../components/Status";
 import { ApprovalStatus, ErrorLine, principalText } from "./parts";
 import "./approvals.css";
 
-/** Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A). */
-export function subjectHref(ns: string, approval: Approval): string | undefined {
+/**
+ * Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A).
+ * DUI-46: a Switchover's approval page is the two-person request, which exists only in a
+ * two-person namespace; under any other mode (or one not known) its record opens the
+ * Switchover's own page, as the Waiting table's link does.
+ */
+export function subjectHref(ns: string, approval: Approval, mode: ApprovalMode | null): string | undefined {
   if (approval.subjectRef.kind === "Restore") {
     return `#/${ns}/approvals/${encodeURIComponent(approval.subjectRef.name)}?approval=${encodeURIComponent(approval.name)}`;
   }
-  if (approval.subjectRef.kind === "Switchover") return `#/${ns}/approvals/switchover/${encodeURIComponent(approval.subjectRef.name)}`;
+  if (approval.subjectRef.kind === "Switchover") return switchoverHref(ns, approval.subjectRef.name, mode);
   return undefined;
+}
+
+/** A switchover's link from Approvals: its two-person approval page, or its own page. */
+export function switchoverHref(ns: string, name: string, mode: ApprovalMode | null): string {
+  return mode === "twoPerson" ? `#/${ns}/approvals/switchover/${encodeURIComponent(name)}` : `#/${ns}/switchovers/${encodeURIComponent(name)}`;
 }
 
 const NOTHING_WAITS: Record<ApprovalMode, string> = {
@@ -161,7 +171,7 @@ export function ApprovalList() {
       name: s.name,
       // A second person decides on the switchover's approval page; under strict or with
       // files the Switchover's own page gives the commands.
-      href: mode === "twoPerson" ? `#/${ns}/approvals/switchover/${encodeURIComponent(s.name)}` : `#/${ns}/switchovers/${encodeURIComponent(s.name)}`,
+      href: switchoverHref(ns, s.name, mode),
       link:
         mode === "twoPerson" ? (
           <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: s.name }} className="lw-break">
@@ -290,7 +300,7 @@ export function ApprovalList() {
               label="Recorded approvals"
               items={recorded.map((a) => ({
                 key: a.name,
-                href: subjectHref(ns, a),
+                href: subjectHref(ns, a, mode),
                 title: `${a.subjectRef.kind}/${a.subjectRef.name}`,
                 meta: (
                   <>
@@ -313,7 +323,7 @@ export function ApprovalList() {
               </Thead>
               <Tbody>
                 {recorded.map((a) => {
-                  const href = subjectHref(ns, a);
+                  const href = subjectHref(ns, a, mode);
                   return (
                     <Tr key={a.name}>
                       <Td dataLabel="Subject" className="lw-break">
