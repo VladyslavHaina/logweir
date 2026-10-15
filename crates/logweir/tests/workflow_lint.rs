@@ -983,7 +983,10 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
         &|s| run(s) == "bash scripts/engine-source.sh build",
         "`bash scripts/engine-source.sh build`",
     );
-    let save = at(&|s| uses(s).starts_with("actions/cache/save@"), "cache save");
+    let save = at(
+        &|s| uses(s).starts_with("actions/cache/save@"),
+        "cache save",
+    );
     let identity = at(
         &|s| {
             run(s).contains("third_party/kafka-backup-build.env")
@@ -995,7 +998,9 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
         &|s| uses(s).starts_with("actions/upload-artifact@"),
         "artifact upload",
     );
-    assert!(key < restore && restore < build && build < save && save < identity && identity < upload);
+    assert!(
+        key < restore && restore < build && build < save && save < identity && identity < upload
+    );
     let miss = "steps.cache.outputs.cache-hit != 'true'";
     assert_eq!(steps[build]["if"].as_str(), Some(miss));
     assert_eq!(
@@ -1004,14 +1009,20 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
         "only main saves the engine cache"
     );
     for step in [restore, save] {
-        assert_eq!(steps[step]["with"]["path"].as_str(), Some(".engine/kafka-backup"));
+        assert_eq!(
+            steps[step]["with"]["path"].as_str(),
+            Some(".engine/kafka-backup")
+        );
         assert_eq!(
             steps[step]["with"]["key"].as_str(),
             Some("${{ steps.inputs.outputs.key }}")
         );
     }
     assert_eq!(steps[upload]["with"]["name"].as_str(), Some("engine"));
-    assert_eq!(steps[upload]["with"]["path"].as_str(), Some(".engine/kafka-backup"));
+    assert_eq!(
+        steps[upload]["with"]["path"].as_str(),
+        Some(".engine/kafka-backup")
+    );
 
     let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
     let text = serde_yaml::to_string(&ci["jobs"]["e2e"]).unwrap();
@@ -1024,7 +1035,10 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
             .position(pred)
             .unwrap_or_else(|| panic!("ci.yml's e2e job has no {what}"))
     };
-    let extract = shard_at(&|s| run(s) == "./scripts/extract-engine.sh", "OSO extraction");
+    let extract = shard_at(
+        &|s| run(s) == "./scripts/extract-engine.sh",
+        "OSO extraction",
+    );
     let download = shard_at(
         &|s| uses(s).starts_with("actions/download-artifact@") && s["with"]["name"] == "engine",
         "download of the `engine` artifact",
@@ -1077,7 +1091,11 @@ fn rust_caches_are_shared_per_job_kind_and_saved_by_main_only() {
     let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
     let cache = e2e
         .iter()
-        .find(|s| s["uses"].as_str().is_some_and(|u| u.starts_with("Swatinem/rust-cache@")))
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("Swatinem/rust-cache@"))
+        })
         .unwrap();
     assert_eq!(
         cache["with"]["save-if"].as_str(),
