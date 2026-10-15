@@ -35,8 +35,8 @@ cut from this entry is `v0.2.0-rc.2`; its record follows
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 129 landed after the `v0.3.0` tag and are in no
-release yet.
+is below. Items 102 to 129 landed after the `v0.3.0` tag and are in the
+`v0.4.0` release, whose record is below.
 
 ### Candidate record
 
@@ -62,6 +62,68 @@ pass.
 | `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
 | Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
+
+### `v0.4.0`: the release after `v0.3.0`
+
+The rebuilt console and the v1.1 fixes, proven on the PoC by the deep UI
+validation (OD-19): every page by clicks under seven roles, then four fix
+rounds, each re-checked until a full regression passed. It is `v0.3.0` (the
+next record) plus items 102 to 129:
+
+- **The rebuilt console (item 102, PROD-18.1).** React, TypeScript and
+  PatternFly, from the `logweir-console` image, served by `logweir-api` at
+  `/ui/`. Addresses are `/ui/#/<namespace>/<page>`, so bookmarks move. The
+  release no longer attaches `ui-files.sha256`.
+- **The v1.1 fixes (items 103 to 108):** a complete verification streams each
+  segment under a stored and a decompressed cap; a capped, cut or unreadable
+  read says partial; a point-bound restore reads only its point's receipt; the
+  controller judges evidence at one instant; a missing READ grant is named
+  before the engine; a connection test asks every advertised broker. Apply the
+  CRDs first (item 104), and keep the runner image at least as new as the
+  controller (item 108).
+- **rustls 0.23.46 and engine build 4 (items 116 and 117)**, for
+  RUSTSEC-2026-0346 to -0349: roll the controller and the runner images
+  together; a standalone CLI install replaces its engine with
+  `0.23.3+logweir.4` ([quickstart.md](quickstart.md), step 4).
+- **The deep UI validation's four fix rounds (items 109 to 115, 118 to 124,
+  125 to 127, and 128 and 129):** *Test access* tests the credential a
+  destination has; a failed run says why; the schedule form chooses consumer
+  groups; every finished restore's page opens; long names are shown whole and
+  switch over; the session warns before it ends; a switchover is offered only
+  where the scorecard maps consumer positions; the sign-in pages say what
+  happened. A switchover's approval stays the record of its switchover
+  (item 120), and a switchover runs only on its own bundle (item 124). Let the
+  identity provider serve the `email` scope (item 112); roll the runner with
+  the controller, then re-sync each catalog and review each cutover again
+  (item 113); re-run *Test access* on archive-write-only destinations
+  (item 109).
+- **Before a rollback below this release:** roll the controller and the runner
+  back together (items 113 and 117: the engine is build 3 again), and the
+  console and the API as one image (item 110). No item of this release adds a
+  numbered rollback step; the fields it adds are status fields (items 104 and
+  128) or annotations an older build ignores (item 112).
+
+### Candidate record, `v0.4.0`
+
+Filled as the next record is: before the tag from the release dry run; the
+release run, chart and archive rows after the tag.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | `9ccde594`, the commit that added this record, on `claude/rel-v040` (merged into `main` afterwards); it differs from the publication commit only under `docs/` |
+| Version tag | `v0.4.0`, pushed 2026-10-15, pre-approved by the owner on 2026-10-14 (OD-20: "i can directly tag v0.4.0 once everything in UI IS DEEPLY VALIDATED"); a full GitHub Release |
+| Publication commit (`release.json` `.images.publication`) | `f51c92df073bb08ae86d4a82cba9cad27c132b9c` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [38739731052](https://github.com/VladyslavHaina/logweir/actions/runs/38739731052): every job green, including `check`, the five `e2e` shards and `publish` (promote, sign) |
+| Release dry run (`release.yml` dispatched on `claude/rel-v040` at the publication commit) | [38747914877](https://github.com/VladyslavHaina/logweir/actions/runs/38747914877), every job green on attempt 1; `release.sh verify` on its `release-assets` from a checkout of the publication commit: 13 assets verified (`ui-files.sha256` was retired with `ui/`, item 102); the chart 0.4.0 package (sha256 `cb69d1d4fd48db1ffe59fd1064eb24a60a629c106de55239377f90fa5efe1db2`) carries the four digests of `images.json`; the release drill's signed scorecard verifies, outcome `pass` (the release drill runs OSO's 0.23.3, the one-release rollback engine, by design). Earlier dry runs at `05ac11e9` ([38676702666](https://github.com/VladyslavHaina/logweir/actions/runs/38676702666), rerun after a test flake that item 125's round fixed, F1) and `8490a8d9` ([38709306633](https://github.com/VladyslavHaina/logweir/actions/runs/38709306633), green) were superseded by later fix rounds |
+| Release run (`release.yml` on the tag) and release drill | [38783344195](https://github.com/VladyslavHaina/logweir/actions/runs/38783344195): every job green on attempt 1, including the full `ci.yml`, three builds, `drill / drill-from-artifact`, `publish-images` and `github-release`; the version tags name the dry run's three digests (read back with `docker buildx imagetools inspect`); a fresh `gh release download` passes `SHA256SUMS` and `release.sh verify` (13 assets) |
+| Runner image digest (`logweir`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:4c2fb8e3fa4a4fb2a7549093fd098d08a8ca9431dfb0f7371ed6861f4d99c68e` |
+| Controller image digest (`weirkeeper`; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:e10da554f00ef31a931397dc2dc089c368c704805f92e1641d1b7fb1ecb7b7be` |
+| Console image digest (`logweir-console`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:7b2f98178ee39e8c998e02c90fbd62822ddfd63d4dab37b4b2690df46bb1ef45` |
+| Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | `docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6` (amd64 and arm64), built from `d4e32956` (unchanged since `v0.2.0`) |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.4.0`, package sha256 `857f16b37df40d86d43b894522efa76edee172a42e575a2a05a6b04a29ae3b95`, OCI digest `sha256:abde09b3430755c4bd5d506430791dddda7483d0748804218428af372c2c8b10`; an anonymous `helm pull` is byte-identical to the release asset, and its `values.yaml` pins the four digests above |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `5b3b488499ed5ce1609603d102d714cf3717040f1857f2d444291f39b3538c76` (glibc 2.34+); `logweir-aarch64-unknown-linux-gnu.tar.xz` `fcf2b344291b28b9bb88e2c6f6d3ce25419564a15a17c2e816718758f9ef90d7` (glibc 2.34+); `logweir-aarch64-apple-darwin.tar.xz` `5f8a6982d671ba185f0079f58881a628920a61404a69a094fc22291c208ed325` (macOS 11+, Homebrew `openssl@3`); `SHA256SUMS` checks every asset after a fresh `gh release download` |
+| Kubernetes exercises run on this candidate | the PoC (as in `v0.3.0`'s record) with seven throwaway validation users in Dex, each pass once, in order: `poc-v11` on `sha-519ab67c` (Helm revision 23; revision 24 added the users): 9 of 9 rows passed (FX-46's probe, FX-36's catalog sync, FX-12's verdicts, FX-38's three rows, the served console, the ported specs and the image check); the deep UI validation's parts 1 to 3 (`deep-ui-1` to `deep-ui-3`, the same build): every page by clicks under the seven roles, light and dark, at 1440 and 390 px, 31 defects (DUI-1 to DUI-31), fixed in items 109 to 115; `poc-dui` on `sha-63bae2b4` (revisions 25 and 26): DUI-1 and DUI-5 through the API, the `email` scope on Dex, and engine build 4's drill (a scratch restore `pass`, 150/150, its scorecard signed by engine `0.23.3+logweir.4`); re-check parts 1 to 3 (the same build): 25 of 26 rows, then 30 of 31 and the whole flow (6 of 6 steps), then a 36-row regression with 32 passing, K4 and K-FX36-3 passed, new DUI-32 to DUI-44; fix round 2 (items 118 to 124, off the cluster); `poc-dui2` on `sha-05ac11e9` (revisions 27 and 28): the two switchover approvals an earlier build rewrote, re-verified from their signed bytes and recorded `Consumed=True` `SwitchoverAdmitted`; re-check parts 4 and 5 (the same build): 27 of 27, then the regression 36 of 36, new DUI-45 to DUI-48; fix round 3 (items 125 to 127, off the cluster); `poc-dui3` on `sha-8490a8d9` (revisions 29 and 30): DUI-45's API half headless in one cookie jar, the old build as the control; re-check part 6 (the same build): DUI-45 to DUI-48 passed, the regression 35 of 36, new DUI-49 and DUI-50; fix round 4 (items 128 and 129, off the cluster); `poc-dui4` on this publication (revisions 31 and 32; the `restores` CRD gained `status.integrity.positionsMapping`, applied server-side first): `cosign verify` of all four images, the identity keys unchanged, a fresh complete restore's `positionsMapping` `{bound: true, groups: 2}` in its status and its API view; re-check part 8 (the same build): DUI-50, DUI-42 and DUI-49.1 to 49.3 passed, the regression 36 of 36, no new defect; re-check part 7 (the same build, after part 8): the 118 handed-on objects read and then deleted by name, the fixture namespace last, 0 refused; the counts per kind and namespace equal the state before part 1, except the PoC's own 02:00 nightly backup; the validation users removed, bindings first (Helm revision 33), then Dex (revision 9), and Dex refused all seven before their files were deleted; the controller and the console Ready, the four original connections Reachable, the catalogs 431/431 and 5/5; after the tag, `poc-v040` upgraded the PoC to the release chart `0.4.0` (Helm revisions 34 and 35, Dex untouched at 9): the render diff was only the `helm.sh/chart` label and the three image references, `:sha-f51c92df…` to `:v0.4.0@sha256:…` with the same digests; no CRD changed; every running digest equals `release.json`'s and `cosign verify` passes for all four images by the release's references; the identity keys, the catalogs (431/431 and 5/5) and the four connections unchanged; the served console is this release's build byte for byte (`scripts/check-image-api.sh`) |
+| Checks deliberately deferred, each with its reason | as `v0.3.0`'s, plus: item 108's K2 (no PoC listener advertises an address its namespace cannot reach, so the compose row is the evidence; it stays `[UNVERIFIED]`); item 124's planted bundle (a kubectl write the UI passes do not make; the controller rows prove it; it stays `[UNVERIFIED]`); the DUI-38 stream half (no automated row: jsdom has no EventSource; re-check part 4 saw the live page follow its verdict); the fix reports' remaining gaps: free text still redacts a topic name of 40 or more characters in a row's own message, the Restores list does not poll a pending verdict (by design), an approval whose Switchover or bundle was deleted cannot be rebuilt (the switchover's signed record stays the evidence), a catalog point past the wizard's read budget is bound but not shown as chosen, DUI-44's layout and DUI-43's stacked note are CSS held by the screenshot walk rather than a Vitest row, and DUI-41.1 has a row but no screenshot; `poc-dui2`'s O2 (the README's binding lift re-stamps an expired request record's `lastTransitionTime`, seen again in `poc-dui3` and `poc-dui4`) and O1 (the controller's consumption log line named a Restore for a Switchover; F2 fixed it, and no PoC pass has read that line since); the test flake (F1 matches the bootstrap by its address, not by digits a timestamp can carry; proven by local runs and this dry run's first attempt, not by a soak) |
 
 ### `v0.3.0`: the release after `v0.2.0`
 
@@ -89,8 +151,8 @@ PoC, with its one fix round. It is `v0.2.0` (the next record) plus items 91 to
 - **Before a rollback below this release:** delete the `Switchover`-kind
   Approvals first (rollback step 7, [kubernetes.md](kubernetes.md)).
 
-The rebuilt console, the v1.1 fixes and the deep UI validation's fixes (items 102 and on) are on `main` after
-this release and are not in it.
+The rebuilt console, the v1.1 fixes and the deep UI validation's fixes (items 102 to 129) are on `main` after
+this release and are not in it; `v0.4.0` carries them.
 
 ### Candidate record, `v0.3.0`
 
@@ -2624,7 +2686,11 @@ mutants over items 105 and 106, and the console's rows.
 catalog point's restore logs `recovery point binding verified`, and no
 `PointBindingMismatch`); K-FX36-2, `poc-v11` row 2 (a sync on the new runner
 and controller: all 411 points keep their availability and signature).
-[UNVERIFIED — K-FX36-3 (a switchover plan whose `rollback_of.key` is not a switchover record, answered 422) has not run on a cluster; it needs an API call the UI-only passes do not make.]
+K-FX36-3 ran on build `sha-63bae2b4`, item 59 of the deep UI re-check's part 3
+(`deep-ui-recheck-3`, one API call): a switchover plan whose `rollback_of.key`
+is `logweir/drills/x.json` was answered 422 `validation_failed` on
+`planBytes` (`SwitchoverPlanInvalid`: "…is not a switchover record key…"),
+and no Switchover or Approval was created.
 **Rollback:** an older runner reads the receipt key the plan names, and an
 older catalog sync lists a record by the keys it names.
 
@@ -2674,8 +2740,12 @@ schedule form's readiness lists `connection.topicsReadable` under "Only the
 run itself can answer", "the broker reports READ … on all 2") and row 31
 (*Back up now* runs succeed); K5, `deep-ui-2` row 49 (a scratch restore
 `Succeeded` `pass`, its runner log carrying phase 0's `target.engineProtocol`
-line).
-[UNVERIFIED — K4's runner-log lines (READ reported for the backup principal, the source's engine protocol before the engine starts) were not read on a cluster; the PoC re-check reads them.]
+line). K4's runner-log lines were read on build `sha-63bae2b4`, item 58 of
+the deep UI re-check's part 3 (`deep-ui-recheck-3`): a *Back up now* run's
+log has, in order, `phase_minus1_admit` "the broker reports READ for the
+backup principal on every selected topic", `check=connection.engineProtocol`
+"this endpoint serves every request version the engine sends to back up from
+it", and "execution claimed …; starting the engine".
 **Rollback:** an older runner starts the engine and fails exit 1 again; an
 older controller reads the row as before.
 
@@ -2741,7 +2811,14 @@ a credential; a live row on a compose MinIO (an unknown key reads `notReady`
 `InvalidCredentials` under the default set and `ready` under the old one;
 control: the good key reads `ready`); the console's placement rows; a mutant
 on each rule was killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-1 and DUI-2 on the PoC.]
+**Scope (PoC):** `poc-dui` (build `sha-63bae2b4`, 2026-10-14), through the
+API: a destination whose archive-write key MinIO does not know, tested with no
+grant named, reads `notReady`, `destination.archiveListable`
+`InvalidCredentials` (control: `primary` reads `ready`). The deep UI
+re-check's part 1 (`deep-ui-recheck-1`, the same build), by clicks: the same
+verdict in *Test access* (DUI-1), and a stale tab's *Rotate access* answered
+412 "The destination changed since this page read it. Nothing was written.",
+the generation unchanged (DUI-2).
 **Rollback:** an older API tests the old set, and answers a stale edit by its
 field rules again; nothing stored changes.
 
@@ -2795,7 +2872,18 @@ compose row (a password the broker refuses: exit 1, the cause in
 token); the API's `consumerGroups` rows (a 46-character id stored and read
 back; five refusals, nothing written; control: an empty list is stored
 absent); the console's rows; a mutant on each guard was killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-3, DUI-5, DUI-13, DUI-25 and DUI-31 on the PoC.]
+**Scope (PoC):** `poc-dui` (build `sha-63bae2b4`), through the API: a backup
+of `orders` and `pdui-nosuch` ended `Failed`, exit 3, `GuardRefused` "topic
+`pdui-nosuch` does not exist on the source …", nothing written. The deep UI
+re-check's parts 1 and 2 (`deep-ui-recheck-1`, `-2`, the same build), by
+clicks: the readiness rows `TopicNotFound` and the refused run's sentence; a
+run over a password the broker refuses failed exit 1 with "the runner's last
+error, cleaned and bounded: …" and no password (DUI-5); groups chosen in the
+schedule form, listed on the schedule, the run and the catalog point, and the
+wizard's sentence for a point that maps none (DUI-25); the Overview's newest
+point (DUI-3); next runs within seconds, and a 412 that keeps the edit
+(DUI-13); the last run, the last failed run and *Back up now*'s revision
+(DUI-31.2, 31.3 and 31.7).
 **Rollback:** an older runner starts the engine for a missing topic and prints
 no `failure-detail=`, which an older controller ignores; the console and the
 API roll back as one image, and schedules keep their stored
@@ -2834,7 +2922,16 @@ and a number that is not a time (control: a real instant); a page that throws
 `plan-owners.golden.yaml`, which `console_plan.rs` parses into `RestoreSpec`
 and the runner's owner rules (control: the clone golden's `owners: []`); the
 confirm card, the wizard and the clones list; mutants over each were killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-16, DUI-17, DUI-18, DUI-22 and DUI-23 on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 2 (`deep-ui-recheck-2`, build
+`sha-63bae2b4`), by clicks: every finished restore's page opens with its
+verdict, coverage, evidence, and Clone and Topic configuration cards, and
+"Any age: the broker sets no bound" (DUI-16); a clone with the source's
+configuration and its owners stated (`owners: []`) ran `Succeeded`,
+Verified, the configuration applied (DUI-17); a confirm restore reads "The
+controller is verifying your confirmation" (DUI-18); a kept clone reads
+"clone, deletes in 1 hour" (DUI-23); DUI-22's slips passed, except (3) and (8),
+which item 123 fixed and part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`)
+passed.
 **Rollback:** an older console image crashes on such a page again and builds
 no `owners` list; nothing stored changes.
 
@@ -2888,7 +2985,18 @@ console's requester rows (control: an older request shows the principal only);
 the Approvals, cutover and viewer rows (controls: a Succeeded switchover is not
 listed; the requester's own request counts nothing; an operator's cutover
 sends its one review); mutants over each were killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-20, DUI-21, DUI-27, DUI-28, DUI-30 and DUI-31 on the PoC.]
+**Scope (PoC):** `poc-dui` (build `sha-63bae2b4`): the PoC's Dex accepts
+`openid profile email groups`, and each session's display name is the user's
+verified email (control: the bare username before the upgrade). The deep UI
+re-check's part 2 (`deep-ui-recheck-2`, the same build), by clicks: a
+two-person switchover waits in v-bob's Approvals, counted, and runs once
+approved (DUI-27); "Requested by v-alice@… (email verified by the identity
+provider)", then the signed principal in full, the signed display in the
+request's annotations (DUI-21); the waiting request reads "Request recorded"
+(DUI-20); the cutover right after a restore, and *Review again* (DUI-28); a
+viewer is offered no review, and nothing is sent (DUI-30); DUI-31.8 to 31.10.
+Older request records still read "Refused" there (DUI-40.5); item 123 fixed
+that, and part 4 passed it.
 **Rollback:** an older API reads the `name` claim by default again, ignores the
 requester-display annotations and serves none of the three fields; an older
 console lists no switchover in Approvals. Either build reads the other's
@@ -2925,7 +3033,11 @@ review's details as the console plans it, approved and applied (exit 0,
 `Succeeded`, the offsets read back); control: the old pass names both
 `[redacted]` and the plan built from it is refused `PlanDisagreesWithMapping`,
 exit 3, nothing committed. One mutant was killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-26 on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 2 (`deep-ui-recheck-2`, build
+`sha-63bae2b4`), by clicks: after the hourly sync, the catalog point lists the
+60-character group `rc1-billing-reconciliation-consumer-eu-west-1-settlement-ops`
+whole; its review names the group and the restored topic whole, and the
+switchover `Succeeded`, the group committed at 40/40 on the restored topic.
 **Rollback:** an older runner or controller redacts such names again, and a
 switchover planned over one is refused again; nothing stored changes.
 
@@ -2946,7 +3058,11 @@ changes in the same tab.
 before the sign-in still says signed out; the warning at about two minutes
 (control: at ten, none); the sign-in link follows a hash change (control: the
 first `next`); mutants on the re-read, the link and the dialog were killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-4 and DUI-9 on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 1 (`deep-ui-recheck-1`, build
+`sha-63bae2b4`), by clicks: the warning came 1 min 51 s before the end; the
+ended dialog covered a half-filled schedule form; after a sign-in in a new
+tab, *Continue here* kept the form, whose *Create schedule* then worked
+(DUI-4); signed out, the sign-in link followed a same-tab hash change (DUI-9).
 **Rollback:** an older console image sends a page whose session ended to the
 sign-in page again; nothing is stored.
 
@@ -2982,7 +3098,13 @@ two screenshot walks over the single-file mock build at 1440 and 390 px, light
 and dark (72 and 46 shots): 0 screens wider than the viewport, 0 children past
 a card or dialog edge, 0 list labels over a name, 0 axe violations; mutants
 over the rows were killed.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check runs DUI-6 to DUI-8, DUI-10 to DUI-12, DUI-14, DUI-15, DUI-19, DUI-24, DUI-29 and DUI-31 on the PoC.]
+**Scope (PoC):** the deep UI re-check's parts 1 and 2 (`deep-ui-recheck-1`,
+`-2`, build `sha-63bae2b4`), by clicks at 1440 and 390 px, light and dark:
+each id passed, among them the Test connection table inside its card (DUI-7),
+the 390 px dialog and form (DUI-8), *Connect an archive*'s warning before a
+duplicate is sent (DUI-10), the links (DUI-12) and the user menu (DUI-14).
+DUI-31.6 still read "Not recorded" beside `ProbeRunning`; item 123 fixed it,
+and part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`) passed it.
 **Rollback:** an older console image shows the old layout and words; nothing is
 stored.
 
@@ -3040,7 +3162,8 @@ and its documents say so. Documents build 4 signed stay valid.
 - the console's pending-then-verified row, and its control that the page stops reading at the two-minute bound.
 
 The stream half has no automated row: jsdom has no EventSource.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 stays on a live restore page on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`, 2026-10-15): the page the console opened for a complete restore followed it, with no reload, to "Restored and verified, 398 of 398" and **Switch consumers over** (verified at 05:05:26Z, shown by 05:05:29Z).
+Part 5 (`deep-ui-recheck-5`, the same build) saw the same on two more restores.
 **Rollback:** an older image stops reading at the finish again; reopen the restore to see its verdict.
 
 #### 119. Readiness checks name the topics they are about, and an absent topic reads as absent (DUI-39, DUI-36)
@@ -3055,7 +3178,8 @@ The stream half has no automated row: jsdom has no EventSource.
 - `check_cli.rs::dui36_an_absent_topic_blocks_the_configuration_row_as_absent_not_undescribable`, with the unknown-answer control;
 - the Tier A review: the relaxation reaches a row detail's `sample` only, never a message, a fact or broker text.
 
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 runs the restore check against a taken 43-character topic on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`): a restore check against the taken 43-character topic `rc2r-rc1-settlement-ledger-eu-west-1-orders` names it in `MappedTopicExists`, and nothing is created (DUI-39).
+A backup readiness check over `orders` and `dui1-nosuch` says a selected topic does not exist on the source (`TopicNotFound`) (DUI-36).
 **Rollback:** an older controller redacts long sampled names again.
 
 #### 120. A switchover's approval stays the record of its switchover (DUI-43)
@@ -3090,7 +3214,10 @@ The stream half has no automated row: jsdom has no EventSource.
   - a Job raced in under the name during the admitting pass (no owner, or another UID) is refused `JobNameConflict` with no `jobRef`, and the control is the controller's own Job, which proceeds;
   - an admitted Switchover's Job that is not its own is refused the same way.
 
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 waits past a switchover approval's expiry on the PoC.]
+**Scope (PoC):**
+- `poc-dui2` (build `sha-05ac11e9`, 2026-10-15): the two switchover approvals an earlier build had rewritten were re-verified from their signed bytes at their bundles' instants and recorded `Consumed=True` `SwitchoverAdmitted`, with the approver, key and authorization back.
+- The deep UI re-check's part 4 (the same build): past the expiry of two new switchover approvals, one two-person and one confirm, Approvals reads "Verified · used by swo-…" with the approver and key, and kubectl reads `Consumed=True` `SwitchoverAdmitted`. Part 5's regression held it.
+
 **Rollback:** an older controller rewrites consumed switchover approvals at their expiry again. The switchover's signed record is unaffected.
 
 #### 121. No switchover is offered where there is nothing to switch (DUI-42)
@@ -3098,7 +3225,7 @@ The stream half has no automated row: jsdom has no EventSource.
 **Changed.** A finished restore of a point whose backup recorded no consumer group now says "This point captured no consumer group, so there is nothing to switch over". It no longer offers **Switch consumers over**, whose review then refused with `NoPositionsMapping`.
 **Do:** nothing.
 **Scope:** the console's restore-page row (no button, the sentence, no Next), with controls: a point that recorded groups still offers the switchover.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 opens such a restore on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`): a finished complete restore of a point with no consumer group shows no **Switch consumers over** and no Next, and says "This point captured no consumer group, so there is nothing to switch over"; the control, a restore of a point with two groups, still offers it.
 **Rollback:** an older console offers the switchover again; the review still refuses it.
 
 #### 122. Signing in again from a second tab is one sign-in, and a replaced sign-in reads a page (DUI-41.7)
@@ -3110,7 +3237,8 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing; the console and the API ship as one image.
 **Scope:** `oidc_login.rs::dui41_a_browser_whose_sign_in_was_replaced_reads_a_page_and_stays_signed_out`, whose control is that without `Accept: text/html` the JSON problem is unchanged; and the console's held-link row, whose control is that back in the tab, the link is offered again.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 signs in twice from the session warning on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`): one click on **Sign in again in a new tab** holds the link ("Sign-in open in another tab"), and the next warning offers it again; a replaced callback reads the page "Sign-in not completed … (`state_mismatch`)" with a link back to the console, 401 and no session.
+That path also found DUI-45, which item 125 fixes.
 **Rollback:** an older image answers a replaced sign-in with the JSON problem again.
 
 #### 123. The console counts refused runs, keeps refusals and warnings in view, and fits a phone (DUI-22.3, DUI-22.8, DUI-31.6, DUI-32 to DUI-37, DUI-40, DUI-41.1–6, DUI-44)
@@ -3138,7 +3266,8 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing.
 **Scope:** the console's rows, each with a control, in `checks`, `detail`, `flows`, `protection`, `requester`, `Revealed`, `SessionGate` and `When`. `just console` passes 568 tests. The repo's screenshot walk ran at 1440 and 390, light and dark, over the changed screens.
-[UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 runs each id by clicks on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 4 (`deep-ui-recheck-4`, build `sha-05ac11e9`), by clicks: every id above passed, among them the 24-hour tile's "2 failed · 1 refused" (DUI-32) and the 390 px readiness result inside its card (DUI-44).
+Part 5 (`deep-ui-recheck-5`, the same build) passed the full regression, 36 of 36.
 **Rollback:** an older console image shows the old counts and words; nothing is stored.
 
 #### 124. A switchover runs only on its own bundle (review M1)
@@ -3162,7 +3291,10 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing; the API and the console ship as one image.
 **Scope:** `oidc_login.rs::dui45_the_older_of_two_tabs_refused_first_leaves_the_newer_able_to_finish` (controls: no session on the mismatch, the newer attempt cannot finish twice, a callback with no state still clears the cookie, the late older tab's wording), the every-refusal row with the mismatch as its one exception, and `boundary.rs` for the served stylesheet.
-[UNVERIFIED — not yet run on a cluster; the next deep UI re-check signs in from two tabs on the PoC.]
+**Scope (PoC):**
+- `poc-dui3` (build `sha-8490a8d9`, 2026-10-15), headless in one cookie jar: the older tab's callback answered 401 `state_mismatch` with no `Set-Cookie`, the newer tab then signed in, and a replay was refused. The control: the same script on the old build lost the newer sign-in too (`login_state_absent`).
+- The deep UI re-check's part 6 (`deep-ui-recheck-6`, the same build), with two visible tabs in both orders, light and dark: the styled page with the words above, the newer tab signed in, and no `/favicon.ico` request.
+
 **Rollback:** an older image clears the newer attempt's cookie on a mismatch again; a third sign-in recovers.
 
 #### 126. Approvals link a switchover record by the namespace's mode, and a pending verdict shows no "Verified at" (DUI-46, DUI-47)
@@ -3173,7 +3305,7 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing.
 **Scope:** the console's Approvals row (control: two-person), the backup Evidence row (control: a written verdict), the restore page's pending-then-verified row and the term's own row. `just console` passes 571 tests.
-[UNVERIFIED — not yet run on a cluster; the next deep UI re-check opens a confirm namespace's switchover record and a verifying backup on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 6 (`deep-ui-recheck-6`, build `sha-8490a8d9`): in the confirm namespace a switchover's recorded approval opens the Switchover's page, with no 409, and the two-person control opens the approval page (DUI-46); a verifying backup's Evidence card reads "Last attempt at … (just now)", then "Verified at" (DUI-47).
 **Rollback:** an older console image links every switchover record to the two-person page and shows "Verified at" while pending; nothing is stored.
 
 #### 127. Console: first probes, complete counts, probe words and the backup stepper (DUI-48.1–4)
@@ -3186,7 +3318,12 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing.
 **Scope:** the console's rows, each with a control: in `connections.test`, `destinations.test`, restores `detail`, schedules `flows`, backups `flows` and `verdict.test`. Seven mutants are killed.
-[UNVERIFIED — not yet run on a cluster; the next deep UI re-check adds a connection, runs a complete restore, opens the schedule form and watches a backup start on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 6 (`deep-ui-recheck-6`, build `sha-8490a8d9`):
+- a new connection's page went from Never probed to Probing to Reachable with no reload (48.1);
+- complete restores read "Records compared" and "Compared and matching", and a sampled one keeps "Records sampled" (48.2);
+- the schedule form's Source list read "last probe recorded no reading (NoExitCode)" while kubectl did (48.3);
+- a backup's stepper showed Preparing before Copying and never stepped back (48.4).
+
 **Rollback:** an older console image shows the old words and the stale first-probe page; nothing is stored.
 
 #### 128. A restore offers a switchover only when its scorecard maps consumer positions (DUI-50)
@@ -3206,7 +3343,10 @@ The stream half has no automated row: jsdom has no EventSource.
 - `crd_shape`;
 - the console's restore-page rows: the unbound restore, the no-group restore, and the control of a bound point with groups, which is offered.
 
-[UNVERIFIED — not yet run on a cluster; the next deep UI re-check restores a fresh point before its catalog sync on the PoC.]
+**Scope (PoC):**
+- `poc-dui4` (build `sha-f51c92df`, 2026-10-15): the `restores` CRD gained the field, applied server-side first. A fresh scratch restore with complete coverage, bound to a point with two groups, read `{bound: true, groups: 2}` in its status and its API view, as its signed scorecard says. The two restores finished before the upgrade carry none, as **Do** says.
+- The deep UI re-check's part 8 (`deep-ui-recheck-8`, the same build), by clicks: a fresh backup restored complete before the catalog's sync (`{bound: false}`) offers no switchover and says why; the bound control was switched over, `Succeeded`; a restore of a no-group point reads item 121's sentence. A restore finished before the upgrade still offers the switchover, and its review refuses it, as **Do** predicts.
+
 **Rollback:** an older image offers the switchover again, and the review still refuses it. The status field is additive; an older controller leaves it alone.
 
 #### 129. Sign-in and probe words (DUI-49.1–3)
@@ -3218,7 +3358,11 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Do:** nothing; the API and the console ship as one image.
 **Scope:** `oidc_login.rs` dui45 (control: no new sign-in beside a mismatch); the console's Overview and wizard rows, each with a control.
-[UNVERIFIED — not yet run on a cluster; the next deep UI re-check repeats the two-tab sign-in, the Overview during a probe and the wizard's readiness step on the PoC.]
+**Scope (PoC):** the deep UI re-check's part 8 (`deep-ui-recheck-8`, build `sha-f51c92df`):
+- after the newer of two tabs signed in, the older tab reads "No sign-in is waiting to finish in this browser." with a **Sign in again** link, and the `state_mismatch` page offers none (49.1);
+- Needs attention during a probe reads "The controller's last reading could not reach its brokers; since then, ProbeRunning …" (49.2);
+- the wizard reads "Reachable · Stale" for an 11-minute-old reading (49.3).
+
 **Rollback:** an older image shows the earlier words; nothing is stored.
 
 ### Required operator actions after `v0.2.0-rc.1`
