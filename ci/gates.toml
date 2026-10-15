@@ -9,8 +9,9 @@
 # HOW A GATE'S INPUTS ARE EXPANDED (all matching is git's own pathspec glob,
 # `git ls-files -- ':(glob)<pattern>'`, so `*` stops at `/` and `**` crosses it):
 # - [global].paths: inputs of EVERY gate. They hold the toolchain, the lockfile,
-#   the root manifest, this map, the gate machinery and ci.yml itself: a change
-#   to CI changes every hash, so everything runs.
+#   the root manifest, this map, the gate machinery, the local actions and
+#   every workflow a proving run executes: a change to CI changes every hash,
+#   so everything runs.
 # - definition: the scripts and recipes the gate's job runs. Every gate has one.
 # - crates: workspace packages, expanded from `cargo metadata --locked --no-deps`
 #   to the package directory and every workspace package it depends on
@@ -48,8 +49,16 @@ paths = [
   ".cargo/**",
   "ci/gates.toml",
   "scripts/ci-gate.sh",
-  ".github/actions/gate/**",
+  ".github/actions/**",
+  # Every workflow a proving run executes (scripts/ci-gate.sh PROVERS, and
+  # every workflow they call): ci.yml and the images it publishes, release.yml
+  # and its drill, the nightly. A changed caller could add a job whose name
+  # collides with a gate's; hashing it means its runs prove nothing for us.
   ".github/workflows/ci.yml",
+  ".github/workflows/images.yml",
+  ".github/workflows/release.yml",
+  ".github/workflows/release-drill.yml",
+  ".github/workflows/ci-nightly.yml",
 ]
 
 # ci.yml jobs that are plumbing, not gates: they read no product input.

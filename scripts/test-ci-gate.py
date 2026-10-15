@@ -29,7 +29,8 @@ schema = 1
 
 [global]
 paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/**", "ci/gates.toml",
-         "scripts/ci-gate.sh", ".github/actions/gate/**", ".github/workflows/ci.yml"]
+         "scripts/ci-gate.sh", ".github/actions/**", ".github/workflows/ci.yml",
+         ".github/workflows/release.yml", ".github/workflows/ci-nightly.yml"]
 
 [not_gates]
 changes = "plumbing"
@@ -61,6 +62,8 @@ FILES = {
     "rust-toolchain.toml": "[toolchain]\nchannel = '1.89.0'\n",
     ".cargo/config.toml": "[alias]\n",
     ".github/workflows/ci.yml": "name: ci\n",
+    ".github/workflows/release.yml": "name: release\n",
+    ".github/workflows/ci-nightly.yml": "name: ci-nightly\n",
     ".github/actions/gate/action.yml": "name: gate\n",
     "crates/alpha/Cargo.toml": "[package]\nname = 'alpha'\n",
     "crates/alpha/src/lib.rs": "pub fn a() {}\n",
@@ -126,8 +129,8 @@ def run_of(run_id, sha, path=CI, head_id=REPO_ID, referenced=(), event="push", b
             "event": event, "head_branch": branch, "head_sha": sha}
 
 
-def job(name, conclusion="success", status="completed"):
-    return {"name": name, "status": status, "conclusion": conclusion}
+def job(name, conclusion="success", status="completed", attempt=1):
+    return {"name": name, "status": status, "conclusion": conclusion, "run_attempt": attempt}
 
 
 def artifact(name, run_id, art_id=7, head_id=REPO_ID, expired=False, expires=FUTURE):
@@ -178,8 +181,7 @@ class Repo:
         answers.write_text(json.dumps(self.answers))
         env.update(CI_GATE_CARGO=str(self.tools / "cargo"), CI_GATE_GH=str(self.tools / "gh"),
                    FAKE_GH_ANSWERS=str(answers), FAKE_GH_LOG=str(self.tools / "gh.log"),
-                   GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID),
-                   CI_GATE_RUNNER="Linux-X64-ubuntu24")
+                   GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID))
         env.update(extra)
         return env
 
@@ -187,8 +189,8 @@ class Repo:
         return subprocess.run(["bash", str(self.dir / "scripts" / "ci-gate.sh"), *args],
                               cwd=self.dir, capture_output=True, text=True, env=self.env(**extra))
 
-    def hash(self, gate, runner="Linux-X64-ubuntu24"):
-        proc = self.run("hash", gate, "--runner", runner)
+    def hash(self, gate):
+        proc = self.run("hash", gate)
         if proc.returncode != 0:
             raise AssertionError(f"hash {gate}: {proc.returncode} {proc.stderr}")
         return proc.stdout.strip()
@@ -236,9 +238,8 @@ class Hash(unittest.TestCase):
         clone = Path(tempfile.mkdtemp(prefix="ci-gate-clone-"))
         try:
             subprocess.run(["git", "clone", "-q", str(self.repo.dir), str(clone / "r")], check=True)
-            proc = subprocess.run(["bash", "scripts/ci-gate.sh", "hash", "alpha", "--runner",
-                                   "Linux-X64-ubuntu24"], cwd=clone / "r", capture_output=True,
-                                  text=True, env=self.repo.env())
+            proc = subprocess.run(["bash", "scripts/ci-gate.sh", "hash", "alpha"], cwd=clone / "r",
+                                  capture_output=True, text=True, env=self.repo.env())
             self.assertEqual(proc.stdout.strip(), self.before["alpha"], proc.stderr)
         finally:
             shutil.rmtree(clone, ignore_errors=True)
@@ -260,7 +261,8 @@ class Hash(unittest.TestCase):
         self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
 
     def test_a_ci_definition_change_changes_every_hash(self):
-        for rel in (".github/workflows/ci.yml", "ci/gates.toml", "scripts/ci-gate.sh",
+        for rel in (".github/workflows/ci.yml", ".github/workflows/release.yml",
+                    ".github/workflows/ci-nightly.yml", "ci/gates.toml", "scripts/ci-gate.sh",
                     ".github/actions/gate/action.yml", "Cargo.lock", "rust-toolchain.toml",
                     "Cargo.toml", ".cargo/config.toml"):
             with self.subTest(rel=rel):
@@ -297,16 +299,13 @@ class Hash(unittest.TestCase):
         # and an unclassified file is every gate's input.
         self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
 
-    def test_the_runner_label_is_an_input(self):
-        self.assertNotEqual(self.repo.hash("alpha", "Linux-ARM64-ubuntu24"), self.before["alpha"])
-        proc = self.repo.run("hash", "alpha", CI_GATE_RUNNER="", RUNNER_OS="Linux", RUNNER_ARCH="X64",
-                             ImageOS="ubuntu24")
-        self.assertEqual(proc.stdout.strip(), self.repo.hash("alpha", "Linux-X64-ubuntu24"))
+    def test_the_runner_is_not_hashed(self):
+        # ci.yml's runs-on (a global input) binds a gate's runner.
+        proc = self.repo.run("hash", "alpha", RUNNER_OS="Linux", RUNNER_ARCH="ARM64", ImageOS="ubuntu24")
+        self.assertEqual(proc.stdout.strip(), self.before["alpha"])
 
-    def test_the_index_is_hashed_not_the_working_tree(self):
-        # A job that rewrites a tracked file (e2e-seed.sh refreshes fixtures)
-        # does not move the hash it records.
-        (self.repo.dir / "docs" / "guide.md").write_text("rewritten by a job\n")
+    def test_an_untracked_file_is_not_an_input(self):
+        (self.repo.dir / "lookup.out").write_text("scratch\n")
         self.assertEqual(self.repo.hashes(), self.before)
 
 
@@ -351,6 +350,25 @@ class FailSafe(unittest.TestCase):
                 self.repo.commit(label)
                 self.assert_refused(self.repo.run("hash", "alpha"))
 
+    def test_a_dirty_checkout_gives_no_hash(self):
+        guide = self.repo.dir / "docs" / "guide.md"
+        cases = {"a tracked change in the worktree": ("rewritten by a job\n", False),
+                 "a staged change": ("staged\n", True)}
+        for label, (text, stage) in cases.items():
+            with self.subTest(label):
+                guide.write_text(text)
+                if stage:
+                    self.repo.git("add", "docs/guide.md")
+                for args in (("hash", "alpha"), ("files", "alpha"), ("lookup", "alpha", "0" * 64)):
+                    proc = self.repo.run(*args)
+                    self.assert_refused(proc)
+                    self.assertIn("differs from HEAD", proc.stderr)
+                out = self.repo.tools / "out"
+                out.write_text("")
+                self.repo.run("decide", "alpha", GITHUB_OUTPUT=str(out))
+                self.assertEqual(out.read_text(), "hit=false\nproof-run=\nhash=\n")
+                self.repo.git("reset", "-q", "--hard")
+
     def test_an_unknown_gate_gives_no_hash(self):
         self.assert_refused(self.repo.run("hash", "nope"))
 
@@ -391,6 +409,18 @@ class Lookup(unittest.TestCase):
                 "total_count": len(listed), "jobs": listed}
             tree = (trees or {}).get(run["head_sha"]) or self.repo.tree(run["head_sha"])
             self.repo.answers[f"repos/{REPO}/git/trees/{run['head_sha']}"] = tree
+            self.repo.answers.setdefault(f"repos/{REPO}/compare/{run['head_sha']}...main",
+                                         {"status": "identical", "behind_by": 0})
+
+    def tag(self, name, sha, annotated=True):
+        """refs/tags/<name>, annotated (a tag object) or lightweight, at sha."""
+        if annotated:
+            self.repo.answers[f"repos/{REPO}/git/ref/tags/{name}"] = {
+                "ref": f"refs/tags/{name}", "object": {"type": "tag", "sha": "f" * 40}}
+            self.repo.answers[f"repos/{REPO}/git/tags/{'f' * 40}"] = {"object": {"type": "commit", "sha": sha}}
+        else:
+            self.repo.answers[f"repos/{REPO}/git/ref/tags/{name}"] = {
+                "ref": f"refs/tags/{name}", "object": {"type": "commit", "sha": sha}}
 
     def lookup(self, **extra):
         return self.repo.run("lookup", "alpha", self.hash, **extra)
@@ -411,10 +441,12 @@ class Lookup(unittest.TestCase):
         self.assertIn(f"proof-commit={self.sha}", proc.stdout)
         calls = [c[3] for c in self.repo.gh_calls()]
         self.assertEqual(calls, [self.listing, f"repos/{REPO}/actions/runs/11",
-                                 f"repos/{REPO}/actions/runs/11/jobs", f"repos/{REPO}/git/trees/{self.sha}"])
+                                 f"repos/{REPO}/actions/runs/11/jobs",
+                                 f"repos/{REPO}/compare/{self.sha}...main",
+                                 f"repos/{REPO}/git/trees/{self.sha}"])
         self.assertIn(f"name={self.name}", self.repo.gh_calls()[0])
         self.assertIn("filter=all", self.repo.gh_calls()[2], "every attempt's jobs")
-        self.assertIn("recursive=1", self.repo.gh_calls()[3])
+        self.assertIn("recursive=1", self.repo.gh_calls()[4])
 
     def test_a_forged_marker_whose_gate_job_did_not_pass_runs_the_gate(self):
         for conclusion in ("failure", "cancelled", "skipped", None):
@@ -431,8 +463,19 @@ class Lookup(unittest.TestCase):
 
     def test_a_pass_in_any_attempt_proves_the_gate(self):
         self.serve([artifact(self.name, 14)], [run_of(14, self.sha)],
-                   jobs={14: [job("alpha", "failure"), job("alpha")]})
+                   jobs={14: [job("alpha", "failure"), job("alpha", attempt=2)]})
         self.assert_hit(self.lookup(), 14)
+
+    def test_a_duplicated_job_name_proves_nothing(self):
+        # A second job named like the gate's (a `name:` can collide) runs `true`.
+        self.serve([artifact(self.name, 9)], [run_of(9, self.sha)],
+                   jobs={9: [job("alpha", "failure"), job("alpha")]})
+        self.assert_miss(self.lookup(), "2 jobs named 'alpha' in one attempt")
+
+    def test_a_main_run_whose_commit_is_not_on_main_proves_nothing(self):
+        self.serve([artifact(self.name, 8)], [run_of(8, self.sha)])
+        self.repo.answers[f"repos/{REPO}/compare/{self.sha}...main"] = {"status": "diverged", "behind_by": 2}
+        self.assert_miss(self.lookup(), "is not on main (diverged)")
 
     def test_a_marker_whose_hash_does_not_recompute_at_its_commit_runs_the_gate(self):
         old = self.sha
@@ -462,25 +505,31 @@ class Lookup(unittest.TestCase):
         self.assertEqual(self.lookup().returncode, 2)
 
     def test_only_the_events_ci_produces_count(self):
+        pr = {"base": {"ref": "main", "sha": self.sha}, "head": {"ref": "x", "sha": self.sha}}
         refused = {
-            "pull_request_target": run_of(20, self.sha, event="pull_request_target", branch="x"),
-            "workflow_run": run_of(21, self.sha, event="workflow_run"),
-            "a push to another branch": run_of(22, self.sha, branch="feature"),
-            "a dispatch off main": run_of(23, self.sha, event="workflow_dispatch", branch="feature"),
-            "a schedule of ci.yml": run_of(24, self.sha, event="schedule"),
-            "release.yml on a branch": run_of(25, self.sha, RELEASE, referenced=CALLS_CI, branch="main"),
-            "release.yml not calling ci.yml": run_of(26, self.sha, RELEASE, branch="v0.4.1"),
-            "the nightly on a push": run_of(27, self.sha, NIGHTLY, referenced=CALLS_CI),
-            "another workflow": run_of(28, self.sha, ".github/workflows/ci-trace.yml", event="pull_request"),
+            # A pull request's run tests a merge commit the API does not name.
+            "a pull request": dict(run_of(20, self.sha, event="pull_request", branch="x"), pull_requests=[pr]),
+            "a pull request with no pull_requests": run_of(29, self.sha, event="pull_request", branch="x"),
+            "a pull request with two": dict(run_of(19, self.sha, event="pull_request", branch="x"),
+                                            pull_requests=[pr, pr]),
+            "pull_request_target": run_of(21, self.sha, event="pull_request_target", branch="x"),
+            "workflow_run": run_of(22, self.sha, event="workflow_run"),
+            "a push to another branch": run_of(23, self.sha, branch="feature"),
+            "a dispatch off main": run_of(24, self.sha, event="workflow_dispatch", branch="feature"),
+            "a schedule of ci.yml": run_of(25, self.sha, event="schedule"),
+            "release.yml pushed to main": run_of(26, self.sha, RELEASE, referenced=CALLS_CI),
+            "release.yml on a v-named branch": run_of(27, self.sha, RELEASE, referenced=CALLS_CI, branch="vfoo"),
+            "release.yml not calling ci.yml": run_of(28, self.sha, RELEASE, branch="v0.4.1"),
+            "the nightly on a push": run_of(18, self.sha, NIGHTLY, referenced=CALLS_CI),
+            "another workflow": run_of(17, self.sha, ".github/workflows/ci-trace.yml", event="pull_request"),
         }
         for label, run in refused.items():
             with self.subTest(label):
                 self.serve([artifact(self.name, run["id"])], [run],
                            jobs={run["id"]: [job("alpha"), job("tests / alpha"), job("ci / alpha")]})
-                proc = self.lookup()
-                self.assert_miss(proc, "refused")
+                self.assert_miss(self.lookup(), "refused")
         accepted = {
-            "a same-repository pull request": (run_of(30, self.sha, event="pull_request", branch="feature"), "alpha"),
+            "a push to main": (run_of(30, self.sha), "alpha"),
             "a dispatch on main": (run_of(31, self.sha, event="workflow_dispatch"), "alpha"),
             "a release tag": (run_of(32, self.sha, RELEASE, referenced=(f"{REPO}/{CI}@refs/tags/v0.4.1",),
                                      branch="v0.4.1"), "tests / alpha"),
@@ -491,11 +540,32 @@ class Lookup(unittest.TestCase):
         for label, (run, job_name) in accepted.items():
             with self.subTest(label):
                 self.serve([artifact(self.name, run["id"])], [run], jobs={run["id"]: [job(job_name)]})
+                self.tag("v0.4.1", self.sha)
                 self.assert_hit(self.lookup(), run["id"])
                 # A called ci.yml's job carries its caller's prefix, and only that one.
                 if job_name != "alpha":
                     self.serve([artifact(self.name, run["id"])], [run], jobs={run["id"]: [job("alpha")]})
+                    self.tag("v0.4.1", self.sha)
                     self.assert_miss(self.lookup(), f"no job '{job_name}'")
+
+    def test_a_release_run_proves_only_through_its_tag(self):
+        run = run_of(35, self.sha, RELEASE, referenced=CALLS_CI, branch="v0.4.1")
+        for label, setup, code in (
+                ("a lightweight tag at the commit", lambda: self.tag("v0.4.1", self.sha, annotated=False), 0),
+                ("a tag at another commit", lambda: self.tag("v0.4.1", "e" * 40), 1),
+                ("a lightweight tag at another commit",
+                 lambda: self.tag("v0.4.1", "e" * 40, annotated=False), 1),
+                # a branch named v0.4.1 with no such tag: the refs API answers 404
+                ("no tag", lambda: None, 2)):
+            with self.subTest(label):
+                self.serve([artifact(self.name, 35)], [run], jobs={35: [job("tests / alpha")]})
+                setup()
+                proc = self.lookup()
+                self.assertEqual(proc.returncode, code, proc.stdout + proc.stderr)
+                if code:
+                    self.assertNotIn("proof-run=", proc.stdout)
+                if code == 1:
+                    self.assertIn("peels to commit eeee", proc.stderr)
 
     def test_no_marker_is_a_miss(self):
         self.serve([], [])

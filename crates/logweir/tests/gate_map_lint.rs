@@ -72,7 +72,7 @@ fn every_gate_has_inputs_and_a_definition() {
         "rust-toolchain.toml",
         "ci/gates.toml",
         "scripts/ci-gate.sh",
-        ".github/actions/gate/**",
+        ".github/actions/**",
         ".github/workflows/ci.yml",
     ] {
         assert!(
@@ -507,4 +507,44 @@ fn the_nightly_forces_every_gate_and_publishes_nothing() {
             assert!(job["secrets"].is_null(), "ci.yml job {id} takes secrets");
         }
     }
+}
+
+/// Every workflow a proving run executes is an input of every gate: the
+/// PROVERS workflows (scripts/ci-gate.sh) and every workflow they call, so a
+/// run proves a hash only if it ran the same workflow text. Otherwise a
+/// changed caller could add a job named like a gate's (`tests / check`) that
+/// runs `true`, and its run would prove main's real hash.
+#[test]
+fn every_workflow_a_proving_run_executes_is_a_global_input() {
+    let map = map();
+    let global: BTreeSet<String> = strings(&map["global"]).into_iter().collect();
+    assert!(
+        global.contains(".github/actions/**"),
+        "the local actions are global inputs"
+    );
+    let mut pending = strings(&map["provers"]);
+    assert!(pending.len() >= 3, "provers: {pending:?}");
+    let mut seen = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        assert!(
+            global.contains(&path),
+            "{path} runs in a proving run but is not in [global].paths"
+        );
+        let text =
+            std::fs::read_to_string(root().join(&path)).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        for (_, job) in doc["jobs"].as_mapping().expect("jobs") {
+            if let Some(called) = job["uses"].as_str() {
+                let called = called
+                    .strip_prefix("./")
+                    .unwrap_or_else(|| panic!("{path} calls a remote workflow {called}"));
+                pending.push(called.to_string());
+            }
+        }
+    }
+    assert!(seen.contains(".github/workflows/images.yml"));
+    assert!(seen.contains(".github/workflows/release-drill.yml"));
 }

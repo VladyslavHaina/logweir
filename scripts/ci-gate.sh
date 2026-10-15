@@ -3,10 +3,9 @@
 # skipped only when a MARKER proves that the same gate passed on the same
 # inputs in a same-repository run of ci.yml; otherwise it runs and leaves one.
 #
-#   ci-gate.sh hash <gate> [--runner <label>]   the gate's input hash (hex)
+#   ci-gate.sh hash <gate>                      the gate's input hash (hex)
 #   ci-gate.sh files <gate>                     the tracked files that hash covers
-#   ci-gate.sh lookup <gate> <hash> [--runner <label>]
-#                                               0 = a run proves it (prints
+#   ci-gate.sh lookup <gate> <hash>             0 = a run proves it (prints
 #                                               proof-run=<url>); anything else = run
 #   ci-gate.sh record <gate> <hash> <dir>       write the marker file into <dir>;
 #                                               prints name=… and path=… (nothing
@@ -21,32 +20,40 @@
 #                                               diagnostics: each proof check against
 #                                               one run; never used to skip
 #
-# THE HASH is sha256 over a scheme line, the gate's name, the runner label, and
-# `<mode> <blob id> <path>` of every tracked input (`git ls-files -s`, sorted).
-# It reads the index and `cargo metadata --no-deps`; it builds nothing. The
-# inputs are ci/gates.toml's expansion of the gate: [global] (the lockfile,
-# toolchain, root manifest, the map, this script, the gate action, ci.yml),
-# its definition, crate closures, paths, readers, walks and tests, plus every
-# tracked file no gate classifies.
+# THE HASH is sha256 over a scheme line, the gate's name, and `<mode> <blob id>
+# <path>` of every tracked input (`git ls-files -s`, sorted). It reads the
+# index, which must equal HEAD with no tracked change in the worktree (a dirty
+# checkout gives no hash, so the gate runs), and `cargo metadata --no-deps`; it
+# builds nothing. The inputs are ci/gates.toml's expansion of the gate:
+# [global] (the lockfile, toolchain, root manifest, the map, this script, the
+# local actions, and every workflow a proving run executes), its definition,
+# crate closures, paths, readers, walks and tests, plus every tracked file no
+# gate classifies. The runner is not hashed: a gate's job is one ci.yml job,
+# and its `runs-on` is in ci.yml, a global input; the nightly catches image drift.
 #
 # THE PROOF. A marker artifact `gate-<gate>-<hash>` is only an INDEX: any code
 # in a same-repository job could upload one. `lookup` accepts a marker only
-# when the run it names (1) is this repository's, not a fork's, and not expired;
-# (2) is ci.yml on push to main, a same-repository pull request or a dispatch
-# on main, or release.yml (a v* tag, or a dispatch on main) or ci-nightly.yml
-# (schedule or dispatch on main) calling ci.yml; (3) has the gate's OWN job
-# concluded `success` in some attempt (the jobs API); and (4) has a head commit
-# whose tree (the git trees API, not truncated) gives the requested hash under
-# this map. A forged marker can then only assert what is already true.
+# when the run it names
+#   1. is this repository's, not a fork's, and the marker is not expired;
+#   2. is a PROVERS run: ci.yml pushed to main or dispatched on main;
+#      release.yml calling ci.yml from a v* tag push (the tag, read from the
+#      refs API, peels to the run's commit) or a dispatch on main; or
+#      ci-nightly.yml calling ci.yml from its schedule or a dispatch on main.
+#      A main run's commit must be on main (the compare API). Pull requests,
+#      pull_request_target, workflow_run and everything else prove nothing;
+#   3. has exactly one job, per attempt, named as the gate's job, and that job
+#      concluded `success` in some attempt (the jobs API);
+#   4. has a head commit whose tree (the git trees API, not truncated) gives
+#      the requested hash under this map.
+# A forged marker can then only point at what is already true: the gate's own
+# job passed on exactly these inputs, run by these workflow files.
 #
 # FAIL SAFE. Exit 0 from `lookup` is the only "skip". A miss is 1; a refused
-# marker is a miss; an API error, a map error, a pattern that matches no
-# tracked file (a stale definition), or an unknown gate exits 2 or 3. The gate
-# action runs the gate on anything but 0.
-# The runner label is $CI_GATE_RUNNER, or RUNNER_OS-RUNNER_ARCH-ImageOS on a
-# GitHub runner, or `local`. The lookup uses `gh api` (CI_GATE_GH overrides
-# it) with $GH_TOKEN, which needs `actions: read`; cargo is CI_GATE_CARGO,
-# CARGO, or `cargo`.
+# marker is a miss; an API error, a map error, a dirty checkout, a pattern that
+# matches no tracked file (a stale definition), or an unknown gate exits 2 or
+# 3. The gate action runs the gate on anything but 0. The lookup uses `gh api`
+# (CI_GATE_GH overrides it) with $GH_TOKEN, which needs `actions: read`; cargo
+# is CI_GATE_CARGO, CARGO, or `cargo`.
 set -euo pipefail
 
 self="${BASH_SOURCE[0]}"
@@ -116,7 +123,7 @@ except ModuleNotFoundError:  # Python < 3.11: no TOML reader, so no hash
     print("ci-gate: python3 3.11 or later is needed (tomllib)", file=sys.stderr)
     sys.exit(4)
 
-SCHEME = "ci-gate/1"
+SCHEME = "ci-gate/2"
 MAP = "ci/gates.toml"
 GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "always"}
 # Pattern kinds that CLASSIFY a path. `walks` and `global` are inputs but say
@@ -241,6 +248,19 @@ class Tree:
         return self.cache[pattern]
 
 
+def require_clean():
+    """The hash reads the index and cargo reads the worktree's manifests, so
+    both must be the commit: no staged and no unstaged tracked change."""
+    for args in (("diff", "--cached", "--quiet", "HEAD", "--"), ("diff", "--quiet", "--")):
+        proc = subprocess.run(["git", "-C", ROOT, *args], capture_output=True)
+        if proc.returncode == 1:
+            raise MapError("the checkout differs from HEAD (" + " ".join(args[:2])
+                           + "): a gate hashes a clean commit only")
+        if proc.returncode != 0:
+            raise MapError("git " + " ".join(args) + ": "
+                           + proc.stderr.decode(errors="replace").strip())
+
+
 class Workspace:
     """Workspace packages and their path dependencies, from cargo metadata."""
 
@@ -334,23 +354,10 @@ def inputs(gmap, ws, tree, name, strict=True):
     return files | unclaimed(gmap, ws, tree), empty
 
 
-def runner_label(args):
-    if "--runner" in args:
-        i = args.index("--runner")
-        if i + 1 >= len(args) or not args[i + 1]:
-            die(EXIT_ERROR, "--runner needs a label")
-        return args[i + 1]
-    if os.environ.get("CI_GATE_RUNNER"):
-        return os.environ["CI_GATE_RUNNER"]
-    if os.environ.get("RUNNER_OS"):
-        return "-".join(os.environ.get(k, "") for k in ("RUNNER_OS", "RUNNER_ARCH", "ImageOS"))
-    return "local"
-
-
-def gate_hash(gmap, ws, tree, name, runner):
+def gate_hash(gmap, ws, tree, name):
     files, _ = inputs(gmap, ws, tree, name)
     digest = hashlib.sha256()
-    digest.update(f"{SCHEME}\ngate {name}\nrunner {runner}\n".encode())
+    digest.update(f"{SCHEME}\ngate {name}\n".encode())
     for path in sorted(files):
         mode, blob = tree.all[path]
         digest.update(f"{mode} {blob} {path}\0".encode())
@@ -406,25 +413,38 @@ def refuse_artifact(artifact, name, repo_id, now):
 # in a same-repository job can upload one. The proof is the RUN it points at:
 # one of these workflows, on one of these events and refs, in which the gate's
 # OWN job concluded success, on a commit whose tree gives the requested hash.
-# The ref is the run's head branch (a tag's name for a tag push); None is any
-# branch of this repository (a same-repository pull request). `prefix` is how
-# a caller names ci.yml's jobs: `<caller job> / <job>`.
+# `ref` is "main" (the run's head branch is main and its commit is on main) or
+# "tag" (a v* tag push: the tag exists and peels to the run's commit). `prefix`
+# is how a caller names ci.yml's jobs: `<caller job> / <job>`. Every workflow
+# here, and every workflow they call, is a [global] input of every gate
+# (gate_map_lint holds that), so a proving run executed the same workflow
+# text as the requester's.
+#
+# NOT pull_request. A pull request run tests and executes the MERGE commit of
+# its head and the base branch's tip at that moment, but the API names only
+# the head (`head_sha`); `pull_requests[].base.sha` is the pull request's
+# recorded base, not the base that was merged (PR #60's run 38808363036
+# merged 65ba93fa while it records fb29ee72), and the base branch can have
+# been retargeted since. No API answer binds the tested tree, so a pull
+# request's run proves nothing. It still USES markers from these runs.
 PROVERS = {
     ".github/workflows/ci.yml": {
-        "events": {"push": "main", "pull_request": None, "workflow_dispatch": "main"},
+        "events": {"push": "main", "workflow_dispatch": "main"},
         "prefix": ""},
     ".github/workflows/release.yml": {
-        "events": {"push": "v*", "workflow_dispatch": "main"},
+        "events": {"push": "tag", "workflow_dispatch": "main"},
         "prefix": "tests / "},
     ".github/workflows/ci-nightly.yml": {
         "events": {"schedule": "main", "workflow_dispatch": "main"},
         "prefix": "ci / "},
 }
 CI = ".github/workflows/ci.yml"
+TAG = re.compile(r"^v[0-9][0-9A-Za-z.+-]*$")
 
 
 def refuse_run(run, repo, repo_id):
-    """Why this run cannot prove anything, or None. Returns (reason, prover)."""
+    """Why this run cannot prove anything (reason, None), or (None, prover).
+    Reads only the run object; refuse_ref asks the API about its ref."""
     if run.get("repository", {}).get("id") != repo_id:
         return "a run of another repository", None
     if run.get("head_repository", {}).get("id") != repo_id:
@@ -442,17 +462,41 @@ def refuse_run(run, repo, repo_id):
     if event not in prover["events"]:
         return f"a {event} run of {path}; only {', '.join(prover['events'])} count", None
     want = prover["events"][event]
-    if want == "v*":
-        if not (isinstance(branch, str) and branch.startswith("v")):
-            return f"a {event} run of {path} on {branch!r}, not a v* tag", None
-    elif want is not None and branch != want:
-        return f"a {event} run of {path} on {branch!r}, not {want}", None
+    if want == "tag" and not (isinstance(branch, str) and TAG.match(branch)):
+        return f"a {event} run of {path} on {branch!r}, not a v<digit> tag", None
+    if want == "main" and branch != "main":
+        return f"a {event} run of {path} on {branch!r}, not main", None
     if not isinstance(run.get("head_sha"), str) or not re.match(r"^[0-9a-f]{40}$", run["head_sha"]):
         return "a run with no head commit", None
     url = run.get("html_url")
     if not isinstance(url, str) or not url.startswith("https://"):
         return "a run with no URL", None
     return None, prover
+
+
+def refuse_ref(repo, run, prover):
+    """The run's commit is where its ref says: on main, or the v* tag's commit."""
+    sha, branch = run["head_sha"], run["head_branch"]
+    if prover["events"][run["event"]] == "main":
+        # main only moves forward (assumption: it is never force-pushed), so a
+        # commit that was main's tip is an ancestor of, or equal to, main now.
+        cmp = gh_api(f"repos/{repo}/compare/{sha}...main", {"per_page": 1})
+        if cmp.get("status") not in ("ahead", "identical") or cmp.get("behind_by") != 0:
+            return f"its commit {sha} is not on main ({cmp.get('status')})"
+        return None
+    # A branch named like a tag is not a tag: the tag must exist and peel to
+    # the run's commit. (A 404 for a missing tag is an API error: the gate runs.)
+    obj = gh_api(f"repos/{repo}/git/ref/tags/{branch}")
+    if not isinstance(obj, dict) or obj.get("ref") != f"refs/tags/{branch}":
+        return f"refs/tags/{branch} is not a tag"
+    target = obj["object"]
+    for _ in range(4):
+        if target.get("type") != "tag":
+            break
+        target = gh_api(f"repos/{repo}/git/tags/{target['sha']}")["object"]
+    if target.get("type") != "commit" or target.get("sha") != sha:
+        return f"tag {branch} peels to {target.get('type')} {target.get('sha')}, not {sha}"
+    return None
 
 
 def run_jobs(repo, run_id):
@@ -478,13 +522,18 @@ def refuse_job(jobs, job_name):
     named = [j for j in jobs if j.get("name") == job_name]
     if not named:
         return f"the run has no job {job_name!r}"
+    attempts = [j.get("run_attempt") for j in named]
+    if len(set(attempts)) != len(attempts):
+        # A second job with the gate's name (a `name:` can collide) is not
+        # the gate's job; the name proves nothing.
+        return f"{len(named)} jobs named {job_name!r} in one attempt"
     if any(j.get("status") == "completed" and j.get("conclusion") == "success" for j in named):
         return None
     seen = ", ".join(sorted({str(j.get("conclusion") or j.get("status")) for j in named}))
     return f"job {job_name!r} did not pass ({seen})"
 
 
-def refuse_tree(gmap, ws, repo, name, value, sha, runner):
+def refuse_tree(gmap, ws, repo, name, value, sha):
     answer = gh_api(f"repos/{repo}/git/trees/{sha}", {"recursive": 1})
     if answer.get("truncated") is not False:
         return f"the tree of {sha} is truncated"
@@ -493,7 +542,7 @@ def refuse_tree(gmap, ws, repo, name, value, sha, runner):
         if entry["type"] in ("blob", "commit"):
             entries[entry["path"]] = (entry["mode"], entry["sha"])
     try:
-        recomputed = gate_hash(gmap, ws, Tree(entries), name, runner)
+        recomputed = gate_hash(gmap, ws, Tree(entries), name)
     except MapError as err:
         return f"the gate has no hash at {sha} ({err})"
     if recomputed != value:
@@ -501,7 +550,7 @@ def refuse_tree(gmap, ws, repo, name, value, sha, runner):
     return None
 
 
-def lookup(gmap, ws, name, value, runner):
+def lookup(gmap, ws, name, value):
     if name not in gmap["gates"]:
         raise MapError(f"unknown gate {name!r}")
     if not HEX64.match(value):
@@ -542,7 +591,11 @@ def lookup(gmap, ws, name, value, runner):
             if reason:
                 refused(reason)
                 continue
-            reason = refuse_tree(gmap, ws, repo, name, value, run["head_sha"], runner)
+            reason = refuse_ref(repo, run, prover)
+            if reason:
+                refused(reason)
+                continue
+            reason = refuse_tree(gmap, ws, repo, name, value, run["head_sha"])
             if reason:
                 refused(reason)
                 continue
@@ -556,7 +609,7 @@ def lookup(gmap, ws, name, value, runner):
     return EXIT_MISS
 
 
-def explain(gmap, ws, name, value, run_id, job, runner):
+def explain(gmap, ws, name, value, run_id, job):
     """Diagnostics only (ci-trace.yml): each proof check against one run,
     whatever the run is. `decide` never calls it; it proves nothing."""
     repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -567,8 +620,10 @@ def explain(gmap, ws, name, value, run_id, job, runner):
         print(f"run: {reason or 'ok'}")
         name_ = job or (prover["prefix"] if prover else "") + gmap["gates"][name].get("job", name)
         print(f"job {name_!r}: {refuse_job(run_jobs(repo, run_id), name_) or 'ok'}")
+        if prover:
+            print(f"ref {run.get('head_branch')}: {refuse_ref(repo, run, prover) or 'ok'}")
         print(f"tree {run.get('head_sha')}: "
-              f"{refuse_tree(gmap, ws, repo, name, value, run['head_sha'], runner) or 'ok'}")
+              f"{refuse_tree(gmap, ws, repo, name, value, run['head_sha']) or 'ok'}")
     except (KeyError, TypeError, AttributeError, ValueError) as err:
         raise LookupFailed(f"unexpected API answer ({err!r})")
     return EXIT_OK
@@ -645,14 +700,18 @@ def main():
             return record(gmap, rest[0], rest[1], rest[2])
         if command == "explain" and len(rest) >= 3:
             job = rest[rest.index("--job") + 1] if "--job" in rest else ""
-            return explain(gmap, Workspace(), rest[0], rest[1], rest[2], job, runner_label(rest[3:]))
-        if command == "lookup" and len(rest) >= 2:
-            return lookup(gmap, Workspace(), rest[0], rest[1], runner_label(rest[2:]))
+            require_clean()
+            return explain(gmap, Workspace(), rest[0], rest[1], rest[2], job)
+        if command == "lookup" and len(rest) == 2:
+            require_clean()
+            return lookup(gmap, Workspace(), rest[0], rest[1])
         ws, tree = Workspace(), Tree()
-        if command == "hash" and rest and not rest[0].startswith("-"):
-            print(gate_hash(gmap, ws, tree, rest[0], runner_label(rest[1:])))
+        if command == "hash" and len(rest) == 1:
+            require_clean()
+            print(gate_hash(gmap, ws, tree, rest[0]))
             return EXIT_OK
         if command == "files" and len(rest) == 1:
+            require_clean()
             print("\n".join(sorted(inputs(gmap, ws, tree, rest[0])[0])))
             return EXIT_OK
         if command == "match" and rest:
