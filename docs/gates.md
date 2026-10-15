@@ -73,7 +73,7 @@ cargo-deny, and Python with cryptography and pytest.
 It needs Docker to extract and verify the pinned engine, but no running broker or Kubernetes cluster. It also runs `cargo deny` over the engine's own lockfile, prepared with the patch folder (`third_party/kafka-backup-deny.toml`), and `scripts/check-cosign-verify.py`. Dependency downloads
 and advisory updates may use the network.
 
-For a shorter iteration use `just lint` or the relevant test target. The gate
+For a shorter iteration, use `just lint` or the relevant test target. The gate
 runs the workspace suite once in debug mode, plus the Python and integration
 checks that prove different behavior. It does not repeat the entire suite in
 release mode or enforce a workstation timing threshold. `just time-unit-suite`
