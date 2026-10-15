@@ -29,7 +29,7 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122 and 123. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123 and 124. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
@@ -3062,20 +3062,25 @@ The stream half has no automated row: jsdom has no EventSource.
 
 **Changed.** About 15 minutes after a switchover ran, the controller used to rewrite the switchover's Approval to `Verified=False AuthorizationExpired` and erase its approver, matched key and authorization. A succeeded, two-person-approved switchover then read "Refused", with no approver.
 - **Now:** an Approval a Switchover was admitted under is recorded `Consumed=True`, reason `SwitchoverAdmitted`, as a restore's is (`RestoreAdmitted`), and its expiry never rewrites it.
-- **What counts as admission:** the Switchover names the Approval, its controller created the Job, and the Switchover's own bundle carries the Approval's signed bytes.
+- **What counts as admission:** the Switchover's own `Admitted=True` condition, which its controller writes once, after the bundle and before the Job; its time is the instant recorded. A Job named after the Switchover, its `status.jobRef` or a ConfigMap is never admission on its own.
+- **One admission per Switchover:** a Job named after a Switchover that its controller did not create for an admission is not adopted; the Switchover waits `Pending`, `SwitchoverJobNotAdmitted`, until it is gone. A run whose Job is deleted before it finishes ends `Failed`, `SwitchoverJobLost`, and is never admitted again on an approval that may have expired since; before this, an older build admitted it again.
 - **Unchanged:** an unused expired approval still authorises nothing new and is refused exactly as before.
-- **Approvals an earlier build already rewrote:** after the upgrade, each is re-verified from its signed bytes at the instant its switchover was admitted, and recorded again; nothing is copied from an unsigned field. This needs the Switchover and its bundle to still exist. Where they are gone, the switchover's own signed record stays the evidence.
+- **Approvals an earlier build already rewrote:** a Switchover an older build ran has no marker. After the upgrade, its Approval is re-verified from its signed bytes, and recorded again, only when the Switchover's status proves the run (a terminal phase with the run's own exit code, and its Job recorded) and its bundle is that build's: one owner, this Switchover, immutable, carrying this Approval's signed bytes and sidecar, made after the Approval. The bundle's creation is then the instant. Nothing is copied from an unsigned field, and `jobRef` alone never counts. Where the Switchover or its bundle is gone, the switchover's own signed record stays the evidence.
 - **The console** reads such an approval "Verified · used by swo-…".
 
 **Do:** nothing.
-**Scope:** `approval_policy.rs::dui43_an_admitted_switchover_keeps_its_approval_verified_past_its_expiry`, which also covers a rewritten record re-established at the admission instant, and its refusal row with these controls:
-- no Job;
-- no bundle;
-- a Switchover naming another Approval;
-- another Switchover's bundle;
-- other approval or signature bytes;
-- a bundle older than the Approval;
-- an admission after the window.
+**Scope:**
+- `approval_policy.rs::dui43_an_admitted_switchover_keeps_its_approval_verified_past_its_expiry`, which also covers a rewritten record re-established at the marker's instant.
+- Its refusal row, with these controls:
+  - never admitted;
+  - a recorded Job alone;
+  - a `False` marker;
+  - a Switchover naming another Approval;
+  - a marker older than the Approval;
+  - an admission after the window.
+- `dui43_an_older_builds_run_is_rebuilt_only_from_what_proves_it_ran`, with eleven controls (no exit code, not finished, no bundle, another owner, a second owner, not immutable, other approval or signature bytes, an older bundle, an admission after the window).
+- `dui43_a_switchover_recreated_under_a_new_uid_consumes_nothing`.
+- `switchover_controller.rs`: the order bundle, marker, Job, `jobRef`; a lost Job, new and older, ends `SwitchoverJobLost` with no Approval read; a stranger's Job is not adopted.
 
 [UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 waits past a switchover approval's expiry on the PoC.]
 **Rollback:** an older controller rewrites consumed switchover approvals at their expiry again. The switchover's signed record is unaffected.
@@ -3127,6 +3132,17 @@ The stream half has no automated row: jsdom has no EventSource.
 **Scope:** the console's rows, each with a control, in `checks`, `detail`, `flows`, `protection`, `requester`, `Revealed`, `SessionGate` and `When`. `just console` passes 568 tests. The repo's screenshot walk ran at 1440 and 390, light and dark, over the changed screens.
 [UNVERIFIED — not yet run on a cluster; the deep UI re-check's round 2 runs each id by clicks on the PoC.]
 **Rollback:** an older console image shows the old counts and words; nothing is stored.
+
+#### 124. A switchover runs only on its own bundle (review M1)
+
+**Changed.** The Job of a `Switchover` mounts the ConfigMap `<name>-switchover` by name: the plan, the approval and its signature, the approver's key and the evidence keyring.
+- **Before:** when that ConfigMap already existed, the controller used it as it was. A namespace user could plant one before the approval was verified, and the Job then ran a plan and an approval its approvers never saw, beside an Approval reading "Verified · used by" that Switchover.
+- **Now:** as a `Restore` does, an existing bundle is used only when it is exactly the one this admission would write: one owner, this Switchover as its controller, immutable, and every member byte for byte. Anything else ends the Switchover `Refused`, `ApprovalBundleConflict`, naming the differing members; no Job is created, and no admission is recorded, so the Approval is not consumed.
+
+**Do:** nothing. A Switchover refused `ApprovalBundleConflict` stays refused: delete the planted ConfigMap, then create a new Switchover and approval.
+**Scope:** `switchover_controller.rs::a_bundle_that_is_not_this_admissions_is_refused_and_no_job_is_created`: one differing member, another owner, a second owner, not immutable and a planted approver key are each refused with no Job and no marker; the control is the controller's own bundle (the pass that stopped after creating it), which proceeds to its Job.
+[UNVERIFIED — not yet run on a cluster; no PoC Switchover has met a planted bundle.]
+**Rollback:** an older controller uses an existing bundle as it is again.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
@@ -3273,7 +3289,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122 and 123, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123 and 124, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3374,6 +3390,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 121 | the console | nothing |
 | 122 | the API (the callback's page) and the console, one image | nothing |
 | 123 | the console | nothing |
+| 124 | the controller (a switchover's bundle is checked before its Job) | nothing; a Switchover refused `ApprovalBundleConflict` is created again |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

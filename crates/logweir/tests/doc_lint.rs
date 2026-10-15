@@ -2318,6 +2318,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ("a replaced sign-in reads a page", "`Accept: text/html`"),
         // DUI-22.3 to DUI-44 (item 123): a refused run is counted.
         ("the console counts refused runs", "\"1 refused\""),
+        // Review M1 (item 124): the refusal a bundle that is not the admission's gets.
+        (
+            "a switchover runs only on its own bundle",
+            "`ApprovalBundleConflict`",
+        ),
     ];
     assert_eq!(
         items.len(),
