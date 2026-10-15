@@ -29,14 +29,15 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128 and 129. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135 and 136. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
 is below. Items 102 to 129 landed after the `v0.3.0` tag and are in the
-`v0.4.0` release, whose record is below.
+`v0.4.0` release, whose record is below. Items 130 to 136 landed after the
+`v0.4.0` tag and are in no release yet.
 
 ### Candidate record
 
@@ -3365,6 +3366,108 @@ Part 5 (`deep-ui-recheck-5`, the same build) passed the full regression, 36 of 3
 
 **Rollback:** an older image shows the earlier words; nothing is stored.
 
+#### 130. `kubectl get` names why a run ended (FX-52 F1)
+
+**Changed.**
+- **Before:** `kubectl get backups` printed a refused run's phase and exit code; why it ended was read from its status.
+- **Now:** `kubectl get backups` prints `REASON` (`status.exitReason`: `GuardRefused` or the guard's own state, `ok`, `operational`) and, with `-o wide`, `FAILED`: the `Failed` condition's reason, which names the controller's refusal or the crashed Job behind an `operational`.
+- **Every kind whose status holds its reason prints it:** `REASON` on KafkaClusters, Preflights, TopicDiscoveries and BackupDestinations (`status.reason`) and on Approvals (the `Verified` condition's reason); with `-o wide`, `REASON` on BackupSchedules (`Ready`), TrustPolicies (`Loaded`) and RecoveryCatalogs (`Synced`).
+- **Every new column comes after AGE,** so a script that reads the columns by position reads the same ones. No status field is added.
+- **Unchanged:** Restores and Switchovers already print `REASON`; ProtectionPolicies and RetentionPolicies already print their verdict (`HEALTH`, `ENFORCEMENT`).
+
+**Do:** apply the CRDs first (`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`, [install.md](install.md#upgrade-crds-before-upgrading-the-controller)), as item 104 says; Helm does not upgrade CRDs. Until then `kubectl get` prints the old columns.
+**Scope:**
+- `crd_shape.rs::the_printer_columns_are_exactly_the_briefs_table` (a literal table) and `only_the_wide_columns_carry_a_priority`;
+- `backup_controller.rs::the_reason_columns_name_a_guard_refusal_and_a_controller_refusal` (a guard state, a controller refusal and a pass) and `the_printer_columns_are_the_contract`;
+- `restore_controller.rs::every_status_write_sets_the_scalar_reason`, its Backup arm updated.
+
+[UNVERIFIED — not yet run on a cluster; after the CRDs are applied, the PoC check's `kubectl get backups` shows a run refused as item 110 refuses it as `Failed`, `3` and `REASON` `GuardRefused`, `-o wide` adds `FAILED`, and `kubectl get kafkaclusters,preflights,approvals` show `REASON`.]
+**Rollback:** an older chart's CRDs print the old columns; no object changes.
+
+#### 131. A clean drill records what its teardown removed (FX-52 F2)
+
+**Changed.** A drill's `Restore.status.teardown` named the topics its teardown left (`failed`, item 69; `failedCount`, item 104), but not what a clean teardown removed.
+- **Now:** when phase 9 puts its teardown attestation, the runner also prints `teardown-deleted=[…]` and `teardown-deleted-count=`, sealed, under the same condition as `teardown-key=`. The controller reads `teardown-key=` and that pair from sealed lines only, keeps only names the plan mapped, and writes `attestationKey`, `deleted` and `deletedCount` beside `failed`.
+- **A partial teardown** records both what it removed and what it left.
+- **A runner older than this release** prints no such line, and `deleted` stays absent. A plain line that copies them is never read.
+
+**Do:** upgrade the runner with the controller (one `helm upgrade`). The `Restore` CRD has carried these fields since items 91 and 104, so the CRDs applied first for item 130 cover it.
+**Scope:**
+- `execution_contract.rs::the_teardown_deleted_lines_round_trip_and_are_bounded` (logweir-core);
+- `restore_controller.rs::f2_a_clean_teardown_is_recorded_from_the_sealed_lines` and `f2_a_partial_teardown_records_what_it_removed_and_what_it_left`;
+- `f2_an_absent_or_unsealed_teardown_line_records_nothing`, with controls: no key, forged plain lines, and an FX-34 Job.
+
+No compose row ran; the live row is a drill on a cluster.
+[UNVERIFIED — not yet run on a cluster; the PoC check's clean scratch drill, on this build's runner and controller, records `status.teardown` as `{attestationKey: logweir/drills/<run>.teardown.json, deleted: [<both drill topics>], deletedCount: 2}`.]
+**Rollback:** an older controller ignores the two lines and leaves `deleted` absent; an older runner prints neither. Roll back in either order.
+
+#### 132. `RunnerOlderThanController` only when the runner's log shows it (FX-52 F3)
+
+**Changed.**
+- **Before:** a Job that carried `--runner-line-token` and whose runner exited 0 to 4 without a sealed `runner-exit=` line was named `RunnerOlderThanController` (item 96), nothing of its log was read, and a schedule did not retry it. A probe killed or starved under load, or a log not read whole, read as an older runner image.
+- **Now:** the name also needs the runner's own refusal of `--runner-line-token` in its log (clap's "unexpected argument", the retention worker's "unrecognised argument"). Without it, the run is said as observed, and the sealed lines it did print are read:
+  - a Backup or a Restore says "the runner exited N without its sealed `runner-exit=` line, and its log does not show it refusing `--runner-line-token` …", and a schedule retries it;
+  - a probe reads `Reachable=Unknown`, `ProbeOutputUnreadable`, with the pod's exit.
+- **One rule for every reader:** the Backup, the Restore, the exit-3 reason, the probe, the check relay, retention, and the terminal judgement of a clone cleanup and a switchover. The cause messages name the refusal.
+- **Unchanged:** a real older runner, which refuses the flag, is named as before.
+- **Not named:** a runner its Job's deadline killed with an exit code of 0 to 4 reads "no sealed end"; the sentence does not name the Job's `DeadlineExceeded`.
+
+**Do:** nothing.
+**Scope:**
+- `fx43_runner_lines.rs::a_runner_that_vouched_for_no_exit_is_older_than_the_controller`, rewritten: older only with the refusal;
+- `kafka_cluster_controller.rs::f3_a_probe_with_no_sealed_line_is_not_named_older` and `backup_controller.rs::f3_a_backup_with_no_sealed_end_is_not_named_older`, each with the older-runner fixture as its control;
+- `restore_controller.rs::fx43_a_refusal_is_read_only_off_the_sealed_pair`, updated, with its control.
+
+Every existing fixture row is unchanged.
+[UNVERIFIED — not yet run on a cluster; in the PoC check, a probe that fails under load reads `Reachable=Unknown`, `ProbeOutputUnreadable … (pod exit 1)`, never `RunnerOlderThanController`, and a real older runner still reads `RunnerOlderThanController`.]
+**Rollback:** an older controller names every run with no sealed end `RunnerOlderThanController` again; nothing stored changes.
+
+#### 133. An expired approval is not rewritten during an upgrade (FX-52 F4)
+
+**Changed.**
+- **Before:** while a namespace's binding was lifted during an upgrade, an expired `Approval` (`Verified=False`, `AuthorizationExpired`) was judged again: it was rewritten `ApprovalPolicyMismatch`, then `AuthorizationExpired` again once the binding was restored, each time with a new `lastTransitionTime`.
+- **Now:** a stored `Verified=False`, `AuthorizationExpired` of the same generation is kept, with its message and `lastTransitionTime`, over any fresh outcome except a consumed one. The repair after admission (item 120) still runs. A live approval is judged as before.
+- **Not chosen:** keeping only the time, as Kubernetes conditions do, would still flip the reason during the lift (two writes, a wrong reason) and change the time of every other condition the controller writes.
+
+**Do:** nothing.
+**Scope:** `approval_policy.rs::f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding`: across a lifted and a restored binding, the record keeps its reason and time with no write; the control, a live record, is judged `ApprovalPolicyMismatch`. The repair row `a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_instant` still passes.
+[UNVERIFIED — not yet run on a cluster; across the PoC's next two-step upgrade, the expired `…-confirmation` Approvals keep `AuthorizationExpired` and their `lastTransitionTime`, with no status write at either step.]
+**Rollback:** an older controller rewrites an expired approval while a binding is lifted again; it authorises nothing either way.
+
+#### 134. A long topic name in a message's topic position is shown whole (FX-52 F5)
+
+**Changed.** Item 113 showed long names whole in the typed fields, but a message still redacted a legal topic name of 40 or more characters as `[redacted]`.
+- **Now:** in a message's topic position, a backtick span right after `topic` or `topics`, and each further `, `-separated span of that list, whose content is a legal topic name, is shown whole: "topic `x` does not exist on the source", "topics `a`, `b` …".
+- **Still redacted:** the secret-shape rules run first, so an access key id in a name is removed. An AWS secret (not a legal name), a token anywhere else and a bare name are still `[redacted]`.
+- **One rule everywhere:** the runner's messages, the check relay, the controller's details and its condition messages.
+- **The Backup refusal of several missing topics** names them: "topics `a`, `b` do not exist on the source (2 of the 3 selected)".
+- **Unchanged:** a Preflight's `connection.topicsReadable` still counts several missing topics in its message, with their names in the row's sample.
+
+**Do:** upgrade the runner and the controller (one `helm upgrade`). A message already written keeps its `[redacted]`.
+**Scope:** `check_contract.rs::f5_a_long_topic_name_in_the_template_position_survives_and_tokens_do_not` (the redaction and `clean_message`), with controls: a bare token, ``key `tok` ``, `subtopic`, a list break, an AWS secret in a list, an access key id in a name, and a bare name. Three mutants are killed (the position ignored, every backtick span kept, the legal-name check dropped), and `backup_run.rs` passes its 40 rows.
+[UNVERIFIED — not yet run on a cluster; the PoC check's Preflight for a missing 43-character topic reads "topic `<whole name>` does not exist on the source" in `connection.topicsReadable`, and so does the Backup's `Failed` condition.]
+**Rollback:** an older image redacts long names in messages again; nothing stored changes.
+
+#### 135. The chart sets the console's OIDC scopes and display-name claim (FX-52 F6)
+
+**Changed.** Two chart values for the console's sign-in, both empty by default:
+- `api.console.oidc.scopes`: the scopes the console asks for, a list that must hold `openid`, each one word (for example `[openid, profile, groups]` for a provider that refuses `email`);
+- `api.console.oidc.displayNameClaim`: a plain claim name such as `name` (`^[A-Za-z_][A-Za-z0-9_]{0,63}$`), whose value names a requester, shown as unverified because most providers let a user set it.
+
+Empty renders nothing: the API keeps its defaults, `[openid, profile, email, groups]` and no name, as before, and a render that sets neither is unchanged. The chart refuses a list without `openid`, a scope holding whitespace and a claim that is not a plain name, in its schema and its templates. This is the Helm path item 112's `email` remedy named.
+**Do:** nothing until set. A provider that refuses a default scope, such as item 112's `email`, sets `api.console.oidc.scopes` without it ([install.md](install.md)).
+**Scope:** `just chart-check`: the refusals (no `openid`; a claim that is not plain, in the schema and the template; a scope holding whitespace, in the template), the render row (both values reach the API's configuration), and the per-leaf rows for both values.
+[UNVERIFIED — not yet rendered for the PoC; the PoC check's `helm template … --set-json 'api.console.oidc.scopes=["openid","profile","groups"]' --set-string api.console.oidc.displayNameClaim=name` shows the API ConfigMap's `oidc:` carrying `scopes:` and `displayNameClaim: "name"`.]
+**Rollback:** remove both values before rolling the chart back: an older chart's schema refuses them. The API then asks for its default scopes again.
+
+#### 136. Console dependencies (FX-52 F7)
+
+**Changed.** The console's build dependencies move to `@tanstack/react-router` 1.170.41, `@playwright/test` 1.63.0, `axe-core` 4.13.0, `typescript-eslint` 8.71.0, `vitest` 5.0.3 and `jsdom` 30.1.1 (Dependabot #50, #52, #53 and #55). TypeScript stays 5.9.3 while `openapi-typescript` requires `^5`, and Dependabot no longer offers TypeScript's next major.
+**Do:** nothing; the console image carries them.
+**Scope:** `just console` passes unchanged: 36 files, 583 tests, and the build.
+[UNVERIFIED — the PoC has not served this console build yet; the PoC check reads the served console as this build's, byte for byte (`scripts/check-image-api.sh`), and Dependabot's #50, #52, #53 and #55 are then closed.]
+**Rollback:** an older console image carries the older versions; nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -3510,7 +3613,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128 and 129, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135 and 136, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3617,6 +3720,13 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 127 | the console | nothing |
 | 128 | the controller (a status field from the scorecard), the CRD, the API (`coverage.positionsMapping`) and the console | the controller and the API/console image; a restore finished before keeps item 121's rule |
 | 129 | the API (the sign-in page's words) and the console, one image | nothing |
+| 130 | the CRDs only (`kubectl get`'s `REASON` and `FAILED` columns on nine kinds; no status field) | the CRDs applied first |
+| 131 | the runner (two new sealed lines, `teardown-deleted=` and `teardown-deleted-count=`) and the controller (a drill's `status.teardown` `attestationKey`, `deleted`, `deletedCount`) | the CRDs applied first (the `Restore` fields are items 91 and 104's); the runner rolled with the controller |
+| 132 | the controller (`RunnerOlderThanController` only on the runner's refusal; what it says otherwise) | nothing |
+| 133 | the controller (an expired `Approval`'s condition is kept) | nothing |
+| 134 | the runner (its messages, the multi-topic refusal) and the controller (the check relay, the details, the condition messages) | nothing; a long name shows whole once both have rolled |
+| 135 | the chart's values only (`api.console.oidc.scopes`, `api.console.oidc.displayNameClaim`) | nothing until set; both removed before the chart rolls back |
+| 136 | the console image (its build dependencies) | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
