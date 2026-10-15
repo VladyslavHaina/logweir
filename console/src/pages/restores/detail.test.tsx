@@ -170,6 +170,20 @@ describe("a restore's page", () => {
     expect(screen.getAllByText(/partial: partitions 0, 2 of topic orders/).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /Retry to a fresh target/ })).toBeNull();
   });
+  it("DUI-48.2: a complete restore's counts never read \"sampled\"; a sampled one's do (the control)", async () => {
+    const completion = { recordsExpected: 398, recordsRestored: 398, recordsSampled: 398, recordsSampledMatching: 398, integrityLevel: "byte-fingerprint", newTopics: [] };
+    showRestore(R(subsetRestore), { ...O(subsetOperation), completion } as OperationView);
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText("Records compared")).toBeTruthy();
+    expect(screen.getByText("Compared and matching")).toBeTruthy();
+    expect(screen.queryByText(/sampled/i, { selector: "dt, dt *" })).toBeNull();
+    cleanup();
+    const sampledOp = { ...O(subsetOperation), completion, verificationScope: { ...O(subsetOperation).verificationScope, coverage: "sampled" } } as OperationView;
+    showRestore({ ...R(subsetRestore), coverage: { requested: "sampled", recorded: "sampled", covered: true } }, sampledOp);
+    expect(await screen.findByText("Records sampled")).toBeTruthy();
+    expect(screen.getByText("Sampled and matching")).toBeTruthy();
+  });
+
   it("a stopped creation step names the topic it left and the one it cannot account for", async () => {
     const r = R(unconfirmedRestore);
     showRestore(r, { ...O(uncoveredOperation), state: "failed", verifiedSuccess: false });

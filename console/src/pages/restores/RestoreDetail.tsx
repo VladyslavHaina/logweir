@@ -60,7 +60,7 @@ import { approvalRoute } from "./model";
 import {
   COMPLETION_NOT_VERIFIED,
   QUEUED_RUN_SENTENCE,
-  RECORDS_IN_WINDOW_LABEL,
+  completionCountLabels,
   RETRY_FRESH_TARGET_SENTENCE,
   SCORECARD_CLAIM_SENTENCE,
   completionGuidance,
@@ -341,6 +341,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const switchable = cutoverRefusal(r, source) === null;
   const complete = r.coverage?.requested === "complete";
   const scope = op?.verificationScope;
+  // DUI-48.2: the completion counts' labels follow the recorded coverage.
+  const labels = completionCountLabels(scope?.coverage ?? r.coverage?.recorded ?? null);
   const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
   const planBucket = planEvidenceBucket(r.planBytes);
   const evidenceKeys = op?.evidence.payloadKey && op.evidence.sidecarKey;
@@ -682,9 +684,9 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     <Facts
                       items={[
                         { term: "Records expected", value: <Claim value={count(op.completion.recordsExpected)} verified={signed} /> },
-                        { term: RECORDS_IN_WINDOW_LABEL, value: <Claim value={count(op.completion.recordsRestored)} verified={signed} /> },
-                        { term: "Records sampled", value: <Claim value={count(op.completion.recordsSampled)} verified={signed} /> },
-                        { term: "Sampled and matching", value: <Claim value={count(op.completion.recordsSampledMatching)} verified={signed} /> },
+                        { term: labels.window, value: <Claim value={count(op.completion.recordsRestored)} verified={signed} /> },
+                        { term: labels.checked, value: <Claim value={count(op.completion.recordsSampled)} verified={signed} /> },
+                        { term: labels.matching, value: <Claim value={count(op.completion.recordsSampledMatching)} verified={signed} /> },
                         { term: "Integrity level", value: <Claim value={op.completion.integrityLevel} verified={signed} /> },
                       ]}
                     />
