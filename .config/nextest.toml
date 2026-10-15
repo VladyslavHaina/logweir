@@ -1,0 +1,24 @@
+# cargo-nextest's profiles for CI (FX-53 §2.4). `scripts/ci-check.sh unit
+# <group>` and `docs` run the `ci` profile; the e2e shards run `e2e`. Locally,
+# `just gate` runs the workspace suite with libtest and reads none of this.
+#
+# Each test runs in a process of its own, and the binaries of one run in
+# parallel. What libtest's one-binary-at-a-time order hid, checked before the
+# move: no test writes a fixed path under the repository (scratch directories
+# are per-process or `tempfile`), no test binds a fixed port (every `:8484` in
+# the tests is a Host header), and env changes stay in their own process.
+
+[profile.ci]
+fail-fast = false
+# Reported, never killed: some rows wait on deadlines by design
+# (logweir-api's `local_admin` took 139 s as one libtest binary).
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
+
+[profile.e2e]
+# ONE TEST AT A TIME: the suite drives one compose stack, one broker and one
+# bucket (e2e/tests/harness/mod.rs), as `--test-threads=1` did.
+test-threads = 1
+fail-fast = false
+slow-timeout = { period = "300s" }
+failure-output = "immediate-final"

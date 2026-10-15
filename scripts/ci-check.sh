@@ -2,19 +2,50 @@
 # Shared local/CI quality check. Requires Rust, just, Node >= 20, Helm >= 4,
 # kubectl, cargo-deny, Docker, and Python with cryptography and pytest.
 # No running broker or Kubernetes cluster is needed.
+#
+#   scripts/ci-check.sh                    the whole gate, in one run (`just gate`)
+#   scripts/ci-check.sh <part> [<group>]   one part, as one CI job runs it
+#
+# THE PARTS (FX-53 §2.4). CI runs each in a job of its own, at once:
+#   lint            the CLI build, `just lint` (fmt, clippy, the shell and
+#                   Python lints), the engine-string scan of the debug CLI, the
+#                   pure-library dependency checks, the cosign-pin scan
+#   unit <group>    one crate group's tests with cargo-nextest, then its
+#                   doctests (nextest runs none); the groups are below
+#   generated       schema, CRD and chart drift
+#   supply-chain    the notices diff, `cargo deny` over both graphs, the engine
+#                   patch oracle
+#   python          the Python rows and `just verify-py`
+#   docs            links, the unverified-label scan, `doc_lint`
+# With no part the script runs every command of every part, in one process and
+# in the order it always has, with the workspace suite as ONE libtest run
+# (`cargo test --workspace`), so a laptop needs no nextest. The unit groups and
+# `docs` are CI's split of that one suite: their union is the workspace, which
+# crates/logweir/tests/workflow_lint.rs holds every member to.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Function bodies are not indented: several contract tests read the lines of
+# this file (`just lint`, `just schema-check`, `just crds-check`, the `for
+# crate in` loop) as they stand at the left margin.
+
+prepare() {
 cargo fetch --locked
 bash scripts/extract-engine.sh
+}
 
 # Build the current CLI once for verifier parity and UI plan/hash behavior.
-# Explicitly select debug so these checks never depend on a stale release binary.
+# Explicitly select debug so these checks never depend on a stale optimised binary.
+cli() {
 cargo build --locked -p logweir
 export LOGWEIR_BIN="$PWD/${CARGO_TARGET_DIR:-target}/debug/logweir"
 if [[ "${CARGO_TARGET_DIR:-target}" = /* ]]; then
   export LOGWEIR_BIN="$CARGO_TARGET_DIR/debug/logweir"
 fi
+}
+
+lint() {
+cli
 just lint
 # The release gate's engine check, on every run, so a new uncited engine string
 # fails here rather than first at a tag.
@@ -30,22 +61,65 @@ for crate in logweir-core logweir-evidence logweir-kafka logweir-verify; do
   fi
 done
 
-cargo test --locked --workspace
-python3 scripts/test-ci-images.py
 # PROD-00.2 security review: every cosign / gh attestation verification in the
 # repository pins the exact signer identity, the calling repository, ref and
 # trigger, and the issuer (images.yml is a reusable workflow).
 python3 scripts/check-cosign-verify.py
+}
+
+# THE UNIT GROUPS (FX-53 §2.4): the workspace's members, each in exactly one.
+unit_packages() {
+case "$1" in
+  core) echo "logweir-core logweir-evidence logweir-verify logweir-store logweir-kafka logweir-rdkafka-ffi logweir-engine-oso" ;;
+  logweir) echo "logweir" ;;
+  weirkeeper) echo "weirkeeper" ;;
+  api) echo "logweir-api" ;;
+  retention) echo "logweir-retention logweir-reaper" ;;
+  xtask) echo "xtask" ;;
+  e2e) echo "e2e" ;;
+  *)
+    echo "ci-check: no unit group \`$1\`; the groups are core logweir weirkeeper api retention xtask e2e" >&2
+    return 2
+    ;;
+esac
+}
+
+# One group's tests: every test target, examples and bins included, through
+# cargo-nextest (one process per test, binaries in parallel; the `ci` profile
+# in .config/nextest.toml), then the doctests, which nextest does not run.
+# `doc_lint` is the `docs` part's, so the logweir group leaves it out.
+unit() {
+local group="${1:-}" packages args=() filter=() p
+packages="$(unit_packages "$group")"
+for p in $packages; do args+=(-p "$p"); done
+if [ "$group" = logweir ]; then filter=(-E 'not binary_id(logweir::doc_lint)'); fi
+cargo nextest run --locked --profile ci "${args[@]}" ${filter[@]+"${filter[@]}"}
+# xtask is a bin crate only: it has no library, so no doctests.
+if [ "$group" != xtask ]; then cargo test --locked --doc "${args[@]}"; fi
+}
+
+python_rows() {
+cli
+python3 scripts/test-ci-images.py
 python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
 python3 scripts/test-recovery-kit.py
 just verify-py
+}
 
+generated() {
 just schema-check
 just crds-check
 just chart-check
-just links
+}
 
+docs() {
+just links
+./scripts/check-unverified-labels.sh
+cargo nextest run --locked --profile ci -p logweir --test doc_lint
+}
+
+supply_chain() {
 mkdir -p target
 bash scripts/gen-third-party-notices.sh > target/tpn.check
 diff -u THIRD_PARTY_NOTICES.md target/tpn.check
@@ -70,8 +144,8 @@ cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advi
 # keep every topic's replication factor. Patch 0003's (PROD-00.3g): the restore
 # checkpoint's hash leaves out the run's paths and map order, and a due
 # checkpoint is saved. It builds in the debug profile of target/engine-build,
-# beside `scripts/engine-source.sh build`'s release one (this script never
-# builds a release profile).
+# beside `scripts/engine-source.sh build`'s optimised one (this script never
+# builds an optimised profile).
 engine_tests="target/engine-patch-oracle.log"
 CARGO_TARGET_DIR="$PWD/target/engine-build" cargo test --locked \
   --manifest-path "$engine_src/Cargo.toml" -p kafka-backup-core --lib \
@@ -87,3 +161,40 @@ for oracle in backup::engine::tests::test_merge_manifests_updates_replication_fa
   grep -q "^test $oracle \.\.\. ok$" "$engine_tests" \
     || { cat "$engine_tests" >&2; echo "ci-check: the engine patch oracle $oracle did not run and pass" >&2; exit 1; }
 done
+}
+
+usage() {
+echo "usage: scripts/ci-check.sh [lint | unit <group> | generated | supply-chain | python | docs]" >&2
+exit 2
+}
+
+part="${1:-}"
+case "$part" in
+  "")
+    prepare
+    lint
+    cargo test --locked --workspace
+    python_rows
+    generated
+    just links
+    supply_chain
+    ;;
+  unit)
+    [ "$#" -eq 2 ] || usage
+    unit_packages "$2" > /dev/null
+    prepare
+    unit "$2"
+    ;;
+  lint | generated | supply-chain | python | docs)
+    [ "$#" -eq 1 ] || usage
+    prepare
+    case "$part" in
+      lint) lint ;;
+      generated) generated ;;
+      supply-chain) supply_chain ;;
+      python) python_rows ;;
+      docs) docs ;;
+    esac
+    ;;
+  *) usage ;;
+esac
