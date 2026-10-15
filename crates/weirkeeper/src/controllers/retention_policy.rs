@@ -3754,7 +3754,7 @@ pub const BUDGET_EXHAUSTED_CODE: &str = "BudgetExhausted";
 /// token (FX-43, [`runner_log::own_lines`]): a `retention-point=`,
 /// `retention-refusal=` or `retention-record=` line a provider's error body or
 /// a plan got into the log is not read. A Job given the token whose worker
-/// vouched for no exit (an older worker refuses the flag, exit 3) is the
+/// vouched for no exit and refused the flag (an older worker, exit 3) is the
 /// mixed pair, named: `refusal_code` is `RunnerOlderThanController` and
 /// nothing else of the log is read. A Job an older controller built is read
 /// as it always was. Pure.

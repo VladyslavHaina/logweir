@@ -175,17 +175,19 @@ fn the_genuine_line_is_honoured_anywhere_in_the_tail() {
     );
 }
 
-/// **A runner older than the controller is named, and degrades nothing.**
-/// Under FX-43's flag, a log with no sealed `runner-exit=` line (the
-/// released runner's real refusal of the flag; an FX-34 runner's output; an
-/// empty log) is the mixed pair, at the exit codes a runner reaches through
-/// its own code. A kill (137) or a panic (101) is not a runner's statement
-/// and is not called one. A Job built by an older controller is never called
-/// one: it degrades to today's reading.
+/// **A runner older than the controller is named on evidence, and degrades
+/// nothing.** Under FX-43's flag, a log with no sealed `runner-exit=` line
+/// that shows the runner refusing the flag (the released runners' real
+/// answers, `logweir`'s and `logweir-retention`'s) is the mixed pair. The
+/// same absence WITHOUT that refusal (an FX-34 runner's pair, another Job's
+/// end line, an empty log: a runner that stopped early or a log not read
+/// whole) is only `no_sealed_end` and is not called older (F3, poc-dui3 O2).
+/// A Job built by an older controller is never either: it degrades to
+/// today's reading.
 ///
 /// KILLS: the end line not required; a sealed end line of another Job
-/// accepted; the rule asked at any exit code; the rule asked of an older
-/// controller's Job.
+/// accepted; the inference made without the flag's refusal; the rule asked
+/// of an older controller's Job.
 #[test]
 fn a_runner_that_vouched_for_no_exit_is_older_than_the_controller() {
     let t = own();
@@ -202,19 +204,27 @@ fn a_runner_that_vouched_for_no_exit_is_older_than_the_controller() {
             "a sentence"
         )
     );
+    let retention = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-retention.log"),
+    )
+    .expect("the captured older retention worker's stderr");
     let another_jobs_end = final_block(every(&another_jobs()), 1, &[]);
-    for log in [
-        older.as_str(),
-        fx34_runner.as_str(),
-        another_jobs_end.as_str(),
-        "",
+    for (log, older_runner) in [
+        (older.as_str(), true),
+        (retention.as_str(), true),
+        (fx34_runner.as_str(), false),
+        (another_jobs_end.as_str(), false),
+        ("", false),
     ] {
         let lines = own_lines(&JobToken::EveryLine(t.clone()), log);
-        assert!(lines.runner_is_older(), "{log:?}");
+        assert_eq!(lines.runner_is_older(), older_runner, "{log:?}");
+        assert_eq!(lines.no_sealed_end(), !older_runner, "{log:?}");
         assert!(lines.text().is_empty(), "nothing of it is read: {log:?}");
         for older_job in [JobToken::RefusalDetail(t.clone()), JobToken::None] {
+            let lines = own_lines(&older_job, log);
             assert!(
-                !own_lines(&older_job, log).runner_is_older(),
+                !lines.runner_is_older() && !lines.no_sealed_end(),
                 "{older_job:?}"
             );
         }

@@ -13819,9 +13819,12 @@ async fn fx43_an_older_runner_is_named_and_nothing_of_its_log_is_read() {
     assert_eq!(patched_statuses(&seen)[0]["exitReason"], "operational");
 }
 
-/// **FX-43, exit 3: the runner's sealed refusal pair is shown; an older
-/// runner's unsealed pair, even one carrying this Job's token in its JSON (an
-/// FX-34 runner given the token by hand), is the mixed pair, named.**
+/// **FX-43, exit 3: the runner's sealed refusal pair is shown; an unsealed
+/// pair, even one carrying this Job's token in its JSON (an FX-34 runner
+/// given the token by hand), is not read.** With no refusal of
+/// `--runner-line-token` in the log it is not called older either (F3): the
+/// status says the runner's end was not seen. After the older runner's real
+/// refusal of the flag, it is the mixed pair, named.
 ///
 /// KILLS: `refusal-detail=` read off the raw log under an FX-43 Job.
 #[tokio::test]
@@ -13838,8 +13841,24 @@ async fn fx43_a_refusal_is_read_only_off_the_sealed_pair() {
         fx34_message(&status),
         format!("{FX34_OLD_MESSAGE}{FX34_STATED}{SENTENCE}")
     );
-    // The FX-34 runner's output (the pair, unsealed): named, nothing read.
+    // The FX-34 runner's output (the pair, unsealed): nothing read, and not
+    // named older without the flag's refusal (F3).
     let (_, status) = fx43_pass(3, fx34_runner_pair(SENTENCE)).await;
+    assert_eq!(
+        status["exitReason"], "GuardRefusedUnknownReason",
+        "{status}"
+    );
+    assert!(
+        !fx34_message(&status).contains("cleanup.policy")
+            && fx34_message(&status).contains("without its sealed `runner-exit=` line"),
+        "{status}"
+    );
+    // After the older runner's refusal of the flag: named, nothing read.
+    let older = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx-43/older-runner-restore.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let (_, status) = fx43_pass(3, format!("{older}{}", fx34_runner_pair(SENTENCE))).await;
     assert_eq!(
         status["exitReason"], "RunnerOlderThanController",
         "{status}"

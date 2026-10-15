@@ -6996,6 +6996,15 @@ async fn reconcile_restore_inner(
     if runner_reason.is_none() {
         runner_reason = crate::refusal::failure_detail(exit_code, &lines);
     }
+    // poc-dui3 O2: no sealed end and no sign of an older runner is said as
+    // observed, never as an older image.
+    if runner_reason.is_none()
+        && !raw.is_empty()
+        && runner_log::vouches_for_exit(exit_code)
+        && lines.no_sealed_end()
+    {
+        runner_reason = Some(crate::refusal::RunnerReason::NoSealedEnd(exit_code));
+    }
     let log = lines.text();
     let keys = restore_evidence_keys(log);
     // An exit-1 run whose last line names a state on the Restore's closed

@@ -18,7 +18,8 @@
 //! `let lines = runner_log::own_lines(&job::job_token(&job), &raw_log);`, then
 //! every reader of that kind scans `lines.text()`, and
 //! `lines.runner_is_older()` names a runner image older than this controller
-//! (`RunnerOlderThanController`) instead of reading anything. The runner side
+//! (`RunnerOlderThanController`) instead of reading anything, when the log
+//! shows the runner refusing the token flag. The runner side
 //! is `logweir::exit::FinalLines` (the lines printed last) and
 //! `logweir::exit::print_lines` (a line printed during the run).
 //!
@@ -184,6 +185,7 @@ pub struct RunnerLines {
     token: Option<logweir_core::refusal_detail::LineToken>,
     every_line: bool,
     exit_vouched: bool,
+    flag_refused: bool,
 }
 
 impl RunnerLines {
@@ -211,15 +213,42 @@ impl RunnerLines {
         self.every_line
     }
 
-    /// **The mixed pair, named.** True when the Job carries FX-43's token and
-    /// no line of the log sealed with it is the runner's `runner-exit=`: a
-    /// runner that knows the flag prints one at every exit it reaches, and one
-    /// that does not stops at argument parsing. Ask it only of a log read to
-    /// its end, of a runner that exited 0 to 4 ([`vouches_for_exit`]).
+    /// **The mixed pair, named, on evidence.** True when the Job carries
+    /// FX-43's token, no line of the log sealed with it is the runner's
+    /// `runner-exit=`, AND the log shows the runner refusing the flag
+    /// (`--runner-line-token` named as an unknown argument), which is where an
+    /// older runner stops. A runner that knows the flag prints `runner-exit=`
+    /// at every exit it reaches; one that exited without it and refused
+    /// nothing failed before its last lines, or its log was not read whole
+    /// ([`Self::no_sealed_end`]), and is not called older (poc-dui3 O2). Ask
+    /// it only of a log read to its end, of a runner that exited 0 to 4
+    /// ([`vouches_for_exit`]).
     #[must_use]
     pub fn runner_is_older(&self) -> bool {
-        self.every_line && !self.exit_vouched
+        self.every_line && !self.exit_vouched && self.flag_refused
     }
+
+    /// The Job carries FX-43's token, the runner printed no sealed
+    /// `runner-exit=`, and nothing in its log says it is older: what was
+    /// observed is only that its end was not seen.
+    #[must_use]
+    pub fn no_sealed_end(&self) -> bool {
+        self.every_line && !self.exit_vouched && !self.flag_refused
+    }
+}
+
+/// Whether `line` is a runner refusing [`RUNNER_LINE_TOKEN_ARG`] as an
+/// argument it does not know: clap's `unexpected argument '--runner-line-token'
+/// found`, or `logweir-retention`'s ``unrecognised argument
+/// `--runner-line-token` `` (the captures in `tests/fixtures/fx-43/`).
+///
+/// [`RUNNER_LINE_TOKEN_ARG`]: logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+#[must_use]
+pub fn refuses_line_token_flag(line: &str) -> bool {
+    line.contains(logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG)
+        && ["unexpected argument", "unrecognised argument", "unrecognized argument"]
+            .iter()
+            .any(|m| line.contains(m))
 }
 
 /// Whether a container exit code is one a runner reaches through its own
@@ -247,7 +276,9 @@ pub fn own_lines_binding(token: &crate::job::JobToken, log: &str, bound: &[&str]
     };
     let mut text = String::new();
     let mut exit_vouched = false;
+    let mut flag_refused = false;
     for line in log.lines().map(|l| l.trim_end_matches('\r')) {
+        flag_refused |= refuses_line_token_flag(line);
         let own = match unseal(t, line) {
             Some(own) if own.starts_with(RUNNER_EXIT_PREFIX) => {
                 exit_vouched = true;
@@ -265,6 +296,7 @@ pub fn own_lines_binding(token: &crate::job::JobToken, log: &str, bound: &[&str]
         token: Some(t.clone()),
         every_line: true,
         exit_vouched,
+        flag_refused,
     }
 }
 
@@ -290,7 +322,9 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
         JobToken::EveryLine(t) => {
             let mut text = String::new();
             let mut exit_vouched = false;
+            let mut flag_refused = false;
             for line in log.lines().map(|l| l.trim_end_matches('\r')) {
+                flag_refused |= refuses_line_token_flag(line);
                 let Some(own) = unseal(t, line) else {
                     continue;
                 };
@@ -306,6 +340,7 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
                 token: Some(t.clone()),
                 every_line: true,
                 exit_vouched,
+                flag_refused,
             }
         }
         JobToken::RefusalDetail(t) => RunnerLines {
@@ -313,12 +348,14 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
             token: Some(t.clone()),
             every_line: false,
             exit_vouched: false,
+            flag_refused: false,
         },
         JobToken::None => RunnerLines {
             text: log.to_string(),
             token: None,
             every_line: false,
             exit_vouched: false,
+            flag_refused: false,
         },
     }
 }
@@ -331,8 +368,9 @@ pub enum Terminal {
     /// The lines the runner vouched for: read every key off
     /// [`RunnerLines::text`].
     Lines(RunnerLines),
-    /// The Job carries FX-43's token, the runner exited 0 to 4, and it printed
-    /// no sealed `runner-exit=`: the runner image is older than the
+    /// The Job carries FX-43's token, the runner exited 0 to 4, it printed
+    /// no sealed `runner-exit=`, and its log shows it refusing the flag
+    /// ([`RunnerLines::runner_is_older`]): the runner image is older than the
     /// controller. Name it ([`RUNNER_OLDER_SENTENCE`]) and read nothing.
     RunnerOlder,
     /// The tail is longer than [`TERMINAL_LOG_LIMIT_BYTES`]: cut before its
@@ -342,11 +380,10 @@ pub enum Terminal {
 
 /// What a kind's status says beside `RunnerOlderThanController` when it has no
 /// sentence of its own.
-pub const RUNNER_OLDER_SENTENCE: &str = "the runner printed no line sealed with this Job's \
-     line token, which every runner at least as new as this controller does, so the runner \
-     image is older than the controller (an older one stops at the unknown argument \
-     `--runner-line-token`); nothing of its log was read. Upgrade the runner image to the \
-     controller's version (the chart's `runnerImage`)";
+pub const RUNNER_OLDER_SENTENCE: &str = "the runner refused the argument \
+     `--runner-line-token` and printed no line sealed with this Job's line token, so the runner \
+     image is older than the controller; nothing of its log was read. Upgrade the runner image \
+     to the controller's version (the chart's `runnerImage`)";
 
 /// [`read_own_terminal`]'s pure half: `read` judged under `token` at
 /// `exit_code` (`None`: no container exit code was read, so nothing is said

@@ -4888,11 +4888,12 @@ fn the_printer_columns_are_the_contract() {
             .collect();
         assert_eq!(
             names,
-            vec!["PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"],
-            "{source}: `kubectl get backups` renders these five, in this order. EXIT is the \
-             column Global Constraint 11 exists for: without it every non-zero exit is a generic \
-             `Error` to an operator glancing at the namespace, and `your backup failed its drill` \
-             looks exactly like `the drill could not run`"
+            vec!["PHASE", "EXIT", "RECORDS", "SIGNED", "AGE", "REASON", "FAILED"],
+            "{source}: `kubectl get backups` renders these, in this order (FAILED only with \
+             `-o wide`). EXIT is the column Global Constraint 11 exists for: without it every \
+             non-zero exit is a generic `Error` to an operator glancing at the namespace, and \
+             `your backup failed its drill` looks exactly like `the drill could not run`. \
+             REASON says which guard refused it (poc-dui O1)"
         );
     }
 
@@ -4914,6 +4915,112 @@ fn the_printer_columns_are_the_contract() {
         Some("integer"),
         "an exit code is an integer"
     );
+}
+
+/// What `kubectl get backups` prints in a column: its `jsonPath` read off a
+/// status patch. Two shapes only, the two the Backup columns use: a dotted
+/// path and `.status.conditions[?(@.type=="X")].reason`.
+fn printed_column(column: &serde_yaml::Value, patch: &serde_json::Value) -> Option<String> {
+    let path = column["jsonPath"].as_str().expect("a column has a jsonPath");
+    if let Some(rest) = path.strip_prefix(".status.conditions[?(@.type==\"") {
+        let (kind, field) = rest.split_once("\")].").expect("a condition filter");
+        return patch["status"]["conditions"]
+            .as_array()?
+            .iter()
+            .find(|c| c["type"] == kind)
+            .and_then(|c| c[field].as_str())
+            .map(str::to_string);
+    }
+    patch
+        .pointer(&path.replace('.', "/"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// poc-dui O1: `kubectl get backups` names why a run failed. REASON is
+/// `status.exitReason`, the guard's own state for a refusal; the `-o wide`
+/// FAILED column names the controller's refusal behind an `operational`.
+///
+/// KILLS: dropping REASON (DUI-5 printed only `Failed 3`), or pointing it at
+/// the Failed condition (a guard's own state, `CredentialNotRenderable`, would
+/// print as the generic `GuardRefused`).
+#[test]
+fn the_reason_columns_name_a_guard_refusal_and_a_controller_refusal() {
+    let crd = emitted_backup_crd();
+    let columns = crd["spec"]["versions"][0]["additionalPrinterColumns"]
+        .as_sequence()
+        .expect("printer columns")
+        .clone();
+    let column = |name: &str| {
+        columns
+            .iter()
+            .find(|c| c["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("the Backup CRD prints {name}"))
+            .clone()
+    };
+    let (reason, failed) = (column("REASON"), column("FAILED"));
+    assert_eq!(
+        failed["priority"].as_i64(),
+        Some(1),
+        "FAILED is -o wide only"
+    );
+    assert_eq!(
+        reason["priority"].as_i64().unwrap_or(0),
+        0,
+        "REASON is in the default view"
+    );
+
+    let now = utc(2026, 11, 9, 3, 20);
+    // The guard's own state, exit 3.
+    let guard = weirkeeper::controllers::backup::finished_status_patch(
+        &backup(),
+        3,
+        &weirkeeper::controllers::backup::EvidenceKeys::default(),
+        Some("CredentialNotRenderable"),
+        None,
+        None,
+        None,
+        now,
+    );
+    assert_eq!(
+        printed_column(&reason, &guard).as_deref(),
+        Some("CredentialNotRenderable")
+    );
+    assert_eq!(
+        printed_column(&failed, &guard).as_deref(),
+        Some("GuardRefused")
+    );
+
+    // A refusal the controller made before any Job: REASON stays the wire
+    // `operational` (the field's contract), FAILED names it.
+    let refused = weirkeeper::controllers::backup::refused_status_patch(
+        &backup(),
+        TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
+        "the archive URL is not an object-store location",
+        now,
+    );
+    assert_eq!(
+        printed_column(&reason, &refused).as_deref(),
+        Some("operational")
+    );
+    assert_eq!(
+        printed_column(&failed, &refused).as_deref(),
+        Some(TERMINAL_STATE_ARCHIVE_URL_UNREADABLE)
+    );
+
+    // A pass: REASON `ok`, and FAILED is empty (no Failed condition).
+    let pass = weirkeeper::controllers::backup::finished_status_patch(
+        &backup(),
+        0,
+        &evidence_keys(&log_body(&i7_tail())),
+        None,
+        None,
+        None,
+        None,
+        now,
+    );
+    assert_eq!(printed_column(&reason, &pass).as_deref(), Some("ok"));
+    assert_eq!(printed_column(&failed, &pass), None);
 }
 
 /// The green rule reads `exitCode`, and `Backup` has no `outcome`.
@@ -15941,6 +16048,42 @@ async fn fx43_a_killed_backup_is_not_named_older_and_is_retried() {
         ));
     }
     let status = fx43_status(1, &older).await;
+    assert_eq!(status["exitReason"], "RunnerOlderThanController");
+}
+
+/// **F3 (poc-dui3 O2): a Backup whose runner exited 1 without its sealed end,
+/// and refused nothing, is not called older.** The status says what was
+/// observed (the exit, no sealed `runner-exit=`), `exitReason` stays
+/// `operational`, and a schedule retries it.
+///
+/// CONTROL: the older runner's real refusal of the flag before the same
+/// lines is named `RunnerOlderThanController`.
+///
+/// KILLS: the older-runner inference made without the flag refusal.
+#[tokio::test]
+async fn f3_a_backup_with_no_sealed_end_is_not_named_older() {
+    let log = "{\"level\":\"ERROR\",\"message\":\"engine: broker transport failure\"}\n";
+    let status = fx43_status(1, log).await;
+    assert_eq!(status["exitReason"], "operational", "{status}");
+    let message = fx34_message(&status);
+    assert!(
+        message.contains("without its sealed `runner-exit=` line")
+            && !message.contains("RunnerOlderThanController"),
+        "{message}"
+    );
+    assert!(weirkeeper::cadence::is_retryable(
+        weirkeeper::cadence::TerminalOutcome {
+            exit_code: Some(1),
+            terminal_state: status["exitReason"].as_str(),
+        }
+    ));
+    // CONTROL.
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-backup.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let status = fx43_status(1, &format!("{older}{log}")).await;
     assert_eq!(status["exitReason"], "RunnerOlderThanController");
 }
 

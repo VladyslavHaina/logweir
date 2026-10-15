@@ -213,8 +213,9 @@ pub fn classify(input: &Input<'_>) -> Observation {
 
     // 3b. FX-43: whose lines are read. Under the Job's every-line token, the
     // sealed end frame and `refusal-reason=` and the frames the end frame
-    // binds by digest; nothing else. A runner that vouched for no exit is
-    // older than this controller, and says nothing this pass reads.
+    // binds by digest; nothing else. A runner that vouched for no exit and
+    // refused the token flag is older than this controller, and says nothing
+    // this pass reads.
     let raw = log;
     let lines = crate::runner_log::own_lines_binding(
         &crate::job::job_token(input.job),
@@ -232,14 +233,13 @@ pub fn classify(input: &Input<'_>) -> Observation {
             phase: CheckPhase::Failed,
             reason: CheckCode::CheckContractMismatch,
             message: format!(
-                "{}: the check runner printed no line sealed with this Job's line token (exit \
-                 {}), which every runner at least as new as this controller does, so the runner \
-                 image is older than this controller (an older one stops at the unknown \
-                 argument `{}`); nothing of its log was read — upgrade the runner image to this \
+                "{}: the check runner refused the argument `{}` and printed no line sealed \
+                 with this Job's line token (exit {}), so the runner image is older than this \
+                 controller; nothing of its log was read — upgrade the runner image to this \
                  controller's release",
                 logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG,
                 exit_code.map_or_else(|| "<none>".to_string(), |c| c.to_string()),
-                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
             ),
             relay: None,
             waiting,
