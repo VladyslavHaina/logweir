@@ -8,8 +8,8 @@
 //! cannot be tested without a bucket: read the real environment, open the real
 //! handles, print, exit.
 //!
-//! See the library's module header for the argv, the environment, the two
-//! credentials and the exit contract.
+//! See the library's module header (`src/lib.rs`) for the argv, the
+//! environment, the two credentials and the exit contract.
 
 use std::process::ExitCode;
 
