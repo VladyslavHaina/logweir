@@ -30,10 +30,12 @@ under `docs/` and always run everything, since images copy them.
 |---|---|
 | `changes` | Classifies the diff as docs-only or not; `engine`, `e2e` (and so `publish`) run only when something outside `docs/`, or the verifier, changed. It also says whether the rebuilt console's inputs changed (`console/`, `console/fixtures/console/` or the product API's OpenAPI document) |
 | `console` | Only when the console's inputs changed: `just console`, the rebuilt console's gates (lockfile install, API types, TypeScript, ESLint, Vitest, the build and its shape, `npm audit` and the licence allowlist) |
-| `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
+| `check` (twelve gates) | Runs one part of [scripts/ci-check.sh](../scripts/ci-check.sh) each, at once: `lint` (formatting, Clippy, the shell and Python lints, dependency boundaries, the cosign-pin scan), seven `unit-<group>` gates (the workspace tests by crate group with cargo-nextest, then the doctests: `core`, `logweir`, `weirkeeper`, `api`, `retention` with the reaper, `xtask`, and the e2e package's rows that need no stack), `generated` (schema, CRD and chart drift), `supply-chain` (the notices diff, licences and advisories over both graphs, the engine patch oracle), `python` (the script rows and the independent Python verifier), `docs` (links, the unverified-label scan, `doc_lint`) |
 | `engine` | Builds Logweir's engine once per run with `scripts/engine-source.sh build`, or restores the binary that command built from the same inputs (a cache keyed by `engine-source.sh digest`, the recipe, the toolchain, the build packages and the runner image; saved by `main` only); checks that it prints the build env's `ENGINE_VERSION` and hands it to the shards as an artifact |
-| `e2e` | Runs the feature-gated integration suite in shards against Docker Compose Kafka and MinIO, with the `engine` job's build over OSO's extracted binary (OSO's pinned image seeds the archive; each shard checks the engine's `--version` again) and both evidence readers; retains Compose logs and tears down the stack |
-| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `check`, `e2e` and `console`, and a `console` job skipped for a change outside its inputs passes |
+| `build-e2e` | Builds the debug `logweir` the suite drives and archives the e2e test binaries with cargo-nextest, once per run |
+| `e2e` (eight shards) | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, one test at a time from `build-e2e`'s archive, balanced by measured time; with the `engine` job's build over OSO's extracted binary (OSO's pinned image seeds the archive; each shard checks the engine's `--version` again) and both evidence readers. One shard then runs the `--features e2e` rows under `crates/`. Retains Compose logs and tears down the stack |
+| `ci-ok` | Every gate's verdict in one job: green only when each passed, or was skipped because `changes` said its inputs did not change |
+| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `ci-ok` and an `e2e` that ran |
 
 The Compose suite excludes the test that requires a local `docker-desktop`
 Kubernetes listener. That exclusion does not establish Kubernetes deployment
@@ -45,8 +47,11 @@ Run the repository checks locally with:
 just gate
 ```
 
-This invokes the same script as the CI `check` job. It requires Rust, just,
-Node 20+, Helm 4+, kubectl, cargo-deny, and Python with cryptography and pytest.
+This invokes the same script as the CI `check` gates, all of its parts in one
+run, with the workspace suite as one libtest run (no cargo-nextest needed);
+`scripts/ci-check.sh <part>` runs one gate's part the way CI does (the parts
+need cargo-nextest). It requires Rust, just, Node 20+, Helm 4+, kubectl,
+cargo-deny, and Python with cryptography and pytest.
 It needs Docker to extract and verify the pinned engine, but no running broker or Kubernetes cluster. It also runs `cargo deny` over the engine's own lockfile, prepared with the patch folder (`third_party/kafka-backup-deny.toml`), and `scripts/check-cosign-verify.py`. Dependency downloads
 and advisory updates may use the network.
 

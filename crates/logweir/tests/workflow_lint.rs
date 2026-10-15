@@ -37,17 +37,66 @@ fn all_workflows_parse_and_default_to_read_only() {
 fn main_publication_requires_quality_and_integration_success() {
     let ci = workflow("ci.yml");
     let publish = &ci["jobs"]["publish"];
-    assert_eq!(dependencies(publish), ["check", "e2e", "console"]);
-    // The console job's gates hold the image as well; its skip (no console
-    // change) passes, a skipped check or e2e does not, and a failure never does.
+    // FX-53: `ci-ok` is every gate's verdict; the e2e suite must also have RUN
+    // (a docs-only change skips it and publishes nothing, as before).
+    assert_eq!(dependencies(publish), ["ci-ok", "e2e"]);
     assert_eq!(
         publish["if"].as_str(),
         Some(
             "github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() \
-             && needs.check.result == 'success' && needs.e2e.result == 'success' \
-             && needs.console.result != 'failure'"
+             && needs.ci-ok.result == 'success' && needs.e2e.result == 'success'"
         )
     );
+    // `ci-ok` needs every other job, runs whatever they did, and lets a job
+    // skip only where the classifier said its inputs did not change.
+    let ok = &ci["jobs"]["ci-ok"];
+    assert_eq!(ok["if"].as_str(), Some("always()"));
+    let mut gates: Vec<&str> = ci["jobs"]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str().unwrap())
+        .filter(|k| !["ci-ok", "publish"].contains(k))
+        .collect();
+    gates.sort();
+    let mut needed = dependencies(ok);
+    needed.sort();
+    assert_eq!(needed, gates, "ci-ok must need every gate job");
+    let steps = ok["steps"].as_sequence().unwrap();
+    let green = steps
+        .iter()
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("re-actors/alls-green@"))
+        })
+        .expect("ci-ok runs re-actors/alls-green");
+    let sha = green["uses"].as_str().unwrap().split_once('@').unwrap().1;
+    assert!(sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(green["with"]["jobs"].as_str(), Some("${{ toJSON(needs) }}"));
+    assert_eq!(
+        green["with"]["allowed-skips"].as_str(),
+        Some("${{ steps.skips.outputs.list }}")
+    );
+    let skips = steps
+        .iter()
+        .find(|s| s["id"] == "skips")
+        .and_then(|s| s["run"].as_str())
+        .unwrap();
+    for (condition, jobs) in [
+        ("[ \"$CONSOLE\" != true ]", "'\"console\"'"),
+        (
+            "[ \"$CODE\" != true ]",
+            "'\"engine\"' '\"build-e2e\"' '\"e2e\"'",
+        ),
+    ] {
+        assert!(
+            skips
+                .lines()
+                .any(|l| l.contains(condition) && l.contains(jobs)),
+            "ci-ok allows `{jobs}` to skip only under `{condition}`: {skips}"
+        );
+    }
     assert_eq!(
         publish["uses"].as_str(),
         Some("./.github/workflows/images.yml")
@@ -913,10 +962,14 @@ fn docs_only_changes_skip_what_they_cannot_affect() {
         "check must run on every change"
     );
     assert!(dependencies(&jobs["check"]).is_empty());
-    // FX-53: the shards also wait for the run's one engine build, which runs
-    // exactly when they do.
-    assert_eq!(dependencies(&jobs["e2e"]), ["changes", "engine"]);
-    for job in ["e2e", "engine"] {
+    // FX-53: the shards also wait for the run's one engine build and its one
+    // e2e build, which run exactly when they do.
+    assert_eq!(
+        dependencies(&jobs["e2e"]),
+        ["changes", "engine", "build-e2e"]
+    );
+    assert_eq!(dependencies(&jobs["build-e2e"]), ["changes"]);
+    for job in ["e2e", "engine", "build-e2e"] {
         assert_eq!(
             jobs[job]["if"].as_str(),
             Some("needs.changes.outputs.code == 'true'"),
@@ -1056,16 +1109,22 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
 }
 
 /// FX-53: EVERY RUST CACHE IN ci.yml IS ONE KEY PER JOB KIND, SAVED BY main
-/// ONLY. A pull request's cache lives where no other run can read it; and the
-/// shards share one key that exactly one of them saves.
+/// ONLY, AND BY ONE JOB. A pull request's cache lives where no other run can
+/// read it; a key two jobs saved would race for the reservation.
 #[test]
 fn rust_caches_are_shared_per_job_kind_and_saved_by_main_only() {
     let ci = workflow("ci.yml");
-    let mut kinds = Vec::new();
+    let main = "${{ github.ref == 'refs/heads/main'";
+    let mut saved: Vec<String> = Vec::new();
+    let mut restored: Vec<String> = Vec::new();
     for (name, job) in ci["jobs"].as_mapping().unwrap() {
         let Some(steps) = job["steps"].as_sequence() else {
             continue;
         };
+        let rows = job["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .cloned()
+            .unwrap_or_default();
         for step in steps {
             let Some(uses) = step["uses"].as_str() else {
                 continue;
@@ -1078,37 +1137,143 @@ fn rust_caches_are_shared_per_job_kind_and_saved_by_main_only() {
                 sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
                 "{name:?}: `{uses}` is not pinned by commit"
             );
-            let save_if = step["with"]["save-if"].as_str().unwrap_or_default();
-            assert!(
-                save_if.starts_with("${{ github.ref == 'refs/heads/main'"),
-                "{name:?}: rust-cache must save on main only, not `{save_if}`"
-            );
-            kinds.push(step["with"]["shared-key"].as_str().unwrap().to_string());
+            let key = step["with"]["shared-key"].as_str().unwrap().to_string();
+            let save_if = match &step["with"]["save-if"] {
+                Value::Bool(false) => "false".to_string(),
+                v => v.as_str().unwrap_or_default().to_string(),
+            };
+            if key == "${{ matrix.cache }}" {
+                // A matrix of gates: the row names its cache and whether it saves.
+                assert_eq!(save_if, format!("{main} && matrix.save }}}}"), "{name:?}");
+                for row in &rows {
+                    let cache = row["cache"].as_str().unwrap().to_string();
+                    if row["save"].as_bool() == Some(true) {
+                        saved.push(cache);
+                    } else {
+                        assert_eq!(row["save"].as_bool(), Some(false), "{row:?}");
+                        restored.push(cache);
+                    }
+                }
+            } else if save_if == "false" {
+                restored.push(key);
+            } else {
+                assert_eq!(
+                    save_if,
+                    format!("{main} }}}}"),
+                    "{name:?}: saves on main only"
+                );
+                saved.push(key);
+            }
         }
     }
-    kinds.sort();
-    assert_eq!(kinds, ["check", "e2e"]);
-    let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
-    let cache = e2e
-        .iter()
-        .find(|s| {
-            s["uses"]
-                .as_str()
-                .is_some_and(|u| u.starts_with("Swatinem/rust-cache@"))
-        })
-        .unwrap();
+    let mut unique = saved.clone();
+    unique.sort();
+    unique.dedup();
     assert_eq!(
-        cache["with"]["save-if"].as_str(),
-        Some("${{ github.ref == 'refs/heads/main' && matrix.crates == true }}"),
-        "one shard saves the shared e2e key"
+        unique.len(),
+        saved.len(),
+        "two jobs save one key: {saved:?}"
     );
-    let savers = ci["jobs"]["e2e"]["strategy"]["matrix"]["include"]
+    for key in &restored {
+        assert!(
+            saved.contains(key),
+            "`{key}` is restored but no job saves it: {saved:?}"
+        );
+    }
+}
+
+/// FX-53 §2.4: `check` is a matrix of scripts/ci-check.sh's parts, one gate
+/// each, and the unit groups' union is the workspace: every member in exactly
+/// one group, every group a gate.
+#[test]
+fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
+    let ci = workflow("ci.yml");
+    let check = &ci["jobs"]["check"];
+    let rows = check["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap();
+    assert_eq!(check["strategy"]["fail-fast"].as_bool(), Some(false));
+    let parts: Vec<&str> = rows.iter().map(|r| r["part"].as_str().unwrap()).collect();
+    assert!(check["steps"]
         .as_sequence()
         .unwrap()
         .iter()
-        .filter(|row| row["crates"].as_bool() == Some(true))
-        .count();
-    assert_eq!(savers, 1, "exactly one shard saves the e2e cache");
+        .any(|s| s["run"] == "bash scripts/ci-check.sh ${{ matrix.part }}"));
+    for part in ["lint", "generated", "supply-chain", "python", "docs"] {
+        assert_eq!(
+            parts.iter().filter(|p| **p == part).count(),
+            1,
+            "`{part}` is one gate"
+        );
+    }
+    let script = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
+    let table: String = script
+        .split("unit_packages() {")
+        .nth(1)
+        .unwrap()
+        .split("esac")
+        .next()
+        .unwrap()
+        .to_string();
+    let mut groups = std::collections::BTreeMap::new();
+    for line in table.lines() {
+        let Some((group, rest)) = line.trim().split_once(") echo \"") else {
+            continue;
+        };
+        let members: Vec<String> = rest
+            .trim_end_matches(" ;;")
+            .trim_end_matches('"')
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        groups.insert(group.to_string(), members);
+    }
+    let mut gated: Vec<String> = parts
+        .iter()
+        .filter_map(|p| p.strip_prefix("unit "))
+        .map(str::to_string)
+        .collect();
+    gated.sort();
+    let mut declared: Vec<String> = groups.keys().cloned().collect();
+    declared.sort();
+    assert_eq!(gated, declared, "every unit group is one gate");
+    // The workspace's members, read from their manifests (`[workspace]
+    // members = ["crates/*", "xtask", "e2e"]`).
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root().join("crates"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("Cargo.toml").is_file())
+        .collect();
+    dirs.push(root().join("xtask"));
+    dirs.push(root().join("e2e"));
+    let members: Vec<String> = dirs
+        .iter()
+        .map(|d| {
+            // The `name = "…"` line of the `[package]` table (every member's
+            // manifest opens with it).
+            let manifest = std::fs::read_to_string(d.join("Cargo.toml")).unwrap();
+            let package = manifest.split("[package]").nth(1).unwrap();
+            package
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("name = \""))
+                .and_then(|n| n.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("{}: no package name", d.display()))
+                .to_string()
+        })
+        .collect();
+    let mut grouped: Vec<String> = groups.values().flatten().cloned().collect();
+    grouped.sort();
+    let mut expected = members.clone();
+    expected.sort();
+    assert_eq!(
+        grouped, expected,
+        "the unit groups must hold every workspace member exactly once"
+    );
+    let root_manifest = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(
+        root_manifest.contains(r#"members = ["crates/*", "xtask", "e2e"]"#),
+        "the workspace's members moved: update this row and the unit groups"
+    );
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {

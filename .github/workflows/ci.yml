@@ -30,11 +30,42 @@ jobs:
         run: |
           bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
           bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" console | tee -a "$GITHUB_OUTPUT"
+  # THE CHECK GATES (FX-53 §2.4): scripts/ci-check.sh's parts, each on its own
+  # runner, at once, where one serial job ran them all for 26 to 28 minutes.
+  # Every command of the old job runs in exactly one part; `bash
+  # scripts/ci-check.sh` with no part is still all of them in one run (`just
+  # gate`). The unit groups' union is the workspace (workflow_lint holds it).
+  # `cache` names the Rust cache a gate restores, and only a gate with `save`
+  # writes it, on main: `python` and `docs` build the `logweir` package that
+  # `unit-logweir`'s cache holds, `unit-e2e` the graph `build-e2e`'s holds.
+  #
+  # TEST BUILDS LINK WITH mold AND KEEP LINE TABLES ONLY (FX-53): neither
+  # changes what a test does; both cut the link and the debuginfo I/O of some
+  # 300 debug test binaries. Nothing built here ships.
   check:
+    name: ${{ matrix.gate }}
     runs-on: ubuntu-24.04
-    # ci-check.sh takes 18-24 minutes; at 25 the job on main 4bfc8b4a was
-    # cancelled while saving the cache, so publish was skipped.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { gate: lint, part: lint, cache: lint, save: true }
+          - { gate: unit-core, part: unit core, cache: unit-core, save: true }
+          - { gate: unit-logweir, part: unit logweir, cache: unit-logweir, save: true }
+          - { gate: unit-weirkeeper, part: unit weirkeeper, cache: unit-weirkeeper, save: true }
+          - { gate: unit-api, part: unit api, cache: unit-api, save: true }
+          - { gate: unit-retention, part: unit retention, cache: unit-retention, save: true }
+          - { gate: unit-xtask, part: unit xtask, cache: unit-xtask, save: true }
+          - { gate: unit-e2e, part: unit e2e, cache: e2e, save: false }
+          - { gate: generated, part: generated, cache: generated, save: true }
+          - { gate: supply-chain, part: supply-chain, cache: supply-chain, save: true }
+          - { gate: python, part: python, cache: unit-logweir, save: false }
+          - { gate: docs, part: docs, cache: unit-logweir, save: false }
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - uses: actions/checkout@v4
       # Docker Hub rate-limits anonymous pulls per IP; GitHub's shared runners
@@ -56,19 +87,19 @@ jobs:
       # saving it only filled the 10 GB limit; every run still restores main's.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: check
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ matrix.cache }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.save }}
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - uses: taiki-e/install-action@v2
-        with: { tool: 'just,cargo-deny@0.20.2' }
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-deny@0.20.2,cargo-nextest@0.9.148' }
       - uses: azure/setup-helm@v4
         with: { version: v4.0.1 }
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
-      - run: bash scripts/ci-check.sh
+      - run: bash scripts/ci-check.sh ${{ matrix.part }}
   # PROD-18.1: the rebuilt console (console/), only when it or the API schema its
   # types come from changed. `just console` is the whole job: the lockfile
   # install, the API types, tsc, ESLint, Vitest, the build and its shape, npm
@@ -158,18 +189,53 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
-  # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's
-  # fifth), each on its own runner with its own stack and logweir build (the
-  # Rust cache is shared; the engine is the `engine` job's artifact, FX-53).
-  # Every file under e2e/tests/ is in exactly one shard's `tests`:
-  # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
-  # per-binary times of a local run on the default line, 4.3.1 (86 minutes
-  # of tests, 2026-10-10). Each shard's expected minutes of tests read
-  # "local; CI": CI ran the binaries whose rows are the same on 3.7.1 in 0.6
-  # of their local time. Setup takes about 15 minutes before any test runs.
-  # `publish` needs every shard.
+  # THE e2e BUILD, ONCE PER RUN (FX-53 §2.3): the debug `logweir` every shard
+  # drives (the harness runs `<root>/target/debug/logweir`) and the e2e test
+  # binaries, archived by cargo-nextest so a shard runs them with no toolchain,
+  # cache or compile of its own. GitHub's runners check out at the same path in
+  # every job, so the paths compiled into the binaries (CARGO_MANIFEST_DIR) hold
+  # in the shards. Its Rust cache is the one `unit-e2e` restores.
+  build-e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'cargo-nextest@0.9.148' }
+      - name: Build the CLI and archive the e2e test binaries
+        run: |
+          mkdir -p target/e2e-build
+          cargo nextest archive --locked -p e2e --features e2e --archive-file target/e2e-build/e2e.tar.zst
+          cargo build --locked -p logweir
+          cp target/debug/logweir target/e2e-build/logweir
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-build
+          path: target/e2e-build/
+          if-no-files-found: error
+          retention-days: 3
+  # FX-41: the e2e suite in shards BY TEST BINARY, each on its own runner with
+  # its own stack. Every file under e2e/tests/ is in exactly one shard's
+  # `tests`: e2e/tests/stack_params.rs fails otherwise, in `unit-e2e`. FX-53:
+  # eight shards, balanced longest-first on the per-binary CI times of main run
+  # 38739731052 and the medians of 35 earlier runs (seconds of tests in each
+  # comment); a shard installs the `engine` job's engine and `build-e2e`'s CLI
+  # and archive, and compiles nothing. Setup takes about 2 to 3 minutes before
+  # the first test. `publish` needs every shard.
   e2e:
-    needs: [changes, engine]
+    needs: [changes, engine, build-e2e]
     if: needs.changes.outputs.code == 'true'
     name: e2e ${{ matrix.shard }}
     timeout-minutes: 40
@@ -177,30 +243,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 23; 14
+          # 720
           - shard: 1
-            tests: [record_semantics, topic_identity, record_semantics_oracle, check_image,
-                    config_coverage, new_topic_parity, topic_budget]
-          # 23; 14. On 4.x group_admin's fixture is seven groups of four types.
+            tests: [position_evidence]
+          # 647
           - shard: 2
-            tests: [position_evidence, group_admin, original_name, fixture_retention,
-                    replication_factor_parity, resume_semantics, clone_ttl]
-          # 22; 13
+            tests: [record_semantics, fixture_retention, check_image]
+          # 552
           - shard: 3
-            tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
-                    credential_binding_store, compat_contract, stack_params, created_topics,
-                    schema_dependency, smoke, stopped_restore, topic_configuration, fault_proxy,
-                    topic_configuration_apply]
-          # 22; 13, with the `--features e2e` rows under crates/.
+            tests: [replay_selection, mvp_demo, stack_params, fault_proxy, stopped_restore]
+          # 570
           - shard: 4
-            crates: true
-            tests: [guards, consumer_group_snapshot, backup_argv, mvp_demo, empty_capture,
-                    topic_ids, scram, consumer_positions, offset_side, point_set_binding]
-          # about 15; 9 (PROD-04.2's switchover rows, from the worker's
-          # single-row runs). Its own shard: in any of the four above it would
-          # bring that shard's setup and tests close to the 40-minute timeout.
+            tests: [auth_modes, topic_ids, empty_capture, topic_configuration, original_name]
+          # 568
           - shard: 5
-            tests: [switchover]
+            tests: [topic_identity, point_set_binding, topic_configuration_apply, pitr_boundary,
+                    replication_factor_parity, resume_semantics]
+          # 558, counting about 360 for the `--features e2e` rows under crates/
+          # and the compile they need.
+          - shard: 6
+            crates: true
+            tests: [clone_ttl, consumer_group_snapshot, compat_contract, credential_binding_store,
+                    config_coverage, new_topic_parity]
+          # 557
+          - shard: 7
+            tests: [group_admin, full_drill, consumer_positions, offset_side, schema_dependency,
+                    record_semantics_oracle, topic_budget]
+          # 554
+          - shard: 8
+            tests: [switchover, guards, scram, backup_argv, created_topics, smoke]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
@@ -209,6 +280,11 @@ jobs:
       # The broker is the default line `.env` pins, Kafka 4.3.1 (PROD-01.5a);
       # the legacy 3.7.1 line runs in engine-matrix.yml's weekly rows.
       COMPOSE_PROFILES: auth
+      # The crate rows' compile only (shard 6); the same as `build-e2e`'s, so
+      # it restores that cache.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -244,24 +320,23 @@ jobs:
           else
             echo "${avail} GB free, at least ${FREE_DISK_NEED_GB} GB: nothing removed"
           fi
-      - uses: dtolnay/rust-toolchain@1.89.0
-      # One key for all five shards, saved by ONE of them on main (FX-53):
-      # the shards no longer race to reserve it ("Unable to reserve cache").
-      # Shard 4 saves, because its crate rows compile a superset of the others'
-      # dependencies.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The crate rows (shard 6) compile, so that shard alone sets up Rust.
+      - if: matrix.crates
+        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - if: matrix.crates
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: e2e
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.crates == true }}
+          save-if: false
+      - if: matrix.crates
+        run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       # The console rows (record_semantics, schema_dependency) run the
       # console's own TypeScript with node's types stripped: Node 22.6 or later.
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      - uses: taiki-e/install-action@v2
-        with: { tool: just }
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-nextest@0.9.148' }
       - run: pip install cryptography
-      - run: cargo fetch --locked
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
       # WHAT SHIPS IS WHAT THIS JOB TESTS (PROD-00.2). The extraction above
@@ -282,10 +357,34 @@ jobs:
           got=$(.engine/kafka-backup --version)
           [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
           echo "$got"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: e2e-build
+          path: ${{ runner.temp }}/e2e-build
+      # The harness drives `<root>/target/debug/logweir`; it is `build-e2e`'s,
+      # and it must load here, on a runner that installed no -dev package.
+      - name: Install the CLI build-e2e built
+        run: |
+          install -D -m 0755 "$RUNNER_TEMP/e2e-build/logweir" target/debug/logweir
+          if ldd target/debug/logweir | grep -F 'not found'; then
+            echo "::error::target/debug/logweir needs a library this runner lacks"; exit 1
+          fi
+          target/debug/logweir --version
       - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
-      - run: cargo build --locked -p logweir
-      - run: cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
+      # The shard's binaries, one test at a time (the `e2e` profile in
+      # .config/nextest.toml: the suite drives one stack), each test in its own
+      # process; the one row that needs a local Kubernetes listener is left out,
+      # as before. nextest fails a run that selects no test.
+      - name: The shard's e2e test binaries
+        run: >-
+          cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e-build/e2e.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE" --profile e2e
+          -E '(binary(=${{ join(matrix.tests, ') | binary(=') }})) & not test(a_pod_really_reaches_the_k8s_listener)'
+      # THE `--features e2e` ROWS UNDER crates/, after the suite: they rebuild
+      # `target/debug/logweir` with the crate's `e2e` feature, which the suite
+      # must not drive. Each crate's own test targets, so they compile here.
+      #
       # THE NAMED ROWS GO THROUGH scripts/run-named-tests.sh (FX-53), which
       # refuses a name that matches no test: a bare `cargo test <filter>` exits
       # 0 having run nothing. That is how this step ran `notify`'s
@@ -293,20 +392,27 @@ jobs:
       # `0 passed … 8 filtered out` on every run after f0f01777 withdrew the
       # drill's notification post and that row with it (PROD-17.1 B2, OD-12).
       # The post is gone, so the row has nothing left to prove and is removed;
-      # notify.rs's remaining rows run in `check`. A name is the test's full
-      # path, as `--list` prints it.
-      - name: Kafka adapter and doctor integration tests
+      # notify.rs's remaining rows run in `unit-logweir`. A name is the test's
+      # full path, as `--list` prints it. The whole-binary rows run through
+      # nextest, which fails a selection with no test in it.
+      #
+      # FX-53 GAP 4: the 20 rows no workflow ran before, `catalog_minio` (6),
+      # `minio_options` (6) and `check_cli`'s `live` module (8).
+      - name: The --features e2e rows under crates/
         if: matrix.crates
         run: |
-          cargo test --locked -p logweir-kafka --features e2e --test live -- --test-threads=1
+          cargo nextest run --locked --profile e2e -p logweir-kafka --features e2e --test live
           CARGO_TEST_ARGS="--locked -p logweir --features e2e --lib" bash scripts/run-named-tests.sh \
             doctor::tests::check_storage_skips_a_genuinely_unreachable_endpoint
           CARGO_TEST_ARGS="--locked -p logweir --features e2e --test doctor" bash scripts/run-named-tests.sh \
             check_7_an_unreachable_target_is_named_as_a_target_problem
+          cargo nextest run --locked --profile e2e -p logweir --features e2e --test catalog_minio
+          cargo nextest run --locked --profile e2e -p logweir-store --features e2e --test minio_options
+          cargo nextest run --locked --profile e2e -p logweir --features e2e --test check_cli -E 'test(/^live::/)'
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
       # The free-disk step's measurement: what this shard used, at its peak
-      # (everything built, the stack and its volumes still up).
+      # (everything installed, the stack and its volumes still up).
       - name: Disk used by this shard
         if: always()
         run: |
@@ -319,12 +425,39 @@ jobs:
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
+  # EVERY GATE, IN ONE VERDICT (FX-53 §2.4): `publish`, and a reader of this
+  # run, need one job that is green exactly when every gate passed or was
+  # skipped for a reason the classifier gave. A job may be skipped only when
+  # `changes` said its inputs did not change: `console` when the console's
+  # did not, and `engine`, `build-e2e` and `e2e` when only docs/ did; any other
+  # skip, a failure or a cancellation is red.
+  ci-ok:
+    if: always()
+    needs: [changes, check, console, engine, build-e2e, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: The skips the classifier allows
+        id: skips
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          CONSOLE: ${{ needs.changes.outputs.console }}
+        run: |
+          skips=()
+          if [ "$CONSOLE" != true ]; then skips+=('"console"'); fi
+          if [ "$CODE" != true ]; then skips+=('"engine"' '"build-e2e"' '"e2e"'); fi
+          list="[$(IFS=,; echo "${skips[*]}")]"
+          echo "list=$list" | tee -a "$GITHUB_OUTPUT"
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          allowed-skips: ${{ steps.skips.outputs.list }}
+          jobs: ${{ toJSON(needs) }}
+
   publish:
-    # The console job's gates (audit, licences, ESLint, Vitest) hold the image
-    # too. It is skipped when neither console/ nor its inputs changed, and a
-    # skip passes here; a skipped check or e2e still skips publication.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.check.result == 'success' && needs.e2e.result == 'success' && needs.console.result != 'failure'
-    needs: [check, e2e, console]
+    # Every gate passed (`ci-ok`), and the e2e suite ran: a docs-only change
+    # skips it, and so publishes nothing, as before.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.ci-ok.result == 'success' && needs.e2e.result == 'success'
+    needs: [ci-ok, e2e]
     # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
     # workflow's jobs get no more than this job grants.
     permissions:
