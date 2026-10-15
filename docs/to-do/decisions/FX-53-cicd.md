@@ -30,7 +30,7 @@
 
    This one rule does three jobs at once:
    - **per-component selection:** a docs change re-runs only the gates that read docs;
-   - **no double testing:** main and a release reuse a green PR or publication run;
+   - **no double testing:** a release reuses its publication's green main run, and every run reuses the gates an earlier main run proved;
    - **soundness on failure:** a gate that failed left no marker, so it runs again.
 
    Repeated builds become one build, shared by artifact or by a cache keyed on the build's inputs.
@@ -93,7 +93,9 @@ One checked-in file names every gate (job), with:
   - **Every prover workflow file is a global input**, as `ci.yml` is: `release.yml` and `ci-nightly.yml`. A modified caller, for example one with a fake job named `tests / check`, changes every hash.
   - **A tag is a tag:** `refs/tags/<name>` exists, matches `^v[0-9]`, and peels to the run's `head_sha`. A branch named `v…` proves nothing.
   - **One job per name:** a run attempt with two jobs of the gate's name proves nothing.
-  - **A pull-request run tests its merge commit**, so it proves something only when that merge tree is its head tree: its one pull request targets main, and the base is an ancestor of the head and of current main. That rests on main never being force-pushed.
+  - **A pull-request run proves nothing.** It tests and executes its merge commit, but the API records neither that commit nor the base it merged. PR #60's run merged `65ba93fa` and records `fb29ee72`. So PR runs only *use* proofs, from main, tag and nightly runs, and never leave one.
+    - Consequence: main re-runs the gates a merged PR changed, and skips every other gate.
+    - The §0 "main after" figures for docs-only and console-only rise by those gates' minutes: about 3–6 minutes, not 1–3.
   - **The runner** is bound by `ci.yml`'s `runs-on`, or by the proving job's labels.
   - **The requester hashes a clean checkout:** an index or worktree that differs from `HEAD` means the gate runs.
   - **Hit:** the job prints the proving run's URL and succeeds without working.
