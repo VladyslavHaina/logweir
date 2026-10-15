@@ -433,3 +433,36 @@ fn the_time_dependent_gates_never_skip() {
         assert!(strings(&map["gates"][gate]["covers"]).contains(&id.to_string()));
     }
 }
+
+/// A gate's proof is its job's `success` in the proving run (the jobs API),
+/// so no gate job may turn a failure into success: no `continue-on-error`, on
+/// the job or on any step. The gate jobs are ci.yml's (release.yml and
+/// ci-nightly.yml only call it), so the row reads every job of ci.yml, which
+/// is cicd-w1's file; stage 4 adds "every ci.yml job is a gate".
+#[test]
+fn no_gate_job_can_pass_on_a_failure() {
+    let map = map();
+    let provers = strings(&map["provers"]);
+    assert!(provers.contains(&".github/workflows/ci.yml".to_string()));
+    let ci = ".github/workflows/ci.yml";
+    let text = std::fs::read_to_string(root().join(ci)).expect("ci.yml");
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("ci.yml parses");
+    let mut found = Vec::new();
+    for (id, job) in doc["jobs"].as_mapping().expect("jobs") {
+        let id = id.as_str().unwrap_or_default();
+        let lenient = |v: &serde_yaml::Value| !v.is_null() && v.as_bool() != Some(false);
+        if lenient(&job["continue-on-error"]) {
+            found.push(format!("{ci}: job {id}"));
+        }
+        for (n, step) in job["steps"].as_sequence().into_iter().flatten().enumerate() {
+            if lenient(&step["continue-on-error"]) {
+                found.push(format!("{ci}: job {id}, step {}", n + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "a job whose failure can conclude `success` proves nothing to a marker:\n{}",
+        found.join("\n")
+    );
+}

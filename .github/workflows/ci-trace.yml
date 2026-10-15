@@ -4,10 +4,12 @@ name: ci-trace
 #
 # `gate-machinery` proves the machinery on a GitHub runner whenever it
 # changes: the unit rows on Linux, then the action's hash and lookup, the
-# marker upload, and a second lookup that must FIND that marker through the
+# marker upload, a second lookup that must FIND that marker through the
 # artifacts API, read its run, and REFUSE it because this workflow is not
-# ci.yml. A marker proves a gate only from ci.yml (directly, or called by
-# release.yml or ci-nightly.yml); the accepting path is a unit row
+# ci.yml, and the jobs and trees API reads against this run. A marker is only
+# an index; a run proves a gate only from ci.yml (directly, or called by
+# release.yml or ci-nightly.yml), where the gate's own job passed on a commit
+# whose tree gives the same hash. The accepting path is a unit row
 # (scripts/test-ci-gate.py) and is proven live once ci.yml's gates use the
 # action (FX-53 stage 4).
 #
@@ -58,6 +60,7 @@ jobs:
       - name: The marker is found, read, and refused (this is not ci.yml)
         env:
           GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: stable
         run: |
           for attempt in 1 2 3 4 5 6; do
             echo "lookup $attempt"
@@ -68,7 +71,7 @@ jobs:
               echo "a marker from ci-trace.yml proved a gate" >&2
               exit 1
             fi
-            if grep -q "refused: run of .github/workflows/ci-trace.yml, not .github/workflows/ci.yml" lookup.err; then
+            if grep -q "refused: a run of .github/workflows/ci-trace.yml, not " lookup.err; then
               echo "found, read and refused: the artifacts and runs API answer as the script reads them"
               exit 0
             fi
@@ -76,3 +79,15 @@ jobs:
           done
           echo "this run's marker was not found and refused" >&2
           exit 1
+      # The other two proof reads, the jobs API and the trees API, against this
+      # run: this job is still in progress (so it cannot pass), and the tree of
+      # its head commit is read whole and hashed.
+      - name: The jobs and trees API answer as the script reads them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          bash scripts/ci-gate.sh explain docs "$CI_GATE_HASH" "$GITHUB_RUN_ID" --job gate-machinery | tee explain.out
+          grep -q "^run: a run of .github/workflows/ci-trace.yml" explain.out
+          grep -q "^job 'gate-machinery': job 'gate-machinery' did not pass (in_progress)" explain.out
+          grep -Eq "^tree [0-9a-f]{40}: (ok|its inputs at [0-9a-f]{40} hash to [0-9a-f]{64})$" explain.out

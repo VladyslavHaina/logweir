@@ -5,7 +5,8 @@
 #
 #   ci-gate.sh hash <gate> [--runner <label>]   the gate's input hash (hex)
 #   ci-gate.sh files <gate>                     the tracked files that hash covers
-#   ci-gate.sh lookup <gate> <hash>             0 = a marker proves it (prints
+#   ci-gate.sh lookup <gate> <hash> [--runner <label>]
+#                                               0 = a run proves it (prints
 #                                               proof-run=<url>); anything else = run
 #   ci-gate.sh record <gate> <hash> <dir>       write the marker file into <dir>;
 #                                               prints name=… and path=… (nothing
@@ -16,6 +17,9 @@
 #   ci-gate.sh gates | unclaimed | describe     the map, the unclassified files,
 #                                               and the whole map as JSON (lint)
 #   ci-gate.sh match <pattern>…                 the tracked files each pattern names (JSON)
+#   ci-gate.sh explain <gate> <hash> <run> [--job <name>]
+#                                               diagnostics: each proof check against
+#                                               one run; never used to skip
 #
 # THE HASH is sha256 over a scheme line, the gate's name, the runner label, and
 # `<mode> <blob id> <path>` of every tracked input (`git ls-files -s`, sorted).
@@ -25,10 +29,20 @@
 # its definition, crate closures, paths, readers, walks and tests, plus every
 # tracked file no gate classifies.
 #
+# THE PROOF. A marker artifact `gate-<gate>-<hash>` is only an INDEX: any code
+# in a same-repository job could upload one. `lookup` accepts a marker only
+# when the run it names (1) is this repository's, not a fork's, and not expired;
+# (2) is ci.yml on push to main, a same-repository pull request or a dispatch
+# on main, or release.yml (a v* tag, or a dispatch on main) or ci-nightly.yml
+# (schedule or dispatch on main) calling ci.yml; (3) has the gate's OWN job
+# concluded `success` in some attempt (the jobs API); and (4) has a head commit
+# whose tree (the git trees API, not truncated) gives the requested hash under
+# this map. A forged marker can then only assert what is already true.
+#
 # FAIL SAFE. Exit 0 from `lookup` is the only "skip". A miss is 1; a refused
-# marker (a fork's run, another workflow, expired) is a miss; an API error, a
-# map error, a pattern that matches no tracked file (a stale definition), or
-# an unknown gate exits 2 or 3. The gate action runs the gate on anything but 0.
+# marker is a miss; an API error, a map error, a pattern that matches no
+# tracked file (a stale definition), or an unknown gate exits 2 or 3. The gate
+# action runs the gate on anything but 0.
 # The runner label is $CI_GATE_RUNNER, or RUNNER_OS-RUNNER_ARCH-ImageOS on a
 # GitHub runner, or `local`. The lookup uses `gh api` (CI_GATE_GH overrides
 # it) with $GH_TOKEN, which needs `actions: read`; cargo is CI_GATE_CARGO,
@@ -104,7 +118,7 @@ except ModuleNotFoundError:  # Python < 3.11: no TOML reader, so no hash
 
 SCHEME = "ci-gate/1"
 MAP = "ci/gates.toml"
-GATE_KEYS = {"covers", "definition", "crates", "paths", "readers", "walks", "tests", "always"}
+GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "always"}
 # Pattern kinds that CLASSIFY a path. `walks` and `global` are inputs but say
 # nothing about who owns a file.
 CLASSIFYING = ("definition", "crates", "paths", "readers", "tests")
@@ -156,7 +170,9 @@ def load_map():
         if unknown:
             # A misspelt key would silently drop inputs.
             raise MapError(f"{MAP}: gate {name}: unknown key(s) {sorted(unknown)}")
-        for key in GATE_KEYS - {"always"}:
+        if not isinstance(gate.get("job", name), str) or not gate.get("job", name):
+            raise MapError(f"{MAP}: gate {name}: job must be a job name")
+        for key in GATE_KEYS - {"always", "job"}:
             value = gate.get(key, [])
             if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
                 raise MapError(f"{MAP}: gate {name}: {key} must be a list of strings")
@@ -164,9 +180,6 @@ def load_map():
             raise MapError(f"{MAP}: gate {name}: always must be true or false")
     if not isinstance(gmap.get("global", {}).get("paths"), list):
         raise MapError(f"{MAP}: [global].paths is missing")
-    workflows = gmap.get("marker", {}).get("workflows")
-    if not isinstance(workflows, list) or not workflows:
-        raise MapError(f"{MAP}: [marker].workflows is missing")
     return gmap
 
 
@@ -202,11 +215,15 @@ def compile_glob(pattern):
 
 
 class Tree:
-    """The tracked files (`git ls-files -s`: the index, which a checkout
-    makes equal to the commit), matched by compile_glob."""
+    """Tracked files as {path: (mode, blob id)}: this checkout's index
+    (`git ls-files -s`, which a checkout makes equal to its commit), or a
+    commit's tree from the git trees API. Matched by compile_glob."""
 
-    def __init__(self):
+    def __init__(self, entries=None):
         self.cache = {}
+        if entries is not None:
+            self.all = entries
+            return
         self.all = {}
         for record in git("ls-files", "-s", "-z").split(b"\0"):
             if not record:
@@ -385,22 +402,106 @@ def refuse_artifact(artifact, name, repo_id, now):
     return None
 
 
-def refuse_run(run, repo, repo_id, workflows):
+# WHO MAY PROVE A GATE. A marker artifact is only an index: anything that runs
+# in a same-repository job can upload one. The proof is the RUN it points at:
+# one of these workflows, on one of these events and refs, in which the gate's
+# OWN job concluded success, on a commit whose tree gives the requested hash.
+# The ref is the run's head branch (a tag's name for a tag push); None is any
+# branch of this repository (a same-repository pull request). `prefix` is how
+# a caller names ci.yml's jobs: `<caller job> / <job>`.
+PROVERS = {
+    ".github/workflows/ci.yml": {
+        "events": {"push": "main", "pull_request": None, "workflow_dispatch": "main"},
+        "prefix": ""},
+    ".github/workflows/release.yml": {
+        "events": {"push": "v*", "workflow_dispatch": "main"},
+        "prefix": "tests / "},
+    ".github/workflows/ci-nightly.yml": {
+        "events": {"schedule": "main", "workflow_dispatch": "main"},
+        "prefix": "ci / "},
+}
+CI = ".github/workflows/ci.yml"
+
+
+def refuse_run(run, repo, repo_id):
+    """Why this run cannot prove anything, or None. Returns (reason, prover)."""
     if run.get("repository", {}).get("id") != repo_id:
-        return "run of another repository"
+        return "a run of another repository", None
     if run.get("head_repository", {}).get("id") != repo_id:
-        return "a fork's run"
+        return "a fork's run", None
     path = str(run.get("path", "")).split("@")[0]
-    if path in workflows:
+    prover = PROVERS.get(path)
+    if prover is None:
+        return f"a run of {path or 'an unknown workflow'}, not {', '.join(PROVERS)}", None
+    if path != CI:
+        called = [str(r.get("path", "")).split("@")[0].lower()
+                  for r in run.get("referenced_workflows") or []]
+        if f"{repo}/{CI}".lower() not in called:
+            return f"a run of {path} that did not call {CI}", None
+    event, branch = run.get("event"), run.get("head_branch")
+    if event not in prover["events"]:
+        return f"a {event} run of {path}; only {', '.join(prover['events'])} count", None
+    want = prover["events"][event]
+    if want == "v*":
+        if not (isinstance(branch, str) and branch.startswith("v")):
+            return f"a {event} run of {path} on {branch!r}, not a v* tag", None
+    elif want is not None and branch != want:
+        return f"a {event} run of {path} on {branch!r}, not {want}", None
+    if not isinstance(run.get("head_sha"), str) or not re.match(r"^[0-9a-f]{40}$", run["head_sha"]):
+        return "a run with no head commit", None
+    url = run.get("html_url")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return "a run with no URL", None
+    return None, prover
+
+
+def run_jobs(repo, run_id):
+    jobs, page = [], 1
+    while True:
+        answer = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs",
+                        {"filter": "all", "per_page": 100, "page": page})
+        batch, total = answer["jobs"], answer["total_count"]
+        if not isinstance(batch, list) or not isinstance(total, int):
+            raise TypeError("jobs is not a list")
+        jobs += batch
+        if len(jobs) >= total or not batch:
+            break
+        page += 1
+        if page > 10:
+            raise LookupFailed(f"run {run_id}: more than 1000 jobs")
+    if len(jobs) < total:
+        raise LookupFailed(f"run {run_id}: {len(jobs)} of {total} jobs listed")
+    return jobs
+
+
+def refuse_job(jobs, job_name):
+    named = [j for j in jobs if j.get("name") == job_name]
+    if not named:
+        return f"the run has no job {job_name!r}"
+    if any(j.get("status") == "completed" and j.get("conclusion") == "success" for j in named):
         return None
-    prefixes = [f"{repo}/{w}".lower() for w in workflows]
-    for ref in run.get("referenced_workflows") or []:
-        if str(ref.get("path", "")).split("@")[0].lower() in prefixes:
-            return None
-    return f"run of {path or 'an unknown workflow'}, not {', '.join(workflows)}"
+    seen = ", ".join(sorted({str(j.get("conclusion") or j.get("status")) for j in named}))
+    return f"job {job_name!r} did not pass ({seen})"
 
 
-def lookup(gmap, name, value):
+def refuse_tree(gmap, ws, repo, name, value, sha, runner):
+    answer = gh_api(f"repos/{repo}/git/trees/{sha}", {"recursive": 1})
+    if answer.get("truncated") is not False:
+        return f"the tree of {sha} is truncated"
+    entries = {}
+    for entry in answer["tree"]:
+        if entry["type"] in ("blob", "commit"):
+            entries[entry["path"]] = (entry["mode"], entry["sha"])
+    try:
+        recomputed = gate_hash(gmap, ws, Tree(entries), name, runner)
+    except MapError as err:
+        return f"the gate has no hash at {sha} ({err})"
+    if recomputed != value:
+        return f"its inputs at {sha} hash to {recomputed}"
+    return None
+
+
+def lookup(gmap, ws, name, value, runner):
     if name not in gmap["gates"]:
         raise MapError(f"unknown gate {name!r}")
     if not HEX64.match(value):
@@ -415,7 +516,7 @@ def lookup(gmap, name, value):
         raise LookupFailed("GITHUB_REPOSITORY_ID is not set")
     if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
         raise LookupFailed("GITHUB_REPOSITORY is not set")
-    workflows = gmap["marker"]["workflows"]
+    job = gmap["gates"][name].get("job", name)
     marker = f"gate-{name}-{value}"
     now = datetime.datetime.now(datetime.timezone.utc)
     try:
@@ -425,25 +526,52 @@ def lookup(gmap, name, value):
             raise TypeError("artifacts is not a list")
         artifacts = sorted(artifacts, key=lambda a: str(a.get("created_at", "")), reverse=True)
         for artifact in artifacts:
+            def refused(reason):
+                print(f"ci-gate: marker {artifact.get('id')} refused: {reason}", file=sys.stderr)
             reason = refuse_artifact(artifact, marker, repo_id, now)
             if reason:
-                print(f"ci-gate: marker {artifact.get('id')} refused: {reason}", file=sys.stderr)
+                refused(reason)
                 continue
-            run = gh_api(f"repos/{repo}/actions/runs/{artifact['workflow_run']['id']}")
-            reason = refuse_run(run, repo, repo_id, workflows)
+            run_id = artifact["workflow_run"]["id"]
+            run = gh_api(f"repos/{repo}/actions/runs/{run_id}")
+            reason, prover = refuse_run(run, repo, repo_id)
             if reason:
-                print(f"ci-gate: marker {artifact.get('id')} refused: {reason}", file=sys.stderr)
+                refused(reason)
                 continue
-            url = run.get("html_url")
-            if not isinstance(url, str) or not url.startswith("https://"):
-                raise LookupFailed(f"run {run.get('id')} has no URL")
-            print(f"proof-run={url}")
+            reason = refuse_job(run_jobs(repo, run_id), prover["prefix"] + job)
+            if reason:
+                refused(reason)
+                continue
+            reason = refuse_tree(gmap, ws, repo, name, value, run["head_sha"], runner)
+            if reason:
+                refused(reason)
+                continue
+            print(f"proof-run={run['html_url']}")
+            print(f"proof-commit={run['head_sha']}")
             print(f"artifact={artifact['id']}")
             return EXIT_HIT
     except (KeyError, TypeError, AttributeError, ValueError) as err:
         raise LookupFailed(f"unexpected API answer ({err!r})")
-    print(f"ci-gate: {name}: no marker {marker}", file=sys.stderr)
+    print(f"ci-gate: {name}: no marker {marker} proves it", file=sys.stderr)
     return EXIT_MISS
+
+
+def explain(gmap, ws, name, value, run_id, job, runner):
+    """Diagnostics only (ci-trace.yml): each proof check against one run,
+    whatever the run is. `decide` never calls it; it proves nothing."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    repo_id = int(os.environ.get("GITHUB_REPOSITORY_ID", "0") or 0)
+    try:
+        run = gh_api(f"repos/{repo}/actions/runs/{run_id}")
+        reason, prover = refuse_run(run, repo, repo_id)
+        print(f"run: {reason or 'ok'}")
+        name_ = job or (prover["prefix"] if prover else "") + gmap["gates"][name].get("job", name)
+        print(f"job {name_!r}: {refuse_job(run_jobs(repo, run_id), name_) or 'ok'}")
+        print(f"tree {run.get('head_sha')}: "
+              f"{refuse_tree(gmap, ws, repo, name, value, run['head_sha'], runner) or 'ok'}")
+    except (KeyError, TypeError, AttributeError, ValueError) as err:
+        raise LookupFailed(f"unexpected API answer ({err!r})")
+    return EXIT_OK
 
 
 def record(gmap, name, value, directory):
@@ -486,11 +614,12 @@ def record(gmap, name, value, directory):
 
 
 def describe(gmap, ws, tree):
-    out = {"global": gmap["global"]["paths"], "workflows": gmap["marker"]["workflows"],
+    out = {"global": gmap["global"]["paths"], "provers": sorted(PROVERS),
            "not_gates": sorted(gmap.get("not_gates", {})), "gates": {}}
     for name, gate in gmap["gates"].items():
         files, empty = inputs(gmap, ws, tree, name, strict=False)
         out["gates"][name] = {
+            "job": gate.get("job", name),
             "covers": gate.get("covers", []),
             "always": gate.get("always", False),
             "crates": gate.get("crates", []),
@@ -512,10 +641,13 @@ def main():
         if command == "gates":
             print("\n".join(gmap["gates"]))
             return EXIT_OK
-        if command == "lookup" and len(rest) == 2:
-            return lookup(gmap, rest[0], rest[1])
         if command == "record" and len(rest) == 3:
             return record(gmap, rest[0], rest[1], rest[2])
+        if command == "explain" and len(rest) >= 3:
+            job = rest[rest.index("--job") + 1] if "--job" in rest else ""
+            return explain(gmap, Workspace(), rest[0], rest[1], rest[2], job, runner_label(rest[3:]))
+        if command == "lookup" and len(rest) >= 2:
+            return lookup(gmap, Workspace(), rest[0], rest[1], runner_label(rest[2:]))
         ws, tree = Workspace(), Tree()
         if command == "hash" and rest and not rest[0].startswith("-"):
             print(gate_hash(gmap, ws, tree, rest[0], runner_label(rest[1:])))

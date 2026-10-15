@@ -1,7 +1,10 @@
 # The gate map (FX-53 §2.1): every CI gate, the tracked files it reads, and
 # the files that define it. `scripts/ci-gate.sh hash <gate>` hashes a gate's
-# inputs; a gate is skipped only when a marker from a same-repository run of
-# ci.yml proves that the same gate passed on the same hash (§2.2).
+# inputs; a gate is skipped only when a same-repository run of ci.yml proves
+# that the same gate passed on the same hash (§2.2). A marker artifact
+# `gate-<gate>-<hash>` only points at that run: the proof is the run itself,
+# where the gate's own job (`job`, default the gate's name) concluded success
+# on a commit whose tree gives the same hash (scripts/ci-gate.sh, PROVERS).
 #
 # HOW A GATE'S INPUTS ARE EXPANDED (all matching is git's own pathspec glob,
 # `git ls-files -- ':(glob)<pattern>'`, so `*` stops at `/` and `**` crosses it):
@@ -19,6 +22,8 @@
 # - walks: files the gate reads because it walks the tree. Walks are inputs of
 #   the gate, but they do not CLASSIFY a path (below).
 # - tests: e2e test binaries; each adds `e2e/tests/<name>.rs` to the inputs.
+# - job: the name of the ci.yml job that runs the gate, as the jobs API shows
+#   it (default: the gate's name; a caller prefixes `<caller job> / `).
 # - always = true: the result depends on time or the outside world (advisory
 #   databases, the npm registry). The gate never skips; its marker is recorded
 #   only for the record.
@@ -46,12 +51,6 @@ paths = [
   ".github/actions/gate/**",
   ".github/workflows/ci.yml",
 ]
-
-[marker]
-# A marker proves a gate passed only when its run is one of these workflows
-# (directly, or as the reusable workflow a caller ran), in this repository.
-workflows = [".github/workflows/ci.yml"]
-retention_days = 30
 
 # ci.yml jobs that are plumbing, not gates: they read no product input.
 [not_gates]
@@ -357,6 +356,7 @@ readers = ["e2e/compose/stack-lib.sh"]
 # examples, the engine's inputs and the verifier the harness runs
 # (harness/mod.rs:1357, gap 1).
 [gates.e2e-1]
+job = "e2e 1"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["topic_identity", "topic_ids", "offset_side", "empty_capture", "config_coverage", "new_topic_parity"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -371,6 +371,7 @@ readers = [
 ]
 
 [gates.e2e-2]
+job = "e2e 2"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["record_semantics", "full_drill", "topic_configuration_apply", "pitr_boundary", "record_semantics_oracle", "topic_budget"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -390,6 +391,7 @@ readers = [
 
 # The `--features e2e` crate rows (E5) are guessed into this shard.
 [gates.e2e-3]
+job = "e2e 3"
 covers = ["E0", "E2", "E4", "E5", "E6"]
 tests = ["position_evidence", "scram", "original_name", "replication_factor_parity"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", "scripts/run-named-tests.sh"]
@@ -404,6 +406,7 @@ readers = [
 ]
 
 [gates.e2e-4]
+job = "e2e 4"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["record_semantics", "guards", "backup_argv", "stack_params", "fixture_retention", "check_image"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -430,6 +433,7 @@ readers = [
 ]
 
 [gates.e2e-5]
+job = "e2e 5"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["replay_selection", "consumer_positions", "credential_binding_store", "smoke", "resume_semantics"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -444,6 +448,7 @@ readers = [
 ]
 
 [gates.e2e-6]
+job = "e2e 6"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["auth_modes", "consumer_group_snapshot", "compat_contract", "stopped_restore"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -458,6 +463,7 @@ readers = [
 ]
 
 [gates.e2e-7]
+job = "e2e 7"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["position_evidence", "clone_ttl", "point_set_binding", "created_topics", "topic_configuration"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
@@ -472,6 +478,7 @@ readers = [
 ]
 
 [gates.e2e-8]
+job = "e2e 8"
 covers = ["E0", "E2", "E4", "E6"]
 tests = ["group_admin", "switchover", "mvp_demo", "schema_dependency", "fault_proxy"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", "scripts/mvp-demo.sh"]

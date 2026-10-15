@@ -31,9 +31,6 @@ schema = 1
 paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/**", "ci/gates.toml",
          "scripts/ci-gate.sh", ".github/actions/gate/**", ".github/workflows/ci.yml"]
 
-[marker]
-workflows = [".github/workflows/ci.yml"]
-
 [not_gates]
 changes = "plumbing"
 
@@ -116,10 +113,21 @@ print(answer if isinstance(answer, str) else json.dumps(answer))
 '''
 
 
-def run_of(run_id, path=".github/workflows/ci.yml", head_id=REPO_ID, referenced=()):
+CI = ".github/workflows/ci.yml"
+RELEASE = ".github/workflows/release.yml"
+NIGHTLY = ".github/workflows/ci-nightly.yml"
+CALLS_CI = (f"{REPO}/{CI}@refs/heads/main",)
+
+
+def run_of(run_id, sha, path=CI, head_id=REPO_ID, referenced=(), event="push", branch="main"):
     return {"id": run_id, "path": path, "html_url": f"https://github.com/{REPO}/actions/runs/{run_id}",
             "repository": {"id": REPO_ID}, "head_repository": {"id": head_id},
-            "referenced_workflows": [{"path": p} for p in referenced]}
+            "referenced_workflows": [{"path": p} for p in referenced],
+            "event": event, "head_branch": branch, "head_sha": sha}
+
+
+def job(name, conclusion="success", status="completed"):
+    return {"name": name, "status": status, "conclusion": conclusion}
 
 
 def artifact(name, run_id, art_id=7, head_id=REPO_ID, expired=False, expires=FUTURE):
@@ -187,6 +195,21 @@ class Repo:
 
     def hashes(self):
         return {g: self.hash(g) for g in ("alpha", "beta", "walker", "clock")}
+
+    def head(self, rev="HEAD"):
+        return subprocess.run(["git", "-C", str(self.dir), "rev-parse", rev], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def tree(self, sha):
+        """The git trees API's answer for a commit, recursive, directories included."""
+        out = subprocess.run(["git", "-C", str(self.dir), "ls-tree", "-r", "-t", "--full-tree", sha],
+                             check=True, capture_output=True, text=True).stdout
+        entries = []
+        for line in out.splitlines():
+            meta, path = line.split("\t", 1)
+            mode, kind, blob = meta.split(" ")
+            entries.append({"path": path, "mode": mode, "type": kind, "sha": blob})
+        return {"sha": sha, "truncated": False, "tree": entries}
 
     def gh_calls(self):
         log = self.tools / "gh.log"
@@ -345,79 +368,168 @@ class FailSafe(unittest.TestCase):
 
 
 class Lookup(unittest.TestCase):
+    """A marker is an index; the run it names is the proof (FX-53 §2.2)."""
+
     def setUp(self):
         self.repo = Repo()
         self.hash = self.repo.hash("alpha")
         self.name = f"gate-alpha-{self.hash}"
+        self.sha = self.repo.head()
         self.listing = f"repos/{REPO}/actions/artifacts"
 
     def tearDown(self):
         self.repo.cleanup()
 
-    def serve(self, artifacts, runs):
+    def serve(self, artifacts, runs, jobs=None, trees=None):
+        """The API: artifacts, runs, each run's jobs (default: alpha passed),
+        and each run's head tree (default: the commit's own)."""
         self.repo.answers = {self.listing: {"total_count": len(artifacts), "artifacts": artifacts}}
         for run in runs:
             self.repo.answers[f"repos/{REPO}/actions/runs/{run['id']}"] = run
+            listed = (jobs or {}).get(run["id"], [job("alpha")])
+            self.repo.answers[f"repos/{REPO}/actions/runs/{run['id']}/jobs"] = {
+                "total_count": len(listed), "jobs": listed}
+            tree = (trees or {}).get(run["head_sha"]) or self.repo.tree(run["head_sha"])
+            self.repo.answers[f"repos/{REPO}/git/trees/{run['head_sha']}"] = tree
 
     def lookup(self, **extra):
         return self.repo.run("lookup", "alpha", self.hash, **extra)
+
+    def assert_hit(self, proc, run_id):
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"proof-run=https://github.com/{REPO}/actions/runs/{run_id}", proc.stdout)
 
     def assert_miss(self, proc, why):
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertNotIn("proof-run=", proc.stdout)
         self.assertIn(why, proc.stderr)
 
-    def test_a_same_repository_ci_marker_proves_the_gate(self):
-        self.serve([artifact(self.name, 11)], [run_of(11)])
+    def test_a_true_marker_proves_the_gate(self):
+        self.serve([artifact(self.name, 11)], [run_of(11, self.sha)])
         proc = self.lookup()
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(f"proof-run=https://github.com/{REPO}/actions/runs/11", proc.stdout)
-        listing = self.repo.gh_calls()[0]
-        self.assertEqual(listing[3], self.listing)
-        self.assertIn(f"name={self.name}", listing)
+        self.assert_hit(proc, 11)
+        self.assertIn(f"proof-commit={self.sha}", proc.stdout)
+        calls = [c[3] for c in self.repo.gh_calls()]
+        self.assertEqual(calls, [self.listing, f"repos/{REPO}/actions/runs/11",
+                                 f"repos/{REPO}/actions/runs/11/jobs", f"repos/{REPO}/git/trees/{self.sha}"])
+        self.assertIn(f"name={self.name}", self.repo.gh_calls()[0])
+        self.assertIn("filter=all", self.repo.gh_calls()[2], "every attempt's jobs")
+        self.assertIn("recursive=1", self.repo.gh_calls()[3])
 
-    def test_a_ci_yml_called_by_another_workflow_proves_the_gate(self):
-        # release.yml's `tests` and ci-nightly.yml run ci.yml as a reusable workflow.
-        self.serve([artifact(self.name, 12)],
-                   [run_of(12, ".github/workflows/release.yml",
-                           referenced=[f"{REPO}/.github/workflows/ci.yml@refs/tags/v0.4.1"])])
-        self.assertEqual(self.lookup().returncode, 0)
+    def test_a_forged_marker_whose_gate_job_did_not_pass_runs_the_gate(self):
+        for conclusion in ("failure", "cancelled", "skipped", None):
+            with self.subTest(conclusion=conclusion):
+                status = "completed" if conclusion else "in_progress"
+                self.serve([artifact(self.name, 12)], [run_of(12, self.sha)],
+                           jobs={12: [job("alpha", conclusion, status), job("beta")]})
+                self.assert_miss(self.lookup(), "job 'alpha' did not pass")
+
+    def test_a_marker_from_a_run_without_the_gate_s_job_runs_the_gate(self):
+        # Uploaded by another job (a test, a package's install script).
+        self.serve([artifact(self.name, 13)], [run_of(13, self.sha)], jobs={13: [job("beta")]})
+        self.assert_miss(self.lookup(), "the run has no job 'alpha'")
+
+    def test_a_pass_in_any_attempt_proves_the_gate(self):
+        self.serve([artifact(self.name, 14)], [run_of(14, self.sha)],
+                   jobs={14: [job("alpha", "failure"), job("alpha")]})
+        self.assert_hit(self.lookup(), 14)
+
+    def test_a_marker_whose_hash_does_not_recompute_at_its_commit_runs_the_gate(self):
+        old = self.sha
+        self.repo.write("docs/guide.md", "# guide, later\n")
+        self.repo.commit("docs")
+        # The marker claims today's hash, but its run tested the older tree.
+        self.hash = self.repo.hash("alpha")
+        self.name = f"gate-alpha-{self.hash}"
+        self.serve([artifact(self.name, 15)], [run_of(15, old)])
+        self.assert_miss(self.lookup(), f"its inputs at {old} hash to")
+        # A change outside the gate's inputs leaves the proof standing.
+        self.repo.write("web/index.html", "<html>later</html>\n")
+        self.repo.commit("web")
+        self.serve([artifact(self.name, 16)], [run_of(16, self.repo.head("HEAD~1"))])
+        self.assert_hit(self.lookup(), 16)
+
+    def test_a_truncated_or_unreadable_tree_runs_the_gate(self):
+        tree = self.repo.tree(self.sha)
+        tree["truncated"] = True
+        self.serve([artifact(self.name, 17)], [run_of(17, self.sha)], trees={self.sha: tree})
+        self.assert_miss(self.lookup(), "is truncated")
+        self.serve([artifact(self.name, 18)], [run_of(18, self.sha)])
+        del self.repo.answers[f"repos/{REPO}/git/trees/{self.sha}"]
+        self.assertEqual(self.lookup().returncode, 2)
+        self.serve([artifact(self.name, 19)], [run_of(19, self.sha)])
+        del self.repo.answers[f"repos/{REPO}/actions/runs/19/jobs"]
+        self.assertEqual(self.lookup().returncode, 2)
+
+    def test_only_the_events_ci_produces_count(self):
+        refused = {
+            "pull_request_target": run_of(20, self.sha, event="pull_request_target", branch="x"),
+            "workflow_run": run_of(21, self.sha, event="workflow_run"),
+            "a push to another branch": run_of(22, self.sha, branch="feature"),
+            "a dispatch off main": run_of(23, self.sha, event="workflow_dispatch", branch="feature"),
+            "a schedule of ci.yml": run_of(24, self.sha, event="schedule"),
+            "release.yml on a branch": run_of(25, self.sha, RELEASE, referenced=CALLS_CI, branch="main"),
+            "release.yml not calling ci.yml": run_of(26, self.sha, RELEASE, branch="v0.4.1"),
+            "the nightly on a push": run_of(27, self.sha, NIGHTLY, referenced=CALLS_CI),
+            "another workflow": run_of(28, self.sha, ".github/workflows/ci-trace.yml", event="pull_request"),
+        }
+        for label, run in refused.items():
+            with self.subTest(label):
+                self.serve([artifact(self.name, run["id"])], [run],
+                           jobs={run["id"]: [job("alpha"), job("tests / alpha"), job("ci / alpha")]})
+                proc = self.lookup()
+                self.assert_miss(proc, "refused")
+        accepted = {
+            "a same-repository pull request": (run_of(30, self.sha, event="pull_request", branch="feature"), "alpha"),
+            "a dispatch on main": (run_of(31, self.sha, event="workflow_dispatch"), "alpha"),
+            "a release tag": (run_of(32, self.sha, RELEASE, referenced=(f"{REPO}/{CI}@refs/tags/v0.4.1",),
+                                     branch="v0.4.1"), "tests / alpha"),
+            "a release dry run": (run_of(33, self.sha, RELEASE, referenced=CALLS_CI,
+                                         event="workflow_dispatch"), "tests / alpha"),
+            "the nightly": (run_of(34, self.sha, NIGHTLY, referenced=CALLS_CI, event="schedule"), "ci / alpha"),
+        }
+        for label, (run, job_name) in accepted.items():
+            with self.subTest(label):
+                self.serve([artifact(self.name, run["id"])], [run], jobs={run["id"]: [job(job_name)]})
+                self.assert_hit(self.lookup(), run["id"])
+                # A called ci.yml's job carries its caller's prefix, and only that one.
+                if job_name != "alpha":
+                    self.serve([artifact(self.name, run["id"])], [run], jobs={run["id"]: [job("alpha")]})
+                    self.assert_miss(self.lookup(), f"no job '{job_name}'")
 
     def test_no_marker_is_a_miss(self):
         self.serve([], [])
         self.assert_miss(self.lookup(), "no marker")
 
     def test_a_fork_marker_is_refused(self):
-        self.serve([artifact(self.name, 13, head_id=FORK_ID)], [run_of(13, head_id=FORK_ID)])
+        self.serve([artifact(self.name, 40, head_id=FORK_ID)], [run_of(40, self.sha, head_id=FORK_ID)])
         self.assert_miss(self.lookup(), "a fork's run")
         self.assertEqual(len(self.repo.gh_calls()), 1, "a fork's marker is refused before its run is read")
 
     def test_a_fork_run_behind_a_same_repository_artifact_is_refused(self):
-        self.serve([artifact(self.name, 14)], [run_of(14, head_id=FORK_ID)])
+        self.serve([artifact(self.name, 41)], [run_of(41, self.sha, head_id=FORK_ID, event="pull_request")])
         self.assert_miss(self.lookup(), "a fork's run")
 
-    def test_another_workflow_s_marker_is_refused(self):
-        self.serve([artifact(self.name, 15)], [run_of(15, ".github/workflows/ci-trace.yml")])
-        self.assert_miss(self.lookup(), "run of .github/workflows/ci-trace.yml, not .github/workflows/ci.yml")
-
     def test_an_expired_marker_is_refused(self):
-        self.serve([artifact(self.name, 16, expired=True), artifact(self.name, 17, art_id=8, expires=PAST)],
-                   [run_of(16), run_of(17)])
+        self.serve([artifact(self.name, 42, expired=True), artifact(self.name, 43, art_id=8, expires=PAST)],
+                   [run_of(42, self.sha), run_of(43, self.sha)])
         proc = self.lookup()
         self.assert_miss(proc, "expired")
         self.assertIn("past its expiry", proc.stderr)
 
     def test_a_marker_with_another_name_is_refused(self):
-        self.serve([artifact(self.name.replace("alpha", "beta"), 18)], [run_of(18)])
+        self.serve([artifact(self.name.replace("alpha", "beta"), 44)], [run_of(44, self.sha)])
         self.assert_miss(self.lookup(), "named")
 
-    def test_one_good_marker_among_refused_ones_proves_the_gate(self):
-        self.serve([artifact(self.name, 19, art_id=1, head_id=FORK_ID), artifact(self.name, 20, art_id=2)],
-                   [run_of(20)])
-        self.assertEqual(self.lookup().returncode, 0)
+    def test_one_true_marker_among_refused_ones_proves_the_gate(self):
+        self.serve([artifact(self.name, 45, art_id=1, head_id=FORK_ID), artifact(self.name, 46, art_id=2),
+                    artifact(self.name, 47, art_id=3)],
+                   [run_of(46, self.sha), run_of(47, self.sha)],
+                   jobs={46: [job("alpha", "failure")], 47: [job("alpha")]})
+        self.assert_hit(self.lookup(), 47)
 
     def test_a_lookup_error_runs_the_gate(self):
-        self.serve([artifact(self.name, 21)], [run_of(21)])
+        self.serve([artifact(self.name, 48)], [run_of(48, self.sha)])
         cases = {
             "an API error": {"FAKE_GH_FAIL": "1"},
             "no repository id": {"GITHUB_REPOSITORY_ID": ""},
@@ -438,12 +550,12 @@ class Lookup(unittest.TestCase):
                 proc = self.lookup()
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         # The run cannot be read: an error, not a proof.
-        self.serve([artifact(self.name, 22)], [])
+        self.serve([artifact(self.name, 49)], [])
         self.assertEqual(self.lookup().returncode, 2)
 
     def test_an_always_gate_never_skips(self):
         value = self.repo.hash("clock")
-        self.serve([artifact(f"gate-clock-{value}", 23)], [run_of(23)])
+        self.serve([artifact(f"gate-clock-{value}", 50)], [run_of(50, self.sha)])
         proc = self.repo.run("lookup", "clock", value)
         self.assert_miss(proc, "always = true")
         self.assertEqual(self.repo.gh_calls(), [])
@@ -454,16 +566,20 @@ class Lookup(unittest.TestCase):
     def test_decide_hits_only_on_a_proof(self):
         out = self.repo.tools / "out"
         env_file = self.repo.tools / "env"
-        self.serve([artifact(self.name, 24)], [run_of(24)])
+        self.serve([artifact(self.name, 51)], [run_of(51, self.sha)])
         proc = self.repo.run("decide", "alpha", "false", GITHUB_OUTPUT=str(out), GITHUB_ENV=str(env_file))
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        url = f"https://github.com/{REPO}/actions/runs/24"
+        url = f"https://github.com/{REPO}/actions/runs/51"
         self.assertEqual(out.read_text(), f"hit=true\nproof-run={url}\nhash={self.hash}\n")
         self.assertEqual(env_file.read_text(),
                          f"CI_GATE_NAME=alpha\nCI_GATE_HASH={self.hash}\nCI_GATE_HIT=true\n")
         for label, extra, args in (("an API error", {"FAKE_GH_FAIL": "1"}, ["false"]),
+                                   ("forged", {}, ["false"]),
                                    ("forced", {}, ["true"])):
             with self.subTest(label):
+                if label == "forged":
+                    self.serve([artifact(self.name, 52)], [run_of(52, self.sha)],
+                               jobs={52: [job("alpha", "failure")]})
                 out.write_text("")
                 calls = len(self.repo.gh_calls())
                 proc = self.repo.run("decide", "alpha", *args, GITHUB_OUTPUT=str(out), **extra)
