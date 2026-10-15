@@ -3752,6 +3752,18 @@ export interface components {
             /** @description Its UID — a same-named replacement is a different policy. */
             uid?: string | null;
         };
+        /** @description **DUI-50.** `Restore.coverage.positionsMapping`: what the signed scorecard binds about the consumer positions the restore mapped. */
+        PositionsMappingView: {
+            /** @description `true` exactly when the scorecard names a positions mapping document: the restore has positions a switchover can apply. `false` when it binds none: its point captured no consumer group, the plan was not bound to a recovery point, or no document was written (`omitted`). */
+            bound: boolean;
+            /**
+             * Format: uint32
+             * @description The groups the mapping covers, when the scorecard states them.
+             */
+            groups?: number | null;
+            /** @description Why no mapping document was written (`tooLarge` or `writeFailed`). */
+            omitted?: string | null;
+        };
         /** @description An operation-readiness result. */
         Preflight: {
             /**
@@ -4209,6 +4221,8 @@ export interface components {
             covered?: boolean | null;
             /** @description Why `covered` is `false`. */
             incompleteReason?: string | null;
+            /** @description **DUI-50.** Whether the signed scorecard binds a consumer positions mapping, the one fact a switchover's review requires: copied from `status.integrity.positionsMapping`. A CLAIM until the evidence verifies. ABSENT MEANS NOT RECORDED (a controller before this field, or a scorecard not read), never bound and never unbound. */
+            positionsMapping?: components["schemas"]["PositionsMappingView"];
             /** @description What the signed scorecard says it verified — a CLAIM until the evidence verifies. ABSENT MEANS NOT RECORDED (a scorecard before format 1.4.0, a refused run, or one not read yet), never complete. */
             recorded?: components["schemas"]["RestoreCoverage"];
             /** @description What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`. */

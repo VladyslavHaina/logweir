@@ -45,7 +45,10 @@ export function SwitchoverEntry({
         <Content component="p" className={refusal ? "lw-subtle" : undefined}>
           {refusal
             ? `${refusal.body}`
-            : "Verified completely, so the consumer groups its recovery point captured, if any, have positions mapped onto the restored topics. Review them, then move the stopped groups here."}
+            : r.coverage.positionsMapping?.bound
+              ? // DUI-50: the signed scorecard's own binding, when served.
+                `Verified completely, and its signed scorecard maps the positions of ${groupCount(r.coverage.positionsMapping.groups)} onto the restored topics. Review them, then move the stopped groups here.`
+              : "Verified completely, so the consumer groups its recovery point captured, if any, have positions mapped onto the restored topics. Review them, then move the stopped groups here."}
           {refusal && <span className="lw-reason"> {refusal.word}</span>}
         </Content>
         {mine.length > 0 && (
@@ -64,3 +67,8 @@ export function SwitchoverEntry({
     </Card>
   );
 }
+
+function groupCount(n: number | null | undefined): string {
+  return typeof n === "number" ? `${n} consumer group${n === 1 ? "" : "s"}` : "its consumer groups";
+}
+

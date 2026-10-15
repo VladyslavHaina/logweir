@@ -39,7 +39,7 @@ import { When, exactUtc, relative } from "../../components/When";
 import { RestoreDetail, VERDICT_PENDING_SENTENCE } from "./RestoreDetail";
 import { VERDICT_FOLLOW_MS, useVerdictFollow, verdictPending } from "../../api/restores";
 import { CheckStep } from "./WizardSteps";
-import { NO_GROUPS_CAPTURED, cutoverRefusal } from "../cutover/Cutover";
+import { NO_GROUPS_CAPTURED, NO_MAPPING_BOUND, POINT_UNBOUND_REFUSAL, cutoverRefusal, mappingOmitted } from "../cutover/Cutover";
 import backupDoc from "../../../fixtures/console/backup.json";
 import { readinessRefusal, type Preflight } from "./model";
 
@@ -309,6 +309,46 @@ describe("DUI-42: a restore of a point that captured no consumer group", () => {
     // An unknown source (no Backup carries the set id any more) refuses nothing: the review decides.
     expect(cutoverRefusal(restore(), null)).toBeNull();
     expect(cutoverRefusal(restore(), { consumerGroups: [] })?.word).toBe("NoPositionsMapping");
+  });
+});
+
+describe("DUI-50: a switchover is offered only when the scorecard binds a positions mapping", () => {
+  const restore = (positionsMapping?: Record<string, unknown>): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" }, coverage: { ...r.coverage, ...(positionsMapping ? { positionsMapping } : {}) } } as Restore;
+  };
+  const source = (consumerGroups?: string[]) => ({
+    items: [{ ...(backupDoc.item as object), name: "orders-hourly-x", backupId: restore().backupSetRef, ...(consumerGroups ? { consumerGroups } : {}) }],
+    page: { limit: 200 },
+    requestId: "r",
+  });
+
+  it("a complete restore of a plan bound to the backup set only offers no switchover, and says why", async () => {
+    showRestore(restore({ bound: false }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(POINT_UNBOUND_REFUSAL))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    expect(screen.queryByText(/your consumer groups still point at their old positions/)).toBeNull();
+  });
+
+  it("a bound point with groups still offers it (the control), naming the groups its scorecard maps", async () => {
+    showRestore(restore({ bound: true, groups: 2 }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing", "orders-audit"]) });
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(await screen.findByText(/its signed scorecard maps the positions of 2 consumer groups/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain(POINT_UNBOUND_REFUSAL);
+  });
+
+  it("one rule: the binding decides, and the source only picks the sentence", () => {
+    const groups = { consumerGroups: ["g"] };
+    expect(cutoverRefusal(restore({ bound: false }), groups)?.body).toBe(POINT_UNBOUND_REFUSAL);
+    expect(cutoverRefusal(restore({ bound: false }), { consumerGroups: [] })?.body).toBe(NO_GROUPS_CAPTURED);
+    expect(cutoverRefusal(restore({ bound: false }), null)?.body).toBe(NO_MAPPING_BOUND);
+    expect(cutoverRefusal(restore({ bound: false, omitted: "tooLarge" }), groups)?.body).toBe(mappingOmitted("tooLarge"));
+    expect(cutoverRefusal(restore({ bound: false }), groups)?.word).toBe("NoPositionsMapping");
+    // A binding the API serves is the answer; one not recorded (an older controller) leaves the review to decide.
+    expect(cutoverRefusal(restore({ bound: true, groups: 1 }), groups)).toBeNull();
+    expect(cutoverRefusal(restore(), groups)).toBeNull();
+    expect(cutoverRefusal(restore(), null)).toBeNull();
   });
 });
 

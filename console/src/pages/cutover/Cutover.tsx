@@ -88,19 +88,44 @@ import { exactUtc } from "../../components/When";
 /** The words for a restore whose point captured no consumer group (DUI-42). */
 export const NO_GROUPS_CAPTURED = "This point captured no consumer group, so there is nothing to switch over.";
 
+/** DUI-50: the words for a restore whose plan was not bound to a recovery point (the wizard's `POINT_UNBOUND_SENTENCE`). */
+export const POINT_UNBOUND_REFUSAL =
+  "This restore was not bound to a recovery point: its plan names the backup set only, so it maps no consumer group's position and cannot be switched over. To switch over, restore this point from the Recovery catalog once its next sync has listed it.";
+
+/** DUI-50: the words when the scorecard binds no mapping and the reason is not known here. */
+export const NO_MAPPING_BOUND =
+  "This restore's signed scorecard binds no consumer positions mapping: its point captured no consumer group, or the restore was not bound to a recovery point. There is nothing to switch over.";
+
+/** DUI-50: the words when the run wrote no mapping document, with the scorecard's own reason. */
+export function mappingOmitted(reason: string): string {
+  return `This restore wrote no consumer positions mapping (${reason}), so there is nothing a switchover can apply. Restore again to switch consumers over.`;
+}
+
 /**
  * Why this restore cannot be switched over (§3.4's admission), from the restore and, when it
- * is known, the Backup its point came from (`useSourceBackup`): a point whose backup selected
- * no consumer group maps no position, and the review would refuse `NoPositionsMapping`.
- * An unknown source (`undefined` or `null`) refuses nothing: the review decides.
+ * is known, the Backup its point came from (`useSourceBackup`).
+ *
+ * DUI-50, one rule with DUI-42's: a switchover needs the restore's verified scorecard to bind a
+ * positions mapping, the fact the API serves as `coverage.positionsMapping` and the review
+ * itself checks. When it is not bound, the sentence says why: the source Backup selected no
+ * consumer group (DUI-42), or it did and the plan was not bound to a recovery point (DUI-50),
+ * or the run wrote no mapping (its reason). A restore whose binding is not recorded (a
+ * controller before the field) falls back to the source's groups, and an unknown source
+ * refuses nothing: the review decides.
  */
 export function cutoverRefusal(r: Restore, source?: { consumerGroups?: string[] | null } | null): { word: string; title: string; body: string } | null {
   if (r.target.mode === "scratch") return { word: "RestoreIsScratch", title: "A clone cannot be switched over", body: "This restore is a clone (scratch mode): its topics are deleted when it expires, so consumers are never moved onto them." };
   if (!r.operation.terminal) return { word: "RestoreNotSucceeded", title: "The restore has not finished", body: "Positions are mapped when the restore passes its complete verification. Come back when it is verified." };
   if (r.operation.state !== "succeeded" || !r.operation.verifiedSuccess) return { word: "RestoreNotSucceeded", title: "This restore cannot be switched over", body: "Only a restore that succeeded with a verified scorecard has positions to apply." };
-  if (source && !source.consumerGroups?.length) return { word: "NoPositionsMapping", title: "Nothing to switch over", body: NO_GROUPS_CAPTURED };
+  const noGroups = source !== undefined && source !== null && !source.consumerGroups?.length;
+  const mapping = r.coverage.positionsMapping;
+  if (noGroups && mapping?.bound !== true) return { word: "NoPositionsMapping", title: "Nothing to switch over", body: NO_GROUPS_CAPTURED };
   if (r.coverage.recorded !== "complete" || r.coverage.covered === false) {
     return { word: "VerificationNotComplete", title: "No positions to switch over", body: "This restore was not verified completely. Positions are mapped only by a complete verification of every partition; restore again with complete verification to switch consumers over." };
+  }
+  if (mapping && !mapping.bound) {
+    const body = mapping.omitted ? mappingOmitted(mapping.omitted) : source?.consumerGroups?.length ? POINT_UNBOUND_REFUSAL : NO_MAPPING_BOUND;
+    return { word: "NoPositionsMapping", title: "Nothing to switch over", body };
   }
   return null;
 }
