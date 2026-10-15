@@ -583,11 +583,6 @@ async fn the_login_state_the_cookie_and_the_pkce_verifier_are_all_checked() {
     assert!(session_cookie_of(&refused).is_none());
 }
 
-/// **The callback consumes the login cookie: it clears it, so the same browser
-/// does not present it again.** Clearing is advice to the browser; what makes
-/// the `state` single-use against someone who kept a copy is the replica's
-/// record of redeemed states, with the provider's single-use code behind it,
-/// asserted in `tests/sign_in_state.rs`.
 /// DUI-41.7: a second "Sign in again in a new tab" replaced the first sign-in, and
 /// the first tab's callback showed a bare JSON 401 with no way back. A browser
 /// navigation (Accept text/html) that fails the state check now reads a page that
@@ -652,6 +647,77 @@ async fn dui41_a_browser_whose_sign_in_was_replaced_reads_a_page_and_stays_signe
     assert_eq!(idp.token_calls(), 0);
 }
 
+/// Review L9: a browser whose code exchange the provider refuses (a stolen code
+/// without its verifier looks like this) reads the same kind of page: the
+/// variant's code, a fixed sentence and a link to the console. Still 401, no
+/// session, the login cookie cleared.
+///
+/// CONTROL: an API client gets the problem document it got before.
+#[tokio::test]
+async fn a_browser_whose_code_exchange_fails_reads_a_page_and_stays_signed_out() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = app(&idp);
+    for (accept, code) in [
+        (Some("text/html,application/xhtml+xml"), "code-h"),
+        (None, "code-j"),
+    ] {
+        let (_, started) = start_login(&app, "").await;
+        let started = started.expect("login redirects");
+        idp.grant(
+            code,
+            Grant {
+                id_token: key.mint(&claims(&started.nonce)),
+                // A challenge from a DIFFERENT verifier: the provider refuses.
+                code_challenge: Some(MockIdp::challenge("a-verifier-this-login-never-had")),
+                redirect_uri: None,
+            },
+        );
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/auth/callback?code={code}&state={}",
+                started.state
+            ))
+            .header("host", SHARED_HOST)
+            .header("cookie", &started.cookie);
+        if let Some(accept) = accept {
+            request = request.header("accept", accept);
+        }
+        let refused = app.app.send(request.body(Body::empty()).unwrap()).await;
+        assert_eq!(refused.status.as_u16(), 401);
+        assert!(session_cookie_of(&refused).is_none(), "no session");
+        assert!(
+            login_cookie_clear_of(&refused).is_some(),
+            "the attempt is over"
+        );
+        let html = refused
+            .header("content-type")
+            .is_some_and(|t| t.starts_with("text/html"));
+        if accept.is_some() {
+            assert!(html, "{:?}", refused.headers);
+            let text = refused.text();
+            assert!(
+                text.contains("This sign-in was not completed.")
+                    && text.contains("The sign-in could not be completed.")
+                    && text.contains("href=\"/ui/\""),
+                "{text}"
+            );
+        } else {
+            assert!(!html);
+            assert_eq!(
+                refused.json()["detail"],
+                "The sign-in could not be completed."
+            );
+        }
+    }
+}
+
+/// **The callback consumes the login cookie: it clears it, so the same browser
+/// does not present it again.** Clearing is advice to the browser; what makes
+/// the `state` single-use against someone who kept a copy is the replica's
+/// record of redeemed states, with the provider's single-use code behind it,
+/// asserted in `tests/sign_in_state.rs`.
 #[tokio::test]
 async fn a_consumed_login_cookie_is_cleared() {
     let key = TestKey::ec("k-ec-1");

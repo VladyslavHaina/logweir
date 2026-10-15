@@ -367,7 +367,7 @@ export function stateSentence(found: Found, subject: Subject): string {
     case "awaiting-verification":
       return `Approval ${name} is recorded and the controller has not verified it yet. The Restore runs only once it is verified for this Restore's UID.`;
     case "verified":
-      return `The controller verified Approval ${name} against key ${found.key} for Restore ${subject.name} (uid ${subject.uid}).${
+      return `The controller verified Approval ${name} against key ${found.key} for ${found.usedBy?.kind ?? "Restore"} ${subject.name} (uid ${subject.uid}).${
         found.consumedAt ? ` The ${found.usedBy?.kind ?? "Restore"} was admitted under it at ${found.consumedAt}; the verdict is now the record of that admission and authorises nothing else.` : ""
       }`;
     case "revoked-after-use":

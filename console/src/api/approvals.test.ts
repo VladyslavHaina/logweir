@@ -190,7 +190,11 @@ describe("an approval's state", () => {
     };
     const used = recordState(usedSwitchover);
     expect(used).toMatchObject({ state: "verified", usedBy: { kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" } });
-    expect(stateSentence(used, { ...subject, name: "swo-ttusskxkeb5i65k4gx4jd6davm" })).toContain("The Switchover was admitted under it at 2026-09-09T13:01:00Z");
+    const sentence = stateSentence(used, { ...subject, name: "swo-ttusskxkeb5i65k4gx4jd6davm" });
+    expect(sentence).toContain("The Switchover was admitted under it at 2026-09-09T13:01:00Z");
+    // Review L9: the verdict names the Switchover it was verified for, never a Restore.
+    expect(sentence).toContain("for Switchover swo-ttusskxkeb5i65k4gx4jd6davm");
+    expect(sentence).not.toContain("Restore");
     // ...and a verdict no run consumed names none.
     expect(recordState({ ...usedSwitchover, conditions: usedSwitchover.conditions.filter((c) => c.type !== "Consumed") }).usedBy).toBeUndefined();
     const unconsumed = { ...revoked, conditions: revoked.conditions.filter((c) => c.type !== "Consumed") };

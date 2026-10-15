@@ -532,11 +532,17 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
             // provider that has stopped serving this client.
             audit.set_failure(error.code());
             tracing::warn!(reason = %error.code(), detail = %error, "a sign-in was refused");
-            let mut response = ApiError::new(
-                ProblemCode::Unauthenticated,
-                "The sign-in could not be completed.",
-            )
-            .into_response();
+            // A browser reads the page here too (review L9): the variant's code
+            // and a fixed sentence, never the provider's words.
+            let mut response = if browser {
+                refused_sign_in_page(error.code(), "The sign-in could not be completed.")
+            } else {
+                ApiError::new(
+                    ProblemCode::Unauthenticated,
+                    "The sign-in could not be completed.",
+                )
+                .into_response()
+            };
             if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(session::LOGIN_COOKIE))
             {
                 response.headers_mut().append(header::SET_COOKIE, value);
