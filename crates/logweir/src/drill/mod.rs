@@ -4616,33 +4616,46 @@ mod tests {
         );
     }
 
-    /// Every crate name this build compiled, read from the artifact directory
-    /// the test binary lives in. `Cargo.lock` also records optional
-    /// dependencies no feature activates, and a crate never compiled cannot
-    /// emit. Not `cargo tree`, which takes the package-cache lock. Artifact
-    /// names are `lib<crate_name>-<16 hex>.<ext>`, already in module spelling.
+    /// Every library this WORKSPACE's build compiles, by its module spelling,
+    /// as cargo resolves it: `cargo tree --workspace` over normal, build and
+    /// dev edges. `Cargo.lock` also records optional dependencies no feature
+    /// activates, and a crate never compiled cannot emit.
+    ///
+    /// FX-53: this used to list the artifact directory the test binary lives
+    /// in. That directory held every workspace crate's dependencies only after
+    /// a `cargo test --workspace`; CI now runs `-p logweir` on its own runner
+    /// (scripts/ci-check.sh `unit logweir`), where the directory held
+    /// logweir's alone, so the same tree passed one way and failed the other
+    /// (`kube_client`, which weirkeeper compiles). Cargo's own answer is the
+    /// same however the tests were built. It takes the package-cache lock for
+    /// a moment; nothing holds it while tests run.
     fn crates_compiled_into_this_build() -> std::collections::BTreeSet<String> {
-        let exe = std::env::current_exe().expect("the running test binary has a path");
-        let deps = exe
-            .parent()
-            .expect("a test binary lives in <target>/<profile>/deps");
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tree = std::process::Command::new(env!("CARGO"))
+            .current_dir(&workspace)
+            .args([
+                "tree",
+                "--locked",
+                "--workspace",
+                "--edges",
+                "normal,build,dev",
+                "--prefix",
+                "none",
+                "--format",
+                "{lib}",
+            ])
+            .output()
+            .expect("cargo runs");
+        assert!(
+            tree.status.success(),
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&tree.stderr)
+        );
         let mut out = std::collections::BTreeSet::new();
-        for entry in std::fs::read_dir(deps).expect("the deps directory is readable") {
-            let Ok(entry) = entry else { continue };
-            let file = entry.file_name();
-            let file = file.to_string_lossy();
-            let stem = file.split('.').next().unwrap_or("");
-            let Some((name, hash)) = stem.rsplit_once('-') else {
-                continue;
-            };
-            if hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                continue;
-            }
-            // Both spellings: a crate literally named `libc` produces
-            // `liblibc-<hash>.rlib`, and blindly stripping `lib` would hide it.
-            out.insert(name.to_string());
-            if let Some(rest) = name.strip_prefix("lib") {
-                out.insert(rest.to_string());
+        for line in String::from_utf8_lossy(&tree.stdout).lines() {
+            let name = line.trim().trim_end_matches("(*)").trim();
+            if !name.is_empty() {
+                out.insert(name.to_string());
             }
         }
         // Anti-vacuity, and it must PANIC rather than silently narrow to
@@ -4654,7 +4667,7 @@ mod tests {
                 "the compiled-crate scan of {} did not find `{certain}`, which this very binary \
                  links — the scan is broken, and every narrowing below would be vacuous. \
                  Found {} names.",
-                deps.display(),
+                workspace.display(),
                 out.len()
             );
         }
