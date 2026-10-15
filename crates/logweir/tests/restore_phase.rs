@@ -312,6 +312,25 @@ evidence: {{backend: filesystem, path: {evidence}}}
         transcript: String,
     }
 
+    /// Whether a run's transcript shows the plan's bootstrap, `127.0.0.1:19098`, was
+    /// dialled: the ADDRESS form (`:19098`), never the bare digits, which a log
+    /// line's timestamp can carry (`…29.119098Z` flaked the v0.4.0 dry run).
+    fn dialled_the_bootstrap(transcript: &str) -> bool {
+        transcript.contains(":19098")
+    }
+
+    /// F1: a timestamp that carries the port's digits is not a dial, and the
+    /// address is (the claim the rows below make, kept).
+    #[test]
+    fn the_bootstrap_is_matched_by_its_address_never_a_timestamp() {
+        assert!(!dialled_the_bootstrap(
+            "2026-10-14T03:41:29.119098Z INFO phase=0 refused"
+        ));
+        assert!(dialled_the_bootstrap(
+            "BrokerTransportFailure: 127.0.0.1:19098/bootstrap: Connect to ipv4#127.0.0.1:19098 failed"
+        ));
+    }
+
     /// Mount a bundle for `plan_text`, stamp a complete v2 contract over it and
     /// run the real binary. `evidence_keys`, when given, is mounted as
     /// `--evidence-keys` and PINNED by `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256`
@@ -575,7 +594,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
         assert!(
             !run.transcript.contains("BrokerTransportFailure")
                 && !run.transcript.contains("Connection refused")
-                && !run.transcript.contains("19098"),
+                && !dialled_the_bootstrap(&run.transcript),
             "the plan's bootstrap must never be dialled:\n{}",
             run.transcript
         );
@@ -691,7 +710,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
             run.transcript
         );
         assert!(
-            !run.transcript.contains("19098"),
+            !dialled_the_bootstrap(&run.transcript),
             "the plan's bootstrap must never be dialled:\n{}",
             run.transcript
         );
@@ -779,7 +798,8 @@ evidence: {{backend: filesystem, path: {evidence}}}
             );
         }
         assert!(
-            !run.transcript.contains("progress-phase=0:admit") && !run.transcript.contains("19098"),
+            !run.transcript.contains("progress-phase=0:admit")
+                && !dialled_the_bootstrap(&run.transcript),
             "before phase 0, the bootstrap never dialled:\n{}",
             run.transcript
         );
@@ -829,7 +849,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
                 run.transcript
             );
             assert!(
-                !run.transcript.contains("19098"),
+                !dialled_the_bootstrap(&run.transcript),
                 "{backup}: the plan's bootstrap must never be dialled:\n{}",
                 run.transcript
             );
