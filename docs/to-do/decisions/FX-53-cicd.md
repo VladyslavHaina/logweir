@@ -88,6 +88,14 @@ One checked-in file names every gate (job), with:
   4. **the gate's input hash, recomputed over the run's `head_sha` tree** (git trees API or a shallow fetch, with the same selection), equals the requested hash.
 
   So a forged artifact can only assert something already true: this gate's job passed on exactly these inputs.
+
+  **What binds the proof to what ran** (the second security review, of `590aa4cf`):
+  - **Every prover workflow file is a global input**, as `ci.yml` is: `release.yml` and `ci-nightly.yml`. A modified caller, for example one with a fake job named `tests / check`, changes every hash.
+  - **A tag is a tag:** `refs/tags/<name>` exists, matches `^v[0-9]`, and peels to the run's `head_sha`. A branch named `v…` proves nothing.
+  - **One job per name:** a run attempt with two jobs of the gate's name proves nothing.
+  - **A pull-request run tests its merge commit**, so it proves something only when that merge tree is its head tree: its one pull request targets main, and the base is an ancestor of the head and of current main. That rests on main never being force-pushed.
+  - **The runner** is bound by `ci.yml`'s `runs-on`, or by the proving job's labels.
+  - **The requester hashes a clean checkout:** an index or worktree that differs from `HEAD` means the gate runs.
   - **Hit:** the job prints the proving run's URL and succeeds without working.
   - **Miss, refusal, truncated tree or API error:** it works.
 - **Where it lives.** One composite action, `.github/actions/gate`, does both. Every gate job wraps its work in it.
