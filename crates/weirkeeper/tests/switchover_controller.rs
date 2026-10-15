@@ -23,6 +23,12 @@ use weirkeeper::crds::switchover::Switchover;
 use weirkeeper::job::RunnerImage;
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 
+use http::{Request, Response};
+use http_body_util::BodyExt as _;
+use kube::client::Body;
+use std::sync::Mutex;
+use tower::service_fn;
+
 const NS: &str = "logweir-t20";
 const SW: &str = "sw1";
 const SW_UID: &str = "5a5a5a5a-0000-4000-8000-00000000005a";
@@ -171,7 +177,18 @@ fn roster() -> Value {
     })
 }
 
+/// The run's Job, as this controller creates it: controlled by this
+/// Switchover UID.
 fn job() -> Value {
+    let mut j = stranger_job();
+    j["metadata"]["ownerReferences"] = json!([{
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover", "name": SW,
+        "uid": SW_UID, "controller": true, "blockOwnerDeletion": true}]);
+    j
+}
+
+/// A Job someone else made under the Switchover's name.
+fn stranger_job() -> Value {
     json!({
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {"name": SW, "namespace": NS, "uid": "job-uid"},
@@ -470,7 +487,7 @@ async fn a_switchover_whose_job_is_deleted_ends_and_is_not_readmitted() {
 #[tokio::test]
 async fn a_job_someone_else_created_is_not_adopted_and_admits_nothing() {
     let table = vec![
-        route("GET", "/jobs/sw1", 200, job()),
+        route("GET", "/jobs/sw1", 200, stranger_job()),
         route(
             "PATCH",
             "/switchovers/sw1/status",
@@ -559,4 +576,159 @@ fn the_job_step_reads_the_marker_and_the_recorded_job() {
     ] {
         assert_eq!(sw::job_step(Some(&status(s)), job), want, "{case}");
     }
+}
+
+/// One pass over `table`, except that the Job read answers `jobs` in turn (the
+/// last one again after that): the read at the top of the pass, then the read
+/// after a 409 on the Job create.
+async fn pass_with_job_reads(
+    status: Value,
+    table: Vec<Route>,
+    jobs: Vec<(u16, Value)>,
+) -> Vec<SeenBody> {
+    let routes = Arc::new(table);
+    let reads = Arc::new(Mutex::new(0usize));
+    let seen: Arc<Mutex<Vec<SeenBody>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = weirkeeper::testing::recorder();
+    let service = {
+        let seen = Arc::clone(&seen);
+        service_fn(move |request: Request<Body>| {
+            let (routes, reads, seen, recorder, jobs) = (
+                Arc::clone(&routes),
+                Arc::clone(&reads),
+                Arc::clone(&seen),
+                Arc::clone(&recorder),
+                jobs.clone(),
+            );
+            async move {
+                let method = request.method().to_string();
+                let uri = request.uri().to_string();
+                let body = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+                    .unwrap_or_default();
+                seen.lock().expect("seen").push(SeenBody {
+                    method: method.clone(),
+                    uri: uri.clone(),
+                    body,
+                });
+                let path = uri.split('?').next().unwrap_or(&uri).to_string();
+                let response = if method == "GET" && path.ends_with("/jobs/sw1") {
+                    let mut n = reads.lock().expect("reads");
+                    let (status, body) = jobs[(*n).min(jobs.len() - 1)].clone();
+                    *n += 1;
+                    Response::builder()
+                        .status(status)
+                        .body(Body::from(body.to_string().into_bytes()))
+                        .expect("a response")
+                } else {
+                    weirkeeper::testing::answer(&routes, &recorder, &method, &uri)
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        })
+    };
+    let ctx = Arc::new(Context {
+        client: kube::Client::new(service, NS),
+        archive: None,
+        runner_image: RunnerImage::default(),
+    });
+    let object: Switchover = serde_json::from_value(switchover(status)).expect("a Switchover");
+    sw::reconcile(
+        Arc::new(object),
+        ctx,
+        PolicySource::fixed(Arc::new(ApprovalPolicySet::default())),
+    )
+    .await
+    .expect("the pass completes");
+    let out = seen.lock().expect("seen").clone();
+    out
+}
+
+/// **L10: a Job made under the Switchover's name during its admitting pass.**
+/// The pass read no Job, admitted the run (bundle, marker), and its Job
+/// create answered 409: someone created a Job named after it in between. That
+/// Job is read, and it is not this Switchover's (no controller reference to
+/// its UID), so the run ends `Refused`, `JobNameConflict`, and no `jobRef` is
+/// recorded: the next pass never observes it as the run. The Restore twin's
+/// rule.
+///
+/// CONTROL: the controller's own Job (its create landed and the response was
+/// lost, then the pass retried) is used, and `jobRef` recorded.
+#[tokio::test]
+async fn a_job_raced_in_during_admission_is_refused_unless_it_is_this_switchovers() {
+    let not_found = json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                           "reason": "NotFound", "code": 404});
+    let conflict = json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                          "reason": "AlreadyExists", "code": 409});
+    let table = || {
+        let mut t: Vec<Route> = routes(None, None)
+            .into_iter()
+            .filter(|r| !(r.method == "POST" && r.path_suffix == "/jobs"))
+            .collect();
+        t.push(route("POST", "/jobs", 409, conflict.clone()));
+        t
+    };
+    // No owner, and one owner that is another Switchover (a same-named one
+    // deleted and re-created: another UID).
+    let mut other_uid = job();
+    other_uid["metadata"]["ownerReferences"][0]["uid"] = json!("another-switchover-uid");
+    for (case, stranger) in [("no owner", stranger_job()), ("another UID", other_uid)] {
+        let bodies = pass_with_job_reads(
+            json!({}),
+            table(),
+            vec![(404, not_found.clone()), (200, stranger)],
+        )
+        .await;
+        let written = statuses(&bodies);
+        let last = written.last().expect("the refusal");
+        assert_eq!(last["phase"], json!("Refused"), "{case}: {written:?}");
+        assert_eq!(
+            last["reason"],
+            json!("JobNameConflict"),
+            "{case}: {written:?}"
+        );
+        assert!(
+            written.iter().all(|s| s["jobRef"].is_null()),
+            "{case}: a stranger's Job is never recorded as the run: {written:?}"
+        );
+    }
+
+    // CONTROL: the Job under the name is this Switchover's own.
+    let bodies =
+        pass_with_job_reads(json!({}), table(), vec![(404, not_found), (200, job())]).await;
+    let written = statuses(&bodies);
+    let last = written.last().expect("the Job's patch");
+    assert_eq!(last["jobRef"], json!(SW), "{written:?}");
+    assert_eq!(last["phase"], json!("Running"));
+}
+
+/// **L10, the next pass:** an admitted Switchover whose Job under its name is
+/// not controlled by its UID (made after the marker, before the Job) is
+/// refused `JobNameConflict`, and that Job is never observed as the run.
+#[tokio::test]
+async fn an_admitted_switchovers_job_is_observed_only_when_it_is_its_own() {
+    let marker = json!([{"type": "Admitted", "status": "True", "reason": "Admitted",
+                          "lastTransitionTime": "2026-09-09T13:01:00Z"}]);
+    let table = vec![
+        route("GET", "/jobs/sw1", 200, stranger_job()),
+        route(
+            "PATCH",
+            "/switchovers/sw1/status",
+            200,
+            switchover(json!({})),
+        ),
+    ];
+    let bodies = pass(
+        json!({"phase": "Running", "reason": "Admitted", "conditions": marker}),
+        table,
+    )
+    .await;
+    let written = statuses(&bodies);
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["phase"], json!("Refused"));
+    assert_eq!(written[0]["reason"], json!("JobNameConflict"));
+    assert!(written[0]["jobRef"].is_null());
 }

@@ -2658,8 +2658,11 @@ restore's target. Nothing commits a position automatically after a restore.
    A bundle that already exists is used only when it is byte for byte this
    admission's, with this Switchover as its one controller owner; otherwise the
    Switchover ends `Refused`, `ApprovalBundleConflict`, and no Job is created.
-   A Job named after the Switchover that no admission created is not adopted
-   (`Pending`, `SwitchoverJobNotAdmitted`, until it is gone). A run whose Job
+   A Job named after the Switchover before it is admitted is not adopted
+   (`Pending`, `SwitchoverJobNotAdmitted`, until it is gone); once it is
+   admitted, a Job under its name is the run only when its one controller owner
+   reference is this Switchover's UID, and any other ends it `Refused`,
+   `JobNameConflict`, with no `jobRef` (the Restore's check). A run whose Job
    is deleted before it finishes ends `Failed`, `SwitchoverJobLost`, and is
    never admitted again: create a new Switchover and approval.
 7. **The run** verifies the approval, the scorecard's signature and plan hash,

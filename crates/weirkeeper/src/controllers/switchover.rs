@@ -31,9 +31,11 @@
 //!
 //! `Admitted=True` is written once, before the Job, and its time is the
 //! admission instant the approval controller records the Approval consumed at.
-//! A Job named after this Switchover that no admission created is not adopted
-//! ([`JOB_NOT_ADMITTED`]), and a recorded Job that is gone ends the run
-//! ([`JOB_LOST`]): it is never admitted again ([`job_step`]).
+//! A Job named after this Switchover before its admission is not adopted
+//! ([`JOB_NOT_ADMITTED`]); after it, a Job under its name is the run only when
+//! it is this Switchover's own ([`own_job`]), and any other ends it
+//! `JobNameConflict`. A recorded Job that is gone ends the run ([`JOB_LOST`]):
+//! it is never admitted again ([`job_step`]).
 //!
 //! # The run's result
 //!
@@ -176,6 +178,20 @@ pub fn job_step(status: Option<&SwitchoverStatus>, job_exists: bool) -> JobStep 
         (false, _) if recorded => JobStep::Lost,
         (false, _) => JobStep::Admit,
     }
+}
+
+/// Whether a Job named after `sw` is the one this controller created for it:
+/// its one owner reference is this Switchover UID as controller, as
+/// [`job_spec`] writes it (review L10, the Restore twin's
+/// `restore::compatible_restore_job`). A Job anyone made under that name is
+/// never observed as the run. An owner reference can be written by whoever
+/// may create Jobs, so this matches the twin and no more.
+#[must_use]
+pub fn own_job(job: &Job, sw: &Switchover) -> bool {
+    let owners = job.metadata.owner_references.as_deref().unwrap_or_default();
+    job.metadata.name.as_deref() == Some(sw.name_any().as_str())
+        && owners.len() == 1
+        && owners[0] == owner_reference(sw)
 }
 
 /// The admitting patch: `Admitted=True` (its time kept once written, by
@@ -951,8 +967,25 @@ pub async fn reconcile(
             return Ok(Action::await_change());
         }
     }
-    // The run's Job: observe it.
+    // The run's Job: observe it, when it is this Switchover's own.
     if let Some(job) = job {
+        if !own_job(&job, &sw) {
+            warn!(switchover = %name, "a Job named after this Switchover is not controlled by its UID; not adopted");
+            patch_status(
+                &api,
+                &name,
+                &hold_or_refuse(
+                    so::RUN_REFUSED,
+                    crate::conditions::TERMINAL_STATE_JOB_NAME_CONFLICT,
+                    format!(
+                        "the Job {name} is not controlled by this Switchover UID, so it is not \
+                         this run and was not adopted"
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
         let st = job.status.clone().unwrap_or_default();
         if st.succeeded.unwrap_or(0) == 0 && st.failed.unwrap_or(0) == 0 {
             let mut status = sw.status.clone().unwrap_or_default();
@@ -1265,7 +1298,34 @@ pub async fn reconcile(
         .await
     {
         Ok(_) => {}
-        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        // L10: a Job created under this name since the read at the top of this
+        // pass is used only when it is this Switchover's own (the pass that
+        // stopped after creating it); a stranger's is refused, never recorded.
+        Err(kube::Error::Api(e)) if e.code == 409 => match jobs.get_opt(&name).await? {
+            Some(raced) if own_job(&raced, &sw) => {}
+            Some(_) => {
+                warn!(switchover = %name, "a concurrent Job under this name is not this Switchover's");
+                patch_status(
+                    &api,
+                    &name,
+                    &refuse(
+                        crate::conditions::TERMINAL_STATE_JOB_NAME_CONFLICT,
+                        format!(
+                            "the Job {name} won a concurrent create but is not controlled by \
+                             this Switchover UID; it was not adopted"
+                        ),
+                    ),
+                )
+                .await?;
+                return Ok(Action::await_change());
+            }
+            // Deleted between the 409 and the read: the next pass creates it.
+            None => {
+                return Ok(Action::requeue(std::time::Duration::from_secs(
+                    HOLD_REQUEUE_SECS,
+                )))
+            }
+        },
         Err(e) => return Err(e),
     }
     let status = SwitchoverStatus {
