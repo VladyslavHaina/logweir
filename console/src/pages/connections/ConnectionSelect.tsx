@@ -3,8 +3,8 @@
 // is the UID, and a connection that is gone is refused, never replaced.
 import { Alert, FormSelect, FormSelectOption } from "@patternfly/react-core";
 import {
-  PROBE_WORDS,
   preferredConnection,
+  probeShortWords,
   probeState,
   resolveSelection,
   savedConnections,
@@ -14,8 +14,7 @@ import {
 import { Field, ProbeLabels } from "./parts";
 
 export function optionCaption(c: Connection): string {
-  const p = probeState(c.reachability);
-  return `${c.name} (${c.role || "no role"}): connection probe ${PROBE_WORDS[p.verdict].toLowerCase()}${p.stale ? ", stale" : ""}`;
+  return `${c.name} (${c.role || "no role"}): connection probe ${probeShortWords(c.reachability)}`;
 }
 
 export function ConnectionSelect({

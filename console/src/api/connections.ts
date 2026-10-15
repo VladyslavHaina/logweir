@@ -203,6 +203,26 @@ export const PROBE_WORDS: Record<ProbeVerdict, string> = {
   never: "Never probed",
 };
 
+/**
+ * DUI-48.3: a connection's probe in a picker's few words, read as its page reads it
+ * (`probeState`, DUI-31.6). A probe that ran and recorded no reading (Unknown, for example
+ * NoExitCode) says so with its reason, never "not checked yet"; only a connection with no
+ * probe at all reads "not probed yet". A refusal names its reason; a stale reading says so.
+ */
+export function probeShortWords(r: Reachability | undefined, now = Date.now()): string {
+  const p = probeState(r, now);
+  const reason = p.reason ? ` (${p.reason})` : "";
+  const base =
+    p.verdict === "never"
+      ? "not probed yet"
+      : p.verdict === "unknown"
+        ? `last probe recorded no reading${reason}`
+        : p.verdict === "refused"
+          ? `refused${reason}`
+          : PROBE_WORDS[p.verdict].toLowerCase();
+  return `${base}${p.stale ? ", stale" : ""}`;
+}
+
 export const PROBE_SENTENCE =
   "The connection probe is a pod the controller runs on its own cadence: it dialled these brokers once and recorded what happened. It is not a readiness verdict and not a promise about right now. An observation older than 10 minutes is labelled stale, and a connection the controller refused to dial is labelled with its own reason.";
 
