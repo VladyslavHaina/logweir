@@ -229,6 +229,16 @@ fn a_runner_that_vouched_for_no_exit_is_older_than_the_controller() {
             );
         }
     }
+    // Review L2: a CURRENT runner's log that echoes the refusal text (a
+    // library's error the runner logged) beside its sealed lines, with its end
+    // line not read, is not an older runner: an older one seals nothing.
+    let echoed = format!(
+        "{}{older}",
+        inline_lines(every(&t), &["progress-phase=3:target-diff".to_string()])
+    );
+    let lines = own_lines(&JobToken::EveryLine(t.clone()), &echoed);
+    assert!(!lines.runner_is_older(), "{echoed:?}");
+    assert!(lines.no_sealed_end(), "{echoed:?}");
     // NEGATIVE CONTROL: this build's runner, at every code it can exit with.
     for code in 0..=4u8 {
         let lines = own_lines(

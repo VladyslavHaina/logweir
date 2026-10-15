@@ -186,6 +186,7 @@ pub struct RunnerLines {
     every_line: bool,
     exit_vouched: bool,
     flag_refused: bool,
+    sealed_any: bool,
 }
 
 impl RunnerLines {
@@ -220,12 +221,14 @@ impl RunnerLines {
     /// older runner stops. A runner that knows the flag prints `runner-exit=`
     /// at every exit it reaches; one that exited without it and refused
     /// nothing failed before its last lines, or its log was not read whole
-    /// ([`Self::no_sealed_end`]), and is not called older (poc-dui3 O2). Ask
-    /// it only of a log read to its end, of a runner that exited 0 to 4
-    /// ([`vouches_for_exit`]).
+    /// ([`Self::no_sealed_end`]), and is not called older (poc-dui3 O2). And
+    /// the log holds NO sealed line at all: an older runner cannot seal one,
+    /// so a refusal text beside sealed lines is an echo in a current
+    /// runner's log, not evidence (review L2). Ask it only of a log read to
+    /// its end, of a runner that exited 0 to 4 ([`vouches_for_exit`]).
     #[must_use]
     pub fn runner_is_older(&self) -> bool {
-        self.every_line && !self.exit_vouched && self.flag_refused
+        self.every_line && !self.exit_vouched && self.flag_refused && !self.sealed_any
     }
 
     /// The Job carries FX-43's token, the runner printed no sealed
@@ -233,7 +236,7 @@ impl RunnerLines {
     /// observed is only that its end was not seen.
     #[must_use]
     pub fn no_sealed_end(&self) -> bool {
-        self.every_line && !self.exit_vouched && !self.flag_refused
+        self.every_line && !self.exit_vouched && !self.runner_is_older()
     }
 }
 
@@ -281,9 +284,12 @@ pub fn own_lines_binding(token: &crate::job::JobToken, log: &str, bound: &[&str]
     let mut text = String::new();
     let mut exit_vouched = false;
     let mut flag_refused = false;
+    let mut sealed_any = false;
     for line in log.lines().map(|l| l.trim_end_matches('\r')) {
         flag_refused |= refuses_line_token_flag(line);
-        let own = match unseal(t, line) {
+        let sealed = unseal(t, line);
+        sealed_any |= sealed.is_some();
+        let own = match sealed {
             Some(own) if own.starts_with(RUNNER_EXIT_PREFIX) => {
                 exit_vouched = true;
                 continue;
@@ -301,6 +307,7 @@ pub fn own_lines_binding(token: &crate::job::JobToken, log: &str, bound: &[&str]
         every_line: true,
         exit_vouched,
         flag_refused,
+        sealed_any,
     }
 }
 
@@ -327,11 +334,13 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
             let mut text = String::new();
             let mut exit_vouched = false;
             let mut flag_refused = false;
+            let mut sealed_any = false;
             for line in log.lines().map(|l| l.trim_end_matches('\r')) {
                 flag_refused |= refuses_line_token_flag(line);
                 let Some(own) = unseal(t, line) else {
                     continue;
                 };
+                sealed_any = true;
                 if own.starts_with(RUNNER_EXIT_PREFIX) {
                     exit_vouched = true;
                     continue;
@@ -345,6 +354,7 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
                 every_line: true,
                 exit_vouched,
                 flag_refused,
+                sealed_any,
             }
         }
         JobToken::RefusalDetail(t) => RunnerLines {
@@ -353,6 +363,7 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
             every_line: false,
             exit_vouched: false,
             flag_refused: false,
+            sealed_any: false,
         },
         JobToken::None => RunnerLines {
             text: log.to_string(),
@@ -360,6 +371,7 @@ pub fn own_lines(token: &crate::job::JobToken, log: &str) -> RunnerLines {
             every_line: false,
             exit_vouched: false,
             flag_refused: false,
+            sealed_any: false,
         },
     }
 }
