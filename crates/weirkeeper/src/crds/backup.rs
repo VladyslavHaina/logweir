@@ -339,7 +339,10 @@ pub struct FrozenDestination {
     printcolumn = r#"{"name":"EXIT","type":"integer","jsonPath":".status.exitCode","description":"0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed"}"#,
     printcolumn = r#"{"name":"RECORDS","type":"integer","jsonPath":".status.records"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND exitCode 0"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.exitReason","description":"why the run ended: ok, GuardRefused or the guard's own state, ExecutionAlreadyClaimed, OrphanedScorecard, ...; operational when the controller refused the run or the pod left no exit code (FAILED, in -o wide, names that case)"}"#,
+    printcolumn = r#"{"name":"FAILED","type":"string","priority":1,"jsonPath":".status.conditions[?(@.type==\"Failed\")].reason","description":"the Failed condition's reason: the controller's refusal or the crashed-Job case behind an operational REASON"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupSpec {

@@ -154,7 +154,9 @@ pub struct SyncSettings {
     printcolumn = r#"{"name":"AVAILABLE","type":"integer","jsonPath":".status.counts.available"}"#,
     printcolumn = r#"{"name":"SYNCED","type":"date","jsonPath":".status.syncedAt"}"#,
     printcolumn = r#"{"name":"TRUNCATED","type":"boolean","jsonPath":".status.truncated"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","priority":1,"jsonPath":".status.conditions[?(@.type==\"Synced\")].reason","description":"the Synced condition's reason: why the last sync did not finish (PartialScan, DestinationUnusable, ...)"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryCatalogSpec {

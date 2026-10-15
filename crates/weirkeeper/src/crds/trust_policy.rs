@@ -398,7 +398,9 @@ pub struct TrustedKey {
     printcolumn = r#"{"name":"KEYS","type":"integer","jsonPath":".status.keyCount"}"#,
     printcolumn = r#"{"name":"LOADED","type":"string","jsonPath":".status.loaded"}"#,
     printcolumn = r#"{"name":"BOUND","type":"string","jsonPath":".status.boundNamespaces[*]"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","priority":1,"jsonPath":".status.conditions[?(@.type==\"Loaded\")].reason","description":"the Loaded condition's reason: why LOADED is false (UnparseableKey, KeyIdMismatch, AlgorithmMismatch)"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TrustPolicySpec {

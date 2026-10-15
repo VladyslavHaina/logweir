@@ -40,6 +40,11 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: 'the Synced condition''s reason: why the last sync did not finish (PartialScan, DestinationUnusable, ...)'
+      jsonPath: .status.conditions[?(@.type=="Synced")].reason
+      name: REASON
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

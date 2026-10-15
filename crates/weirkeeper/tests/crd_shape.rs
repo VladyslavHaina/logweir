@@ -434,7 +434,11 @@ type Column = (&'static str, &'static str, &'static str);
 /// `Restore`'s `REASON` READS `.status.reason`, NOT `.status.exitReason`:
 /// `exitReason` is written from an exit code, and a refusal the CONTROLLER
 /// makes before any `POST` has none, so every admission refusal would print
-/// `operational`. `Backup` has no `REASON` column.
+/// `operational`. `Backup`'s `REASON` does read `.status.exitReason`: a
+/// `Backup` has no `status.reason`, and its exit reason carries the guard's
+/// own state; the `-o wide` `FAILED` column beside it names the controller's
+/// refusal behind an `operational`. Every column added after the first cut is
+/// appended after `AGE`, so no column a runbook reads by position moves.
 const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
     (
         "KafkaCluster",
@@ -443,6 +447,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("REACHABLE", ".status.reachable", "string"),
             ("CLUSTER-ID", ".status.clusterId", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            ("REASON", ".status.reason", "string"),
         ],
     ),
     (
@@ -458,6 +463,11 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
                 "string",
             ),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            (
+                "REASON",
+                ".status.conditions[?(@.type==\"Ready\")].reason",
+                "string",
+            ),
         ],
     ),
     (
@@ -468,6 +478,12 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("RECORDS", ".status.records", "integer"),
             ("SIGNED", ".status.evidence.verification.result", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            ("REASON", ".status.exitReason", "string"),
+            (
+                "FAILED",
+                ".status.conditions[?(@.type==\"Failed\")].reason",
+                "string",
+            ),
         ],
     ),
     (
@@ -497,6 +513,11 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("APPROVER", ".status.approver", "string"),
             ("KEY-ID", ".status.matchedKeyId", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            (
+                "REASON",
+                ".status.conditions[?(@.type==\"Verified\")].reason",
+                "string",
+            ),
         ],
     ),
     (
@@ -520,6 +541,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
                 "string",
             ),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            ("REASON", ".status.reason", "string"),
         ],
     ),
     (
@@ -531,6 +553,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("TOPICS", ".status.result.counts.returned", "integer"),
             ("OBSERVED", ".status.observedAt", "date"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            ("REASON", ".status.reason", "string"),
         ],
     ),
     (
@@ -541,6 +564,7 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("RESULT", ".status.result.state", "string"),
             ("EXPIRES", ".status.result.expiresAt", "date"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            ("REASON", ".status.reason", "string"),
         ],
     ),
     (
@@ -551,6 +575,11 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("LOADED", ".status.loaded", "string"),
             ("BOUND", ".status.boundNamespaces[*]", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            (
+                "REASON",
+                ".status.conditions[?(@.type==\"Loaded\")].reason",
+                "string",
+            ),
         ],
     ),
     (
@@ -576,6 +605,11 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 14] = [
             ("SYNCED", ".status.syncedAt", "date"),
             ("TRUNCATED", ".status.truncated", "boolean"),
             ("AGE", ".metadata.creationTimestamp", "date"),
+            (
+                "REASON",
+                ".status.conditions[?(@.type==\"Synced\")].reason",
+                "string",
+            ),
         ],
     ),
     (
@@ -714,6 +748,50 @@ fn the_printer_columns_are_exactly_the_briefs_table() {
              and type, IN ORDER"
         );
     }
+}
+
+/// The `-o wide` columns, as `(kind, NAME)`: `priority: 1`. Every other
+/// column is in the default view (no `priority`, or `0`).
+///
+/// A guard refusal's REASON is the default view's job (`kubectl get backups`
+/// must say `GuardRefused`, poc-dui O1); the condition reason behind an
+/// `operational` Backup and the standing objects' reasons are `-o wide`.
+const WIDE_COLUMNS: [(&str, &str); 4] = [
+    ("Backup", "FAILED"),
+    ("BackupSchedule", "REASON"),
+    ("TrustPolicy", "REASON"),
+    ("RecoveryCatalog", "REASON"),
+];
+
+#[test]
+fn only_the_wide_columns_carry_a_priority() {
+    let mut got: Vec<(String, String)> = Vec::new();
+    for (kind, _file, doc) in &rendered() {
+        let empty: Vec<Value> = Vec::new();
+        let cols = sole_version(kind, doc)
+            .get("additionalPrinterColumns")
+            .and_then(Value::as_sequence)
+            .unwrap_or(&empty);
+        for c in cols {
+            let priority = c.get("priority").and_then(Value::as_i64).unwrap_or(0);
+            if priority != 0 {
+                assert_eq!(priority, 1, "{kind}: a wide column is priority 1; got {c:?}");
+                let name = c.get("name").and_then(Value::as_str).unwrap_or_default();
+                got.push((kind.to_string(), name.to_string()));
+            }
+        }
+    }
+    got.sort();
+    let mut want: Vec<(String, String)> = WIDE_COLUMNS
+        .iter()
+        .map(|(k, n)| (k.to_string(), n.to_string()))
+        .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "the -o wide columns are exactly these; a REASON moved out of the default view hides \
+         a refusal from `kubectl get`"
+    );
 }
 
 /// Every kind declares `subresources.status`, and losing it is otherwise

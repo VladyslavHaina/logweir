@@ -37,6 +37,10 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: 'the Verified condition''s reason: why VERIFIED is false (AuthorizationExpired, ApprovalPolicyMismatch, KeyRevoked, ...)'
+      jsonPath: .status.conditions[?(@.type=="Verified")].reason
+      name: REASON
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
