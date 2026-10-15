@@ -38,6 +38,10 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: 'the reason of the condition the controller wrote last: why a Failed preflight produced no result'
+      jsonPath: .status.reason
+      name: REASON
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

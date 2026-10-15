@@ -1251,6 +1251,69 @@ async fn a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_
     assert_eq!(outside.reason(), "AuthorizationExpired", "{outside:?}");
 }
 
+/// **F4 (poc-dui2 O2): an expired record across a lifted binding keeps its
+/// reason and its `lastTransitionTime`.** An upgrade lifts the binding (the
+/// namespace resolves to the legacy mode, which refuses a v2 document
+/// `ApprovalPolicyMismatch`) and restores it. The expired record is not
+/// judged again: both passes compute the stored status byte for byte, so
+/// nothing is written.
+///
+/// CONTROL: a live (verified, unexpired) record IS judged under the lifted
+/// binding: `ApprovalPolicyMismatch`.
+///
+/// KILLS: [`approval::keep_expired`] removed (the lifted pass writes
+/// `ApprovalPolicyMismatch`, the restored one `AuthorizationExpired` with a
+/// new transition time).
+#[tokio::test]
+async fn f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding() {
+    let live = verified_ordinary().await;
+    let (expired, _) = decide_over(&live, restore_body(), after_expiry()).await;
+    assert_eq!(expired.reason(), "AuthorizationExpired");
+    let mut stored = live.clone();
+    stored.status = Some(approval::status_for(&live, &expired, after_expiry()));
+    let stored_json = serde_json::to_value(stored.status.as_ref()).ok();
+    let ltt = condition(stored.status.as_ref().expect("a status"), "Verified").last_transition_time;
+
+    let (client, _recorder) = mock_client_recording(routes_over(restore_body()));
+    for (label, policies, when) in [
+        (
+            "lifted",
+            ApprovalPolicySet::default(),
+            after_expiry() + Duration::hours(1),
+        ),
+        (
+            "restored",
+            bind("team-ordinary"),
+            after_expiry() + Duration::hours(2),
+        ),
+    ] {
+        let outcome = approval::decide_with_policy_at(&stored, &client, &policies, when)
+            .await
+            .expect("a verdict");
+        assert_eq!(outcome.reason(), "AuthorizationExpired", "{label}");
+        let status = approval::status_for(&stored, &outcome, when);
+        assert_eq!(
+            condition(&status, "Verified").last_transition_time,
+            ltt,
+            "{label}"
+        );
+        assert!(
+            weirkeeper::conditions::status_unchanged(
+                stored_json.as_ref(),
+                &approval::status_patch_body(&status)
+            ),
+            "{label}: nothing is written"
+        );
+    }
+
+    // CONTROL: a live record is judged by the lifted binding.
+    let outcome =
+        approval::decide_with_policy_at(&live, &client, &ApprovalPolicySet::default(), now())
+            .await
+            .expect("a verdict");
+    assert_eq!(outcome.reason(), "ApprovalPolicyMismatch", "{outcome:?}");
+}
+
 // DUI-43: a Switchover consumes its Approval, as a Restore does.
 //
 // Its approval was judged again on every pass: about fifteen minutes after a

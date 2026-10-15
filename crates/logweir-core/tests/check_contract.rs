@@ -3406,3 +3406,69 @@ fn dui26_kafka_names_in_typed_fields_survive_and_free_text_stays_redacted() {
     }
     assert!(!is_relayable_group_id(&"g".repeat(256)));
 }
+
+/// **F5 (DUI-26's follow-up): a long topic name in a row's own words is the
+/// name.** The template's topic position (`topic `x``, and each name of a
+/// `topics `a`, `b`` list) keeps a legal name of 40 or more characters whole,
+/// in the free-text redactor every pass runs: `redact` (the runner's
+/// `with_message`, the controller's `sanitise` and `entry_of`) and
+/// `clean_message` (a refusal's sentence, runner and reader).
+///
+/// CONTROLS, the security property: a token-shaped run anywhere else is
+/// `[redacted]` (bare, in another backtick position, after `subtopic`); in the
+/// topic position, an AWS secret key (not a legal name: `/`, `+`) and an
+/// access key id planted in a legal name are removed; a list stops at the
+/// first span that is not a name.
+///
+/// KILLS: the position ignored (the defect); every backtick span kept; the
+/// legal-name check on a kept span dropped.
+#[test]
+fn f5_a_long_topic_name_in_the_template_position_survives_and_tokens_do_not() {
+    use logweir_core::check_contract::{redact, REDACTED};
+    use logweir_core::refusal_detail::clean_message;
+    let topic = "rc2r-rc1-settlement-ledger-eu-west-1-orders-partitioned";
+    let other = "rc2r-rc1-settlement-ledger-eu-west-1-payments-partitioned";
+    let token = "ghp_0123456789abcdefABCDEF0123456789abcdef";
+    assert!(topic.len() >= 40 && token.len() >= 40);
+    for clean in [redact as fn(&str) -> String, clean_message] {
+        let one = clean(&format!(
+            "topic `{topic}` does not exist on the source (the broker answered \
+             UNKNOWN_TOPIC_OR_PARTITION)"
+        ));
+        assert!(
+            one.starts_with(&format!("topic `{topic}` does not exist")),
+            "{one}"
+        );
+        let list = clean(&format!(
+            "topics `{topic}`, `{other}` do not exist on the source (2 of the 3 selected)"
+        ));
+        assert!(list.contains(&format!("`{topic}`, `{other}`")), "{list}");
+        let mapped = clean(&format!("mapped target topic `{topic}` already exists"));
+        assert!(mapped.contains(topic), "{mapped}");
+
+        // CONTROLS.
+        for text in [
+            format!("the store answered {token}"),
+            format!("key `{token}` was refused"),
+            format!("subtopic `{token}` was refused"),
+            format!("topic `{topic}`, then {token}"),
+            format!("topics `{topic}`, `wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY`"),
+        ] {
+            let out = clean(&text);
+            assert!(!out.contains(token) && !out.contains("EXAMPLEKEY"), "{out}");
+            assert!(out.contains(REDACTED), "{out}");
+        }
+        let planted = format!("restore-o-AKIA{}", "FAKE".repeat(4));
+        let out = clean(&format!("topic `{planted}` does not exist"));
+        assert!(!out.contains("AKIA"), "{out}");
+        // The bare name, in no position, is still free text.
+        assert_eq!(clean(topic), REDACTED);
+        // ACCEPTED RESIDUAL (review L1): a slash-free token in the topic
+        // position is a legal topic name and is KEPT. Only a topic name is ever
+        // interpolated there (`topic_name_spans`' invariant); the redactor
+        // cannot tell such a token from a name.
+        let slash_free = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+        let kept = clean(&format!("topic `{slash_free}` does not exist"));
+        assert!(kept.contains(slash_free), "{kept}");
+    }
+}

@@ -670,7 +670,12 @@ refusal; a refused render changes nothing:
 
 **Roles come from the ID token's `groups` claim alone** (scopes `openid profile
 email groups`; `email` names a requester to an approver only when the provider
-marks it verified, `email_verified: true`, and is never an authorization input). A user with no bound group sees no namespace (`404`). Per provider:
+marks it verified, `email_verified: true`, and is never an authorization input). A user with no bound group sees no namespace (`404`).
+A provider that refuses one of those scopes takes `api.console.oidc.scopes`
+(a list that must hold `openid`, for example `[openid, profile, groups]`);
+`api.console.oidc.displayNameClaim: name` shows a requester's name, marked
+unverified (most providers let a user set it). Both empty: the defaults above,
+no name. Per provider:
 
 - **Dex:** the connector supplies groups (LDAP `groupSearch`, GitHub
   `orgs`/`teams`, an OIDC upstream with `insecureEnableGroups: true`);

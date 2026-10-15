@@ -384,7 +384,9 @@ pub struct PreflightRequest {
     printcolumn = r#"{"name":"PHASE","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"RESULT","type":"string","jsonPath":".status.result.state","description":"ready, notReady or unknown — advisory, never authorization"}"#,
     printcolumn = r#"{"name":"EXPIRES","type":"date","jsonPath":".status.result.expiresAt"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the reason of the condition the controller wrote last: why a Failed preflight produced no result"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct PreflightSpec {

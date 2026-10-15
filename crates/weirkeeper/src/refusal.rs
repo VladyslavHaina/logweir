@@ -86,12 +86,19 @@ pub enum RunnerReason {
     /// so the lines that would carry the reason were not read.
     TailOverBound,
     /// **FX-43's mixed pair, named**: the Job carries FX-43's token, the
-    /// runner exited through its own code, and no line of its log, read to
-    /// its end, is the sealed `runner-exit=` a runner at least as new as this
-    /// controller always prints ([`RunnerLines::runner_is_older`]). The
-    /// runner image is older than the controller, and nothing from its log
-    /// is read. At ANY exit code 0 to 4, not only 3.
+    /// runner exited through its own code, no line of its log, read to its
+    /// end, is the sealed `runner-exit=` a runner at least as new as this
+    /// controller always prints, and the log shows it refusing the token flag
+    /// ([`RunnerLines::runner_is_older`]). The runner image is older than the
+    /// controller, and nothing from its log is read. At ANY exit code 0 to 4,
+    /// not only 3.
     RunnerOlderThanController,
+    /// The same Job and exit WITHOUT that evidence
+    /// ([`RunnerLines::no_sealed_end`]): the runner printed no sealed
+    /// `runner-exit=` and refused nothing, so it stopped before its last lines
+    /// or its log was not read whole. Said as observed, with the exit code;
+    /// the sealed lines it did print are still read (poc-dui3 O2).
+    NoSealedEnd(i32),
     /// The pod is gone: the log read answered 404.
     PodGone,
     /// The log read was refused or failed. `status` is the HTTP status, or
@@ -132,12 +139,18 @@ impl RunnerReason {
                 TERMINAL_LOG_LIMIT_BYTES / 1024
             ),
             Self::RunnerOlderThanController => format!(
-                "; {}: the runner printed no line sealed with this Job's line token, which \
-                 every runner at least as new as this controller does, so the runner image is \
-                 older than the controller (an older one stops at the unknown argument `{}`). \
+                "; {}: the runner refused the argument `{}` and printed no line sealed with \
+                 this Job's line token, so the runner image is older than the controller. \
                  Nothing from its log was read. Upgrade the runner image to the controller's \
                  version (the chart's `runnerImage`), or roll the controller back with it",
                 logweir_core::runner_line::RUNNER_OLDER_THAN_CONTROLLER,
+                logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
+            ),
+            Self::NoSealedEnd(code) => format!(
+                "; the runner exited {code} without its sealed `{}` line, and its log does not \
+                 show it refusing `{}`: it stopped before its last lines, or the log was not \
+                 read whole",
+                logweir_core::runner_line::RUNNER_EXIT_PREFIX,
                 logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
             ),
             Self::PodGone => {
@@ -274,14 +287,23 @@ impl RefusalLog {
 /// The runner's reason from the lines its Job's token vouches for
 /// ([`runner_log::own_lines`]), at an exit code `exit_code`: the mixed pair
 /// named ([`RunnerReason::RunnerOlderThanController`]) when the runner
-/// vouched for no exit it reached through its own code, else
-/// [`runner_reason`] over those lines. Pure.
+/// vouched for no exit it reached through its own code and refused the token
+/// flag, else [`runner_reason`] over those lines, and
+/// [`RunnerReason::NoSealedEnd`] when that finds nothing and the runner's end
+/// was not seen. Pure.
 #[must_use]
 pub fn reason_of(run: RefusingRun, exit_code: i32, lines: &RunnerLines) -> RunnerReason {
     if runner_log::vouches_for_exit(exit_code) && lines.runner_is_older() {
         return RunnerReason::RunnerOlderThanController;
     }
-    runner_reason(run, lines.token(), lines.text())
+    match runner_reason(run, lines.token(), lines.text()) {
+        RunnerReason::NotStated
+            if runner_log::vouches_for_exit(exit_code) && lines.no_sealed_end() =>
+        {
+            RunnerReason::NoSealedEnd(exit_code)
+        }
+        reason => reason,
+    }
 }
 
 /// The bytes an exit-3 log read returned, as the [`RefusalLog`] they mean —

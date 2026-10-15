@@ -118,7 +118,9 @@ pub struct VerifiedSubjectRef {
     printcolumn = r#"{"name":"VERIFIED","type":"string","jsonPath":".status.verified"}"#,
     printcolumn = r#"{"name":"APPROVER","type":"string","jsonPath":".status.approver"}"#,
     printcolumn = r#"{"name":"KEY-ID","type":"string","jsonPath":".status.matchedKeyId"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.conditions[?(@.type==\"Verified\")].reason","description":"the Verified condition's reason: why VERIFIED is false (AuthorizationExpired, ApprovalPolicyMismatch, KeyRevoked, ...)"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalSpec {

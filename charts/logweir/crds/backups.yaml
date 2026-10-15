@@ -39,6 +39,15 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: 'why the run ended: ok, GuardRefused or the guard''s own state, ExecutionAlreadyClaimed, OrphanedScorecard, ...; operational when the controller refused the run or the pod left no exit code (FAILED, in -o wide, names that case)'
+      jsonPath: .status.exitReason
+      name: REASON
+      type: string
+    - description: 'the Failed condition''s reason: the controller''s refusal or the crashed-Job case behind an operational REASON'
+      jsonPath: .status.conditions[?(@.type=="Failed")].reason
+      name: FAILED
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

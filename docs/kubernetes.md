@@ -336,7 +336,13 @@ kubectl --context docker-desktop get backup <name> \
   -o jsonpath='{.status.exitCode} {.status.exitReason}{"\n"}'
 ```
 
-The `EXIT` column is why `kubectl get backups` is worth running. The full table
+The `EXIT` column is why `kubectl get backups` is worth running; `REASON`
+(`status.exitReason`) says why the run ended, for example `GuardRefused`, and
+`-o wide` adds `FAILED`, the controller's reason behind an `operational`. Every
+kind whose status holds its reason prints it the same way (`REASON` on
+`kafkaclusters`, `preflights`, `topicdiscoveries`, `backupdestinations`,
+`approvals`; with `-o wide` on `backupschedules`, `trustpolicies`,
+`recoverycatalogs`). The full table
 of exit codes, `exitReason` values and terminal reasons is in
 [reference.md](reference.md#backup-exit-code-to-status). **A green `Backup`** is `phase: Succeeded`,
 `exitCode: 0`, `Complete=True` and `status.evidence.verification.result: Valid`.
@@ -1556,7 +1562,10 @@ the secret-shape rules apply to it and the 40-character rule does not, so a long
 name arrives whole. That covers a legal topic name (`[a-zA-Z0-9._-]`, at most
 249) under a details line's `topic` or `mappedTopicExists`, a row's topic
 sample and a catalog entry's topic `name`, and a group id (printable ASCII, at
-most 255 bytes) under `group`, `target` or a catalog entry's `groupId`.
+most 255 bytes) under `group`, `target` or a catalog entry's `groupId`. In a
+message, a legal topic name in backticks right after the word `topic` or
+`topics` (and each further name of that list) is kept the same way, so "topic
+`x` does not exist on the source" names a long `x`.
 Anything else under those keys, and every other string, is redacted as before.
 Every row code is in
 [reference.md](reference.md#preflight-rows).

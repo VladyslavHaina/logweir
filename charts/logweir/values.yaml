@@ -193,6 +193,8 @@ api:
       clientSecret: ""          # the NAME of a Secret with key `clientSecret`
       caBundle: { configMap: "", secret: "", key: ca.crt }  # a PRIVATE issuer CA, added to the system roots
       systemRoots: true         # false: trust caBundle alone
+      scopes: []                # empty: the API's [openid, profile, email, groups]; a list must hold openid
+      displayNameClaim: ""      # empty: no name read; e.g. `name` (self-asserted at most providers)
     roles:
       revision: ""              # shared: recorded in every audit line
       bindings: []              # [{role, namespace, groups, subjects}] — EXACT strings

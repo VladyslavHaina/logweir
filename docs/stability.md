@@ -201,8 +201,9 @@ RunnerOlderThanController` on a `Restore` or `Backup` (a schedule does not
 retry it), reason `RunnerOlderThanController` and `reachable` cleared on a
 `KafkaCluster`, `CheckContractMismatch` naming it on a check, and
 `lastEnforcement.refusalCode: RunnerOlderThanController` on a retention run
-(nothing deleted). The same name is given to any run whose runner exited 0 to 4
-and printed no sealed `runner-exit=` line. Upgrade the runner image to the
+(nothing deleted). The name needs that refusal in the log: a run whose runner
+exited 0 to 4 with no sealed `runner-exit=` line and no refusal of the flag
+says only that its end was not seen, with the exit code. Upgrade the runner image to the
 controller's version; to roll back, move both together or the controller
 first. What it looks like and what to do are in
 [the guide](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).

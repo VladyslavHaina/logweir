@@ -3004,6 +3004,14 @@ fn teardown(
                 false
             }
         };
+        // What the attestation says it removed, on the same condition as
+        // `teardown-key=`, sealed: the controller copies it to
+        // `status.teardown.deleted` (F2).
+        if persisted {
+            crate::exit::print_lines(&logweir_core::execution_contract::teardown_deleted_lines(
+                &a.topics_deleted,
+            ));
+        }
         Ok((a, persisted))
     });
     // The notes go on AFTER `record` returns, because `record` pushes the

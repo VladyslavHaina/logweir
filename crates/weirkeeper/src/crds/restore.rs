@@ -1290,7 +1290,10 @@ pub struct TeardownFailure {
 /// exact names it created, through a deleter that refuses any name outside the
 /// run's prefix. The controller writes `failed` from the runner's
 /// `teardown-failed=` line (FX-44), on a run that passed and on one that
-/// failed after its creation step. For a TTL clone it also
+/// failed after its creation step. When phase 9 attested, it writes
+/// `attestationKey`, `deleted` and `deletedCount` from the runner's sealed
+/// `teardown-key=` and `teardown-deleted=` lines; a runner older than those
+/// lines leaves them absent. For a TTL clone it also
 /// copies `deleted`, `failed` and `attestationKey` from its cleanup Job's
 /// `clone-cleanup=` line.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

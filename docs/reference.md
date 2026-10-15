@@ -42,7 +42,7 @@ Neither returns 2 or 4.
 | 2 | `Failed` | `drill-not-pass` | `Failed=True`, `DrillNotPass` | Not produced by `backup run`; one vocabulary across both paths |
 | 3 | `Failed` | the state on `refusal-reason=`, or `GuardRefusedUnknownReason` | `Failed=True`, `GuardRefused` | A guard refused; the message ends with the runner's reason |
 | 4 | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` | `Failed=True`, `SigningOrLock` | Nothing uploaded. `ExecutionClaimUnproven`: the store refused the claim, does not enforce conditional create, or the archive could not be read for a reason no retry changes |
-| 0 to 4 | `Failed` (`Succeeded` at 0) | `RunnerOlderThanController` | the exit code's | The Job carries `--runner-line-token` and its runner printed no sealed `runner-exit=` line: the runner image is older than the controller (an older one stops at the flag, exit 1). Nothing of its log is read; never retried ([sealed lines](#sealed-lines-fx-43)) |
+| 0 to 4 | `Failed` (`Succeeded` at 0) | `RunnerOlderThanController` | the exit code's | The Job carries `--runner-line-token`, its runner printed no sealed `runner-exit=` line, and its log shows it refusing the flag (an older one stops there, exit 1): the runner image is older than the controller. Nothing of its log is read; never retried ([sealed lines](#sealed-lines-fx-43)) |
 | absent | `Failed` | `operational` | `Failed=True`, `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` / `VolumeMountFailed` / `CredentialReferenceMissing` / `RunnerImageUnavailable` / `PodCreationForbidden` / `PodOwnershipContested` | The runner reported no terminated state |
 | absent | `Failed` | `operational` | `Failed=True`, a refusal before any Job: `NameTooLong`, `ExecutionSpecInvalid`, `ScheduledIdentityMismatch`, `ScheduleNotFound`, `RunPolicyDigestMismatch`, `InvalidTopicSelection`, `GuardRefused` (a glob), `ReferentNotFound`, `CredentialNotRenderable`, `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `PlainWithoutTls`, `ArchiveUrlUnreadable`, `PlanConfigMapConflict`, `JobNameConflict`, `SelectionTooLarge`, `OwnerDetectionFailed`, and the dynamic-selection reasons | Nothing was created |
 
@@ -83,7 +83,7 @@ condition's reason.
 | `ApprovalBundleConflict` | The approval bundle was made by another controller; delete and re-create |
 | `ApprovalBundleMaterializationFailed` | Held: a bundle key cannot sign anything new under its usage |
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
-| `RunnerOlderThanController` | Exit 0 to 4 with no sealed `runner-exit=` line: the runner image is older than the controller ([sealed lines](#sealed-lines-fx-43)) |
+| `RunnerOlderThanController` | Exit 0 to 4 with no sealed `runner-exit=` line and the runner's refusal of `--runner-line-token` in the log: the runner image is older than the controller ([sealed lines](#sealed-lines-fx-43)) |
 | `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PointInTimeSelectionIncomplete`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
 | `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point's receipt key outside the plan's own set, and a receipt that is absent, has other bytes or is over the cap, are one exit-3 `PointBindingMismatch` (FX-36); a receipt or manifest the store could not read, and a missing manifest, are exit 1 |
 
@@ -141,13 +141,16 @@ it holds (`logweir_core::runner_line::one_line`).
   the flag stops at argument parsing (`error: unexpected argument
   '--runner-line-token' found`, exit 1; the retention worker exits 3 with
   `retention-refusal=UnknownArgument`) before any work. A Job with the flag
-  whose runner exited 0 to 4 and printed no sealed `runner-exit=` is
-  `exitReason: RunnerOlderThanController` (a probe: reason
+  whose runner exited 0 to 4, printed no sealed `runner-exit=` and refused
+  the flag is `exitReason: RunnerOlderThanController` (a probe: reason
   `RunnerOlderThanController`, `reachable` cleared; a check:
   `CheckContractMismatch` whose message names it; a retention run:
   `lastEnforcement.refusalCode: RunnerOlderThanController`, nothing deleted);
   nothing of its log is read, and a schedule does not retry it. A kill (137,
-  143) or a panic (101) is never named so.
+  143) or a panic (101) is never named so. Nor is a runner that printed no
+  sealed `runner-exit=` WITHOUT refusing the flag (it stopped before its last
+  lines, or its log was not read whole): its status says that, with the exit
+  code, and the sealed lines it did print are read.
 - **A Job an older controller built is read as that controller read it**:
   with FX-34's `--line-token`, only `refusal-detail=` by its JSON token; with
   no token, every reader's own rules over the whole tail.

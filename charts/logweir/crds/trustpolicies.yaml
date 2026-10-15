@@ -37,6 +37,11 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
+    - description: 'the Loaded condition''s reason: why LOADED is false (UnparseableKey, KeyIdMismatch, AlgorithmMismatch)'
+      jsonPath: .status.conditions[?(@.type=="Loaded")].reason
+      name: REASON
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

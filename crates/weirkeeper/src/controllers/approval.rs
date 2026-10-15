@@ -1698,6 +1698,62 @@ pub async fn decide_with_policy_at(
     policies: &ApprovalPolicySet,
     now: DateTime<Utc>,
 ) -> Result<ApprovalOutcome, ReconcileError> {
+    let outcome = judge(approval, client, policies, now).await?;
+    Ok(keep_expired(approval, outcome))
+}
+
+/// **An expired authorization stays expired** (F4): the stored
+/// `Verified=False/AuthorizationExpired` of this generation is kept, message
+/// and `lastTransitionTime` included, over any fresh outcome but a consumed
+/// one.
+///
+/// A document's `expiresAt` is signed and the clock only moves on, so nothing
+/// but a new document can undo it, and every later refusal of that document is
+/// a refusal of an expired one. Re-judging it named whatever the moment said:
+/// during an upgrade's lifted binding the namespace resolves to the legacy
+/// mode, which wrote `ApprovalPolicyMismatch` over every expired record and
+/// then `AuthorizationExpired` back with a new `lastTransitionTime`
+/// (poc-dui2 O2). A fresh `Verified` (a clock set back) is not let through
+/// either: the safe side. A consumed outcome wins, so the repair of a record an
+/// earlier build rewrote after its admission still runs. Pure.
+#[must_use]
+pub fn keep_expired(approval: &Approval, outcome: ApprovalOutcome) -> ApprovalOutcome {
+    if outcome.is_consumed() {
+        return outcome;
+    }
+    let expired = ApprovalRefusal::AuthorizationExpired {
+        detail: String::new(),
+    }
+    .reason();
+    let stored = approval
+        .status
+        .as_ref()
+        .filter(|s| s.verified == Some(false));
+    match stored.and_then(|s| current_condition(s.conditions.as_ref(), CONDITION_VERIFIED)) {
+        Some(c)
+            if c.status == "False"
+                && c.reason.as_deref() == Some(expired)
+                && c.observed_generation == approval.metadata.generation =>
+        {
+            match &c.message {
+                Some(detail) => ApprovalOutcome::Refused(ApprovalRefusal::AuthorizationExpired {
+                    detail: detail.clone(),
+                }),
+                None => outcome,
+            }
+        }
+        _ => outcome,
+    }
+}
+
+/// [`decide_with_policy_at`] before [`keep_expired`]: the verdict as this
+/// moment judges it.
+async fn judge(
+    approval: &Approval,
+    client: &kube::Client,
+    policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
+) -> Result<ApprovalOutcome, ReconcileError> {
     let name = approval.name_any();
     let namespace = approval
         .namespace()

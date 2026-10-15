@@ -933,6 +933,55 @@ pub fn teardown_failed_lines(failed: &[(String, String)]) -> Vec<String> {
     vec![list, format!("{TEARDOWN_FAILED_COUNT_PREFIX}{count}")]
 }
 
+/// `teardown-deleted=["drill-a",…]`: the topics phase 9 removed, printed
+/// with `teardown-deleted-count=<n>` only when phase 9's attestation was put
+/// (the condition `teardown-key=` has). The list carries at most
+/// [`TEARDOWN_FAILED_MAX_TOPICS`] Kafka-legal names; the count says how many.
+/// The controller copies them to `Restore.status.teardown.deleted` and
+/// `deletedCount`, from sealed lines only.
+pub const TEARDOWN_DELETED_PREFIX: &str = "teardown-deleted=";
+/// See [`TEARDOWN_DELETED_PREFIX`].
+pub const TEARDOWN_DELETED_COUNT_PREFIX: &str = "teardown-deleted-count=";
+
+/// The two `teardown-deleted` lines for `deleted`. An empty list is still two
+/// lines (`[]`, `0`): an attested teardown that removed nothing (`newTopic`,
+/// or `teardown: keep`) says so.
+#[must_use]
+pub fn teardown_deleted_lines(deleted: &[String]) -> Vec<String> {
+    let legal: Vec<&String> = deleted
+        .iter()
+        .filter(|t| crate::guard::topic_name_is_kafka_legal(t))
+        .collect();
+    let listed: Vec<&String> = legal
+        .iter()
+        .copied()
+        .take(TEARDOWN_FAILED_MAX_TOPICS)
+        .collect();
+    let list = serde_json::to_string(&listed).unwrap_or_else(|_| "[]".to_string());
+    vec![
+        format!("{TEARDOWN_DELETED_PREFIX}{list}"),
+        format!("{TEARDOWN_DELETED_COUNT_PREFIX}{}", legal.len()),
+    ]
+}
+
+/// What a reader keeps of a `teardown-deleted=` value: `None` unless it is a
+/// JSON array of strings no longer than a genuine one; only Kafka-legal names,
+/// at most [`TEARDOWN_FAILED_MAX_TOPICS`].
+#[must_use]
+pub fn parse_teardown_deleted(value: &str) -> Option<Vec<String>> {
+    if value.len() > TEARDOWN_FAILED_MAX_TOPICS * (crate::guard::MAX_TOPIC_NAME_CHARS + 4) + 2 {
+        return None;
+    }
+    let names: Vec<String> = serde_json::from_str(value).ok()?;
+    Some(
+        names
+            .into_iter()
+            .filter(|t| crate::guard::topic_name_is_kafka_legal(t))
+            .take(TEARDOWN_FAILED_MAX_TOPICS)
+            .collect(),
+    )
+}
+
 /// What a reader keeps of a `teardown-failed=` value: `None` unless it is a
 /// JSON array no longer than a genuine one; entries bounded as the writer
 /// bounds them.
@@ -2223,5 +2272,34 @@ mod tests {
         let one = teardown_failed_lines(&left[..1]);
         assert_eq!(one[1], format!("{TEARDOWN_FAILED_COUNT_PREFIX}1"));
         assert!(teardown_failed_lines(&[]).is_empty());
+    }
+
+    /// F2: the `teardown-deleted` pair round-trips, is cut at 256 names with
+    /// the count past it, and carries only legal names. CONTROL: an empty
+    /// teardown is still `[]` and `0`; a value that is not an array of
+    /// strings is not read.
+    #[test]
+    fn the_teardown_deleted_lines_round_trip_and_are_bounded() {
+        let deleted: Vec<String> = (0..300)
+            .map(|i| format!("drill-t{i}"))
+            .chain(std::iter::once("bad name".to_string()))
+            .collect();
+        let lines = teardown_deleted_lines(&deleted);
+        assert_eq!(lines.len(), 2);
+        let value = lines[0].strip_prefix(TEARDOWN_DELETED_PREFIX).unwrap();
+        let back = parse_teardown_deleted(value).unwrap();
+        assert_eq!(back.len(), TEARDOWN_FAILED_MAX_TOPICS);
+        assert_eq!(back[0], "drill-t0");
+        assert_eq!(lines[1], format!("{TEARDOWN_DELETED_COUNT_PREFIX}300"));
+        let none = teardown_deleted_lines(&[]);
+        assert_eq!(none[0], format!("{TEARDOWN_DELETED_PREFIX}[]"));
+        assert_eq!(none[1], format!("{TEARDOWN_DELETED_COUNT_PREFIX}0"));
+        assert_eq!(parse_teardown_deleted("[]"), Some(Vec::new()));
+        assert!(parse_teardown_deleted("{}").is_none());
+        assert!(parse_teardown_deleted("[1]").is_none());
+        assert_eq!(
+            parse_teardown_deleted(r#"["ok","bad name"]"#),
+            Some(vec!["ok".to_string()])
+        );
     }
 }

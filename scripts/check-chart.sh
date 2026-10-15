@@ -1033,6 +1033,27 @@ refuses "an issuer CA bundle with no key" "/api/console/oidc/caBundle/key': minL
 refuses "no trust anchor at all for the issuer" "systemRoots=false without" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.systemRoots=false
+# F6: the two OIDC options the API reads. A scope list without openid, and a
+# display-name claim that is not a plain claim name, are refused by name.
+refuses "OIDC scopes without openid" "scopes is [profile email] without openid" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set-json 'api.console.oidc.scopes=["profile","email"]'
+refuses "a display-name claim that is not a plain claim name" "/api/console/oidc/displayNameClaim'" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set-string api.console.oidc.displayNameClaim=https://idp.example.com/claims/name
+# AND SET RIGHT, BOTH REACH THE API'S CONFIG; unset (every committed render),
+# neither is written and the API keeps its defaults.
+renders "the two OIDC options" "$tmp/oidc-options.yaml" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set-json 'api.console.oidc.scopes=["openid","profile","groups"]' \
+  --set-string api.console.oidc.displayNameClaim=preferred_username &&
+  if grep -F -q -- '      displayNameClaim: "preferred_username"' "$tmp/oidc-options.yaml" &&
+    grep -A3 -F -- '      scopes:' "$tmp/oidc-options.yaml" | grep -F -q -- '        - groups'; then
+    echo "   rc=0  (oidc.scopes and oidc.displayNameClaim reach the API's config)"
+  else
+    echo "FAIL: oidc.scopes / oidc.displayNameClaim did not reach the API's config" >&2
+    fail=1
+  fi
 refuses "a hostAliases entry with no hostname" "missing property 'hostnames'" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set "api.console.hostAliases[0].ip=10.96.0.50"
@@ -1211,6 +1232,12 @@ if [ -n "$skip_schema" ]; then
     "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
     --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
     --set "api.console.networkPolicy.oidcPeers[0].port=8443"
+  refuses "a display-name claim that is not a plain claim name (template arms only)" "plain name of one ID-token claim" \
+    "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+    --set-string api.console.oidc.displayNameClaim=https://idp.example.com/claims/name
+  refuses "an OIDC scope with whitespace (template arms only)" "a scope is one word" \
+    "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+    --set-json 'api.console.oidc.scopes=["openid","offline access"]'
 fi
 
 # CHART GAP G4 — THE PUBLISHED PACKAGE, BUILT HERE WITH THE REAL HELM. The

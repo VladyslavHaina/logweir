@@ -2336,6 +2336,32 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // DUI-49 (item 129): the sign-in page's new link.
         ("sign-in and probe words", "**Sign in again**"),
+        // FX-52 F1 (item 130): the wide column behind an `operational`.
+        ("kubectl get names why a run ended", "`FAILED`"),
+        // FX-52 F2 (item 131): the sealed line a clean teardown prints.
+        (
+            "a clean drill records its teardown",
+            "`teardown-deleted=[…]`",
+        ),
+        // FX-52 F3 (item 132): what a probe with no sealed end reads.
+        (
+            "an older runner named only on evidence",
+            "`ProbeOutputUnreadable`",
+        ),
+        // FX-52 F4 (item 133): the time an expired approval keeps.
+        (
+            "an expired approval is not rewritten",
+            "`lastTransitionTime`",
+        ),
+        // FX-52 F5 (item 134): the multi-topic refusal that names its topics.
+        ("a long topic name in a message", "(2 of the 3 selected)"),
+        // FX-52 F6 (item 135): the chart value for the display name.
+        (
+            "the chart's OIDC scopes and claim",
+            "`api.console.oidc.displayNameClaim`",
+        ),
+        // FX-52 F7 (item 136): the peer that holds TypeScript at 5.
+        ("console dependencies", "`openapi-typescript`"),
     ];
     assert_eq!(
         items.len(),

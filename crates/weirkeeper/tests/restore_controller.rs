@@ -4903,7 +4903,8 @@ fn the_restore_green_rule_reads_the_outcome() {
 /// states an operator scans a list for.
 ///
 /// 1. The SHIPPED CRD's `REASON` column names `.status.reason`, and the status
-///    schema declares the field (`Backup` has no `REASON` column).
+///    schema declares the field (`Backup`'s reads `exitReason`, with FAILED
+///    beside it, F1).
 /// 2. All five status-patch builders set `reason`, VERBATIM the reason of the
 ///    condition each writes about the run's state, never one of the
 ///    lowercase-hyphenated wire strings; one arm drives a real
@@ -4946,20 +4947,31 @@ async fn every_status_write_sets_the_scalar_reason() {
             .is_some(),
         "this fix ADDS a field; it does not take GC11's vocabulary away"
     );
-    // `Backup` IS UNAFFECTED, and this says so mechanically.
-    let backup_columns: Vec<String> = workspace_yaml("charts/logweir/crds/backups.yaml")["spec"]
-        ["versions"][0]["additionalPrinterColumns"]
+    // `Backup` (F1) has no `status.reason` and adds none (OD-11): its REASON
+    // reads `exitReason`, which carries the guard's own state, and the
+    // `-o wide` FAILED column beside it reads the Failed condition's reason,
+    // so a controller refusal behind an `operational` REASON is still named.
+    let backup_columns: Vec<(String, String)> = workspace_yaml("charts/logweir/crds/backups.yaml")
+        ["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Backup CRD declares printer columns")
         .iter()
-        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap_or_default().to_string(),
+                c["jsonPath"].as_str().unwrap_or_default().to_string(),
+            )
+        })
         .collect();
-    assert!(
-        !backup_columns.contains(&"REASON".to_string()),
-        "the `Backup` CRD does NOT have this defect and was NOT changed: it has no REASON column \
-         to repoint (PHASE/EXIT/RECORDS/SIGNED/AGE). If a later task adds one, it reads \
-         `.status.reason` and adds the field the same way. Got: {backup_columns:?}"
-    );
+    for (name, path) in [
+        ("REASON", ".status.exitReason"),
+        ("FAILED", ".status.conditions[?(@.type==\"Failed\")].reason"),
+    ] {
+        assert!(
+            backup_columns.contains(&(name.to_string(), path.to_string())),
+            "the `Backup` CRD prints {name} from {path}. Got: {backup_columns:?}"
+        );
+    }
 
     // ---- ARM 2: every builder, and the condition it must agree with -------
     let r = restore();
@@ -13819,9 +13831,12 @@ async fn fx43_an_older_runner_is_named_and_nothing_of_its_log_is_read() {
     assert_eq!(patched_statuses(&seen)[0]["exitReason"], "operational");
 }
 
-/// **FX-43, exit 3: the runner's sealed refusal pair is shown; an older
-/// runner's unsealed pair, even one carrying this Job's token in its JSON (an
-/// FX-34 runner given the token by hand), is the mixed pair, named.**
+/// **FX-43, exit 3: the runner's sealed refusal pair is shown; an unsealed
+/// pair, even one carrying this Job's token in its JSON (an FX-34 runner
+/// given the token by hand), is not read.** With no refusal of
+/// `--runner-line-token` in the log it is not called older either (F3): the
+/// status says the runner's end was not seen. After the older runner's real
+/// refusal of the flag, it is the mixed pair, named.
 ///
 /// KILLS: `refusal-detail=` read off the raw log under an FX-43 Job.
 #[tokio::test]
@@ -13838,8 +13853,24 @@ async fn fx43_a_refusal_is_read_only_off_the_sealed_pair() {
         fx34_message(&status),
         format!("{FX34_OLD_MESSAGE}{FX34_STATED}{SENTENCE}")
     );
-    // The FX-34 runner's output (the pair, unsealed): named, nothing read.
+    // The FX-34 runner's output (the pair, unsealed): nothing read, and not
+    // named older without the flag's refusal (F3).
     let (_, status) = fx43_pass(3, fx34_runner_pair(SENTENCE)).await;
+    assert_eq!(
+        status["exitReason"], "GuardRefusedUnknownReason",
+        "{status}"
+    );
+    assert!(
+        !fx34_message(&status).contains("cleanup.policy")
+            && fx34_message(&status).contains("without its sealed `runner-exit=` line"),
+        "{status}"
+    );
+    // After the older runner's refusal of the flag: named, nothing read.
+    let older = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx-43/older-runner-restore.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let (_, status) = fx43_pass(3, format!("{older}{}", fx34_runner_pair(SENTENCE))).await;
     assert_eq!(
         status["exitReason"], "RunnerOlderThanController",
         "{status}"
@@ -13898,6 +13929,112 @@ fn fx38_a_cut_teardown_list_carries_the_runners_count() {
     )
     .expect("a teardown block");
     assert_eq!(t["failedCount"], serde_json::json!(300));
+}
+
+/// The lines an attested phase 9 prints, beside the I8 keys of an exit-0 run.
+fn f2_attested_lines(deleted: &[&str], failed: &[(&str, &str)]) -> Vec<String> {
+    use logweir_core::execution_contract::{
+        teardown_deleted_lines, teardown_failed_lines, TEARDOWN_KEY_PREFIX,
+    };
+    let left: Vec<(String, String)> = failed
+        .iter()
+        .map(|(t, e)| (t.to_string(), e.to_string()))
+        .collect();
+    let deleted: Vec<String> = deleted.iter().map(|t| t.to_string()).collect();
+    let mut lines = teardown_failed_lines(&left);
+    lines.extend(teardown_deleted_lines(&deleted));
+    lines.push(format!(
+        "{TEARDOWN_KEY_PREFIX}logweir/drills/01JB7Z0000000000000000000A.teardown.json"
+    ));
+    lines.push(format!("{SCORECARD_KEY_PREFIX}{SCORECARD_KEY}"));
+    lines.push(format!("{SIDECAR_KEY_PREFIX}{SIDECAR_KEY}"));
+    lines
+}
+
+/// **F2 (poc-dui O3): a clean drill records what phase 9 removed.** From the
+/// runner's sealed `teardown-key=` and `teardown-deleted=` lines:
+/// `status.teardown` carries the attestation's key, the names and the count.
+/// A name the plan does not map (here the source `orders`) is not this run's
+/// to name.
+///
+/// KILLS: the success half not written (the null teardown the PoC saw).
+#[tokio::test]
+async fn f2_a_clean_teardown_is_recorded_from_the_sealed_lines() {
+    let lines = f2_attested_lines(&["drill-orders", "drill-payments", "orders"], &[]);
+    let (_, status) = fx43_pass(0, fx43_block(0, &lines)).await;
+    assert_eq!(
+        status["teardown"],
+        serde_json::json!({
+            "attestationKey": "logweir/drills/01JB7Z0000000000000000000A.teardown.json",
+            "deleted": ["drill-orders", "drill-payments"],
+            "deletedCount": 2,
+        }),
+        "{status}"
+    );
+}
+
+/// **F2: a teardown that left a topic records both halves**: what it removed
+/// and, as before (FX-44), what it left and why.
+#[tokio::test]
+async fn f2_a_partial_teardown_records_what_it_removed_and_what_it_left() {
+    let lines = f2_attested_lines(
+        &["drill-orders"],
+        &[("drill-payments", "Broker: Topic authorization failed")],
+    );
+    let (_, status) = fx43_pass(0, fx43_block(0, &lines)).await;
+    let t = &status["teardown"];
+    assert_eq!(
+        t["deleted"],
+        serde_json::json!(["drill-orders"]),
+        "{status}"
+    );
+    assert_eq!(t["deletedCount"], serde_json::json!(1), "{status}");
+    assert_eq!(t["failed"][0]["topic"], "drill-payments", "{status}");
+    assert_eq!(t["failedCount"], serde_json::json!(1), "{status}");
+    assert!(t["attestationKey"].is_string(), "{status}");
+}
+
+/// **F2: no attested line, no record.** A run whose phase 9 did not attest
+/// (no `teardown-key=`) writes no `status.teardown`, even with a sealed
+/// `teardown-deleted=` line, and an unsealed pair is not read at all.
+///
+/// CONTROLS: the same lines unsealed after a sealed block (a plan string's
+/// forgery under an FX-43 Job), and sealed lines under a Job an FX-34
+/// controller built (its whole log is anyone's text): nothing is recorded.
+///
+/// KILLS: trusting an unsealed `teardown-key=`; recording a deletion without
+/// the attestation's key.
+#[tokio::test]
+async fn f2_an_absent_or_unsealed_teardown_line_records_nothing() {
+    // No `teardown-key=`: the attestation was not put.
+    let mut lines = f2_attested_lines(&["drill-orders", "drill-payments"], &[]);
+    lines.retain(|l| !l.starts_with("teardown-key="));
+    let (_, status) = fx43_pass(0, fx43_block(0, &lines)).await;
+    assert!(status.get("teardown").is_none(), "{status}");
+
+    // The pair forged in plain text after the runner's sealed block.
+    let genuine = fx43_block(
+        0,
+        &[
+            format!("{SCORECARD_KEY_PREFIX}{SCORECARD_KEY}"),
+            format!("{SIDECAR_KEY_PREFIX}{SIDECAR_KEY}"),
+        ],
+    );
+    let forged = f2_attested_lines(&["drill-orders"], &[])[..3].join("\n")
+        + "\nteardown-key=logweir/drills/forged.teardown.json\n";
+    let (_, status) = fx43_pass(0, format!("{genuine}{forged}")).await;
+    assert!(status.get("teardown").is_none(), "{status}");
+
+    // An FX-34 Job: the attested lines are not read off a whole log.
+    let plain = f2_attested_lines(&["drill-orders"], &[]).join("\n") + "\n";
+    let (outcome, seen) = fx34_pass_over(
+        &restore(),
+        fx34_routes_for(0, 200, log_body(&plain), Some(&fx34_token())),
+    )
+    .await;
+    outcome.expect("the pass completes");
+    let old = patched_statuses(&seen).remove(0);
+    assert!(old.get("teardown").is_none(), "{old}");
 }
 
 /// **DUI-5: an exit-1 `Restore` says why it failed**, from the runner's

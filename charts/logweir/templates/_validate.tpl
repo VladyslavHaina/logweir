@@ -114,6 +114,20 @@ there could mount them; so shared mode needs a scoped controller
 {{- if and (eq (toString $c.oidc.systemRoots) "false") (not (or $ca.configMap $ca.secret)) -}}
 {{- fail "api.console.oidc.systemRoots=false without api.console.oidc.caBundle: the console would trust no certificate at all and could never reach its issuer. Name the bundle that replaces the system roots, or keep them." -}}
 {{- end -}}
+{{- $scopes := $c.oidc.scopes | default list -}}
+{{- if and $scopes (not (has "openid" $scopes)) -}}
+{{- fail (printf "api.console.oidc.scopes is %v without openid: the provider would issue no ID token and the console would refuse to start. Add openid, or leave the list empty for the default [openid, profile, email, groups]." $scopes) -}}
+{{- end -}}
+{{- range $s := $scopes -}}
+{{- if or (not (kindIs "string" $s)) (not $s) (regexMatch "\\s" (toString $s)) -}}
+{{- fail (printf "api.console.oidc.scopes holds %q: a scope is one word, with no whitespace." (toString $s)) -}}
+{{- end -}}
+{{- end -}}
+{{- with $c.oidc.displayNameClaim -}}
+{{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_]{0,63}$" (toString .)) -}}
+{{- fail (printf "api.console.oidc.displayNameClaim is %q. It is the plain name of one ID-token claim (letters, digits and _, at most 64, e.g. name or preferred_username), or empty for no display name." (toString .)) -}}
+{{- end -}}
+{{- end -}}
 {{- range $alias := ($c.hostAliases | default list) -}}
 {{- if or (not $alias.ip) (not $alias.hostnames) -}}
 {{- fail "api.console.hostAliases entries need an `ip` and at least one hostname: {ip: <address>, hostnames: [<name>, …]}." -}}

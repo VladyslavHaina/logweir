@@ -423,7 +423,9 @@ pub struct ReadinessBlock {
     printcolumn = r#"{"name":"ENDPOINT","type":"string","jsonPath":".spec.storage.endpoint","description":"absent means AWS S3"}"#,
     printcolumn = r#"{"name":"TRANSPORT","type":"string","jsonPath":".spec.transport.security","description":"TLS or InsecureHTTP; never derived from addressing"}"#,
     printcolumn = r#"{"name":"VALID","type":"string","jsonPath":".status.conditions[?(@.type==\"Valid\")].status"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the Valid condition's reason: why VALID is False"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupDestinationSpec {

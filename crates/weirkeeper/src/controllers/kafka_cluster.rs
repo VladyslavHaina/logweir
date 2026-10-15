@@ -413,11 +413,10 @@ pub fn runner_older_verdict() -> Verdict {
 pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
     if v.reason == crate::conditions::TERMINAL_STATE_RUNNER_OLDER_THAN_CONTROLLER {
         return format!(
-            "{}: the probe printed no line sealed with its Job's line token (pod exit \
-             {exit_code}), which every runner at least as new as this controller does, so the \
-             runner image is older than the controller (an older one stops at the unknown \
-             argument `{}`). Nothing from its log was read and `reachable` is cleared. Upgrade \
-             the runner image to the controller's version (the chart's `runnerImage`)",
+            "{}: the probe refused the argument `{}` and printed no line sealed with its Job's \
+             line token (pod exit {exit_code}), so the runner image is older than the \
+             controller. Nothing from its log was read and `reachable` is cleared. Upgrade the \
+             runner image to the controller's version (the chart's `runnerImage`)",
             v.reason,
             logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG
         );

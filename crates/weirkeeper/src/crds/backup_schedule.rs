@@ -269,7 +269,9 @@ impl RetrySpec {
     printcolumn = r#"{"name":"LAST","type":"date","jsonPath":".status.lastFireTime"}"#,
     printcolumn = r#"{"name":"NEXT","type":"date","jsonPath":".status.nextFireTime"}"#,
     printcolumn = r#"{"name":"READY","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","priority":1,"jsonPath":".status.conditions[?(@.type==\"Ready\")].reason","description":"the Ready condition's reason: Scheduled, Suspended, UnparseableSchedule, ConcurrencyBlocked, ..."}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleSpec {

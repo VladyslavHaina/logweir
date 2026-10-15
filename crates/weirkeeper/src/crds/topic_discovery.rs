@@ -119,7 +119,9 @@ pub struct TopicDiscoveryRequest {
     printcolumn = r#"{"name":"VISIBILITY","type":"string","jsonPath":".status.result.visibility.state","description":"unknown, limited or attestedComplete — a successful listing alone is unknown"}"#,
     printcolumn = r#"{"name":"TOPICS","type":"integer","jsonPath":".status.result.counts.returned"}"#,
     printcolumn = r#"{"name":"OBSERVED","type":"date","jsonPath":".status.observedAt"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the reason of the condition the controller wrote last: Succeeded, ConnectionNotFound, DeadlineExceeded, ..."}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TopicDiscoverySpec {

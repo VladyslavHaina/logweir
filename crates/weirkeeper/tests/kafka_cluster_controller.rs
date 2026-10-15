@@ -4138,3 +4138,38 @@ async fn fx43_a_killed_probe_is_not_named_older() {
     let status = fx43_probe_status(fx43_routes(1, older)).await;
     assert_eq!(status["reason"], "RunnerOlderThanController");
 }
+
+/// **F3 (poc-dui3 O2): a probe of this build that failed without a sealed
+/// line is not called older.** Exit 1, no sealed line, and nothing in its log
+/// refusing `--runner-line-token` (the probe failed before its result, or its
+/// log was not read whole under load): the verdict says what was observed,
+/// `ProbeOutputUnreadable` with the pod's exit, and `reachable` is cleared.
+/// A forged plain `reachable=true` is still not read.
+///
+/// CONTROL: the released older runner's real refusal of the flag, at the same
+/// exit, is named `RunnerOlderThanController`.
+///
+/// KILLS: the older-runner inference made without the flag refusal.
+#[tokio::test]
+async fn f3_a_probe_with_no_sealed_line_is_not_named_older() {
+    let noise = "{\"level\":\"WARN\",\"message\":\"metadata request timed out\"}\n\
+                 reachable=true\n";
+    let status = fx43_probe_status(fx43_routes(1, noise.to_string())).await;
+    assert_eq!(status["reason"], "ProbeOutputUnreadable", "{status}");
+    assert!(status["reachable"].is_null(), "{status}");
+    let message = status["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("pod exit 1") && !message.contains("older"),
+        "{message}"
+    );
+    // CONTROL.
+    let older = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fx-43/older-runner-probe.log"),
+    )
+    .expect("the captured older runner's stderr");
+    let status = fx43_probe_status(fx43_routes(1, format!("{older}{noise}"))).await;
+    assert_eq!(status["reason"], "RunnerOlderThanController", "{status}");
+}

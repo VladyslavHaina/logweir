@@ -344,7 +344,9 @@ pub const CONNECTION_RULES: [(&[&str], &str, &str); 5] = [
     printcolumn = r#"{"name":"ROLE","type":"string","jsonPath":".spec.role","description":"source or target"}"#,
     printcolumn = r#"{"name":"REACHABLE","type":"string","jsonPath":".status.reachable","description":"the controller's last probe"}"#,
     printcolumn = r#"{"name":"CLUSTER-ID","type":"string","jsonPath":".status.clusterId","description":"read from the broker, never from the spec"}"#,
-    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+    printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
+    // Appended after AGE, so no existing column moves.
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.reason","description":"the Reachable condition's reason: why REACHABLE is false or empty"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaClusterSpec {
@@ -448,14 +450,9 @@ pub struct KafkaClusterStatus {
     /// the one `Reachable` condition the same patch writes, which makes it
     /// CamelCase everywhere by errata **E5b**.
     //
-    // NO NEW PRINTER COLUMN, and this half is a `//` comment because it is
-    // build rationale rather than something `kubectl explain` should print.
-    // `KafkaCluster`'s four columns (ROLE/REACHABLE/CLUSTER-ID/AGE) are Task
-    // 15b's pinned interface, asserted against a deliberately non-derived
-    // literal in `tests/crd_shape.rs` — mutant MA of that task dropped a column
-    // and 16 of 16 tests passed — so repointing or extending them is that
-    // task's decision, not this one's. The scalar is reachable through
-    // `-o jsonpath={.status.reason}` and through `custom-columns` meanwhile.
+    // `kubectl get kafkaclusters` prints it as REASON, appended after AGE so
+    // the four pinned columns (ROLE/REACHABLE/CLUSTER-ID/AGE) keep their
+    // positions; `tests/crd_shape.rs` asserts the list against a literal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The binding this connection's credential Secret must carry under its

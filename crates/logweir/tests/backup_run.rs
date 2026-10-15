@@ -1471,7 +1471,7 @@ fn dui5_a_selected_topic_the_source_does_not_hold_is_refused_before_the_engine()
     let several =
         logweir::backup::phase_minus1_admit::absent_refusal(&["a".to_string(), "b".to_string()], 3);
     assert!(
-        several.starts_with("2 of 3 selected topics do not exist on the source: `a`, `b`"),
+        several.starts_with("topics `a`, `b` do not exist on the source (2 of the 3 selected)"),
         "{several}"
     );
 
