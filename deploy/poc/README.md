@@ -40,10 +40,11 @@ chart, and [validate.sh](validate.sh) is its render gate.
 **Which Logweir it installs.** [versions.env](versions.env) names one `main`
 publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
-together by `images.yml`. The profile needs a build that carries the chart-gap
-fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
-main `3c2f358c` (2026-10-12), and versions.env's comment records every pin
-before it. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
+together by `images.yml`, or a release that promotes one unchanged (its tag and
+chart version; versions.env, *A RELEASE PIN*). The profile needs a build that
+carries the chart-gap fixes below (every publication since main `86a554e6`):
+`LOGWEIR_COMMIT` names main `f51c92df` (2026-10-15), pinned as the release
+`v0.4.0`, and versions.env's comment records every pin before it. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
 2026-09-25), carried the
 fixes for the first PoC round's product defects P1–P10 (first published at
 `02dc44b6`), the second round's P11 and P12, the durable compromise
