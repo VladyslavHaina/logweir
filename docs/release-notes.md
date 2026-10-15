@@ -29,13 +29,13 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125 and 126. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126 and 127. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 126 landed after the `v0.3.0` tag and are in no
+is below. Items 102 to 127 landed after the `v0.3.0` tag and are in no
 release yet.
 
 ### Candidate record
@@ -3176,6 +3176,19 @@ The stream half has no automated row: jsdom has no EventSource.
 [UNVERIFIED — not yet run on a cluster; the next deep UI re-check opens a confirm namespace's switchover record and a verifying backup on the PoC.]
 **Rollback:** an older console image links every switchover record to the two-person page and shows "Verified at" while pending; nothing is stored.
 
+#### 127. Console: first probes, complete counts, probe words and the backup stepper (DUI-48.1–4)
+
+**Changed.**
+- **A just-added connection's page follows its first probe.** It used to read "Never probed" until reloaded. It now reads again every few seconds until the first reading lands, for up to two minutes. A just-added or edited destination follows its first verdict the same way.
+- **A complete restore's counts read as compared:** "Records compared" and "Compared and matching". It used to say "sampled". A sampled restore keeps its words.
+- **The connection pickers word a probe as the connection page does.** The schedule form and the restore wizard say "last probe recorded no reading (NoExitCode)" for a probe that ran and recorded none, instead of "not checked yet", and say "not probed yet" only before any probe.
+- **A backup's progress shows only steps the run has reached, and never steps back.** Before the first progress read, or after a failed one, a run that is still preparing is not shown copying.
+
+**Do:** nothing.
+**Scope:** the console's rows, each with a control: in `connections.test`, `destinations.test`, restores `detail`, schedules `flows`, backups `flows` and `verdict.test`. Seven mutants are killed.
+[UNVERIFIED — not yet run on a cluster; the next deep UI re-check adds a connection, runs a complete restore, opens the schedule form and watches a backup start on the PoC.]
+**Rollback:** an older console image shows the old words and the stale first-probe page; nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -3321,7 +3334,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125 and 126, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126 and 127, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3425,6 +3438,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 124 | the controller (a switchover's bundle is checked before its Job) | nothing; a Switchover refused `ApprovalBundleConflict` is created again |
 | 125 | the API (the callback keeps the newer attempt's cookie; its page) and the console, one image | nothing |
 | 126 | the console | nothing |
+| 127 | the console | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
