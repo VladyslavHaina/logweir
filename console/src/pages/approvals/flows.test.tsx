@@ -105,7 +105,8 @@ const swoRequest = (over: Record<string, unknown> = {}) => ({
 const approvalX = (over: Record<string, unknown> = {}) => ({ ...approvalFixture.item, name: "approval-x", subjectRef: { kind: "Restore", name: "restore-x" }, ...over });
 
 interface World {
-  policy: ApprovalPolicy;
+  /** `null`: the namespace answers no policy; `"error"`: its policy cannot be read. */
+  policy: ApprovalPolicy | null | "error";
   approver?: boolean;
   restore?: Record<string, unknown> | null;
   approval?: Record<string, unknown> | null | "error";
@@ -127,7 +128,7 @@ function serve(w: World) {
     const ok = (item: unknown) => json(200, { item, requestId: "r" });
     if (r.method === "POST") return w.post ? w.post(path, net.sent.at(-1)!.body) : null;
     if (path === "/session") return json(200, session(w.approver ?? true));
-    if (path === "/namespaces/team-a/approval-policy") return ok(w.policy);
+    if (path === "/namespaces/team-a/approval-policy") return w.policy === "error" ? json(500, { code: "internal", detail: "the policy read failed", requestId: "p" }) : ok(w.policy);
     if (path.startsWith("/namespaces/team-a/approvals?")) {
       return w.approvals === "error" ? json(500, { code: "internal", detail: "the list failed", requestId: "q" }) : json(200, { items: w.approvals ?? [], page: { limit: 200 }, requestId: "r" });
     }
@@ -425,12 +426,23 @@ describe("the Approvals list", () => {
       name: "swo-approval-1",
       subjectRef: { kind: "Switchover", name: "swo-1" },
     };
-    serve({ policy: CONFIRM, restores: [], approvals: [used] });
-    renderAt("/team-a/approvals");
-    const link = await screen.findByRole("link", { name: "swo-1" });
-    expect(link.getAttribute("href")).toBe("#/team-a/switchovers/swo-1");
-    expect(net.sent.some((r) => r.path.includes("/approval-request"))).toBe(false);
-    cleanup();
+    // Every mode but two-person, and a mode not known (no policy answered, or its read
+    // failed), opens the Switchover's own page and reads no approval request.
+    for (const [label, policy] of [
+      ["confirm", CONFIRM],
+      ["strict", STRICT],
+      ["files", LEGACY],
+      ["no policy answered", null],
+      ["the policy unreadable", "error"],
+    ] as const) {
+      serve({ policy, restores: [], approvals: [used] });
+      renderAt("/team-a/approvals");
+      const link = await screen.findByRole("link", { name: "swo-1" });
+      expect(link.getAttribute("href"), label).toBe("#/team-a/switchovers/swo-1");
+      expect(net.sent.some((r) => r.path.includes("/approval-request")), label).toBe(false);
+      cleanup();
+      net.sent.length = 0;
+    }
     // CONTROL: in a two-person namespace the record opens the switchover's approval page.
     serve({ policy: TWO_PERSON, restores: [], approvals: [used], switchovers: [] });
     renderAt("/team-a/approvals");
