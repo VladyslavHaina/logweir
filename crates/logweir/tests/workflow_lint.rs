@@ -224,8 +224,14 @@ fn the_chart_is_published_beside_the_images_it_names() {
     assert_eq!(
         names,
         // compat-weekly.yml runs e2e rows weekly and publishes
-        // nothing: contents read, no secret, no registry login.
+        // nothing: contents read, no secret, no registry login. So does
+        // ci-trace.yml (FX-53 §2.6): it traces the tests' file reads. So does
+        // ci-nightly.yml (FX-53 §2.6): it calls ci.yml with no secret, and
+        // ci.yml's `publish` runs only on a main push, never on its schedule
+        // or dispatch (gate_map_lint pins both).
         [
+            "ci-nightly.yml",
+            "ci-trace.yml",
             "ci.yml",
             "compat-weekly.yml",
             "engine-matrix.yml",

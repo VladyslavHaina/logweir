@@ -1,0 +1,27 @@
+# FX-53 §2.2: a gate job's LAST step. After every step before it succeeded, it
+# uploads the marker `gate-<gate>-<hash>` for the hash `.github/actions/gate`
+# computed at the job's start (CI_GATE_* in the job's environment). It records
+# nothing on a hit, without a hash, or in a fork's pull request.
+name: gate-record
+description: Record that this gate passed on its inputs (artifact gate-<gate>-<hash>, 30 days).
+runs:
+  using: composite
+  steps:
+    # A marker that fails to record costs a re-run next time, never a green
+    # gate: neither step can fail the job.
+    - id: marker
+      if: env.CI_GATE_HIT != 'true' && env.CI_GATE_HASH != ''
+      continue-on-error: true
+      shell: bash
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../../../scripts/ci-gate.sh" record \
+          "$CI_GATE_NAME" "$CI_GATE_HASH" "$RUNNER_TEMP/ci-gate-marker" >> "$GITHUB_OUTPUT"
+    - if: steps.marker.outputs.name != ''
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.marker.outputs.name }}
+        path: ${{ steps.marker.outputs.path }}
+        retention-days: 30
+        if-no-files-found: error
+        overwrite: true

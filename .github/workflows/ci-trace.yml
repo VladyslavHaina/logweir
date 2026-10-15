@@ -1,0 +1,93 @@
+name: ci-trace
+# FX-53 §2.6, the backstops of the gate markers (ci/gates.toml,
+# scripts/ci-gate.sh, .github/actions/gate).
+#
+# `gate-machinery` proves the machinery on a GitHub runner whenever it
+# changes: the unit rows on Linux, then the action's hash and lookup, the
+# marker upload, a second lookup that must FIND that marker through the
+# artifacts API, read its run, and REFUSE it because this workflow is not
+# ci.yml, and the jobs and trees API reads against this run. A marker is only
+# an index; a run proves a gate only from ci.yml (directly, or called by
+# release.yml or ci-nightly.yml), where the gate's own job passed on a commit
+# whose tree gives the same hash. The accepting path is a unit row
+# (scripts/test-ci-gate.py) and is proven live once ci.yml's gates use the
+# action (FX-53 stage 4).
+#
+# The weekly traced run of the unit and e2e gates (strace, every opened
+# tracked file against its gate's declared inputs) lands here next.
+on:
+  pull_request:
+    paths:
+      - ci/gates.toml
+      - scripts/ci-gate.sh
+      - scripts/test-ci-gate.py
+      - .github/actions/gate/**
+      - .github/workflows/ci-trace.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-trace-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  gate-machinery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: The script's unit rows
+        run: python3 scripts/test-ci-gate.py
+      - id: gate
+        uses: ./.github/actions/gate
+        with: { gate: docs }
+      - name: The action ran the gate and named its inputs
+        env:
+          HIT: ${{ steps.gate.outputs.hit }}
+          PROOF: ${{ steps.gate.outputs.proof-run }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          echo "hit=$HIT proof-run=$PROOF hash=$CI_GATE_HASH"
+          [ "$HIT" = false ] || { echo "no ci.yml marker exists yet, so docs must run" >&2; exit 1; }
+          [[ "$CI_GATE_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo "the action named no hash" >&2; exit 1; }
+          want="$(bash scripts/ci-gate.sh hash docs)"
+          [ "$want" = "$CI_GATE_HASH" ] || { echo "hash $CI_GATE_HASH, want $want" >&2; exit 1; }
+      - if: steps.gate.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+      - name: The marker is found, read, and refused (this is not ci.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            echo "lookup $attempt"
+            rc=0
+            bash scripts/ci-gate.sh lookup docs "$CI_GATE_HASH" > lookup.out 2> lookup.err || rc=$?
+            cat lookup.out lookup.err
+            if [ "$rc" -eq 0 ]; then
+              echo "a marker from ci-trace.yml proved a gate" >&2
+              exit 1
+            fi
+            if grep -q "refused: a run of .github/workflows/ci-trace.yml, not " lookup.err; then
+              echo "found, read and refused: the artifacts and runs API answer as the script reads them"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "this run's marker was not found and refused" >&2
+          exit 1
+      # The other two proof reads, the jobs API and the trees API, against this
+      # run: this job is still in progress (so it cannot pass), and the tree of
+      # its head commit is read whole and hashed.
+      - name: The jobs and trees API answer as the script reads them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          bash scripts/ci-gate.sh explain docs "$CI_GATE_HASH" "$GITHUB_RUN_ID" --job gate-machinery | tee explain.out
+          grep -q "^run: a run of .github/workflows/ci-trace.yml" explain.out
+          grep -q "^job 'gate-machinery': job 'gate-machinery' did not pass (in_progress)" explain.out
+          grep -Eq "^tree [0-9a-f]{40}: (ok|its inputs at [0-9a-f]{40} hash to [0-9a-f]{64})$" explain.out
