@@ -293,11 +293,11 @@ const HIDDEN_READERS: &[(&str, &[&str])] = &[
     // the #[path] stack.rs and its include_str!
     (
         "e2e/tests/harness/stack.rs",
-        &["unit-core", "unit-logweir", "build-e2e"],
+        &["unit-core", "unit-logweir", "e2e-4"],
     ),
     (
         "e2e/compose/stack-lib.sh",
-        &["unit-core", "unit-logweir", "build-e2e"],
+        &["unit-core", "unit-logweir", "e2e-4"],
     ),
     ("examples/**", &["unit-logweir", "unit-weirkeeper"]),
     (
@@ -345,7 +345,7 @@ const HIDDEN_READERS: &[(&str, &[&str])] = &[
     (
         "docs/verify_scorecard.py",
         &[
-            "python", "e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7", "e2e-8",
+            "python", "e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7",
         ],
     ),
 ];
@@ -547,4 +547,145 @@ fn every_workflow_a_proving_run_executes_is_a_global_input() {
     }
     assert!(seen.contains(".github/workflows/images.yml"));
     assert!(seen.contains(".github/workflows/release-drill.yml"));
+}
+
+/// FX-53 stage 4: EVERY ci.yml JOB IS A GATE OF ci/gates.toml OR ONE OF ITS
+/// [not_gates], AND EVERY GATE IS A JOB, wired as the map says:
+/// - the gate's `job` is the name of the ci.yml job that runs it (a `check`
+///   row's `job`, `e2e N` for a shard, or the job's id);
+/// - the gate step (`./.github/actions/gate`, with that gate's name) comes
+///   right after the checkout, before anything that could write a tracked
+///   file;
+/// - every later step is guarded by the gate's `hit` (or, in a row of several
+///   gates, by "any of them missed"), except the record steps;
+/// - a record step names the gate, runs only after `success()`, only when
+///   `GATE_RECORD` (a proving event) and only on a miss.
+#[test]
+fn every_ci_job_is_a_gate_and_every_gate_a_job() {
+    let map = map();
+    let declared: BTreeMap<String, String> = gates(&map)
+        .iter()
+        .map(|(g, v)| (g.clone(), v["job"].as_str().unwrap_or(g).to_string()))
+        .collect();
+    let not_gates: BTreeSet<String> = strings(&map["not_gates"]).into_iter().collect();
+    let text = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+    let ci: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    let record_if = "success() && env.GATE_RECORD == 'true' && ";
+    let mut wired: BTreeMap<String, String> = BTreeMap::new();
+    let mut plumbing = BTreeSet::new();
+    for (id, job) in ci["jobs"].as_mapping().unwrap() {
+        let id = id.as_str().unwrap().to_string();
+        let steps: Vec<serde_yaml::Value> = job["steps"].as_sequence().cloned().unwrap_or_default();
+        let gate_steps: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s["uses"].as_str() == Some("./.github/actions/gate"))
+            .map(|(n, _)| n)
+            .collect();
+        if gate_steps.is_empty() {
+            assert!(
+                not_gates.contains(&id),
+                "ci.yml job `{id}` runs no gate and is not in ci/gates.toml's [not_gates]"
+            );
+            plumbing.insert(id);
+            continue;
+        }
+        assert!(
+            !not_gates.contains(&id),
+            "ci.yml job `{id}` runs a gate but is listed in [not_gates]"
+        );
+        // The gate steps come first, right after the checkout.
+        assert!(
+            steps[0]["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("actions/checkout@")),
+            "ci.yml job `{id}`: the checkout comes first"
+        );
+        assert_eq!(
+            gate_steps,
+            (1..=gate_steps.len()).collect::<Vec<_>>(),
+            "ci.yml job `{id}`: the gate steps follow the checkout, before anything else"
+        );
+        // The (gate, job name) pairs this job runs.
+        let rows = job["strategy"]["matrix"]["include"].as_sequence().cloned();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        match (id.as_str(), rows) {
+            ("e2e", Some(rows)) => {
+                for row in rows {
+                    let n = serde_yaml::to_string(&row["shard"]).unwrap();
+                    let n = n.trim();
+                    pairs.push((format!("e2e-{n}"), format!("e2e {n}")));
+                }
+                assert_eq!(
+                    steps[1]["with"]["gate"].as_str(),
+                    Some("e2e-${{ matrix.shard }}")
+                );
+            }
+            (_, Some(rows)) => {
+                for row in rows {
+                    let name = row["job"].as_str().unwrap().to_string();
+                    for (n, key) in ["gate1", "gate2", "gate3"].iter().enumerate() {
+                        if let Some(g) = row[*key].as_str() {
+                            pairs.push((g.to_string(), name.clone()));
+                            assert_eq!(
+                                steps[1 + n]["with"]["gate"].as_str(),
+                                Some(format!("${{{{ matrix.{key} }}}}").as_str())
+                            );
+                        }
+                    }
+                }
+            }
+            (_, None) => {
+                assert_eq!(gate_steps.len(), 1, "ci.yml job `{id}`: one gate");
+                let g = steps[1]["with"]["gate"].as_str().unwrap().to_string();
+                let name = job["name"].as_str().unwrap_or(&id).to_string();
+                pairs.push((g, name));
+            }
+        }
+        for (g, name) in pairs {
+            assert!(
+                wired.insert(g.clone(), name.clone()).is_none(),
+                "gate `{g}` is run by two ci.yml jobs"
+            );
+        }
+        // Every later step is guarded; the record steps are the last ones.
+        let guard = |s: &serde_yaml::Value| s["if"].as_str().unwrap_or_default().to_string();
+        let mut records = 0;
+        for (n, step) in steps.iter().enumerate().skip(1 + gate_steps.len()) {
+            let cond = guard(step);
+            if step["uses"].as_str() == Some("./.github/actions/gate/record") {
+                assert!(
+                    cond.starts_with(record_if) && cond.contains("outputs.hit != 'true'"),
+                    "ci.yml job `{id}`, step {}: a record runs after success(), on a proving \
+                     event, on a miss: `{cond}`",
+                    n + 1
+                );
+                assert!(step["with"]["gate"].is_string() && step["with"]["hash"].is_string());
+                records += 1;
+                continue;
+            }
+            assert_eq!(records, 0, "ci.yml job `{id}`: the record steps come last");
+            assert!(
+                cond.contains("outputs.hit != 'true'")
+                    || cond.contains("steps.work.outputs.any == 'true'")
+                    || (n == 1 + gate_steps.len() && step["id"].as_str() == Some("work")),
+                "ci.yml job `{id}`, step {} runs whatever the gate decided: `{cond}`",
+                n + 1
+            );
+        }
+        assert_eq!(
+            records,
+            gate_steps.len(),
+            "ci.yml job `{id}`: one record per gate"
+        );
+    }
+    assert_eq!(
+        wired, declared,
+        "the gates ci.yml runs, by the name of the job that runs each, must be exactly \
+         ci/gates.toml's"
+    );
+    assert_eq!(
+        plumbing, not_gates,
+        "[not_gates] must be exactly ci.yml's other jobs"
+    );
 }

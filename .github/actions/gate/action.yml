@@ -37,6 +37,9 @@ outputs:
   proof-run:
     description: The URL of the run whose marker proved the inputs, on a hit.
     value: ${{ steps.decide.outputs.proof-run }}
+  hash:
+    description: "The gate's input hash ('' when there is none: the gate runs and records nothing). A job that runs several gates hands it to ./record."
+    value: ${{ steps.decide.outputs.hash }}
 runs:
   using: composite
   steps:

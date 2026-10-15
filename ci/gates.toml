@@ -34,9 +34,13 @@
 # new top-level directory, a new root file, or anything this map forgot runs
 # everything until a gate claims it.
 #
-# Job names: ci.yml's jobs are cicd-w1's (FX-53 stages 1, 2). The names here
-# follow the design's §2.4 layout; the ones marked `guessed` are reconciled in
-# stage 4, where every ci.yml job becomes a gate here and every gate a job.
+# Job names (FX-53 stage 4, reconciled with ci.yml): a gate's `job` is the
+# name of the ci.yml job that runs it (default: the gate's own name). Twelve
+# check gates run in eight jobs (GitHub Free's 20 concurrent jobs): `lint`
+# also runs `supply-chain`, `python-docs` runs `python` and `docs`, and
+# `unit-small` runs the retention, xtask and e2e unit groups, each gate a step
+# of its own. A shard's job is `e2e N`. workflow_lint holds every ci.yml job
+# to a gate here or to [not_gates], and every gate here to its job.
 # `covers` names today's gate ids (cicd-structure §1.1), so the parity is
 # checkable: C1-C30, E1-E5 and K1 each sit in at least one gate.
 schema = 1
@@ -66,12 +70,14 @@ paths = [
 changes = "the path classifier; it decides nothing a marker could prove"
 ci-ok = "the aggregate of every gate (re-actors/alls-green)"
 publish = "calls images.yml after ci-ok; publication is not skipped by a marker"
+engine = "a build (E1) the e2e shards consume; it builds whenever any shard's gate misses, and its identity check runs again in every shard"
+build-e2e = "a build (E3) the e2e shards consume; it builds whenever any shard's gate misses"
 
 # ------------------------------------------------------------------ lint
 # fmt, clippy, the shell and Python lints (`just lint`), the engine string scan
 # of the debug CLI, and the pure-library dependency checks (ci-check.sh:7-31).
 [gates.lint]
-covers = ["C1", "C2", "C3", "C4", "C5", "C6", "C10", "C11", "C13", "C14", "C15", "C18"]
+covers = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C18"]
 definition = [
   "justfile",
   "scripts/ci-check.sh",
@@ -97,7 +103,7 @@ walks = ["**"]
 # guessed.
 [gates.unit-core]
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = [
   "logweir-core", "logweir-evidence", "logweir-verify", "logweir-store",
   "logweir-kafka", "logweir-rdkafka-ffi", "logweir-engine-oso",
@@ -122,7 +128,7 @@ readers = [
 
 [gates.unit-logweir]
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["logweir"]
 # chart_lint's withdrawn-image scan, doc_lint, message_lint, unsafe_scope_gate,
 # one_signer_gate (overlay copies) and withdrawn_claim walk the tree
@@ -156,8 +162,9 @@ readers = [
 
 [gates.unit-weirkeeper]
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
-crates = ["weirkeeper"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
+# its runner rows drive `target/debug/logweir`, which the group builds first
+crates = ["weirkeeper", "logweir"]
 readers = [
   "charts/**",
   "config/**",
@@ -177,7 +184,7 @@ readers = [
 
 [gates.unit-api]
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["logweir-api"]
 readers = [
   "docs/**",
@@ -194,13 +201,15 @@ readers = [
 ]
 
 [gates.unit-retention]
+job = "unit-small"
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["logweir-retention", "logweir-reaper"]
 
 [gates.unit-xtask]
+job = "unit-small"
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["xtask"]
 # xtask reads the vendored engine tarball and engine-oso's vendored copies.
 readers = ["third_party/kafka-backup-*", "crates/logweir-engine-oso/**"]
@@ -209,8 +218,9 @@ readers = ["third_party/kafka-backup-*", "crates/logweir-engine-oso/**"]
 # fixture_retention, ...): today they run in C16's `cargo test --workspace`.
 # Name guessed; the design's six groups do not name it.
 [gates.unit-e2e]
+job = "unit-small"
 covers = ["C16"]
-definition = ["justfile", "scripts/ci-check.sh"]
+definition = ["justfile", "scripts/ci-check.sh", ".config/nextest.toml"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
 paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/**"]
 readers = [
@@ -257,6 +267,7 @@ readers = [
 # The notices diff, both `cargo deny` runs and the engine patch oracle
 # (ci-check.sh:49-89). Advisories come from the RustSec database: always.
 [gates.supply-chain]
+job = "lint"
 covers = ["C27", "C28", "C29", "C30"]
 always = true
 definition = [
@@ -277,12 +288,12 @@ paths = [
 # The Python rows, the verifier checks and `just verify-py`
 # (justfile:12-17, ci-check.sh:34-42).
 [gates.python]
-covers = ["C7", "C8", "C9", "C17", "C19", "C20", "C21", "C22"]
+job = "python-docs"
+covers = ["C17", "C19", "C20", "C21", "C22"]
 definition = [
   "justfile",
   "scripts/ci-check.sh",
-  "scripts/check-verifier-parity.sh",
-  "scripts/check-invariant-corpus.sh",
+  "scripts/test-ci-gate.py",
 ]
 # LOGWEIR_BIN (C7, C22)
 crates = ["logweir"]
@@ -301,12 +312,14 @@ readers = [
 # ------------------------------------------------------------------ docs
 # Links, doc_lint and the unverified-label scan (FX-53 §2.4).
 [gates.docs]
+job = "python-docs"
 covers = ["C12", "C26"]
 definition = [
   "justfile",
   "scripts/ci-check.sh",
   "scripts/check-links.sh",
   "scripts/check-unverified-labels.sh",
+  ".config/nextest.toml",
 ]
 # doc_lint is a logweir test binary
 crates = ["logweir"]
@@ -336,39 +349,19 @@ always = true
 definition = ["justfile"]
 paths = ["console/**", "schemas/logweir-api-v1.openapi.json"]
 
-# ------------------------------------------------------------------ builds
-# One engine build per run (FX-53 §2.3), shared by the shards.
-[gates.engine]
-covers = ["E1"]
-definition = ["scripts/engine-source.sh"]
-paths = [
-  "third_party/kafka-backup-build.env",
-  "third_party/kafka-backup-builds.txt",
-  "third_party/kafka-backup-v*.tar.gz",
-  "third_party/kafka-backup-v*.tar.gz.sha256",
-  "third_party/kafka-backup-patches/**",
-]
-
-# `cargo build -p logweir` and the e2e test archive. Name guessed.
-[gates.build-e2e]
-covers = ["E3"]
-definition = ["justfile"]
-crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/**"]
-# stack.rs include_str!s stack-lib.sh
-readers = ["e2e/compose/stack-lib.sh"]
-
 # ------------------------------------------------------------------ e2e
-# About 8 shards, longest first (cicd-techniques §6). The shard lists are
-# GUESSED from that table; stage 4 makes them equal ci.yml's matrix. Each shard
-# reads the e2e build's closure, the harness, the stack, the fixtures, the
-# examples, the engine's inputs and the verifier the harness runs
-# (harness/mod.rs:1357, gap 1).
+# Seven shards (ci.yml's `e2e` matrix, FX-53 stage 2), balanced longest-first
+# on run 38810896223's nextest times. Each shard reads the e2e build's closure,
+# the harness, the stack, the fixtures, the examples, the engine's inputs and
+# the verifier the harness runs (harness/mod.rs:1357, gap 1), plus what its own
+# binaries read. The engine (E1) and the e2e build (E3) are built for the
+# shards, whenever one of them misses, so the shards cover them.
+
 [gates.e2e-1]
 job = "e2e 1"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["topic_identity", "topic_ids", "offset_side", "empty_capture", "config_coverage", "new_topic_parity"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["position_evidence"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
 paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
 readers = [
@@ -381,29 +374,51 @@ readers = [
 
 [gates.e2e-2]
 job = "e2e 2"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["record_semantics", "full_drill", "topic_configuration_apply", "pitr_boundary", "record_semantics_oracle", "topic_budget"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["topic_identity", "scram", "consumer_group_snapshot", "topic_configuration_apply", "created_topics", "fixture_retention", "replication_factor_parity"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/tests/record_semantics_support/**", "e2e/compose/**", "e2e/fixtures/**"]
+paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
 readers = [
   "examples/**",
   "docs/verify_scorecard.py",
   "third_party/kafka-backup-*",
   "third_party/kafka-backup-patches/**",
   ".gitignore",
-  # record_semantics runs console/src/pages/restores/plan.ts with node
-  "console/src/**",
-  "console/package.json",
-  "console/tsconfig.json",
 ]
 
-# The `--features e2e` crate rows (E5) are guessed into this shard.
 [gates.e2e-3]
 job = "e2e 3"
-covers = ["E0", "E2", "E4", "E5", "E6"]
-tests = ["position_evidence", "scram", "original_name", "replication_factor_parity"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", "scripts/run-named-tests.sh"]
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["auth_modes", "clone_ttl", "consumer_positions", "compat_contract", "stack_params", "credential_binding_store", "check_image", "resume_semantics"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
+crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
+paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
+readers = [
+  "examples/**",
+  "docs/verify_scorecard.py",
+  "third_party/kafka-backup-*",
+  "third_party/kafka-backup-patches/**",
+  ".gitignore",
+  # stack_params walks e2e/tests, e2e/compose and scripts, and reads
+  # docs/support-matrix.md, the workflows and the justfile
+  "e2e/tests/**",
+  "scripts/**",
+  "docs/support-matrix.md",
+  ".github/workflows/**",
+  # check_image reads the Dockerfiles and third_party/
+  "Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper", ".dockerignore",
+  "third_party/**",
+]
+
+# The `--features e2e` rows under crates/ (E5): logweir-kafka `live`, two
+# named doctor rows, catalog_minio, minio_options and check_cli's `live`
+# module. Their #[path] harness (e2e/tests/harness/stack.rs) is in `paths`.
+[gates.e2e-4]
+job = "e2e 4"
+covers = ["E0", "E1", "E2", "E3", "E4", "E5", "E6"]
+tests = ["full_drill", "topic_ids", "backup_argv", "pitr_boundary", "fault_proxy", "config_coverage"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml", "scripts/run-named-tests.sh"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka", "logweir-store"]
 paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
 readers = [
@@ -414,83 +429,11 @@ readers = [
   ".gitignore",
 ]
 
-[gates.e2e-4]
-job = "e2e 4"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["record_semantics", "guards", "backup_argv", "stack_params", "fixture_retention", "check_image"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
-crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/tests/record_semantics_support/**", "e2e/compose/**", "e2e/fixtures/**"]
-readers = [
-  "examples/**",
-  "docs/verify_scorecard.py",
-  "third_party/kafka-backup-*",
-  "third_party/kafka-backup-patches/**",
-  ".gitignore",
-  "console/src/**",
-  "console/package.json",
-  "console/tsconfig.json",
-  # stack_params walks e2e/tests, e2e/compose and scripts, and reads
-  # docs/support-matrix.md, the workflows and the justfile; check_image reads
-  # the Dockerfiles and third_party/. No e2e binary names another docs/ file.
-  "e2e/tests/**",
-  "scripts/**",
-  "docs/support-matrix.md",
-  ".github/workflows/**",
-  "Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper", ".dockerignore",
-  "third_party/**",
-]
-
 [gates.e2e-5]
 job = "e2e 5"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["replay_selection", "consumer_positions", "credential_binding_store", "smoke", "resume_semantics"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
-crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
-readers = [
-  "examples/**",
-  "docs/verify_scorecard.py",
-  "third_party/kafka-backup-*",
-  "third_party/kafka-backup-patches/**",
-  ".gitignore",
-]
-
-[gates.e2e-6]
-job = "e2e 6"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["auth_modes", "consumer_group_snapshot", "compat_contract", "stopped_restore"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
-crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
-readers = [
-  "examples/**",
-  "docs/verify_scorecard.py",
-  "third_party/kafka-backup-*",
-  "third_party/kafka-backup-patches/**",
-  ".gitignore",
-]
-
-[gates.e2e-7]
-job = "e2e 7"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["position_evidence", "clone_ttl", "point_set_binding", "created_topics", "topic_configuration"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh"]
-crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
-paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
-readers = [
-  "examples/**",
-  "docs/verify_scorecard.py",
-  "third_party/kafka-backup-*",
-  "third_party/kafka-backup-patches/**",
-  ".gitignore",
-]
-
-[gates.e2e-8]
-job = "e2e 8"
-covers = ["E0", "E2", "E4", "E6"]
-tests = ["group_admin", "switchover", "mvp_demo", "schema_dependency", "fault_proxy"]
-definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", "scripts/mvp-demo.sh"]
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["switchover", "group_admin", "guards", "offset_side", "schema_dependency", "stopped_restore", "new_topic_parity"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
 paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
 readers = [
@@ -503,6 +446,40 @@ readers = [
   # imports console/src/pages/catalog/model.ts
   "console/src/**",
   "console/scripts/**",
+  "console/package.json",
+  "console/tsconfig.json",
+]
+
+[gates.e2e-6]
+job = "e2e 6"
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["replay_selection", "point_set_binding", "mvp_demo", "empty_capture", "smoke", "topic_configuration", "record_semantics_oracle"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml", "scripts/mvp-demo.sh"]
+crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
+paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**"]
+readers = [
+  "examples/**",
+  "docs/verify_scorecard.py",
+  "third_party/kafka-backup-*",
+  "third_party/kafka-backup-patches/**",
+  ".gitignore",
+]
+
+[gates.e2e-7]
+job = "e2e 7"
+covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
+tests = ["record_semantics", "original_name", "topic_budget"]
+definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
+crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]
+paths = ["e2e/Cargo.toml", "e2e/src/**", "e2e/tests/harness/**", "e2e/compose/**", "e2e/fixtures/**", "e2e/tests/record_semantics_support/**"]
+readers = [
+  "examples/**",
+  "docs/verify_scorecard.py",
+  "third_party/kafka-backup-*",
+  "third_party/kafka-backup-patches/**",
+  ".gitignore",
+  # record_semantics runs console/src/pages/restores/plan.ts with node
+  "console/src/**",
   "console/package.json",
   "console/tsconfig.json",
 ]

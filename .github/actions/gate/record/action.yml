@@ -2,20 +2,40 @@
 # uploads the marker `gate-<gate>-<hash>` for the hash `.github/actions/gate`
 # computed at the job's start (CI_GATE_* in the job's environment). It records
 # nothing on a hit, without a hash, or in a fork's pull request.
+#
+# A job that runs SEVERAL gates (ci.yml's `check` rows) names the gate, and
+# hands over the hash and hit its gate step output, because CI_GATE_* holds
+# only the last gate decided.
 name: gate-record
 description: Record that this gate passed on its inputs (artifact gate-<gate>-<hash>, 30 days).
+inputs:
+  gate:
+    description: The gate's name; default CI_GATE_NAME.
+    required: false
+    default: ''
+  hash:
+    description: The gate step's `hash` output; default CI_GATE_HASH.
+    required: false
+    default: ''
+  hit:
+    description: The gate step's `hit` output; default CI_GATE_HIT.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
     # A marker that fails to record costs a re-run next time, never a green
     # gate: neither step can fail the job.
     - id: marker
-      if: env.CI_GATE_HIT != 'true' && env.CI_GATE_HASH != ''
+      if: (inputs.gate != '' && inputs.hit != 'true' && inputs.hash != '') || (inputs.gate == '' && env.CI_GATE_HIT != 'true' && env.CI_GATE_HASH != '')
       continue-on-error: true
       shell: bash
+      env:
+        NAME: ${{ inputs.gate || env.CI_GATE_NAME }}
+        HASH: ${{ inputs.gate != '' && inputs.hash || env.CI_GATE_HASH }}
       run: |
         bash "$GITHUB_ACTION_PATH/../../../../scripts/ci-gate.sh" record \
-          "$CI_GATE_NAME" "$CI_GATE_HASH" "$RUNNER_TEMP/ci-gate-marker" >> "$GITHUB_OUTPUT"
+          "$NAME" "$HASH" "$RUNNER_TEMP/ci-gate-marker" >> "$GITHUB_OUTPUT"
     - if: steps.marker.outputs.name != ''
       continue-on-error: true
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
