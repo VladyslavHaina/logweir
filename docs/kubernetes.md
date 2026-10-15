@@ -2301,10 +2301,14 @@ kubectl --context docker-desktop get approval a1 \
 it names is `Admitted=True` and its bundle names this `Approval`'s UID, the
 controller adds `Consumed=True` (reason `RestoreAdmitted`). A `Switchover`'s
 `Approval` is consumed the same way (reason `SwitchoverAdmitted`) once the
-Switchover records its Job (`status.jobRef`) and its own bundle carries this
-`Approval`'s signed bytes; the bundle's creation is the admission instant. An
-`Approval` an older build rewrote `AuthorizationExpired` after its switchover ran
-is re-verified from its signed bytes at that instant and recorded again. The verdict then
+Switchover carries `Admitted=True`, which its controller writes once, before the
+Job; that condition's time is the admission instant. A Job, `status.jobRef` or a
+ConfigMap alone is never admission. An `Approval` an older build rewrote
+`AuthorizationExpired` after its switchover ran is re-verified from its signed
+bytes and recorded again only when that Switchover's status proves the run (a
+terminal phase with the run's exit code, and its Job recorded) and its bundle is
+that build's, carrying this `Approval`'s bytes; the bundle's creation is then the
+instant. The verdict then
 stays as recorded whatever the clock, a key's `notAfter`, a retirement or a
 policy edit does. Only a compromise reaches it: `verified` becomes `false`, and
 `Verified` reads `RecordedBeforeRevocation` when the admission preceded the
@@ -2646,10 +2650,18 @@ restore's target. Nothing commits a position automatically after a restore.
    `restoreRef`'s, a `Restore` that did not succeed with a `Valid` verdict
    (`RestoreNotSucceeded`), a scratch restore (`RestoreIsScratch`) and a second
    switchover of the same restore while one runs (`SwitchoverInProgress`), then
-   creates one Job (`logweir switchover run`) with the restore's target
-   connection and its evidence destination's two grants: `evidenceRead` to read
-   the evidence, `evidenceWrite` to write the record
+   creates the immutable bundle `<name>-switchover`, writes `Admitted=True`
+   (the admission, once), and creates one Job (`logweir switchover run`) with
+   the restore's target connection and its evidence destination's two grants:
+   `evidenceRead` to read the evidence, `evidenceWrite` to write the record
    ([the grants](#the-grants-and-the-object-storage-actions-each-one-needs)).
+   A bundle that already exists is used only when it is byte for byte this
+   admission's, with this Switchover as its one controller owner; otherwise the
+   Switchover ends `Refused`, `ApprovalBundleConflict`, and no Job is created.
+   A Job named after the Switchover that no admission created is not adopted
+   (`Pending`, `SwitchoverJobNotAdmitted`, until it is gone). A run whose Job
+   is deleted before it finishes ends `Failed`, `SwitchoverJobLost`, and is
+   never admitted again: create a new Switchover and approval.
 7. **The run** verifies the approval, the scorecard's signature and plan hash,
    a passing complete verification (`VerificationNotComplete`, naming the
    field), the mapping's digest, every plan entry against the mapping

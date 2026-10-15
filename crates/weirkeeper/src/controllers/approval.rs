@@ -1745,9 +1745,8 @@ pub async fn decide_with_policy_at(
             if let Some(sw) = api.get_opt(&subject.name).await? {
                 let current = switchover_subject(&sw, &subject.name, &namespace)?;
                 if &current == previous {
-                    let bundle = switchover_bundle(client, &namespace, &sw).await?;
                     if let Some(admitted_at) =
-                        switchover_admitted_under(&sw, approval, bundle.as_ref())
+                        switchover_admission(client, &namespace, &sw, approval).await?
                     {
                         candidate = Some(Consumption {
                             subject: current,
@@ -1936,8 +1935,8 @@ pub async fn decide_with_policy_at(
                         // DUI-43: only a verdict recorded for this UID can have
                         // been consumed by its admission; a record an earlier
                         // build rewrote is asked at that admission instant.
-                        let bundle = switchover_bundle(client, &namespace, &sw).await?;
-                        consumed_at = switchover_admitted_under(&sw, approval, bundle.as_ref());
+                        consumed_at =
+                            switchover_admission(client, &namespace, &sw, approval).await?;
                     }
                     (sw.spec.plan_bytes, Some(current))
                 }
@@ -2321,74 +2320,109 @@ pub fn admitted_under(
     bound.then_some(admitted.last_transition_time)
 }
 
-/// The approval bundle the Switchover controller materialised for this
-/// Switchover's Job (`switchover::bundle_config_map`), read only once the
-/// Switchover records that Job (`status.jobRef`); `None` otherwise.
-async fn switchover_bundle(
+/// When `sw` was admitted under `approval`, from what the Switchover
+/// controller wrote: [`switchover_admitted_under`] (the admission marker), or,
+/// for a Switchover an older build ran before the marker existed,
+/// [`legacy_switchover_ran_under`] over its bundle (read only then).
+async fn switchover_admission(
     client: &kube::Client,
     namespace: &str,
     sw: &Switchover,
-) -> Result<Option<k8s_openapi::api::core::v1::ConfigMap>, ReconcileError> {
-    if sw
-        .status
-        .as_ref()
-        .and_then(|s| s.job_ref.as_ref())
-        .is_none()
-    {
+    approval: &Approval,
+) -> Result<Option<DateTime<Utc>>, ReconcileError> {
+    if let Some(at) = switchover_admitted_under(sw, approval) {
+        return Ok(Some(at));
+    }
+    if !legacy_run_recorded(sw) {
         return Ok(None);
     }
     let api: Api<k8s_openapi::api::core::v1::ConfigMap> =
         Api::namespaced(client.clone(), namespace);
-    Ok(api
+    let bundle = api
         .get_opt(&super::switchover::bundle_name(&sw.name_any()))
-        .await?)
+        .await?;
+    Ok(legacy_switchover_ran_under(sw, approval, bundle.as_ref()))
 }
 
-/// When `sw` records that it was admitted under `approval` (DUI-43): the
-/// Switchover's own admission signal, read from what its controller wrote.
+/// When `sw` records that it was admitted under `approval` (DUI-43, L6): its
+/// admission marker, `Admitted=True`, which the Switchover controller writes
+/// once, on the pass that admitted the run, before its Job.
 ///
-/// * The Switchover names this `Approval` in `spec.approvalRef` and records
-///   its Job (`status.jobRef`), which its controller writes only on the pass
-///   that admitted it and created the Job. `Switchover.status` is written only
-///   by this controller's service account, the trust the Restore twin places
-///   in `Admitted=True`.
-/// * The bundle is that controller's, made for this object: controlled by
-///   exactly this Switchover UID, and carrying this `Approval`'s own signed
-///   bytes and sidecar, the documents the Job verified. An `Approval` created
-///   after the bundle is another object.
+/// * The Switchover names this `Approval` in `spec.approvalRef` (immutable).
+/// * It carries `Admitted=True`. `Switchover.status` is written only by that
+///   controller's service account, the trust the Restore twin places in its
+///   own `Admitted=True`. A Job, a `status.jobRef` or a ConfigMap is not
+///   admission: a Job named after a Switchover can be anyone's, and the
+///   controller adopts none (`switchover::job_step`).
+/// * The `Approval` existed at that instant (`creationTimestamp` at or before
+///   it): one re-created under the same name later is another object.
+///
+/// The instant is the marker's `lastTransitionTime`. Nothing here is a
+/// verdict: a record an earlier build rewrote is re-verified from its signed
+/// bytes at that instant, and a verdict still standing is kept as it stands.
+#[must_use]
+pub fn switchover_admitted_under(sw: &Switchover, approval: &Approval) -> Option<DateTime<Utc>> {
+    if sw.spec.approval_ref.name.trim() != approval.name_any() {
+        return None;
+    }
+    let at = super::switchover::admission_marker(sw.status.as_ref())?.last_transition_time?;
+    approval
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .is_some_and(|created| created.0 <= at)
+        .then_some(at)
+}
+
+/// Whether `sw` is a run an older build admitted and finished before the
+/// admission marker existed: no marker, a terminal phase with the run's own
+/// exit code (written only from a finished Job's pod), and `status.jobRef`
+/// naming its Job. Never true of a run this build admitted, which carries the
+/// marker, nor of one it refused or never admitted, which has no exit code or
+/// no recorded Job: this build records a Job only after its own admission.
+#[must_use]
+pub fn legacy_run_recorded(sw: &Switchover) -> bool {
+    let status = sw.status.as_ref();
+    super::switchover::admission_marker(status).is_none()
+        && super::switchover::is_terminal(status)
+        && status.and_then(|s| s.exit_code).is_some()
+        && status.and_then(|s| s.job_ref.as_deref()) == Some(sw.name_any().as_str())
+}
+
+/// When a Switchover an older build ran ([`legacy_run_recorded`]) was admitted
+/// under `approval`: only from what proves that run used this approval.
+///
+/// * Its status proves it ran (above), and it names this `Approval`.
+/// * Its bundle, which that Job mounted, is exactly that build's: one owner,
+///   this Switchover UID as its controller, immutable, and carrying this
+///   `Approval`'s own signed bytes and sidecar byte for byte.
+/// * The `Approval` existed when the bundle was made.
 ///
 /// The instant is the bundle's `creationTimestamp`, which the API server sets
-/// on the admitting pass, just before the Job. Nothing here is a verdict: a
-/// record an earlier build rewrote is re-verified from its signed bytes at
-/// that instant, and a verdict still standing is kept as it stands.
+/// (that build made it just before the Job). `jobRef` alone is never enough.
 #[must_use]
-pub fn switchover_admitted_under(
+pub fn legacy_switchover_ran_under(
     sw: &Switchover,
     approval: &Approval,
     bundle: Option<&k8s_openapi::api::core::v1::ConfigMap>,
 ) -> Option<DateTime<Utc>> {
-    if sw.spec.approval_ref.name.trim() != approval.name_any()
-        || sw
-            .status
-            .as_ref()
-            .and_then(|s| s.job_ref.as_ref())
-            .is_none()
-    {
+    if !legacy_run_recorded(sw) || sw.spec.approval_ref.name.trim() != approval.name_any() {
         return None;
     }
     let bundle = bundle?;
     let sw_uid = sw.uid()?;
-    let owned = bundle
+    let owners = bundle
         .metadata
         .owner_references
-        .as_ref()
-        .is_some_and(|refs| {
-            refs.iter().any(|r| {
-                r.controller == Some(true) && r.kind == Switchover::kind(&()) && r.uid == sw_uid
-            })
-        });
+        .as_deref()
+        .unwrap_or_default();
+    let owned = owners.len() == 1
+        && owners[0].controller == Some(true)
+        && owners[0].kind == Switchover::kind(&())
+        && owners[0].uid == sw_uid;
     let data = bundle.data.as_ref()?;
-    let carries = data.get(super::switchover::APPROVAL_FILE) == Some(&approval.spec.approval_bytes)
+    let carries = bundle.immutable == Some(true)
+        && data.get(super::switchover::APPROVAL_FILE) == Some(&approval.spec.approval_bytes)
         && data.get(super::switchover::APPROVAL_SIG_FILE) == Some(&approval.spec.sidecar_bytes);
     let at = bundle.metadata.creation_timestamp.as_ref()?.0;
     let existed = approval
