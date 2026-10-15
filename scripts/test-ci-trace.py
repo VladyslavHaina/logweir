@@ -111,7 +111,7 @@ class Recorded(unittest.TestCase):
             os.unlink(fh.name)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual([l for l in proc.stdout.split("\n") if l.startswith("UNDECLARED")],
-                         ["UNDECLARED docs/undeclared.md (statx)"])
+                         ["UNDECLARED docs/undeclared.md (statx) by reads-538d09143c3e3d53"])
 
 
 class Trace(unittest.TestCase):
@@ -161,7 +161,7 @@ class Trace(unittest.TestCase):
         declared = [p for p in self.reads(SAMPLE) if p != "charts/logweir/values.yaml"]
         proc = self.check(SAMPLE, declared)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("UNDECLARED charts/logweir/values.yaml (newfstatat)", proc.stdout)
+        self.assertIn("UNDECLARED charts/logweir/values.yaml (newfstatat) by doc_lint-1", proc.stdout)
         self.assertEqual(proc.stdout.count("UNDECLARED"), 1)
 
     def test_check_passes_when_every_read_is_declared(self):
@@ -169,6 +169,51 @@ class Trace(unittest.TestCase):
         proc = self.check(SAMPLE, declared)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("9 tracked files read", proc.stdout)
+
+    def test_a_presence_only_file_may_be_stat_ed_but_not_read(self):
+        declared = [p for p in self.reads(SAMPLE) if p not in ("justfile", "charts/logweir/values.yaml")]
+        present = self.dir / "exists"
+        present.write_text("justfile\ncharts/logweir/values.yaml\nREADME.md\n")
+        inputs = self.dir / "inputs"
+        inputs.write_text("\n".join(declared) + "\n")
+        proc = self.run_trace("check", SAMPLE, "--inputs", str(inputs), "--exists", str(present))
+        # access(justfile) and a failed newfstatat(values.yaml) only look.
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # An open of a presence-only file is a read the gate does not declare.
+        declared.remove("Cargo.toml")
+        inputs.write_text("\n".join(declared) + "\n")
+        present.write_text("Cargo.toml\n")
+        proc = self.run_trace("check", SAMPLE, "--inputs", str(inputs), "--exists", str(present))
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("UNDECLARED Cargo.toml (newfstatat, openat)", proc.stdout)
+
+    def test_a_trace_strace_gave_up_on_never_passes(self):
+        # Run 38817431902, e2e-2: "strace: ptrace(PTRACE_LISTEN,pid:24228,sig:0):
+        # Input/output error", after which strace no longer followed the run.
+        tools = self.dir / "bin"
+        tools.mkdir()
+        fake = tools / "strace"
+        fake.write_text(f"""#!{sys.executable}
+import sys
+args = sys.argv[1:]
+open(args[args.index("-o") + 1], "w").write('1 openat(AT_FDCWD, "README.md", O_RDONLY) = -1 ENOENT\\n')
+print("strace: ptrace(PTRACE_LISTEN,pid:24228,sig:0): Input/output error", file=sys.stderr)
+sys.exit(0)
+""")
+        fake.chmod(0o755)
+        trace = self.dir / "trace.txt"
+        env = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"}
+        proc = subprocess.run([sys.executable, str(TRACE), "run", "--no-seccomp-bpf", "--out", str(trace), "--",
+                               "true"], capture_output=True, text=True, env=env)
+        self.assertNotEqual(proc.returncode, 0, "the command passed, but the trace is incomplete")
+        self.assertIn("PTRACE_LISTEN", proc.stderr)
+        inputs = self.dir / "inputs"
+        inputs.write_text("README.md\n")
+        proc = subprocess.run([sys.executable, str(TRACE), "check", "--root", CO, "--tracked",
+                               str(self.dir / "tracked"), "--inputs", str(inputs), str(trace)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("is incomplete", proc.stderr)
 
     def test_no_declared_inputs_is_an_error(self):
         self.assertEqual(self.check(SAMPLE, []).returncode, 2)

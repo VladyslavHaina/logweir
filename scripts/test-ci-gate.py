@@ -39,6 +39,7 @@ changes = "plumbing"
 definition = ["scripts/alpha.sh"]
 crates = ["alpha"]
 readers = ["docs/**"]
+exists = ["web/**"]
 
 [gates.beta]
 definition = ["scripts/beta.sh"]
@@ -281,7 +282,8 @@ class Hash(unittest.TestCase):
     def test_a_new_file_under_a_declared_glob_changes_only_its_gates(self):
         self.repo.write("web/new.js", "1\n")
         self.repo.commit("web")
-        self.assertEqual(self.changed(), {"beta", "walker"})
+        # beta reads web/**, walker walks the tree, alpha looks for web/** files
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker"})
 
     def test_a_crate_change_reaches_its_reverse_dependencies(self):
         self.repo.write("crates/alpha/src/lib.rs", "pub fn a() { }\n")
@@ -291,6 +293,21 @@ class Hash(unittest.TestCase):
         self.repo.write("crates/beta/tests/t.rs", "#[test] fn t() { }\n")
         self.repo.commit("beta")
         self.assertEqual(self.changed(), {"beta", "walker"})
+
+    def test_a_presence_only_input_hashes_its_path_not_its_content(self):
+        # alpha declares web/** by presence only; beta reads it; walker walks.
+        self.repo.write("web/index.html", "<html>edited</html>\n")
+        self.repo.commit("edit")
+        self.assertEqual(self.changed(), {"beta", "walker"})
+        self.before = self.repo.hashes()
+        self.repo.write("web/new.js", "1\n")
+        self.repo.commit("add")
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker"})
+        self.before = self.repo.hashes()
+        (self.repo.dir / "web" / "new.js").unlink()
+        self.repo.commit("remove")
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker"})
+        self.assertEqual(self.repo.run("exists", "alpha").stdout.split(), ["web/index.html", "web/package.json"])
 
     def test_a_star_stops_at_a_slash(self):
         self.repo.write("examples/nested/deep.yaml", "b: 3\n")

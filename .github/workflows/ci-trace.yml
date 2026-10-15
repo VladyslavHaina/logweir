@@ -158,7 +158,10 @@ jobs:
       - name: The gate's declared inputs
         env:
           RUSTUP_TOOLCHAIN: stable
-        run: bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt" && wc -l "$RUNNER_TEMP/inputs.txt"
+        run: |
+          bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt"
+          bash scripts/ci-gate.sh exists "$GATE" > "$RUNNER_TEMP/exists.txt"
+          wc -l "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/exists.txt"
       - name: Pull Docker Hub images through a mirror
         run: |
           sudo mkdir -p /etc/docker
@@ -190,7 +193,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           ls -l "$RUNNER_TEMP/trace.txt"
-          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/trace.txt"
+          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" \
+            --exists "$RUNNER_TEMP/exists.txt" --reads-out "$RUNNER_TEMP/reads.tsv" "$RUNNER_TEMP/trace.txt"
+      # Every tracked file the gate read, declared or not, with its syscalls
+      # and the executables that read it: the evidence for a map change.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trace-reads-${{ matrix.gate }}
+          path: ${{ runner.temp }}/reads.tsv
+          retention-days: 14
+          if-no-files-found: warn
 
   trace-e2e:
     needs: plan
@@ -216,7 +229,10 @@ jobs:
       - name: The gate's declared inputs
         env:
           RUSTUP_TOOLCHAIN: stable
-        run: bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt" && wc -l "$RUNNER_TEMP/inputs.txt"
+        run: |
+          bash scripts/ci-gate.sh files "$GATE" > "$RUNNER_TEMP/inputs.txt"
+          bash scripts/ci-gate.sh exists "$GATE" > "$RUNNER_TEMP/exists.txt"
+          wc -l "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/exists.txt"
       - name: Pull Docker Hub images through a mirror
         run: |
           sudo mkdir -p /etc/docker
@@ -255,15 +271,28 @@ jobs:
           cargo nextest archive --locked -p e2e --features e2e --archive-file "$RUNNER_TEMP/e2e.tar.zst"
       - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
+      # Without --seccomp-bpf: with it, strace 6.8 lost e2e-2's run to
+      # `ptrace(PTRACE_LISTEN, …): Input/output error` (run 38817431902). A
+      # strace error fails the step and marks the trace incomplete either way.
       - name: ${{ matrix.gate }}'s binaries, traced
         run: >-
-          python3 scripts/ci-trace.py run --out "$RUNNER_TEMP/trace.txt" --
+          python3 scripts/ci-trace.py run --no-seccomp-bpf --out "$RUNNER_TEMP/trace.txt" --
           cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e.tar.zst"
           --workspace-remap "$GITHUB_WORKSPACE" --profile e2e -E "$FILTER"
       - name: Every tracked file it read is declared
         if: ${{ !cancelled() }}
         run: |
           ls -l "$RUNNER_TEMP/trace.txt"
-          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" "$RUNNER_TEMP/trace.txt"
+          python3 scripts/ci-trace.py check --root "$GITHUB_WORKSPACE" --inputs "$RUNNER_TEMP/inputs.txt" \
+            --exists "$RUNNER_TEMP/exists.txt" --reads-out "$RUNNER_TEMP/reads.tsv" "$RUNNER_TEMP/trace.txt"
+      # Every tracked file the gate read, declared or not, with its syscalls
+      # and the executables that read it: the evidence for a map change.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trace-reads-${{ matrix.gate }}
+          path: ${{ runner.temp }}/reads.tsv
+          retention-days: 14
+          if-no-files-found: warn
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans

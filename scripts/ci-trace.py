@@ -54,6 +54,9 @@ PATH_ARG = {
 }
 DIRFD = {"openat", "newfstatat", "fstatat64", "statx", "faccessat", "faccessat2", "execveat"}
 OPENS = {"open", "openat", "creat"}
+# Calls that look at a file without reading it: a file the gate declares by
+# presence only (ci/gates.toml `exists`) may be named by these and no other.
+STATS = {"stat", "lstat", "newfstatat", "fstatat64", "statx", "access", "faccessat", "faccessat2"}
 FORKS = {"clone", "clone3", "fork", "vfork"}
 LINE = re.compile(r"^(?:\[pid\s+)?(\d+)\]?\s+(.*)$")
 START = re.compile(r"^([a-z_0-9]+)\((.*)$")
@@ -177,8 +180,8 @@ def returned(text):
 
 def reads(lines, root, start_cwd=None):
     """Every absolute path the trace names (opened, stat'ed, probed, executed),
-    resolved, as (path, syscall); raises TraceError for a truncated or
-    unresolvable path.
+    resolved, as (path, syscall, the reading process's executable or None);
+    raises TraceError for a truncated or unresolvable path.
 
     Working directories: the first process starts in start_cwd (default: the
     root). A child is created at its parent's clone/fork START, with a copy
@@ -195,7 +198,7 @@ def reads(lines, root, start_cwd=None):
             timeline.append((e["start"], 0, "spawn", e, int(value), shared))
         timeline.append((e["end"], 1, "done", e, None, None))
     timeline.sort(key=lambda t: (t[0], t[1]))
-    fs_of, found = {}, []
+    fs_of, exe_of, found = {}, {}, []
     start_cwd = start_cwd or root
 
     def fs(pid):
@@ -207,6 +210,7 @@ def reads(lines, root, start_cwd=None):
         parent = fs(e["pid"])
         if kind == "spawn":
             fs_of[child] = parent if shared else [parent[0]]
+            exe_of[child] = exe_of.get(e["pid"])
             continue
         name, text = e["name"], e["text"]
         value, decoration = returned(text)
@@ -248,7 +252,9 @@ def reads(lines, root, start_cwd=None):
             if value == "0":
                 parent[0] = resolved
             continue
-        found.append((resolved, name))
+        found.append((resolved, name, exe_of.get(e["pid"])))
+        if name in ("execve", "execveat") and value == "0":
+            exe_of[e["pid"]] = resolved
     return found
 
 
@@ -261,7 +267,7 @@ def tracked_files(root):
 def to_tracked(found, root, tracked):
     roots = {os.path.normpath(root), os.path.realpath(root)}
     hits = {}
-    for path, name in found:
+    for path, name, exe in found:
         for r in roots:
             if path.startswith(r + "/"):
                 rel = path[len(r) + 1:]
@@ -271,7 +277,9 @@ def to_tracked(found, root, tracked):
         if rel.startswith(("target/", ".git/")) or rel in ("target", ".git"):
             continue
         if rel in tracked:
-            hits.setdefault(rel, set()).add(name)
+            hit = hits.setdefault(rel, {"calls": set(), "exes": set()})
+            hit["calls"].add(name)
+            hit["exes"].add(os.path.basename(exe) if exe else "?")
     return hits
 
 
@@ -281,9 +289,38 @@ def read_traces(paths):
             yield from fh
 
 
-def strace_argv(out, command):
-    return ["strace", "-f", "--seccomp-bpf", "-qq", "-y", "-s", "4096",
+def strace_argv(out, command, seccomp=True):
+    return ["strace", "-f", *(["--seccomp-bpf"] if seccomp else []), "-qq", "-y", "-s", "4096",
             "-e", f"trace={TRACED}", "-o", out, *command]
+
+
+def failed_marker(trace):
+    return trace + ".tracer-failed"
+
+
+def run(out, command, seccomp=True):
+    """Run the command under strace. strace's own diagnostics ("strace: …"
+    on stderr, e.g. a PTRACE_LISTEN error that stops it following a process)
+    mean the trace is incomplete: the run fails and leaves a marker that
+    `check` refuses, so an incomplete trace can never pass."""
+    marker = failed_marker(out)
+    if os.path.exists(marker):
+        os.unlink(marker)
+    proc = subprocess.Popen(strace_argv(out, command, seccomp), stderr=subprocess.PIPE)
+    diagnostics = []
+    for raw in proc.stderr:
+        line = raw.decode("utf-8", "replace")
+        sys.stderr.write(line)
+        if line.startswith("strace: "):
+            diagnostics.append(line.strip())
+    rc = proc.wait()
+    if diagnostics:
+        with open(marker, "w") as fh:
+            fh.write("\n".join(diagnostics) + "\n")
+        print(f"ci-trace: strace reported {len(diagnostics)} error(s); the trace is incomplete",
+              file=sys.stderr)
+        return rc or 3
+    return rc
 
 
 CANARY = ("cd ci && cat gates.toml > /dev/null && cd .. && test -e justfile "
@@ -321,26 +358,37 @@ def main(argv):
             print(f"ci-trace: canary: {err}", file=sys.stderr)
             return 1
     if argv[:1] == ["run"]:
-        rest = argv[1:]
-        dry = rest[:1] == ["--dry-run"]
-        rest = rest[1:] if dry else rest
+        rest, dry, seccomp = argv[1:], False, True
+        while rest[:1] in (["--dry-run"], ["--no-seccomp-bpf"]):
+            dry = dry or rest[0] == "--dry-run"
+            seccomp = seccomp and rest[0] != "--no-seccomp-bpf"
+            rest = rest[1:]
         if len(rest) < 4 or rest[0] != "--out" or rest[2] != "--":
-            print("usage: ci-trace.py run [--dry-run] --out <file> -- <command>...", file=sys.stderr)
+            print("usage: ci-trace.py run [--dry-run] [--no-seccomp-bpf] --out <file> -- <command>...",
+                  file=sys.stderr)
             return 2
-        argv_ = strace_argv(rest[1], rest[3:])
         if dry:
-            print("\0".join(argv_))
+            print("\0".join(strace_argv(rest[1], rest[3:], seccomp)))
             return 0
-        return subprocess.run(argv_).returncode
+        return run(rest[1], rest[3:], seccomp)
     ap = argparse.ArgumentParser(prog="ci-trace.py")
     ap.add_argument("command", choices=("check", "reads"))
     ap.add_argument("--root", required=True, help="the checkout")
     ap.add_argument("--inputs", help="check: the gate's inputs, one tracked path per line")
+    ap.add_argument("--exists", help="check: the files the gate declares by presence only "
+                    "(`ci-gate.sh exists`); a stat or probe of one is declared, an open is not")
     ap.add_argument("--tracked", help="the tracked files, one per line (default: git ls-files)")
     ap.add_argument("--cwd", help="the directory strace started in (default: --root)")
+    ap.add_argument("--reads-out", help="check: also write every tracked file read, with its "
+                    "syscalls and readers, one per line")
     ap.add_argument("traces", nargs="+")
     a = ap.parse_args(argv)
     root = os.path.normpath(os.path.abspath(a.root))
+    for trace in a.traces:
+        if os.path.exists(failed_marker(trace)):
+            print(f"ci-trace: {trace} is incomplete (strace failed: "
+                  f"{open(failed_marker(trace)).read().strip()}); nothing in it can pass", file=sys.stderr)
+            return 2
     try:
         tracked = (set(open(a.tracked).read().split("\n")) - {""}) if a.tracked else tracked_files(root)
         hits = to_tracked(reads(read_traces(a.traces), root, a.cwd), root, tracked)
@@ -356,11 +404,20 @@ def main(argv):
     if not declared:
         print("ci-trace: the gate declares no inputs (did `ci-gate.sh files` fail?)", file=sys.stderr)
         return 2
-    undeclared = sorted(set(hits) - declared)
+    present = (set(open(a.exists).read().split("\n")) - {""}) if a.exists else set()
+    undeclared = sorted(rel for rel in hits if rel not in declared
+                        and not (rel in present and hits[rel]["calls"] <= STATS))
+    if a.reads_out:
+        with open(a.reads_out, "w") as fh:
+            for rel in sorted(hits):
+                mark = "UNDECLARED" if rel in undeclared else "declared"
+                fh.write(f"{mark}\t{rel}\t{','.join(sorted(hits[rel]['calls']))}\t"
+                         f"{','.join(sorted(hits[rel]['exes']))}\n")
     print(f"ci-trace: {len(hits)} tracked files read, {len(declared)} declared, "
           f"{len(undeclared)} undeclared")
     for rel in undeclared:
-        print(f"UNDECLARED {rel} ({', '.join(sorted(hits[rel]))})")
+        print(f"UNDECLARED {rel} ({', '.join(sorted(hits[rel]['calls']))}) "
+              f"by {', '.join(sorted(hits[rel]['exes']))}")
     return 1 if undeclared else 0
 
 
