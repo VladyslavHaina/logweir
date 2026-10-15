@@ -210,12 +210,16 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     expect(screen.getAllByText("Verifying").length).toBeGreaterThan(0);
     expect(screen.queryByText("Done, not verified")).toBeNull();
     expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    // DUI-47: no "Verified at" beside a pending verdict; its instant is the attempt's.
+    expect(screen.getAllByText("Last attempt at").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Verified at")).toBeNull();
     // The controller verifies: the page is still reading, and shows it.
     net.answers.set(`/namespaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
     net.answers.set(`/namespaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
     await screen.findByText("Restored and verified");
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+    expect(screen.getAllByText("Verified at").length).toBeGreaterThan(0);
   });
 
   // Review L2: the bound holds on the page's reads, not only in the hook. Past

@@ -54,6 +54,7 @@ import { TopicConfigurationResult } from "../cutover/TopicConfiguration";
 import { SwitchoverEntry } from "../cutover/SwitchoverEntry";
 import { cutoverRefusal } from "../cutover/Cutover";
 import { useSourceBackup } from "../../api/queries";
+import { verdictInstantTerm } from "../backups/verdict";
 import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
 import { approvalRoute } from "./model";
 import {
@@ -577,7 +578,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                         term: "Signature",
                         value: op.verification.detail ? <Prose text={`${op.verification.state}: ${op.verification.detail}`} /> : op.verification.state,
                       },
-                      { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
+                      // DUI-47: an instant beside a pending verdict is the attempt's, not a verdict's.
+                      { term: verdictInstantTerm(op.verification.state), value: <Instant value={op.verification.verifiedAt} exact /> },
                       op.verification.matchedKeyId ? { term: "Signed by key", value: <Ident value={op.verification.matchedKeyId} label="signer key id" /> } : null,
                       { term: "Trust", value: `${op.trust.state}, basis ${op.trust.basis}${op.trust.keyState ? `, key ${op.trust.keyState}` : ""}${op.trust.policy?.name ? `, policy ${op.trust.policy.name}` : ""}` },
                       op.evidence.payloadKey ? { term: "Scorecard", value: <Ident value={op.evidence.payloadKey} label="scorecard key" /> } : { term: "Scorecard", value: shown(null) },

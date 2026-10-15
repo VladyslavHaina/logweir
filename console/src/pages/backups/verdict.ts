@@ -33,6 +33,15 @@ export function basisAllowsGreen(basis: unknown): boolean {
 
 /** The Evidence card's words for the API's two states and its basis (DUI-31.4). The API's own
  *  word stays in the title; a word this build does not know is shown as it is. */
+/**
+ * DUI-47: the term for a verification's instant. `verifiedAt` is "when the verdict was
+ * reached" only once there is one: while the verdict is pending, the controller has recorded
+ * an attempt (its time), not a verdict, so the instant is worded as the attempt's.
+ */
+export function verdictInstantTerm(state: string | null | undefined): string {
+  return state === "pending" ? "Last attempt at" : "Verified at";
+}
+
 export const SIGNATURE_WORDS: Record<string, string> = {
   pending: "Pending",
   valid: "Valid",

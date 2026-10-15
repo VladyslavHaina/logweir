@@ -348,6 +348,25 @@ describe("one backup's page", () => {
     expect((screen.getByRole("button", { name: "Restore this point" }) as HTMLButtonElement).getAttribute("aria-disabled")).not.toBe("true");
   });
 
+  it("DUI-47: a verifying run's Evidence card gives the attempt's time, never a Verified at beside Not verified", async () => {
+    const op = copy(operationBackup) as { item: Record<string, unknown> };
+    op.item.state = "verifying";
+    op.item.terminal = false;
+    op.item.verifiedSuccess = false;
+    op.item.verification = { state: "pending", verifiedAt: "2026-09-12T08:02:00Z" };
+    op.item.trust = { state: "pending", basis: "None" };
+    detail(op);
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    await screen.findByText("Last attempt at");
+    expect(screen.queryByText("Verified at")).toBeNull();
+    cleanup();
+    // CONTROL: once the verdict is written, the instant is its own.
+    detail(operationBackup);
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    await screen.findByText("Verified at");
+    expect(screen.queryByText("Last attempt at")).toBeNull();
+  });
+
   it("is not green over a key revoked for compromise, and names the case", async () => {
     const op = copy(operationBackup) as { item: Record<string, unknown> };
     op.item.trust = { state: "verified", basis: "RecordedBeforeRevocation", keyState: "Revoked" };

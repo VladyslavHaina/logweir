@@ -54,6 +54,7 @@ import "./evidence.css";
 import {
   BASIS_WORDS,
   SIGNATURE_WORDS,
+  verdictInstantTerm,
   TRUST_BASIS_NOT_OBSERVED,
   TRUST_WORDS,
   HISTORICAL_SUFFIX,
@@ -460,7 +461,7 @@ function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView 
             {trust?.policy?.name ? `${trust.policy.name}${typeof trust.policy.generation === "number" ? ` g${trust.policy.generation}` : ""}` : <Value value={null} />}
           </Term>
           <Term term="Verified with key">{v.matchedKeyId ? <Ident value={v.matchedKeyId} label="signer key id" /> : <Value value={null} />}</Term>
-          <Term term="Verified at">
+          <Term term={verdictInstantTerm(v.state)}>
             <When value={v.verifiedAt} exact />
           </Term>
           <Term term="Signed at">

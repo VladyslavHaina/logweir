@@ -19,6 +19,7 @@ import {
   progressWord,
   restoreOffer,
   triggerWords,
+  verdictInstantTerm,
   windowShort,
 } from "./verdict";
 import backupsList from "../../../fixtures/console/backups-list.json";
@@ -249,5 +250,12 @@ describe("DUI-41.6: the live steps while a backup verifies", () => {
     // Controls: a run copying is at Copying; a finished stage has every step done.
     expect(liveStepIndex("running", "running")).toBe(2);
     expect(liveStepIndex("finished", "succeeded")).toBe(4);
+  });
+});
+
+describe("DUI-47: the instant beside a verdict", () => {
+  it("is the attempt's while the verdict is pending, and the verdict's once written", () => {
+    expect(verdictInstantTerm("pending")).toBe("Last attempt at");
+    for (const state of ["valid", "invalid", "notAttempted", "noEvidence", "unknown"]) expect(verdictInstantTerm(state)).toBe("Verified at");
   });
 });
