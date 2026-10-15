@@ -60,7 +60,7 @@
 
 1. **A gate runs when any input it reads changed, or when no marker proves its inputs passed.** Skipping is a proof, never a guess.
 2. **Fail safe.** An unclassified path, a missing map entry, an API error on the marker lookup, or a change to the gate machinery itself means: run.
-3. **Same repository only.** A marker counts only when its run's `head_repository` is `VladyslavHaina/logweir`, its workflow is `ci.yml`, and its gate definition hash matches. A fork's `pull_request` run executes fork-controlled code, so it never proves anything.
+3. **A marker proves nothing by itself.** It counts only when GitHub confirms that the gate's own job passed, in a same-repository run of an event we produce, on a commit whose inputs hash to the same value (§2.2). A fork's `pull_request` run executes fork-controlled code, so it never proves anything.
 4. **Publication is unchanged in meaning.** `sha-<commit>` images and the chart are published only after every gate for that tree passed: in this run, or proven by markers for the same inputs. A release still promotes one publication unchanged.
 5. **Free runners only.** The repository is public. No paid service is used. Larger runners are a marked option, not a dependency.
 6. **Measured.** Each stage lands as its own PR. Its effect is read from the runs API before the next stage starts.
@@ -80,9 +80,16 @@ One checked-in file names every gate (job), with:
 
 ### 2.2 Markers
 - **Recording.** A gate that passes uploads an artifact named `gate-<gate>-<hash>`: a few bytes, with 30-day retention.
-- **Lookup.** Before working, a gate asks `GET /repos/{repo}/actions/artifacts?name=gate-<gate>-<hash>`. It accepts a non-expired artifact whose `workflow_run.head_repository_id` equals the repository's id, from a run of `ci.yml`.
+- **A marker is an index, never the proof** (the security review of `e6cbc335`: any code running in a same-repository job, such as a Dependabot PR's packages or a test, can upload an artifact of any name with the runtime token).
+- **Lookup.** Before working, a gate asks `GET /repos/{repo}/actions/artifacts?name=gate-<gate>-<hash>`. It accepts a marker only when **all** of these hold:
+  1. the artifact is not expired, and its run is in this repository (`head_repository_id`), of `ci.yml` (directly, or called by `release.yml`);
+  2. the run's event is one we produce: `push` to main or a `v*` tag, a same-repository `pull_request`, or `schedule` or `workflow_dispatch` on main. Never `pull_request_target` or `workflow_run`;
+  3. **in that run, the gate's own job concluded `success`** (jobs API, every attempt). No gate job may set `continue-on-error`;
+  4. **the gate's input hash, recomputed over the run's `head_sha` tree** (git trees API or a shallow fetch, with the same selection), equals the requested hash.
+
+  So a forged artifact can only assert something already true: this gate's job passed on exactly these inputs.
   - **Hit:** the job prints the proving run's URL and succeeds without working.
-  - **Miss or error:** it works.
+  - **Miss, refusal, truncated tree or API error:** it works.
 - **Where it lives.** One composite action, `.github/actions/gate`, does both. Every gate job wraps its work in it.
 
 ### 2.3 Builds shared within a run, and across runs by input key
