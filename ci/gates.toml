@@ -427,6 +427,9 @@ readers = [
   "third_party/kafka-backup-*",
   "third_party/kafka-backup-patches/**",
   ".gitignore",
+  # created_topics and fixture_retention walk every e2e/tests/**/*.rs (traced
+  # run 38822348638)
+  "e2e/tests/**",
 ]
 
 [gates.e2e-3]
