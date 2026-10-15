@@ -70,8 +70,8 @@ export function ApprovalStatus({ found, waiting = false }: { found: Found; waiti
       return found.usedBy ? (
         <span>
           <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />
-          <span className="lw-subtle lw-small lw-break">
-            {" "}· used by {found.usedBy.name}
+          <span className="lw-subtle lw-small lw-break lw-used-by">
+            <span className="lw-used-by__sep"> · </span>used by {found.usedBy.name}
           </span>
         </span>
       ) : (

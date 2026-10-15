@@ -532,6 +532,20 @@ body {
 .lw-list--flush .lw-list__row {
   padding-inline: 0;
 }
+/* DUI-43: a status beside a title (a phone list row's end, a card header's actions) that names
+   the run it was used by stacks under its label and wraps in a bounded column, so the title and
+   meta keep their room. */
+.lw-list__end .lw-used-by,
+.pf-v6-c-card__actions .lw-used-by {
+  display: block;
+  max-width: 9rem;
+  margin-inline-start: auto;
+  text-align: end;
+}
+.lw-list__end .lw-used-by__sep,
+.pf-v6-c-card__actions .lw-used-by__sep {
+  display: none;
+}
 
 /* --------------------------------------------------------------- overview */
 .lw-stat__title {
