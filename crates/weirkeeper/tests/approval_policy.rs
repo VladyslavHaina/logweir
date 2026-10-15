@@ -1624,9 +1624,11 @@ async fn dui43_an_older_builds_run_is_rebuilt_only_from_what_proves_it_ran() {
             ),
         ),
         (
+            // An exit code beside a phase that is not terminal: only a
+            // finished run's status proves it ran.
             "not finished",
             sw_routes(
-                serde_json::json!({"phase": "Running", "jobRef": "sw1"}),
+                serde_json::json!({"phase": "Running", "jobRef": "sw1", "exitCode": 0}),
                 own(),
             ),
         ),
