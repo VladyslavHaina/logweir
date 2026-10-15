@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""Unit rows for scripts/ci-gate.sh (FX-53 §2.1, §2.2, §4 item 2).
+
+Each row builds a throwaway git repository with a small gate map, a fake
+`cargo` (its `metadata`) and a fake `gh` (the artifacts and runs API), so no
+toolchain, network or token is used. The last row holds the script's glob
+matcher to git's own `:(glob)` pathspec for every pattern in the real map.
+"""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "ci-gate.sh"
+REPO_ID = 1359519835
+REPO = "VladyslavHaina/logweir"
+FORK_ID = 42
+FUTURE = "2999-01-01T00:00:00Z"
+PAST = "2001-01-01T00:00:00Z"
+
+GATES = """\
+schema = 1
+
+[global]
+paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/**", "ci/gates.toml",
+         "scripts/ci-gate.sh", ".github/actions/gate/**", ".github/workflows/ci.yml"]
+
+[marker]
+workflows = [".github/workflows/ci.yml"]
+
+[not_gates]
+changes = "plumbing"
+
+[gates.alpha]
+definition = ["scripts/alpha.sh"]
+crates = ["alpha"]
+readers = ["docs/**"]
+
+[gates.beta]
+definition = ["scripts/beta.sh"]
+crates = ["beta"]
+paths = ["web/**"]
+
+[gates.walker]
+definition = ["scripts/walker.sh"]
+walks = ["**"]
+paths = ["examples/*.yaml"]
+
+[gates.clock]
+always = true
+definition = ["scripts/clock.sh"]
+paths = ["web/package.json"]
+"""
+
+FILES = {
+    "Cargo.toml": "[workspace]\nmembers = ['crates/*']\n",
+    "Cargo.lock": "version = 4\n",
+    "rust-toolchain.toml": "[toolchain]\nchannel = '1.89.0'\n",
+    ".cargo/config.toml": "[alias]\n",
+    ".github/workflows/ci.yml": "name: ci\n",
+    ".github/actions/gate/action.yml": "name: gate\n",
+    "crates/alpha/Cargo.toml": "[package]\nname = 'alpha'\n",
+    "crates/alpha/src/lib.rs": "pub fn a() {}\n",
+    "crates/beta/Cargo.toml": "[package]\nname = 'beta'\n",
+    "crates/beta/src/lib.rs": "pub fn b() {}\n",
+    "crates/beta/tests/t.rs": "#[test] fn t() {}\n",
+    "docs/guide.md": "# guide\n",
+    "web/index.html": "<html></html>\n",
+    "web/package.json": "{}\n",
+    "examples/drill.yaml": "a: 1\n",
+    "examples/nested/deep.yaml": "b: 2\n",
+    "scripts/alpha.sh": "true\n",
+    "scripts/beta.sh": "true\n",
+    "scripts/walker.sh": "true\n",
+    "scripts/clock.sh": "true\n",
+}
+
+# `cargo metadata --no-deps` for the two crates: beta depends on alpha.
+FAKE_CARGO = r'''#!/usr/bin/env python3
+import json, os, sys
+root = os.getcwd()
+def pkg(name, deps):
+    return {"name": name, "manifest_path": f"{root}/crates/{name}/Cargo.toml",
+            "dependencies": [{"name": d, "kind": k, "path": f"{root}/crates/{d}"} for d, k in deps]
+                            + [{"name": "serde", "kind": None}]}
+if os.environ.get("FAKE_CARGO_FAIL"):
+    print("error: failed to parse manifest", file=sys.stderr)
+    sys.exit(101)
+assert sys.argv[1] == "metadata" and "--no-deps" in sys.argv, sys.argv
+print(json.dumps({"workspace_root": root,
+                  "packages": [pkg("alpha", []), pkg("beta", [("alpha", None)])]}))
+'''
+
+# The API, from a JSON file of {path: answer}; every call is logged.
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(json.dumps(args) + "\n")
+if os.environ.get("FAKE_GH_FAIL"):
+    print("HTTP 502: Bad Gateway", file=sys.stderr)
+    sys.exit(1)
+assert args[:3] == ["api", "-X", "GET"], args
+answers = json.load(open(os.environ["FAKE_GH_ANSWERS"]))
+answer = answers.get(args[3])
+if answer is None:
+    print("HTTP 404: Not Found", file=sys.stderr)
+    sys.exit(1)
+print(answer if isinstance(answer, str) else json.dumps(answer))
+'''
+
+
+def run_of(run_id, path=".github/workflows/ci.yml", head_id=REPO_ID, referenced=()):
+    return {"id": run_id, "path": path, "html_url": f"https://github.com/{REPO}/actions/runs/{run_id}",
+            "repository": {"id": REPO_ID}, "head_repository": {"id": head_id},
+            "referenced_workflows": [{"path": p} for p in referenced]}
+
+
+def artifact(name, run_id, art_id=7, head_id=REPO_ID, expired=False, expires=FUTURE):
+    return {"id": art_id, "name": name, "expired": expired, "expires_at": expires,
+            "created_at": "2026-10-15T00:00:00Z",
+            "workflow_run": {"id": run_id, "repository_id": REPO_ID, "head_repository_id": head_id}}
+
+
+class Repo:
+    def __init__(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ci-gate-"))
+        self.tools = Path(tempfile.mkdtemp(prefix="ci-gate-tools-"))
+        for rel, text in FILES.items():
+            self.write(rel, text)
+        self.write("ci/gates.toml", GATES)
+        (self.dir / "scripts").mkdir(exist_ok=True)
+        shutil.copy(SCRIPT, self.dir / "scripts" / "ci-gate.sh")
+        for name, text in (("cargo", FAKE_CARGO), ("gh", FAKE_GH)):
+            path = self.tools / name
+            path.write_text(text)
+            path.chmod(0o755)
+        self.answers = {}
+        self.git("init", "-q")
+        self.commit("tree")
+
+    def cleanup(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+        shutil.rmtree(self.tools, ignore_errors=True)
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.dir), *args], check=True, capture_output=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    def write(self, rel, text):
+        path = self.dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", message)
+
+    def env(self, **extra):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("GITHUB_", "RUNNER_", "CI_GATE_", "FAKE_")) and k not in ("ImageOS", "CARGO")}
+        answers = self.tools / "answers.json"
+        answers.write_text(json.dumps(self.answers))
+        env.update(CI_GATE_CARGO=str(self.tools / "cargo"), CI_GATE_GH=str(self.tools / "gh"),
+                   FAKE_GH_ANSWERS=str(answers), FAKE_GH_LOG=str(self.tools / "gh.log"),
+                   GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID),
+                   CI_GATE_RUNNER="Linux-X64-ubuntu24")
+        env.update(extra)
+        return env
+
+    def run(self, *args, **extra):
+        return subprocess.run(["bash", str(self.dir / "scripts" / "ci-gate.sh"), *args],
+                              cwd=self.dir, capture_output=True, text=True, env=self.env(**extra))
+
+    def hash(self, gate, runner="Linux-X64-ubuntu24"):
+        proc = self.run("hash", gate, "--runner", runner)
+        if proc.returncode != 0:
+            raise AssertionError(f"hash {gate}: {proc.returncode} {proc.stderr}")
+        return proc.stdout.strip()
+
+    def hashes(self):
+        return {g: self.hash(g) for g in ("alpha", "beta", "walker", "clock")}
+
+    def gh_calls(self):
+        log = self.tools / "gh.log"
+        return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+
+class Hash(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo()
+        self.before = self.repo.hashes()
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def changed(self):
+        after = self.repo.hashes()
+        return {g for g in after if after[g] != self.before[g]}
+
+    def test_the_same_inputs_give_the_same_hash(self):
+        self.assertEqual(self.repo.hashes(), self.before)
+        for value in self.before.values():
+            self.assertRegex(value, r"^[0-9a-f]{64}$")
+        self.assertEqual(len(set(self.before.values())), 4, "each gate hashes its own name")
+        clone = Path(tempfile.mkdtemp(prefix="ci-gate-clone-"))
+        try:
+            subprocess.run(["git", "clone", "-q", str(self.repo.dir), str(clone / "r")], check=True)
+            proc = subprocess.run(["bash", "scripts/ci-gate.sh", "hash", "alpha", "--runner",
+                                   "Linux-X64-ubuntu24"], cwd=clone / "r", capture_output=True,
+                                  text=True, env=self.repo.env())
+            self.assertEqual(proc.stdout.strip(), self.before["alpha"], proc.stderr)
+        finally:
+            shutil.rmtree(clone, ignore_errors=True)
+
+    def test_an_unknown_path_changes_every_hash(self):
+        self.repo.write("newdir/thing.txt", "x\n")
+        self.repo.commit("an unclassified path")
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
+        # examples/nested/ is read only by a walk, which classifies nothing.
+        self.assertEqual(self.repo.run("unclaimed").stdout.split(),
+                         ["examples/nested/deep.yaml", "newdir/thing.txt"])
+
+    def test_an_edit_to_an_unknown_path_changes_every_hash(self):
+        self.repo.write("newdir/thing.txt", "x\n")
+        self.repo.commit("an unclassified path")
+        self.before = self.repo.hashes()
+        self.repo.write("newdir/thing.txt", "y\n")
+        self.repo.commit("edit it")
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
+
+    def test_a_ci_definition_change_changes_every_hash(self):
+        for rel in (".github/workflows/ci.yml", "ci/gates.toml", "scripts/ci-gate.sh",
+                    ".github/actions/gate/action.yml", "Cargo.lock", "rust-toolchain.toml",
+                    "Cargo.toml", ".cargo/config.toml"):
+            with self.subTest(rel=rel):
+                self.before = self.repo.hashes()
+                path = self.repo.dir / rel
+                path.write_text(path.read_text() + "\n# edited\n")
+                self.repo.commit(f"edit {rel}")
+                self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
+
+    def test_one_reader_file_changes_exactly_the_gates_that_declare_it(self):
+        self.repo.write("docs/guide.md", "# guide, edited\n")
+        self.repo.commit("docs")
+        # alpha declares docs/** as a reader; walker walks the tree.
+        self.assertEqual(self.changed(), {"alpha", "walker"})
+
+    def test_a_new_file_under_a_declared_glob_changes_only_its_gates(self):
+        self.repo.write("web/new.js", "1\n")
+        self.repo.commit("web")
+        self.assertEqual(self.changed(), {"beta", "walker"})
+
+    def test_a_crate_change_reaches_its_reverse_dependencies(self):
+        self.repo.write("crates/alpha/src/lib.rs", "pub fn a() { }\n")
+        self.repo.commit("alpha")
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker"})
+        self.before = self.repo.hashes()
+        self.repo.write("crates/beta/tests/t.rs", "#[test] fn t() { }\n")
+        self.repo.commit("beta")
+        self.assertEqual(self.changed(), {"beta", "walker"})
+
+    def test_a_star_stops_at_a_slash(self):
+        self.repo.write("examples/nested/deep.yaml", "b: 3\n")
+        self.repo.commit("nested")
+        # examples/*.yaml does not name examples/nested/; only the walk reads it,
+        # and an unclassified file is every gate's input.
+        self.assertEqual(self.changed(), {"alpha", "beta", "walker", "clock"})
+
+    def test_the_runner_label_is_an_input(self):
+        self.assertNotEqual(self.repo.hash("alpha", "Linux-ARM64-ubuntu24"), self.before["alpha"])
+        proc = self.repo.run("hash", "alpha", CI_GATE_RUNNER="", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                             ImageOS="ubuntu24")
+        self.assertEqual(proc.stdout.strip(), self.repo.hash("alpha", "Linux-X64-ubuntu24"))
+
+    def test_the_index_is_hashed_not_the_working_tree(self):
+        # A job that rewrites a tracked file (e2e-seed.sh refreshes fixtures)
+        # does not move the hash it records.
+        (self.repo.dir / "docs" / "guide.md").write_text("rewritten by a job\n")
+        self.assertEqual(self.repo.hashes(), self.before)
+
+
+class FailSafe(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo()
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def assert_refused(self, proc, code=3):
+        self.assertEqual(proc.returncode, code, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_a_stale_definition_gives_no_hash(self):
+        (self.repo.dir / "scripts" / "beta.sh").unlink()
+        self.repo.commit("drop beta's script")
+        proc = self.repo.run("hash", "beta")
+        self.assert_refused(proc)
+        self.assertIn("definition: scripts/beta.sh", proc.stderr)
+        # The other gates still hash.
+        self.repo.hash("alpha")
+
+    def test_a_declared_path_that_matches_nothing_gives_no_hash(self):
+        shutil.rmtree(self.repo.dir / "web")
+        self.repo.commit("drop web")
+        self.assert_refused(self.repo.run("hash", "beta"))
+        self.assert_refused(self.repo.run("hash", "clock"))
+
+    def test_a_map_error_gives_no_hash(self):
+        cases = {
+            "an unknown key": GATES.replace("readers = [\"docs/**\"]", "reader = [\"docs/**\"]"),
+            "an unknown crate": GATES.replace("crates = [\"beta\"]", "crates = [\"gamma\"]"),
+            "an unknown pattern syntax": GATES.replace("web/**", "web/[ab]*"),
+            "another schema": GATES.replace("schema = 1", "schema = 2"),
+            "no definition": GATES.replace("definition = [\"scripts/alpha.sh\"]\n", ""),
+            "unparseable": GATES + "[gates.x\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.repo.write("ci/gates.toml", text)
+                self.repo.commit(label)
+                self.assert_refused(self.repo.run("hash", "alpha"))
+
+    def test_an_unknown_gate_gives_no_hash(self):
+        self.assert_refused(self.repo.run("hash", "nope"))
+
+    def test_cargo_metadata_failing_gives_no_hash(self):
+        self.assert_refused(self.repo.run("hash", "alpha", FAKE_CARGO_FAIL="1"))
+
+    def test_decide_without_a_hash_runs_the_gate(self):
+        (self.repo.dir / "scripts" / "beta.sh").unlink()
+        self.repo.commit("stale")
+        out = self.repo.tools / "out"
+        proc = self.repo.run("decide", "beta", GITHUB_OUTPUT=str(out))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out.read_text(), "hit=false\nproof-run=\nhash=\n")
+        self.assertEqual(self.repo.gh_calls(), [], "no hash, so no lookup")
+
+
+class Lookup(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo()
+        self.hash = self.repo.hash("alpha")
+        self.name = f"gate-alpha-{self.hash}"
+        self.listing = f"repos/{REPO}/actions/artifacts"
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def serve(self, artifacts, runs):
+        self.repo.answers = {self.listing: {"total_count": len(artifacts), "artifacts": artifacts}}
+        for run in runs:
+            self.repo.answers[f"repos/{REPO}/actions/runs/{run['id']}"] = run
+
+    def lookup(self, **extra):
+        return self.repo.run("lookup", "alpha", self.hash, **extra)
+
+    def assert_miss(self, proc, why):
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertNotIn("proof-run=", proc.stdout)
+        self.assertIn(why, proc.stderr)
+
+    def test_a_same_repository_ci_marker_proves_the_gate(self):
+        self.serve([artifact(self.name, 11)], [run_of(11)])
+        proc = self.lookup()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"proof-run=https://github.com/{REPO}/actions/runs/11", proc.stdout)
+        listing = self.repo.gh_calls()[0]
+        self.assertEqual(listing[3], self.listing)
+        self.assertIn(f"name={self.name}", listing)
+
+    def test_a_ci_yml_called_by_another_workflow_proves_the_gate(self):
+        # release.yml's `tests` and ci-nightly.yml run ci.yml as a reusable workflow.
+        self.serve([artifact(self.name, 12)],
+                   [run_of(12, ".github/workflows/release.yml",
+                           referenced=[f"{REPO}/.github/workflows/ci.yml@refs/tags/v0.4.1"])])
+        self.assertEqual(self.lookup().returncode, 0)
+
+    def test_no_marker_is_a_miss(self):
+        self.serve([], [])
+        self.assert_miss(self.lookup(), "no marker")
+
+    def test_a_fork_marker_is_refused(self):
+        self.serve([artifact(self.name, 13, head_id=FORK_ID)], [run_of(13, head_id=FORK_ID)])
+        self.assert_miss(self.lookup(), "a fork's run")
+        self.assertEqual(len(self.repo.gh_calls()), 1, "a fork's marker is refused before its run is read")
+
+    def test_a_fork_run_behind_a_same_repository_artifact_is_refused(self):
+        self.serve([artifact(self.name, 14)], [run_of(14, head_id=FORK_ID)])
+        self.assert_miss(self.lookup(), "a fork's run")
+
+    def test_another_workflow_s_marker_is_refused(self):
+        self.serve([artifact(self.name, 15)], [run_of(15, ".github/workflows/ci-trace.yml")])
+        self.assert_miss(self.lookup(), "run of .github/workflows/ci-trace.yml, not .github/workflows/ci.yml")
+
+    def test_an_expired_marker_is_refused(self):
+        self.serve([artifact(self.name, 16, expired=True), artifact(self.name, 17, art_id=8, expires=PAST)],
+                   [run_of(16), run_of(17)])
+        proc = self.lookup()
+        self.assert_miss(proc, "expired")
+        self.assertIn("past its expiry", proc.stderr)
+
+    def test_a_marker_with_another_name_is_refused(self):
+        self.serve([artifact(self.name.replace("alpha", "beta"), 18)], [run_of(18)])
+        self.assert_miss(self.lookup(), "named")
+
+    def test_one_good_marker_among_refused_ones_proves_the_gate(self):
+        self.serve([artifact(self.name, 19, art_id=1, head_id=FORK_ID), artifact(self.name, 20, art_id=2)],
+                   [run_of(20)])
+        self.assertEqual(self.lookup().returncode, 0)
+
+    def test_a_lookup_error_runs_the_gate(self):
+        self.serve([artifact(self.name, 21)], [run_of(21)])
+        cases = {
+            "an API error": {"FAKE_GH_FAIL": "1"},
+            "no repository id": {"GITHUB_REPOSITORY_ID": ""},
+            "no repository": {"GITHUB_REPOSITORY": ""},
+            "no gh": {"CI_GATE_GH": str(self.repo.tools / "absent")},
+        }
+        for label, extra in cases.items():
+            with self.subTest(label):
+                proc = self.lookup(**extra)
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertNotIn("proof-run=", proc.stdout)
+
+    def test_an_unexpected_answer_runs_the_gate(self):
+        for label, listing in {"not JSON": "<html>", "no artifacts": {"total_count": 0},
+                               "a wrong shape": {"artifacts": "x"}}.items():
+            with self.subTest(label):
+                self.repo.answers = {self.listing: listing}
+                proc = self.lookup()
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        # The run cannot be read: an error, not a proof.
+        self.serve([artifact(self.name, 22)], [])
+        self.assertEqual(self.lookup().returncode, 2)
+
+    def test_an_always_gate_never_skips(self):
+        value = self.repo.hash("clock")
+        self.serve([artifact(f"gate-clock-{value}", 23)], [run_of(23)])
+        proc = self.repo.run("lookup", "clock", value)
+        self.assert_miss(proc, "always = true")
+        self.assertEqual(self.repo.gh_calls(), [])
+
+    def test_a_malformed_hash_is_refused(self):
+        self.assertEqual(self.repo.run("lookup", "alpha", "abc").returncode, 3)
+
+    def test_decide_hits_only_on_a_proof(self):
+        out = self.repo.tools / "out"
+        env_file = self.repo.tools / "env"
+        self.serve([artifact(self.name, 24)], [run_of(24)])
+        proc = self.repo.run("decide", "alpha", "false", GITHUB_OUTPUT=str(out), GITHUB_ENV=str(env_file))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        url = f"https://github.com/{REPO}/actions/runs/24"
+        self.assertEqual(out.read_text(), f"hit=true\nproof-run={url}\nhash={self.hash}\n")
+        self.assertEqual(env_file.read_text(),
+                         f"CI_GATE_NAME=alpha\nCI_GATE_HASH={self.hash}\nCI_GATE_HIT=true\n")
+        for label, extra, args in (("an API error", {"FAKE_GH_FAIL": "1"}, ["false"]),
+                                   ("forced", {}, ["true"])):
+            with self.subTest(label):
+                out.write_text("")
+                calls = len(self.repo.gh_calls())
+                proc = self.repo.run("decide", "alpha", *args, GITHUB_OUTPUT=str(out), **extra)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(out.read_text(), f"hit=false\nproof-run=\nhash={self.hash}\n")
+                if label == "forced":
+                    self.assertEqual(len(self.repo.gh_calls()), calls, "a forced gate does not look up")
+
+
+class Record(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo()
+        self.hash = self.repo.hash("alpha")
+        self.out = self.repo.tools / "markers"
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_a_marker_names_the_gate_and_its_hash(self):
+        proc = self.repo.run("record", "alpha", self.hash, str(self.out), GITHUB_SHA="a" * 40,
+                             GITHUB_RUN_ID="99", GITHUB_EVENT_NAME="push")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        name = f"gate-alpha-{self.hash}"
+        path = self.out / f"{name}.json"
+        self.assertEqual(proc.stdout, f"name={name}\npath={path}\n")
+        body = json.loads(path.read_text())
+        self.assertEqual((body["gate"], body["hash"], body["commit"], body["run_id"]),
+                         ("alpha", self.hash, "a" * 40, "99"))
+
+    def test_a_fork_pull_request_records_nothing(self):
+        for label, head in (("a fork", FORK_ID), ("an unreadable event", None)):
+            with self.subTest(label):
+                event = self.repo.tools / "event.json"
+                event.write_text(json.dumps({"pull_request": {"head": {"repo": {"id": head}}}}
+                                            if head else {}))
+                proc = self.repo.run("record", "alpha", self.hash, str(self.out),
+                                     GITHUB_EVENT_NAME="pull_request", GITHUB_EVENT_PATH=str(event))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout, "")
+        self.assertFalse(self.out.exists())
+
+    def test_a_same_repository_pull_request_records(self):
+        event = self.repo.tools / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"repo": {"id": REPO_ID}}}}))
+        proc = self.repo.run("record", "alpha", self.hash, str(self.out),
+                             GITHUB_EVENT_NAME="pull_request", GITHUB_EVENT_PATH=str(event))
+        self.assertIn("name=gate-alpha-", proc.stdout)
+
+
+class TheRealMap(unittest.TestCase):
+    def test_the_matcher_is_git_s_glob_pathspec_for_every_pattern_in_the_map(self):
+        proc = subprocess.run(["bash", str(SCRIPT), "describe"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        described = json.loads(proc.stdout)
+        found = set(described["global"])
+        for gate in described["gates"].values():
+            for pats in gate["patterns"].values():
+                found.update(pats)
+        found.update(["**", "e2e/tests", "*.md", "crates/**/src/*.rs", "**/Cargo.toml", "docs/**/*.md"])
+        ours = json.loads(subprocess.run(["bash", str(SCRIPT), "match", *sorted(found)], cwd=ROOT,
+                                         capture_output=True, text=True, check=True).stdout)
+        for pattern in sorted(found):
+            with self.subTest(pattern=pattern):
+                gits = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--", f":(glob){pattern}"],
+                                      capture_output=True, text=True, check=True).stdout.split("\n")
+                self.assertEqual(ours[pattern], sorted(filter(None, gits)))
+
+
+if __name__ == "__main__":
+    unittest.main()
