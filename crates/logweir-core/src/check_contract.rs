@@ -3512,9 +3512,18 @@ fn redact_long_runs(s: &str) -> String {
 /// The long-run rule reads any 40-character run as a credential, so it ate
 /// every long topic name in a row's own words (DUI-26's follow-up) while the
 /// row's typed fields showed the same name. Only that rule is lifted, only
-/// there: a name with a secret's shape (an access key id), a value that is
-/// not a legal name (an AWS secret key has `/` and `+`), and a token in any
-/// other position are redacted as before.
+/// there: a name with a secret's shape (an access key id), a value with a
+/// character no topic name has, and a token in any other position are
+/// redacted as before.
+///
+/// **THE PROPERTY RESTS ON THE TEMPLATES, NOT ON THIS RULE.** Any token whose
+/// characters are all legal in a topic name (40 alphanumerics, a `ghp_` token,
+/// a JWT) is kept in this position. What keeps a secret out is the invariant
+/// every message template holds: ONLY a topic name (from the spec, the
+/// mapping or broker metadata) is ever interpolated after "topic `" or as a
+/// further name of that list. Foreign text (broker, client, S3, kubelet
+/// errors) does not use this form. A template that put any other value there
+/// would break it.
 fn topic_name_spans(s: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = s.as_bytes();
     let mut spans = Vec::new();

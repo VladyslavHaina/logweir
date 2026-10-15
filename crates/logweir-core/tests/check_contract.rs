@@ -3463,5 +3463,12 @@ fn f5_a_long_topic_name_in_the_template_position_survives_and_tokens_do_not() {
         assert!(!out.contains("AKIA"), "{out}");
         // The bare name, in no position, is still free text.
         assert_eq!(clean(topic), REDACTED);
+        // ACCEPTED RESIDUAL (review L1): a slash-free token in the topic
+        // position is a legal topic name and is KEPT. Only a topic name is ever
+        // interpolated there (`topic_name_spans`' invariant); the redactor
+        // cannot tell such a token from a name.
+        let slash_free = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01";
+        let kept = clean(&format!("topic `{slash_free}` does not exist"));
+        assert!(kept.contains(slash_free), "{kept}");
     }
 }
