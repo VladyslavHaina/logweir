@@ -299,6 +299,7 @@ definition = [
   "justfile",
   "scripts/ci-check.sh",
   "scripts/test-ci-gate.py",
+  "scripts/test-ci-trace.py",
 ]
 # LOGWEIR_BIN (C7, C22)
 crates = ["logweir"]

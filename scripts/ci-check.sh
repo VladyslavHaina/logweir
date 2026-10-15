@@ -112,8 +112,10 @@ python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
 python3 scripts/test-recovery-kit.py
 # FX-53: the gate machinery's own rows (scripts/ci-gate.sh: the hash, the
-# lookup's refusals, the fail-safe cases).
+# lookup's refusals, the fail-safe cases) and the traced run's parser's
+# (scripts/ci-trace.py, on recorded strace output).
 python3 scripts/test-ci-gate.py
+python3 scripts/test-ci-trace.py
 just verify-py
 }
 
