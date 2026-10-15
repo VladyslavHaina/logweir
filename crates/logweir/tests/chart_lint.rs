@@ -4410,8 +4410,10 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // explanation in `charts/logweir/README.md`; it moves only when the number
     // of OPTIONS moves. A key belongs here only when an installation must
     // state it and the chart cannot derive it: per-object settings with CRD
-    // defaults, and settings `logweir-api` already defaults (OIDC claim names,
-    // JWS algorithms, scopes), stay out. No `service.type` (ClusterIP only),
+    // defaults, and settings `logweir-api` already defaults (the groups claim,
+    // JWS algorithms), stay out; `oidc.scopes` and `oidc.displayNameClaim` are
+    // in, empty, because a provider that refuses `email` and an install that
+    // shows names have no other path (F6). No `service.type` (ClusterIP only),
     // no `kubernetes.source` (`inCluster`, always), and no PDB key (it renders
     // from `replicas`).
     assert!(
@@ -4543,6 +4545,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "api.console.oidc.caBundle.secret",
         "api.console.oidc.caBundle.key",
         "api.console.oidc.systemRoots",
+        "api.console.oidc.scopes",
+        "api.console.oidc.displayNameClaim",
         "api.console.networkPolicy.oidcPeers",
         "kubernetes.connectionsNamespace",
         "api.console.oidc.clientId",
@@ -4588,6 +4592,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     assert_eq!(Some(""), values["environment"].as_str());
     assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());
     assert_eq!(Some(false), values["kafka"]["enabled"].as_bool());
+    let oidc = &values["api"]["console"]["oidc"];
+    assert_eq!(oidc["scopes"].as_sequence().map(Vec::len), Some(0));
+    assert_eq!(Some(""), oidc["displayNameClaim"].as_str());
     // THE ADMISSION POLICY SHIPS OFF, and the ONE reason is that
     // `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is
     // Kubernetes 1.30+ while this chart's floor is 1.29 (Global Constraint

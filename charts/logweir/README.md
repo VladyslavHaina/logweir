@@ -199,6 +199,7 @@ statement**.
 | `api.console.oidc.issuer`, `.clientId` | `""` | exact |
 | `api.console.oidc.clientSecret` | `""` | the name of a Secret with key `clientSecret` |
 | `api.console.oidc.caBundle`, `.systemRoots` | `{configMap, secret, key: ca.crt}`, `true` | a private issuer CA added to the system roots |
+| `api.console.oidc.scopes`, `.displayNameClaim` | `[]`, `""` | empty: the API's `[openid, profile, email, groups]` and no name; a list must hold `openid`, a claim is a plain name such as `name` |
 | `api.console.roles.revision`, `.bindings` | `""`, `[]` | `[{role, namespace, groups, subjects}]`, exact strings |
 | `api.console.ingress.*` | off | shared only: `className`, `host`, `tlsSecretName` (required), `annotations` (HSTS) |
 | `api.console.networkPolicy.*` | off | `ingressNamespace` and `ingressPodLabels` (both required), `oidcCIDRs`, `oidcPeers` |
@@ -390,6 +391,7 @@ naming the field:
 | `ingress.enabled` in shared mode with no trusted proxy and `trustedProxy` not `none` | no per-peer cap and one sign-in budget for everybody |
 | `trustedProxy: none` beside a named proxy, another value, or in localAdmin | |
 | `oidc.caBundle` naming a ConfigMap and a Secret, or an empty `key`; `systemRoots: false` without a bundle | |
+| `oidc.scopes` without `openid` or with a scope holding whitespace; an `oidc.displayNameClaim` that is not a plain claim name | |
 | a `hostAliases` entry without `ip` and a hostname, or with a wildcard; an `oidcPeers` entry without `namespace`, `podLabels` and `port` | |
 
 **The trusted proxy** decides who reaches the console, whose sign-in budget a

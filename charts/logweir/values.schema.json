@@ -588,6 +588,16 @@
                 "systemRoots": {
                   "type": "boolean",
                   "description": "false: trust caBundle alone. Refused without a caBundle."
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1, "pattern": "^\\S+$" },
+                  "description": "The scopes the console requests. Empty: the API's default [openid, profile, email, groups]. A list must contain openid (the template refuses one without it)."
+                },
+                "displayNameClaim": {
+                  "type": "string",
+                  "pattern": "^([A-Za-z_][A-Za-z0-9_]{0,63})?$",
+                  "description": "The plain name of the ID-token claim shown as a requester's display name, e.g. name. Empty: no name is read. Self-asserted at most providers; shown as unverified."
                 }
               }
             },

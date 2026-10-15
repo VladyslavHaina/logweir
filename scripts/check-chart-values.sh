@@ -169,6 +169,8 @@ api.console.oidc.caBundle.configMap|console-shared|-|--set-string|fx10-ca
 api.console.oidc.caBundle.secret|console-shared|--set-string api.console.oidc.caBundle.configMap=|--set-string|fx10-ca-secret
 api.console.oidc.caBundle.key|console-shared|-|--set-string|fx10.crt
 api.console.oidc.systemRoots|console-shared|-|--set|false
+api.console.oidc.scopes|console-shared|-|--set-json|["openid","profile","groups"]
+api.console.oidc.displayNameClaim|console-shared|-|--set-string|name
 api.console.roles.revision|console-shared|-|--set-string|fx10-revision
 api.console.roles.bindings|console-shared|-|--set-json|[{"role":"viewer","namespace":"team-b","groups":["fx10-viewers"]}]
 api.console.ingress.enabled|console-shared|--set api.console.ingress.enabled=false|--set|true

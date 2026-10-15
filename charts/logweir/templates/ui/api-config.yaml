@@ -110,6 +110,13 @@ oidc:
 {{- if eq (toString $c.oidc.systemRoots) "false" }}
   systemRoots: false
 {{- end }}
+{{- with $c.oidc.scopes }}
+  scopes:
+{{ toYaml . | indent 4 }}
+{{- end }}
+{{- with $c.oidc.displayNameClaim }}
+  displayNameClaim: {{ . | quote }}
+{{- end }}
 roles:
   revision: {{ $c.roles.revision | quote }}
   bindings:
