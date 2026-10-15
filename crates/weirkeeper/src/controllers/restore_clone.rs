@@ -660,9 +660,10 @@ pub fn teardown_value(
 ) -> Value {
     let bounded = |s: &str| -> String { s.chars().take(256).collect() };
     let mut t = serde_json::Map::new();
-    if let Some(key) = &report.attestation_key {
-        t.insert("attestationKey".into(), json!(key));
-    }
+    // An explicit `null` when the report has none: the status is merge
+    // patched, and phase 9's own attestation key (F2) must not stay beside
+    // this cleanup's lists, which its document does not describe (review L4).
+    t.insert("attestationKey".into(), json!(report.attestation_key));
     let mut deleted: Vec<&String> = earlier.iter().collect();
     for name in &report.deleted {
         if !deleted.contains(&name) {
@@ -1835,5 +1836,27 @@ mod tests {
             teardown_value(&report, &["c-z".into(), "c-a".into()], None)["deleted"],
             json!(["c-z", "c-a"])
         );
+        // Review L4: phase 9 recorded its attestation key ("kept, nothing
+        // deleted", F2); a later cleanup that deleted topics but put no
+        // attestation removes that key in the merge patch, so the status never
+        // pairs the cleanup's lists with phase 9's document. KILLS: the key
+        // written only when the report has one.
+        let mut status = json!({"teardown": {
+            "attestationKey": "logweir/drills/r.teardown.json",
+            "deleted": [], "deletedCount": 0,
+        }});
+        let unattested = CloneCleanupReport {
+            attestation_key: None,
+            ..report.clone()
+        };
+        crate::conditions::apply_merge_patch(
+            &mut status,
+            &json!({"teardown": teardown_value(&unattested, &[], None)}),
+        );
+        assert!(
+            status["teardown"].get("attestationKey").is_none(),
+            "{status}"
+        );
+        assert_eq!(status["teardown"]["deleted"], json!(["c-a"]), "{status}");
     }
 }
