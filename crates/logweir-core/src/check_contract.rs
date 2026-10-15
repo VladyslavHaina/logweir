@@ -3491,8 +3491,61 @@ const LONG_RUN_MIN: usize = 40;
 /// none of them cannot be acted on. Redaction is by key NAME
 /// ([`redact_key_values`]) and by known secret SHAPE (PEM, S3 bodies, URL
 /// userinfo, AWS access key ids); "any long token" is not a shape.
+///
+/// A run inside a topic NAME the message template placed ([`topic_name_spans`],
+/// F5) is the name, kept whole.
 fn redact_long_runs(s: &str) -> String {
-    redact_runs_where(s, is_public_identifier)
+    let names = topic_name_spans(s);
+    redact_runs_at(s, |at, run| {
+        names.iter().any(|r| r.contains(&at)) || is_public_identifier(run)
+    })
+}
+
+/// **F5: where a message template names a Kafka topic.** The byte ranges of
+/// the backtick-quoted spans directly after the word `topic` or `topics` and
+/// one space (`topic `x` does not exist`, `source topic `x``), and of each
+/// further span of that list after `, ` (`topics `a`, `b``), whose content is
+/// a legal topic name ([`is_relayable_topic_name`]). The secret-shape rules
+/// ran before this one ([`redaction_rules`]' order), so a kept name is a
+/// [`redact_name`]: an access key id in it is already gone.
+///
+/// The long-run rule reads any 40-character run as a credential, so it ate
+/// every long topic name in a row's own words (DUI-26's follow-up) while the
+/// row's typed fields showed the same name. Only that rule is lifted, only
+/// there: a name with a secret's shape (an access key id), a value that is
+/// not a legal name (an AWS secret key has `/` and `+`), and a token in any
+/// other position are redacted as before.
+fn topic_name_spans(s: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = s.as_bytes();
+    let mut spans = Vec::new();
+    // A span opening at `open` (the byte after a backtick): its content up to
+    // the next backtick, when that content is a name.
+    let name_at = |open: usize| -> Option<std::ops::Range<usize>> {
+        let len = s.get(open..)?.find('`')?;
+        let name = &s[open..open + len];
+        is_relayable_topic_name(name).then_some(open..open + len)
+    };
+    for word in ["topic `", "topics `"] {
+        let mut from = 0;
+        while let Some(found) = s.get(from..).and_then(|rest| rest.find(word)) {
+            let start = from + found;
+            from = start + word.len();
+            // The whole word: `subtopic `x`` is not the position.
+            if start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+                continue;
+            }
+            let mut open = start + word.len();
+            while let Some(span) = name_at(open) {
+                let close = span.end;
+                spans.push(span);
+                match s.get(close + 1..) {
+                    Some(rest) if rest.starts_with(", `") => open = close + 4,
+                    _ => break,
+                }
+            }
+        }
+    }
+    spans
 }
 
 /// The long-run rule as `logweir::check::redact_path` applies it: the same
@@ -3513,28 +3566,37 @@ pub fn redact_long_runs_in_keys(s: &str) -> String {
 /// The scanner both spellings share: maximal runs of the base64/hex alphabet,
 /// replaced at [`LONG_RUN_MIN`] unless `keep` calls the run public.
 fn redact_runs_where(s: &str, keep: impl Fn(&str) -> bool) -> String {
+    redact_runs_at(s, |_, run| keep(run))
+}
+
+/// [`redact_runs_where`] with the byte offset at which each run starts.
+fn redact_runs_at(s: &str, keep: impl Fn(usize, &str) -> bool) -> String {
     fn is_run_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'
     }
     let mut out = String::with_capacity(s.len());
     let mut run = String::new();
-    let flush = |out: &mut String, run: &mut String| {
-        if run.chars().count() >= LONG_RUN_MIN && !keep(run) {
+    let mut run_at = 0;
+    let flush = |out: &mut String, run: &mut String, at: usize| {
+        if run.chars().count() >= LONG_RUN_MIN && !keep(at, run) {
             out.push_str(REDACTED);
         } else {
             out.push_str(run);
         }
         run.clear();
     };
-    for c in s.chars() {
+    for (at, c) in s.char_indices() {
         if is_run_char(c) {
+            if run.is_empty() {
+                run_at = at;
+            }
             run.push(c);
             continue;
         }
-        flush(&mut out, &mut run);
+        flush(&mut out, &mut run, run_at);
         out.push(c);
     }
-    flush(&mut out, &mut run);
+    flush(&mut out, &mut run, run_at);
     out
 }
 

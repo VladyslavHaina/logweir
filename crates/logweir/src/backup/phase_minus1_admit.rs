@@ -415,7 +415,9 @@ pub fn source_capabilities(
 
 /// The refusal of selected topics the source does not hold (DUI-5): "topic
 /// `x` does not exist on the source", each named (at most
-/// [`NAMED_IN_A_REFUSAL`], the rest counted), with the remedy.
+/// [`NAMED_IN_A_REFUSAL`], the rest counted), with the remedy. The names stand
+/// in the template's topic position (`topic `x``, `topics `a`, `b``), where
+/// the free-text redactor keeps a long legal name whole (F5).
 #[must_use]
 pub fn absent_refusal(absent: &[String], selected: usize) -> String {
     let mut named: Vec<String> = absent
@@ -430,9 +432,9 @@ pub fn absent_refusal(absent: &[String], selected: usize) -> String {
         format!("topic {} does not exist on the source", named.join(", "))
     } else {
         format!(
-            "{} of {selected} selected topics do not exist on the source: {}",
-            absent.len(),
-            named.join(", ")
+            "topics {} do not exist on the source ({} of the {selected} selected)",
+            named.join(", "),
+            absent.len()
         )
     };
     let each = if absent.len() == 1 { "it" } else { "each" };

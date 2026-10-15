@@ -1556,7 +1556,10 @@ the secret-shape rules apply to it and the 40-character rule does not, so a long
 name arrives whole. That covers a legal topic name (`[a-zA-Z0-9._-]`, at most
 249) under a details line's `topic` or `mappedTopicExists`, a row's topic
 sample and a catalog entry's topic `name`, and a group id (printable ASCII, at
-most 255 bytes) under `group`, `target` or a catalog entry's `groupId`.
+most 255 bytes) under `group`, `target` or a catalog entry's `groupId`. In a
+message, a legal topic name in backticks right after the word `topic` or
+`topics` (and each further name of that list) is kept the same way, so "topic
+`x` does not exist on the source" names a long `x`.
 Anything else under those keys, and every other string, is redacted as before.
 Every row code is in
 [reference.md](reference.md#preflight-rows).
