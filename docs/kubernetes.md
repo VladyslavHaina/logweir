@@ -336,7 +336,13 @@ kubectl --context docker-desktop get backup <name> \
   -o jsonpath='{.status.exitCode} {.status.exitReason}{"\n"}'
 ```
 
-The `EXIT` column is why `kubectl get backups` is worth running. The full table
+The `EXIT` column is why `kubectl get backups` is worth running; `REASON`
+(`status.exitReason`) says why the run ended, for example `GuardRefused`, and
+`-o wide` adds `FAILED`, the controller's reason behind an `operational`. Every
+kind whose status holds its reason prints it the same way (`REASON` on
+`kafkaclusters`, `preflights`, `topicdiscoveries`, `backupdestinations`,
+`approvals`; with `-o wide` on `backupschedules`, `trustpolicies`,
+`recoverycatalogs`). The full table
 of exit codes, `exitReason` values and terminal reasons is in
 [reference.md](reference.md#backup-exit-code-to-status). **A green `Backup`** is `phase: Succeeded`,
 `exitCode: 0`, `Complete=True` and `status.evidence.verification.result: Valid`.
