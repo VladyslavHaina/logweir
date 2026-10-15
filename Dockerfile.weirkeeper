@@ -137,11 +137,15 @@ RUN set -eux; \
 # that the `--target` discipline below is complete rather than accidental.
 RUN rustup target add "$(cat /triple)"
 
-# CACHE DISCIPLINE, the same shape `Dockerfile` uses: `COPY . .` is the last
-# thing before the compile, so every layer above survives an edit to any
-# tracked file. `.dockerignore` keeps `target/`, `.engine/` and both
-# Dockerfiles out of the context.
-COPY . .
+# THE RUST BUILD INPUTS AND NOTHING ELSE, the list `Dockerfile` copies and
+# explains (FX-53): the compile layer's cache key is what the compile reads,
+# so an edit outside the Rust inputs reuses it.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY xtask xtask
+COPY e2e/Cargo.toml e2e/
+COPY e2e/src e2e/src
 
 # `-p weirkeeper` AND NOT THE WORKSPACE. This image carries one binary; a
 # workspace build would compile `logweir`, its rdkafka/librdkafka C
@@ -152,11 +156,14 @@ COPY . .
 # `/out` IS A FIXED PATH SO THE `COPY --from=builder` BELOW CAN NAME IT. The
 # compile still goes through `--target`, so the binary is produced under the
 # architecture-qualified directory and is copied out of it by name.
+#
+# `rm -rf target`: the layer keeps `/out`, not the target directory (FX-53).
 RUN set -eux; \
     triple="$(cat /triple)"; \
     cargo build --release --target "$triple" -p weirkeeper; \
     mkdir -p /out; \
-    cp "target/$triple/release/weirkeeper" /out/weirkeeper
+    cp "target/$triple/release/weirkeeper" /out/weirkeeper; \
+    rm -rf target
 
 # ---------------------------------------------------------------------------
 # THE RUNTIME STAGE

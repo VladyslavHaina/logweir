@@ -156,9 +156,9 @@ RUN set -eux; \
 # move does not re-run the apt layer.
 RUN cargo install cargo-auditable --locked --version 0.7.7
 # HOW THE CROSS BUILD IS WIRED, as ENV rather than a `.cargo/config.toml`, so
-# that `docker history` shows it and no file arriving through `COPY . .` can
-# shadow it. Both targets are named; cargo and the `cc`/`cmake` crates read
-# only the variables of the target they build.
+# that `docker history` shows it and no file the builder copies (its
+# `COPY .cargo .cargo` included) can shadow it. Both targets are named; cargo
+# and the `cc`/`cmake` crates read only the variables of the target they build.
 #   CARGO_TARGET_..._LINKER  the real cross linker. Cargo drives the link
 #                            through gcc rather than ld, so the target's C
 #                            runtime objects and library search paths come with
@@ -209,7 +209,8 @@ RUN set -eu; \
     cargo auditable build --locked --release --target "$TRIPLE" --bin kafka-backup; \
     mkdir -p /out; \
     cp "target/$TRIPLE/release/kafka-backup" /out/kafka-backup; \
-    cp LOGWEIR-ENGINE-IDENTITY /out/engine-identity
+    cp LOGWEIR-ENGINE-IDENTITY /out/engine-identity; \
+    rm -rf target
 
 # THE ROLLBACK: OSO's released binary, pinned BY DIGEST. Update this line and
 # third_party/kafka-backup-binary.digest together, never separately
@@ -235,15 +236,28 @@ FROM engine-${ENGINE_SOURCE} AS engine
 
 # LOGWEIR ITSELF.
 #
-# CACHE DISCIPLINE IS UNCHANGED, DELIBERATELY. `COPY . .` is still the last
-# thing before the compile, so every layer above survives an edit to any
-# tracked file and only the compile is re-run — and the compile is minutes. A
-# manifest-first split (`COPY Cargo.toml Cargo.lock` plus a stub build) was
-# considered and rejected: it needs a stub `src/` for every workspace member
-# and breaks quietly the day a member is added. `.dockerignore` already keeps
-# `target/` out of the context.
+# THE RUST BUILD INPUTS AND NOTHING ELSE (FX-53). The builder copies the
+# workspace manifest, lockfile and toolchain pin, cargo's config, and every
+# workspace member's directory (`crates/`, `xtask/`, and the `e2e` member's
+# manifest and `src/`, which cargo loads to resolve the workspace), so the
+# compile layer's cache key is exactly what the compile reads. Before FX-53 it
+# was `COPY . .`, and an edit to docs/, charts/, console/ or .github/
+# recompiled all three images on both architectures for byte-identical
+# binaries. No `build.rs` exists in the workspace, and every `include_str!` of
+# a file outside `crates/` sits in a `#[cfg(test)]` module, which a release
+# build does not compile; a member or an input outside this list fails the
+# compile loudly (cargo cannot find it), never silently. The same list is in
+# `Dockerfile.weirkeeper` and `Dockerfile.console`. A manifest-first split
+# (`COPY Cargo.toml Cargo.lock` plus a stub build) was considered and
+# rejected: it needs a stub `src/` for every workspace member and breaks
+# quietly the day a member is added.
 FROM cross AS builder
-COPY . .
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY xtask xtask
+COPY e2e/Cargo.toml e2e/
+COPY e2e/src e2e/src
 # `--target "$TRIPLE"` IS LOAD-BEARING TWICE OVER: it is what cross-compiles,
 # and it is what puts the binaries under `target/<triple>/release/`, the only
 # directory they are copied from, so a host-architecture binary cannot be
@@ -263,11 +277,16 @@ COPY . .
 # — observed live on docker-desktop (defect RET-NOIMAGE). One `cargo build`
 # with both packages, not two `RUN`s: they share the whole dependency graph, so
 # a second invocation would pay the link twice and cache as a separate layer.
+#
+# `rm -rf target` (FX-53): the layer keeps `/out`, tens of MB, rather than the
+# whole target directory, about 400 MB compressed in the build cache that no
+# later build reads.
 RUN set -eu; \
     . /etc/logweir-cross.env; \
     cargo auditable build --locked --release --target "$TRIPLE" -p logweir -p logweir-retention; \
     mkdir -p /out; \
-    cp "target/$TRIPLE/release/logweir" "target/$TRIPLE/release/logweir-retention" /out/
+    cp "target/$TRIPLE/release/logweir" "target/$TRIPLE/release/logweir-retention" /out/; \
+    rm -rf target
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 # `libsasl2-2` is REQUIRED BY LOGWEIR'S OWN BINARY, not by the engine. rdkafka

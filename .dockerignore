@@ -1,7 +1,14 @@
-# Task 22. Without this, `COPY . .` in the builder stage pulls the entire
-# `target/` directory (multiple GB after a local build) and the generated
-# scratch dirs into the build context, which is slow at best and, on a machine
-# with a warm cargo cache, large enough to make `docker build` look hung.
+# Task 22. Without this, the build context carries the entire `target/`
+# directory (multiple GB after a local build) and the generated scratch dirs,
+# which is slow at best and, on a machine with a warm cargo cache, large enough
+# to make `docker build` look hung.
+#
+# FX-53: no stage copies the whole context any more. Each compiling builder
+# copies the Rust build inputs by name (`Dockerfile`'s builder stage lists and
+# explains them), the runner's engine stage copies the engine's inputs, and the
+# runtime stages copy their licences and anchors by name. So this file decides
+# only what the context tar carries; a cache key is decided by those `COPY`
+# lines. The exclusions below are kept so that no named `COPY` can reach them.
 /target
 /.e2e
 /.demo
@@ -15,29 +22,23 @@
 # when the pin moves, which is exactly when the engine must recompile.
 !/third_party/kafka-backup-v*.tar.gz
 
-# Task 9, carried from Task 8b's review. `COPY . .` is the last thing before
-# `RUN cargo build` (Dockerfile:144-151), so ANY file that reaches the build
-# context invalidates the cargo layer — including the two files that describe
-# the build itself. Editing a comment in the Dockerfile therefore re-ran a
-# 92-second release compile that could not possibly differ. Neither file is
-# read from inside the builder stage: BuildKit takes the Dockerfile through the
-# frontend, not through the context tar, so excluding it here changes what
-# `COPY . .` copies and nothing else.
+# Task 9, carried from Task 8b's review. When the builders ran `COPY . .`
+# before `RUN cargo build`, ANY file in the build context invalidated the cargo
+# layer, including the two files that describe the build itself: editing a
+# comment in the Dockerfile re-ran a 92-second release compile that could not
+# possibly differ. Neither file is read from inside a build stage: BuildKit
+# takes the Dockerfile through the frontend, not through the context tar.
 /Dockerfile
 /.dockerignore
 
 # Task 23, for exactly the reason above. `Dockerfile.weirkeeper` is the second
 # Dockerfile in this tree and is taken through BuildKit's frontend, not through
-# the context tar, so excluding it here changes what `COPY . .` copies and
-# nothing else — and stops an edit to ITS comments invalidating the cargo layer
-# of the OTHER image's build.
+# the context tar.
 /Dockerfile.weirkeeper
 
 # D0 stage 7, for exactly the reason above. `Dockerfile.console` is the fourth
 # Dockerfile in this tree and is taken through BuildKit's frontend, not through
-# the context tar, so excluding it here changes what `COPY . .` copies and
-# nothing else — and stops an edit to ITS comments invalidating the cargo layer
-# of the other two compiling builds.
+# the context tar.
 /Dockerfile.console
 
 # PROD-18.1: the console's local install and build output never enter a build
