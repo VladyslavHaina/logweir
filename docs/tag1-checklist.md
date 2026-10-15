@@ -53,8 +53,10 @@ artifacts.
 1. **The commit.** `main` CI is green for it, including the `publish` job, so
    its `sha-<commit>` images and chart exist; or it is a commit that differs
    from such a commit only under `docs/` (a tracker or release-notes edit).
-   The tag's `tests` job is the full `ci.yml`, so no test may be failing on
-   it.
+   The tag's `tests` job is `ci.yml`, whose gates are proven in that run or by
+   markers for the same inputs (FX-53): a gate whose inputs equal those of a
+   gate that passed on `main` skips and names the proving run; every other
+   gate runs. So no test may be failing on it.
 2. **The dry run.** Dispatch the workflow on that commit's branch; it runs
    every job up to `assemble` and publishes nothing
    ([gates.md](gates.md#versioned-releases)):

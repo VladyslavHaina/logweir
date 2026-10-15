@@ -536,14 +536,17 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
                 })
                 .collect();
             granted.sort();
+            // FX-53: and `actions: read`, which ci.yml's gate jobs need to look
+            // a marker up (a called workflow's jobs get no more than this).
             assert_eq!(
                 granted,
                 [
+                    ("actions".to_string(), "read".to_string()),
                     ("attestations".to_string(), "write".to_string()),
                     ("contents".to_string(), "read".to_string()),
                     ("id-token".to_string(), "write".to_string()),
                 ],
-                "tests grants what ci.yml's publish asks for, and nothing more"
+                "tests grants what ci.yml's publish and gates ask for, and nothing more"
             );
             assert_ne!(
                 job["if"].as_str(),
@@ -1060,12 +1063,26 @@ fn the_engine_is_built_once_per_run_from_its_inputs() {
     assert!(
         key < restore && restore < build && build < save && save < identity && identity < upload
     );
-    let miss = "steps.cache.outputs.cache-hit != 'true'";
+    // FX-53 stage 4: only when some e2e shard's gate misses, then only on a
+    // cache miss; only main saves.
+    let miss = "steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'";
     assert_eq!(steps[build]["if"].as_str(), Some(miss));
     assert_eq!(
         steps[save]["if"].as_str(),
-        Some("steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'"),
+        Some(format!("{miss} && github.ref == 'refs/heads/main'").as_str()),
         "only main saves the engine cache"
+    );
+    let need = steps
+        .iter()
+        .position(|s| s["id"] == "need")
+        .expect("the engine job asks whether a shard needs it");
+    assert!(need < key, "the need comes before any work");
+    let need_run = run(&steps[need]);
+    assert!(
+        need_run.contains("bash scripts/ci-gate.sh decide \"$gate\" \"$FORCE\"")
+            && need_run.contains("grep '^e2e-'")
+            && need_run.contains("need=true"),
+        "the engine is needed when any e2e gate misses: {need_run}"
     );
     for step in [restore, save] {
         assert_eq!(
@@ -1200,28 +1217,35 @@ fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
         .unwrap();
     assert_eq!(check["strategy"]["fail-fast"].as_bool(), Some(false));
     // Eight jobs for twelve gates (GitHub Free's 20 concurrent jobs): a row
-    // runs up to three parts, each a step of its own that runs whatever the
-    // step before it did.
+    // runs up to three gates (ci/gates.toml's names, which are ci-check.sh's
+    // parts), each a step of its own that runs on its gate's miss, whatever the
+    // step before it did (gate_map_lint holds the gate steps themselves).
     let parts: Vec<&str> = rows
         .iter()
-        .flat_map(|r| ["part1", "part2", "part3"].map(|k| r[k].as_str()))
+        .flat_map(|r| ["gate1", "gate2", "gate3"].map(|k| r[k].as_str()))
         .flatten()
         .collect();
     let steps = check["steps"].as_sequence().unwrap();
-    for (n, key) in ["part1", "part2", "part3"].iter().enumerate() {
+    for (n, key) in ["gate1", "gate2", "gate3"].iter().enumerate() {
         let step = steps
             .iter()
             .find(|s| {
                 s["run"] == format!("bash scripts/ci-check.sh ${{{{ matrix.{key} }}}}").as_str()
             })
             .unwrap_or_else(|| panic!("check runs `ci-check.sh ${{{{ matrix.{key} }}}}`"));
-        if n > 0 {
-            assert_eq!(
-                step["if"].as_str(),
-                Some(format!("${{{{ !cancelled() && matrix.{key} }}}}").as_str()),
-                "a later part runs whatever the part before it did"
-            );
-        }
+        let n = n + 1;
+        let want = if n == 1 {
+            "steps.gate1.outputs.hit != 'true'".to_string()
+        } else {
+            format!(
+                "${{{{ !cancelled() && matrix.{key} && steps.gate{n}.outputs.hit != 'true' }}}}"
+            )
+        };
+        assert_eq!(
+            step["if"].as_str(),
+            Some(want.as_str()),
+            "a gate's part runs on its miss, whatever the part before it did"
+        );
     }
     for part in ["lint", "generated", "supply-chain", "python", "docs"] {
         assert_eq!(
@@ -1259,7 +1283,7 @@ fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
     }
     let mut gated: Vec<String> = parts
         .iter()
-        .filter_map(|p| p.strip_prefix("unit "))
+        .filter_map(|p| p.strip_prefix("unit-"))
         .map(str::to_string)
         .collect();
     gated.sort();

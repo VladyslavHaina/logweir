@@ -4,7 +4,9 @@
 # No running broker or Kubernetes cluster is needed.
 #
 #   scripts/ci-check.sh                    the whole gate, in one run (`just gate`)
-#   scripts/ci-check.sh <part> [<group>]   one part, as one CI job runs it
+#   scripts/ci-check.sh <part> [<group>]   one part, as one CI gate runs it
+#   scripts/ci-check.sh unit-<group>       the same as `unit <group>`: a part's
+#                                          name is its gate's in ci/gates.toml
 #
 # THE PARTS (FX-53 §2.4). CI runs each in a job of its own, at once:
 #   lint            the CLI build, `just lint` (fmt, clippy, the shell and
@@ -15,7 +17,8 @@
 #   generated       schema, CRD and chart drift
 #   supply-chain    the notices diff, `cargo deny` over both graphs, the engine
 #                   patch oracle
-#   python          the Python rows and `just verify-py`
+#   python          the Python rows (the gate machinery's included) and
+#                   `just verify-py`
 #   docs            links, the unverified-label scan, `doc_lint`
 # With no part the script runs every command of every part, in one process and
 # in the order it always has, with the workspace suite as ONE libtest run
@@ -108,6 +111,9 @@ python3 scripts/test-ci-images.py
 python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
 python3 scripts/test-recovery-kit.py
+# FX-53: the gate machinery's own rows (scripts/ci-gate.sh: the hash, the
+# lookup's refusals, the fail-safe cases).
+python3 scripts/test-ci-gate.py
 just verify-py
 }
 
@@ -168,11 +174,16 @@ done
 }
 
 usage() {
-echo "usage: scripts/ci-check.sh [lint | unit <group> | generated | supply-chain | python | docs]" >&2
+echo "usage: scripts/ci-check.sh [lint | unit <group> | unit-<group> | generated | supply-chain | python | docs]" >&2
 exit 2
 }
 
 part="${1:-}"
+# `unit-core` is `unit core`: the gate's name.
+if [[ "$part" == unit-* && "$#" -eq 1 ]]; then
+  set -- unit "${part#unit-}"
+  part=unit
+fi
 case "$part" in
   "")
     prepare

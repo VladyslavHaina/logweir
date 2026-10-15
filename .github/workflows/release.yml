@@ -68,9 +68,13 @@ jobs:
     # jobs ask for more than the calling job grants, skipped jobs included
     # (run 38208888673: startup_failure). That job runs only on a push to main,
     # never in a release run, so no token is minted here, and no secret is
-    # handed down (workflow_lint holds both).
+    # handed down (workflow_lint holds both). `actions: read` is for ci.yml's
+    # gates (FX-53 §2.5): each looks up the marker of a run that proved its
+    # inputs, so the tag re-runs only the gates whose inputs differ from the
+    # publication's.
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     uses: ./.github/workflows/ci.yml

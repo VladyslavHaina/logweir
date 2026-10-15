@@ -37,6 +37,24 @@ under `docs/` and always run everything, since images copy them.
 | `ci-ok` | Every gate's verdict in one job: green only when each passed, or was skipped because `changes` said its inputs did not change |
 | `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `ci-ok` and an `e2e` that ran |
 
+### Gates and markers
+
+Every job that tests something is a gate of [ci/gates.toml](../ci/gates.toml),
+which names the tracked files it reads. The job's first step after its
+checkout, [.github/actions/gate](../.github/actions/gate/action.yml), hashes
+those files ([scripts/ci-gate.sh](../scripts/ci-gate.sh)) and looks for a run
+that proves the same gate passed on the same inputs: a push to `main`, a `v*`
+tag, or the nightly ([ci-nightly.yml](../.github/workflows/ci-nightly.yml)),
+in this repository, whose job for that gate succeeded on a commit whose tree
+gives the same hash. On such a proof the job prints the proving run and skips
+its work; on anything else (no marker, a refused one, an API error, a dirty
+checkout) it works. Those three kinds of run leave a marker when a gate
+passes; a pull-request run uses markers and never leaves one. The nightly
+passes `force`, which runs every gate whatever the markers say, and so
+re-checks the gates whose result depends on time (advisories, `npm audit`),
+which never skip anyway. `engine` and `build-e2e` build for the shards
+whenever a shard's gate misses.
+
 The Compose suite excludes the test that requires a local `docker-desktop`
 Kubernetes listener. That exclusion does not establish Kubernetes deployment
 coverage; use the Helm or local Kubernetes exercises below for that.
@@ -109,7 +127,7 @@ that holds a credential or `contents: write` to that gate.
 | Job | What it does | Writes |
 |---|---|---|
 | `validate` | the tag (a dry run's `rehearsal_tag` input), its version and pre-release flag, and whether this run may publish: a tag push that did not delete the tag, whose tag origin still points at the run's commit | — |
-| `tests` | `ci.yml`: the same checks and Compose suite as `main` | — |
+| `tests` | `ci.yml`: the same gates as `main`, each proven in this run or by a marker for the same inputs (a gate whose input hash equals that of a gate that passed on `main`, a `v*` tag or the nightly skips and names that run); on a docs-only diff from the publication, only the docs readers run | — |
 | `plan` | `dist plan` must announce exactly the three CLI archives | artifact `dist-manifest` |
 | `build` (three) | [scripts/release-build.sh](../scripts/release-build.sh) on one native runner per target — Linux inside `rust:1.89-bookworm`, the runner image's own builder base, macOS on the runner; checks the archive's contents and notices, that no engine is inside, that the binary starts and performs `drill countersign`, and measures what it needs at run time | artifact `binary-<target>` |
 | `drill` | [release-drill.yml](../.github/workflows/release-drill.yml): a backup, an approved drill and both verifiers, driven by the packaged Linux x86-64 binary against Compose Kafka and MinIO | artifact `release-drill-evidence` |
