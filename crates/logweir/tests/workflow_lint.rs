@@ -997,6 +997,19 @@ fn ci_changes_classifies_docs_only_diffs() {
     assert_eq!(classify(dir, "", &lookalike), "code=true");
     assert_eq!(classify(dir, &"0".repeat(40), &lookalike), "code=true");
     assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
+    // FX-53 GAP 1: THE VERIFIER IS CODE UNDER docs/. Every e2e harness user
+    // runs `docs/verify_scorecard.py`, and a release ships it, so a change to
+    // it or to its suite runs e2e; a document beside it does not.
+    let prose = commit(dir, "docs/install.md");
+    let verifier = commit(dir, "docs/verify_scorecard.py");
+    assert_eq!(classify(dir, &prose, &verifier), "code=true");
+    let suite = commit(dir, "docs/test_verify_scorecard.py");
+    assert_eq!(classify(dir, &verifier, &suite), "code=true");
+    let beside = commit(dir, "docs/verify_scorecard.md");
+    assert_eq!(classify(dir, &suite, &beside), "code=false");
+    let nested = commit(dir, "docs/formats/verify_scorecard.py");
+    assert_eq!(classify(dir, &beside, &nested), "code=false");
+    assert_eq!(classify(dir, &lookalike, &nested), "code=true");
 }
 
 /// PROD-18.1: the `console` job runs `just console` only when the diff touches

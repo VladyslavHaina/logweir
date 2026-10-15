@@ -4,12 +4,23 @@
 #
 #   scripts/ci-changes.sh <base-sha> <head-sha>
 #
-# `code=false` only when EVERY changed path is under `docs/`. Documentation is
-# read by the `check` job's contract tests (docs/api.md, docs/kubernetes.md,
-# docs/install.md, the doc footer and link lints), so `check` always runs; but
-# no binary embeds a document and no image copies one out of its build stage,
-# so a docs-only change cannot alter what `e2e` measures or what `publish`
-# ships. `docs/to-do/**` never starts a run at all (`paths-ignore` in ci.yml).
+# `code=false` only when EVERY changed path is under `docs/` and none is the
+# verifier's code. Documentation is read by the `check` job's contract tests
+# (docs/api.md, docs/kubernetes.md, docs/install.md, the doc footer and link
+# lints), so `check` always runs; but no binary embeds a document and no image
+# copies one out of its build stage, so a docs-only change cannot alter what
+# `e2e` measures or what `publish` ships. `docs/to-do/**` never starts a run at
+# all (`paths-ignore` in ci.yml), although `doc_lint`, `just links` and the
+# label and cosign scans walk it too: a tracker-only commit is linted only by
+# the next run that starts (FX-53 gap 2, closed by its stage 4: the docs gate
+# keyed on docs/** and the nightly full run).
+#
+# THE VERIFIER IS CODE UNDER docs/ (FX-53, gap 1). `docs/verify_scorecard.py`
+# is the independent reader every e2e harness user runs
+# (e2e/tests/harness/mod.rs) and a release asset (scripts/release.sh), and
+# `docs/test_verify_scorecard.py` is its suite; a change to either is
+# `code=true`. `release.sh resolve` asks this script too, so a release commit
+# that changed the verifier is never matched to an older publication.
 #
 #   scripts/ci-changes.sh <base-sha> <head-sha> console
 #
@@ -47,7 +58,8 @@ if [[ "$question" == console ]]; then
   fi
   exit 0
 fi
-if grep -qv '^docs/' <<< "$changed"; then
+if grep -qvE '^docs/' <<< "$changed" \
+  || grep -qxE 'docs/(test_)?verify_scorecard\.py' <<< "$changed"; then
   echo "code=true"
 else
   echo "code=false"
