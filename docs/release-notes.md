@@ -29,13 +29,13 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126 and 127. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128 and 129. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 `v0.2.0` release that carries it has its own record below. Items 91 to 101
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
-is below. Items 102 to 127 landed after the `v0.3.0` tag and are in no
+is below. Items 102 to 129 landed after the `v0.3.0` tag and are in no
 release yet.
 
 ### Candidate record
@@ -3189,6 +3189,38 @@ The stream half has no automated row: jsdom has no EventSource.
 [UNVERIFIED — not yet run on a cluster; the next deep UI re-check adds a connection, runs a complete restore, opens the schedule form and watches a backup start on the PoC.]
 **Rollback:** an older console image shows the old words and the stale first-probe page; nothing is stored.
 
+#### 128. A restore offers a switchover only when its scorecard maps consumer positions (DUI-50)
+
+**Changed.** A complete restore whose plan was bound to the backup set only, not to a recovery point, offered **Switch consumers over** and said its groups had positions mapped. This is the likely path right after a fresh backup, before the catalog's next sync. The review then refused it, `NoPositionsMapping`.
+- **The API serves the one fact the review checks.** `Restore.coverage.positionsMapping` says whether the restore's signed scorecard binds a consumer positions mapping (`bound`, `groups`, and `omitted` when none was written). The controller copies it to `status.integrity.positionsMapping` from the scorecard it reads.
+- **The console gates the switchover on it,** as one rule with item 121's.
+  - A point that captured no consumer group says so.
+  - A plan not bound to a recovery point says the restore maps no position, and to restore the point from the Recovery catalog after its next sync.
+  - Neither offers the switchover.
+- A restore whose controller predates the field keeps item 121's rule, and the review stays the authority.
+
+**Do:** upgrade the controller and the API/console image. A restore finished before the upgrade carries no `positionsMapping` until its scorecard is read again; for it, item 121's rule and the review apply.
+**Scope:**
+- the controller's `positions_mapping_record` row;
+- the API's `complete_coverage` row (copied; absent stays absent);
+- `crd_shape`;
+- the console's restore-page rows: the unbound restore, the no-group restore, and the control of a bound point with groups, which is offered.
+
+[UNVERIFIED — not yet run on a cluster; the next deep UI re-check restores a fresh point before its catalog sync on the PoC.]
+**Rollback:** an older image offers the switchover again, and the review still refuses it. The status field is additive; an older controller leaves it alone.
+
+#### 129. Sign-in and probe words (DUI-49.1–3)
+
+**Changed.**
+- **The sign-in page.** After the newer of two tabs signed in, the older tab's page now says "No sign-in is waiting to finish in this browser." under its lead, instead of claiming the sign-in did not start there. A new sign-in is a **Sign in again** link, not a path to type. It is not offered beside a replaced sign-in, whose newer tab is still open.
+- **Needs attention** no longer names a running probe's reason as the reason the brokers were not reached. It says the last reading could not reach them and that a new probe is running.
+- **The restore wizard** shows a target's probe as the connection page does: a stale reading says **Stale**, and a probe in flight says **Probing**.
+
+**Do:** nothing; the API and the console ship as one image.
+**Scope:** `oidc_login.rs` dui45 (control: no new sign-in beside a mismatch); the console's Overview and wizard rows, each with a control.
+[UNVERIFIED — not yet run on a cluster; the next deep UI re-check repeats the two-tab sign-in, the Overview during a probe and the wizard's readiness step on the PoC.]
+**Rollback:** an older image shows the earlier words; nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -3334,7 +3366,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126 and 127, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128 and 129, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3439,6 +3471,8 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 125 | the API (the callback keeps the newer attempt's cookie; its page) and the console, one image | nothing |
 | 126 | the console | nothing |
 | 127 | the console | nothing |
+| 128 | the controller (a status field from the scorecard), the CRD, the API (`coverage.positionsMapping`) and the console | the controller and the API/console image; a restore finished before keeps item 121's rule |
+| 129 | the API (the sign-in page's words) and the console, one image | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

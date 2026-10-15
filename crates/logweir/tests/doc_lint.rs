@@ -2329,6 +2329,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ("a switchover record links by mode", "Last attempt at"),
         // DUI-48 (item 127): a complete restore's counts, in its own words.
         ("first probes and complete counts", "Compared and matching"),
+        // DUI-50 (item 128): the fact the switchover is gated on.
+        (
+            "a switchover only where positions are mapped",
+            "`Restore.coverage.positionsMapping`",
+        ),
+        // DUI-49 (item 129): the sign-in page's new link.
+        ("sign-in and probe words", "**Sign in again**"),
     ];
     assert_eq!(
         items.len(),
