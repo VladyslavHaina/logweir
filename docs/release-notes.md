@@ -3428,6 +3428,7 @@ Every existing fixture row is unchanged.
 - **Before:** while a namespace's binding was lifted during an upgrade, an expired `Approval` (`Verified=False`, `AuthorizationExpired`) was judged again: it was rewritten `ApprovalPolicyMismatch`, then `AuthorizationExpired` again once the binding was restored, each time with a new `lastTransitionTime`.
 - **Now:** a stored `Verified=False`, `AuthorizationExpired` of the same generation is kept, with its message and `lastTransitionTime`, over any fresh outcome except a consumed one. The repair after admission (item 120) still runs. A live approval is judged as before.
 - **Not chosen:** keeping only the time, as Kubernetes conditions do, would still flip the reason during the lift (two writes, a wrong reason) and change the time of every other condition the controller writes.
+- **A false expiry stays:** an `AuthorizationExpired` written while the controller's clock ran ahead is kept after the clock is fixed. It fails closed, and an `Approval`'s `spec` is immutable, so the remedy is a new `Approval`.
 
 **Do:** nothing.
 **Scope:** `approval_policy.rs::f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding`: across a lifted and a restored binding, the record keeps its reason and time with no write; the control, a live record, is judged `ApprovalPolicyMismatch`. The repair row `a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_instant` still passes.
@@ -3462,7 +3463,7 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 
 #### 136. Console dependencies (FX-52 F7)
 
-**Changed.** The console's build dependencies move to `@tanstack/react-router` 1.170.41, `@playwright/test` 1.63.0, `axe-core` 4.13.0, `typescript-eslint` 8.71.0, `vitest` 5.0.3 and `jsdom` 30.1.1 (Dependabot #50, #52, #53 and #55). TypeScript stays 5.9.3 while `openapi-typescript` requires `^5`, and Dependabot no longer offers TypeScript's next major.
+**Changed.** The console's build dependencies move to `@tanstack/react-router` 1.170.41, `@playwright/test` 1.63.0, `axe-core` 4.13.0, `typescript-eslint` 8.71.0, `vitest` 5.0.3 and `jsdom` 30.1.1 (Dependabot #50, #52, #53 and #55). TypeScript stays 5.9.3 while `openapi-typescript` requires `^5`, and Dependabot no longer offers TypeScript's next major. Building the console now needs Node ≥ 22.22.2 or ≥ 24.15 (jsdom 30); the image's builder runs 22.23.3.
 **Do:** nothing; the console image carries them.
 **Scope:** `just console` passes unchanged: 36 files, 583 tests, and the build.
 [UNVERIFIED — the PoC has not served this console build yet; the PoC check reads the served console as this build's, byte for byte (`scripts/check-image-api.sh`), and Dependabot's #50, #52, #53 and #55 are then closed.]
