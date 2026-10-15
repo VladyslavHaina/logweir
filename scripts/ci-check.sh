@@ -93,6 +93,10 @@ local group="${1:-}" packages args=() filter=() p
 packages="$(unit_packages "$group")"
 for p in $packages; do args+=(-p "$p"); done
 if [ "$group" = logweir ]; then filter=(-E 'not binary_id(logweir::doc_lint)'); fi
+# weirkeeper's runner rows drive `<root>/target/debug/logweir` (the argv the
+# controller emits must be one the CLI accepts); the whole-workspace run built
+# it before its tests, and so does this group.
+if [ "$group" = weirkeeper ]; then cli; fi
 cargo nextest run --locked --profile ci "${args[@]}" ${filter[@]+"${filter[@]}"}
 # xtask is a bin crate only: it has no library, so no doctests.
 if [ "$group" != xtask ]; then cargo test --locked --doc "${args[@]}"; fi

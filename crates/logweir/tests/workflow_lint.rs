@@ -1193,12 +1193,30 @@ fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
         .as_sequence()
         .unwrap();
     assert_eq!(check["strategy"]["fail-fast"].as_bool(), Some(false));
-    let parts: Vec<&str> = rows.iter().map(|r| r["part"].as_str().unwrap()).collect();
-    assert!(check["steps"]
-        .as_sequence()
-        .unwrap()
+    // Eight jobs for twelve gates (GitHub Free's 20 concurrent jobs): a row
+    // runs up to three parts, each a step of its own that runs whatever the
+    // step before it did.
+    let parts: Vec<&str> = rows
         .iter()
-        .any(|s| s["run"] == "bash scripts/ci-check.sh ${{ matrix.part }}"));
+        .flat_map(|r| ["part1", "part2", "part3"].map(|k| r[k].as_str()))
+        .flatten()
+        .collect();
+    let steps = check["steps"].as_sequence().unwrap();
+    for (n, key) in ["part1", "part2", "part3"].iter().enumerate() {
+        let step = steps
+            .iter()
+            .find(|s| {
+                s["run"] == format!("bash scripts/ci-check.sh ${{{{ matrix.{key} }}}}").as_str()
+            })
+            .unwrap_or_else(|| panic!("check runs `ci-check.sh ${{{{ matrix.{key} }}}}`"));
+        if n > 0 {
+            assert_eq!(
+                step["if"].as_str(),
+                Some(format!("${{{{ !cancelled() && matrix.{key} }}}}").as_str()),
+                "a later part runs whatever the part before it did"
+            );
+        }
+    }
     for part in ["lint", "generated", "supply-chain", "python", "docs"] {
         assert_eq!(
             parts.iter().filter(|p| **p == part).count(),
@@ -1206,6 +1224,11 @@ fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
             "`{part}` is one gate"
         );
     }
+    assert!(
+        rows.len() <= 8,
+        "{} check jobs; the budget is eight",
+        rows.len()
+    );
     let script = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
     let table: String = script
         .split("unit_packages() {")
@@ -1274,6 +1297,43 @@ fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
         root_manifest.contains(r#"members = ["crates/*", "xtask", "e2e"]"#),
         "the workspace's members moved: update this row and the unit groups"
     );
+}
+
+/// FX-53: every test `.config/nextest.toml` singles out (to run alone, because
+/// it writes into the working tree) exists, so a rename cannot quietly put it
+/// back beside the tests that scan the tree.
+#[test]
+fn every_nextest_override_names_a_test_that_exists() {
+    let config = std::fs::read_to_string(root().join(".config/nextest.toml")).unwrap();
+    let mut seen = 0;
+    for line in config.lines() {
+        let Some(filter) = line.trim().strip_prefix("filter = '") else {
+            continue;
+        };
+        let filter = filter.trim_end_matches('\'');
+        let (binary, test) = filter.split_once(" & ").unwrap_or_else(|| {
+            panic!("an override filter is `binary_id(..) & test(=..)`: {filter}")
+        });
+        let id = binary
+            .strip_prefix("binary_id(")
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap();
+        let name = test
+            .strip_prefix("test(=")
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap();
+        let (krate, target) = id.split_once("::").unwrap();
+        let file = root().join(format!("crates/{krate}/tests/{target}.rs"));
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("{}: {e} (override `{filter}`)", file.display()));
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "{} defines no `{name}`: the override `{filter}` selects nothing",
+            file.display()
+        );
+        seen += 1;
+    }
+    assert!(seen >= 1, "the override list was not read");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
