@@ -4726,6 +4726,63 @@ async fn the_restore_status_carries_objectives_and_partial_reason() {
     );
 }
 
+/// **DUI-50: whether the signed scorecard binds a positions mapping reaches
+/// `status.integrity.positionsMapping`**, the one fact a switchover's review
+/// requires (`integrity.verification.positions_mapping.document`). It is
+/// written on every read: `bound: false` for a scorecard that binds none (a
+/// point that captured no group, or a plan not bound to a point), and for one
+/// that names only why none was written.
+///
+/// CONTROL: a block naming a document is `bound: true`, with its groups.
+#[test]
+fn the_scorecards_positions_mapping_binding_reaches_the_status() {
+    use weirkeeper::controllers::restore::{integrity_block, positions_mapping_record};
+    let with_block = |block: Option<serde_json::Value>| {
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&scorecard_json("pass", "pass", "")).expect("JSON");
+        if let Some(block) = block {
+            doc["integrity"]["verification"] = serde_json::json!({
+                "coverage": "complete", "positions_mapping": block
+            });
+        }
+        let observation =
+            scorecard_observation(doc.to_string().as_bytes()).expect("a scorecard object");
+        integrity_block(&observation)
+            .get("positionsMapping")
+            .cloned()
+            .expect("written on every read")
+    };
+    // None bound: no block (no group captured, or an unbound plan).
+    assert_eq!(with_block(None), serde_json::json!({"bound": false}));
+    // CONTROL: a document is bound, with its groups.
+    let document = serde_json::json!({
+        "document": {"key": "logweir/drills/R.positions-mapping.json",
+                     "sha256": format!("sha256:{}", "a".repeat(64)), "bytes": 412},
+        "counts": {"exact": 3, "approximate": 0, "unavailable": 0},
+        "groups": 2
+    });
+    assert_eq!(
+        with_block(Some(document)),
+        serde_json::json!({"bound": true, "groups": 2})
+    );
+    // Omitted: named, not bound.
+    let omitted = serde_json::json!({
+        "omitted": "tooLarge", "counts": {"exact": 0, "approximate": 0, "unavailable": 0},
+        "groups": 9
+    });
+    assert_eq!(
+        with_block(Some(omitted)),
+        serde_json::json!({"bound": false, "groups": 9, "omitted": "tooLarge"})
+    );
+    // A document without its key or digest is not a binding, and a reason the
+    // scorecard does not define is not copied.
+    let half = positions_mapping_record(Some(&serde_json::json!({
+        "document": {"key": "k"}, "omitted": "<script>", "groups": 1
+    })));
+    assert!(!half.bound && half.omitted.is_none(), "{half:?}");
+    assert!(!positions_mapping_record(Some(&serde_json::Value::Null)).bound);
+}
+
 /// `status.topicPreflight` is scanned by key name, and ABSENT when the runner
 /// printed no line: present when the line is, absent when it is not.
 ///

@@ -2658,6 +2658,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
             "coverage",
             "level",
             "partialReason",
+            "positionsMapping",
             "result",
             "selection",
             "unsampledTopics"
@@ -2665,7 +2666,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
         "`status.integrity` carries `partialReason` beside `level` and `result` — a `partial` \
          with no reason is a badge an auditor cannot act on — and, since PROD-08.1a, the \
          signed `coverage`, a complete verification's `complete` block and FX-23's \
-         `unsampledTopics`, and since PROD-11.1b the signed replay `selection`"
+         `unsampledTopics`, and since PROD-11.1b the signed replay `selection`, and since DUI-50 whether it binds a `positionsMapping`"
     );
     // The selection's marker and its bounded rows.
     let selection = at(integrity, &["properties", "selection"]);

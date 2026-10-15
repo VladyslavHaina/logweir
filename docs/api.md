@@ -505,6 +505,11 @@ never a pass** (`CompleteNotCovered`). `coverage`, `timeBasis`, `selection`,
 `integrityResult`, `integrityPartialReason` and `targetTopicsAppeared` are claims
 of the signed scorecard, described in the OpenAPI document; `topicPreflight` and
 `oldTopics` are what phase 0 read and what the restore read from.
+`coverage.positionsMapping` (DUI-50) says whether the signed scorecard binds a
+consumer positions mapping, the one fact a switchover's review requires:
+`bound: false` when its point captured no consumer group, its plan was not bound
+to a recovery point, or no document was written (`omitted`). Absent means not
+recorded, never either answer.
 
 ## Destinations and credentials
 

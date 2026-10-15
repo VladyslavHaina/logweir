@@ -2764,6 +2764,10 @@ pub struct ScorecardObservation {
     /// still a selection, copied empty, so a narrowed restore is never shown
     /// as a full one ([`restore_selection`]).
     pub selection: Option<crate::crds::restore::RestoreSelection>,
+    /// `integrity.verification.positions_mapping` (format 1.12.0 / 2.4.0),
+    /// read by [`positions_mapping_record`]: `Some` on every document read,
+    /// `bound: false` when it binds none (DUI-50).
+    pub positions_mapping: Option<crate::crds::restore::PositionsMappingRecord>,
     /// `Some` when the scorecard was not read because it exceeds the
     /// controller's read cap: the `NotAttempted` detail naming the cap
     /// ([`crate::verification::over_read_cap_detail`]). Every other field is
@@ -3166,8 +3170,41 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
             .pointer("/source/selection")
             .filter(|v| !v.is_null())
             .map(restore_selection),
+        positions_mapping: Some(positions_mapping_record(
+            doc.pointer("/integrity/verification/positions_mapping"),
+        )),
         read_refused: None,
     })
+}
+
+/// A signed `integrity.verification.positions_mapping` block read as the
+/// status' [`crate::crds::restore::PositionsMappingRecord`] (DUI-50).
+///
+/// `bound` is `true` exactly when the block names a document whose `key` and
+/// `sha256` are strings: the condition a switchover's review requires before
+/// it reads the mapping. No block, a `null` one, or one that names only why
+/// nothing was written, is `bound: false`. `omitted` is copied only as one of
+/// the scorecard's own reasons, and `groups` only as a `u32`.
+#[must_use]
+pub fn positions_mapping_record(
+    block: Option<&Value>,
+) -> crate::crds::restore::PositionsMappingRecord {
+    let block = block.filter(|b| b.is_object());
+    let document = block.and_then(|b| b.get("document")).filter(|d| {
+        d.get("key").is_some_and(Value::is_string) && d.get("sha256").is_some_and(Value::is_string)
+    });
+    crate::crds::restore::PositionsMappingRecord {
+        bound: document.is_some(),
+        groups: block
+            .and_then(|b| b.get("groups"))
+            .and_then(Value::as_u64)
+            .and_then(|g| u32::try_from(g).ok()),
+        omitted: block
+            .and_then(|b| b.get("omitted"))
+            .and_then(Value::as_str)
+            .filter(|o| logweir_core::positions_mapping::OMITTED_REASONS.contains(o))
+            .map(str::to_string),
+    }
 }
 
 /// `target_diff.would_create` read as `(topic, partitions)` pairs — all of
@@ -5322,6 +5359,14 @@ pub fn integrity_block(o: &ScorecardObservation) -> serde_json::Map<String, Valu
         .and_then(|sel| serde_json::to_value(sel).ok())
     {
         m.insert("selection".to_string(), v);
+    }
+    // DUI-50: whether the signed scorecard binds a positions mapping.
+    if let Some(v) = o
+        .positions_mapping
+        .as_ref()
+        .and_then(|pm| serde_json::to_value(pm).ok())
+    {
+        m.insert("positionsMapping".to_string(), v);
     }
     m
 }

@@ -581,6 +581,14 @@ pub fn restore_coverage(object: &RestoreCr) -> crate::contract::RestoreCoverageV
         recorded: crate::status::recorded_coverage(integrity),
         covered: complete.as_ref().map(|c| c.covered),
         incomplete_reason: complete.and_then(|c| c.incomplete_reason),
+        // DUI-50: copied, never inferred from the source backup or a catalog.
+        positions_mapping: integrity
+            .and_then(|i| i.positions_mapping.as_ref())
+            .map(|pm| crate::contract::PositionsMappingView {
+                bound: pm.bound,
+                groups: pm.groups,
+                omitted: pm.omitted.as_ref().map(|o| crate::validate::bounded(o, 64)),
+            }),
     }
 }
 
