@@ -12,6 +12,8 @@ import {
   carriesKeyMaterial,
   connectionBody,
   connectionField,
+  connectionReReadMs,
+  PROBE_RE_READS,
   connectionProblems,
   discoveryBody,
   followGap,
@@ -23,6 +25,7 @@ import {
   outcomeOf,
   placeProblems,
   preferredConnection,
+  probeShortWords,
   probeState,
   REFUSAL_GLOSS,
   resolveSelection,
@@ -379,3 +382,33 @@ describe("DUI-31.6: a re-probe beside an earlier reading", () => {
     expect(probeState({ state: "unknown", reason: "ProbeRunning" }, NOW)).toMatchObject({ verdict: "probing", laterReason: "" });
   });
 });
+
+describe("DUI-48.1: a connection's first probe is followed", () => {
+  it("re-reads one with no probe recorded, as a probe in flight, within the bound; never one with a reading", () => {
+    const c = fixture<{ item: Connection }>("connection.json").item;
+    const unprobed = { ...c, reachability: { state: "unknown", reason: null, observedAt: null } } as unknown as Connection;
+    const running = { ...c, reachability: { ...c.reachability, reason: "ProbeRunning" } } as Connection;
+    expect(probeState(unprobed.reachability).verdict).toBe("never");
+    expect(connectionReReadMs(unprobed, 0)).toBe(4000);
+    expect(connectionReReadMs(running, 3)).toBe(4000);
+    // The bound: like DUI-38's, the page stops following.
+    expect(connectionReReadMs(unprobed, PROBE_RE_READS)).toBe(false);
+    // CONTROL: a connection with a reading is not re-read.
+    expect(probeState(c.reachability).verdict).toBe("reachable");
+    expect(connectionReReadMs(c, 0)).toBe(false);
+    expect(connectionReReadMs(undefined, 0)).toBe(false);
+  });
+});
+
+describe("DUI-48.3: a probe in a picker's few words", () => {
+  it("says a probe that recorded no reading, with its reason, and \"not probed yet\" only with no probe", () => {
+    const now = Date.parse("2026-10-15T06:00:30Z");
+    const at = "2026-10-15T06:00:00Z";
+    expect(probeShortWords({ state: "unknown", reason: "NoExitCode", observedAt: at } as never, now)).toBe("last probe recorded no reading (NoExitCode)");
+    expect(probeShortWords({ state: "unknown" } as never, now)).toBe("not probed yet");
+    expect(probeShortWords({ state: "unknown", reason: "ProbeRunning" } as never, now)).toBe("probing");
+    expect(probeShortWords({ state: "reachable", reason: "Reachable", observedAt: at } as never, now)).toBe("reachable");
+    expect(probeShortWords({ state: "unreachable", reason: "ProbeReportedUnreachable", observedAt: "2026-10-15T05:00:00Z" } as never, now)).toBe("not reachable, stale");
+  });
+});
+

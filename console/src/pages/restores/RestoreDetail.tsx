@@ -54,12 +54,13 @@ import { TopicConfigurationResult } from "../cutover/TopicConfiguration";
 import { SwitchoverEntry } from "../cutover/SwitchoverEntry";
 import { cutoverRefusal } from "../cutover/Cutover";
 import { useSourceBackup } from "../../api/queries";
+import { verdictInstantTerm } from "../backups/verdict";
 import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
 import { approvalRoute } from "./model";
 import {
   COMPLETION_NOT_VERIFIED,
   QUEUED_RUN_SENTENCE,
-  RECORDS_IN_WINDOW_LABEL,
+  completionCountLabels,
   RETRY_FRESH_TARGET_SENTENCE,
   SCORECARD_CLAIM_SENTENCE,
   completionGuidance,
@@ -340,6 +341,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const switchable = cutoverRefusal(r, source) === null;
   const complete = r.coverage?.requested === "complete";
   const scope = op?.verificationScope;
+  // DUI-48.2: the completion counts' labels follow the recorded coverage.
+  const labels = completionCountLabels(scope?.coverage ?? r.coverage?.recorded ?? null);
   const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
   const planBucket = planEvidenceBucket(r.planBytes);
   const evidenceKeys = op?.evidence.payloadKey && op.evidence.sidecarKey;
@@ -577,7 +580,8 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                         term: "Signature",
                         value: op.verification.detail ? <Prose text={`${op.verification.state}: ${op.verification.detail}`} /> : op.verification.state,
                       },
-                      { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
+                      // DUI-47: an instant beside a pending verdict is the attempt's, not a verdict's.
+                      { term: verdictInstantTerm(op.verification.state), value: <Instant value={op.verification.verifiedAt} exact /> },
                       op.verification.matchedKeyId ? { term: "Signed by key", value: <Ident value={op.verification.matchedKeyId} label="signer key id" /> } : null,
                       { term: "Trust", value: `${op.trust.state}, basis ${op.trust.basis}${op.trust.keyState ? `, key ${op.trust.keyState}` : ""}${op.trust.policy?.name ? `, policy ${op.trust.policy.name}` : ""}` },
                       op.evidence.payloadKey ? { term: "Scorecard", value: <Ident value={op.evidence.payloadKey} label="scorecard key" /> } : { term: "Scorecard", value: shown(null) },
@@ -680,9 +684,9 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                     <Facts
                       items={[
                         { term: "Records expected", value: <Claim value={count(op.completion.recordsExpected)} verified={signed} /> },
-                        { term: RECORDS_IN_WINDOW_LABEL, value: <Claim value={count(op.completion.recordsRestored)} verified={signed} /> },
-                        { term: "Records sampled", value: <Claim value={count(op.completion.recordsSampled)} verified={signed} /> },
-                        { term: "Sampled and matching", value: <Claim value={count(op.completion.recordsSampledMatching)} verified={signed} /> },
+                        { term: labels.window, value: <Claim value={count(op.completion.recordsRestored)} verified={signed} /> },
+                        { term: labels.checked, value: <Claim value={count(op.completion.recordsSampled)} verified={signed} /> },
+                        { term: labels.matching, value: <Claim value={count(op.completion.recordsSampledMatching)} verified={signed} /> },
                         { term: "Integrity level", value: <Claim value={op.completion.integrityLevel} verified={signed} /> },
                       ]}
                     />

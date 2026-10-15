@@ -776,9 +776,13 @@ is accepted only as a path under `/ui/`.
 `GET /auth/callback` validates the ID token: allowed `alg`, JWKS key by exact
 `kid`, signature, exact `iss` and audience (`azp` with more than one), `exp`,
 `iat` and `nonce`. **The browser never receives a provider token**; the process
-holds no access or refresh token. Every `401` clears the login cookie. A
+holds no access or refresh token. Every `401` clears the login cookie but one:
+a `state` that does not match the cookie (`state_mismatch`). That cookie is a
+newer sign-in's, started since in another tab, and it is left as it is (no
+`Set-Cookie`), so that sign-in can still finish within its own ten minutes. A
 callback with no query, or from a cross-site navigation, is refused and clears
-it.
+it. A browser (`Accept: text/html`) reads a refusal as a short page styled from
+`/ui/sign-in.css` and `/ui/favicon.svg`, with nothing inline.
 
 | the callback | answer | audit `failureCode` |
 |---|---|---|

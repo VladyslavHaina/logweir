@@ -227,6 +227,17 @@ export const COMPLETION_NOT_VERIFIED =
 
 export const RECORDS_IN_WINDOW_LABEL = "Records verified in the sampled window";
 
+/**
+ * DUI-48.2: the labels of a restore's completion counts follow the coverage the run recorded.
+ * A complete verification compared every record, so nothing reads "sampled"; any other
+ * coverage (or none recorded) keeps the sample's words, which never claim completeness.
+ */
+export function completionCountLabels(coverage: string | null | undefined): { window: string; checked: string; matching: string } {
+  return coverage === "complete"
+    ? { window: "Records verified in the restored window", checked: "Records compared", matching: "Compared and matching" }
+    : { window: RECORDS_IN_WINDOW_LABEL, checked: "Records sampled", matching: "Sampled and matching" };
+}
+
 export const SCORECARD_CLAIM_SENTENCE =
   "The outcome, integrity and counts on this run are copied from its scorecard, whose signature has not verified: each is the scorecard's claim, not a verified fact.";
 

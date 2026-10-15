@@ -203,6 +203,26 @@ export const PROBE_WORDS: Record<ProbeVerdict, string> = {
   never: "Never probed",
 };
 
+/**
+ * DUI-48.3: a connection's probe in a picker's few words, read as its page reads it
+ * (`probeState`, DUI-31.6). A probe that ran and recorded no reading (Unknown, for example
+ * NoExitCode) says so with its reason, never "not checked yet"; only a connection with no
+ * probe at all reads "not probed yet". A refusal names its reason; a stale reading says so.
+ */
+export function probeShortWords(r: Reachability | undefined, now = Date.now()): string {
+  const p = probeState(r, now);
+  const reason = p.reason ? ` (${p.reason})` : "";
+  const base =
+    p.verdict === "never"
+      ? "not probed yet"
+      : p.verdict === "unknown"
+        ? `last probe recorded no reading${reason}`
+        : p.verdict === "refused"
+          ? `refused${reason}`
+          : PROBE_WORDS[p.verdict].toLowerCase();
+  return `${base}${p.stale ? ", stale" : ""}`;
+}
+
 export const PROBE_SENTENCE =
   "The connection probe is a pod the controller runs on its own cadence: it dialled these brokers once and recorded what happened. It is not a readiness verdict and not a promise about right now. An observation older than 10 minutes is labelled stale, and a connection the controller refused to dial is labelled with its own reason.";
 
@@ -454,16 +474,29 @@ export function forgetConnectionCredential(body: CreateConnectionRequest): void 
 // ----------------------------------------------------------------- reads
 
 /** While a probe is in flight the page re-reads every 4 s, for at most the probe Job's two-minute deadline. */
-const PROBE_RE_READ_MS = 4000;
-const PROBE_RE_READS = 30;
+export const PROBE_RE_READ_MS = 4000;
+export const PROBE_RE_READS = 30;
 
 function probing(c: Connection | undefined): boolean {
   return c?.reachability.reason === PROBE_RUNNING_REASON;
 }
 
-/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight. */
+/**
+ * DUI-48.1: a connection with no probe recorded yet (just created): its first probe is on
+ * its way, and the page follows it as it follows a probe in flight, within the same bound.
+ */
+function awaitingFirstProbe(c: Connection | undefined): boolean {
+  return c !== undefined && probeState(c.reachability).verdict === "never";
+}
+
+/** How soon a connection is read again: while a probe is in flight or its first is awaited, every 4 s for 30 reads; else never. */
+export function connectionReReadMs(c: Connection | undefined, reads: number): number | false {
+  return (probing(c) || awaitingFirstProbe(c)) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false;
+}
+
+/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight or awaited. */
 export function useConnectionList(ns: string) {
-  return useConnections(ns, (items, reads) => (items.some(probing) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false));
+  return useConnections(ns, (items, reads) => (items.some((c) => connectionReReadMs(c, reads) !== false) ? PROBE_RE_READ_MS : false));
 }
 
 export function useConnection(ns: string, name: string, enabled = true) {
@@ -473,7 +506,7 @@ export function useConnection(ns: string, name: string, enabled = true) {
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal }))).item,
     enabled: enabled && readable,
-    refetchInterval: (q) => (probing(q.state.data) && q.state.dataUpdateCount < PROBE_RE_READS ? PROBE_RE_READ_MS : false),
+    refetchInterval: (q) => connectionReReadMs(q.state.data, q.state.dataUpdateCount),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
   });
 }

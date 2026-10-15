@@ -9,6 +9,7 @@ import {
   accessBody,
   destinationBody,
   destinationField,
+  destinationReReadMs,
   destinationProblems,
   emptyGrant,
   forgetAccessCredentials,
@@ -219,3 +220,18 @@ describe("where the API's field errors land", () => {
     expect(placed).toEqual({ fields: { bucket: "is not an S3 bucket name" }, unmatched: ["x: z"] });
   });
 });
+
+describe("DUI-48.1's sweep: a destination not judged yet is followed", () => {
+  it("re-reads one whose controller has not judged this generation, within the bound; never a judged one", () => {
+    const d = fixture<{ item: Destination }>("destination.json").item;
+    const fresh = { ...d, generation: 2, status: { ...d.status, observedGeneration: 1 } } as Destination;
+    const unseen = { ...d, status: { ...d.status, observedGeneration: undefined } } as unknown as Destination;
+    expect(destinationReReadMs(fresh, 0)).toBe(4000);
+    expect(destinationReReadMs(unseen, 29)).toBe(4000);
+    expect(destinationReReadMs(unseen, 30)).toBe(false);
+    // CONTROL: a destination judged at its generation is not re-read.
+    expect(d.status.observedGeneration).toBe(d.generation);
+    expect(destinationReReadMs(d, 0)).toBe(false);
+  });
+});
+

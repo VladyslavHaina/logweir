@@ -624,17 +624,29 @@ async fn dui41_a_browser_whose_sign_in_was_replaced_reads_a_page_and_stays_signe
     );
     let text = page.text();
     assert!(
-        text.contains("expired, or a newer sign-in replaced it") && text.contains("href=\"/ui/\""),
+        text.contains("Another sign-in was started in this browser after this one")
+            && text.contains("href=\"/ui/\""),
         "{text}"
     );
     assert!(text.contains("state_mismatch"), "{text}");
+    // DUI-45: styled from /ui/ (the console's font and colours) with nothing
+    // inline the Content-Security-Policy would refuse, and an icon of its own,
+    // so the browser asks for no /favicon.ico.
+    assert!(
+        text.contains("href=\"/ui/sign-in.css\"") && text.contains("rel=\"icon\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("<style") && !text.contains("style=") && !text.contains("<script"),
+        "{text}"
+    );
     assert!(
         session_cookie_of(&page).is_none(),
         "no session from a refused state"
     );
     assert!(
-        login_cookie_clear_of(&page).is_some(),
-        "the attempt is over: its login cookie is cleared"
+        login_cookie_clear_of(&page).is_none(),
+        "DUI-45: the cookie is a newer sign-in's, and it is left alone"
     );
     assert_eq!(idp.token_calls(), 0, "refused before any token request");
 
@@ -713,6 +725,123 @@ async fn a_browser_whose_code_exchange_fails_reads_a_page_and_stays_signed_out()
     }
 }
 
+/// DUI-45: two sign-ins started in two tabs. The browser holds one login
+/// cookie, the newer attempt's. The older tab comes back first: refused
+/// `state_mismatch` (401, no session, no token request), and the newer
+/// attempt's cookie is left alone, so the newer tab then finishes, as the
+/// refusal page says.
+///
+/// CONTROLS: the newer attempt cannot be finished twice (its state is
+/// redeemed and its cookie spent); a callback with no state still clears the
+/// cookie; and after the newer one finished, the older tab reads that no
+/// sign-in waits here, which is true.
+#[tokio::test]
+async fn dui45_the_older_of_two_tabs_refused_first_leaves_the_newer_able_to_finish() {
+    let key = TestKey::ec("k-ec-1");
+    let idp = MockIdp::new(ISSUER, &[&key]);
+    let app = app(&idp);
+    let (_, older) = start_login(&app, "").await;
+    let older = older.expect("login redirects");
+    let (_, newer) = start_login(&app, "").await;
+    let newer = newer.expect("login redirects");
+    for (code, started) in [("code-old", &older), ("code-new", &newer)] {
+        idp.grant(
+            code,
+            Grant {
+                id_token: key.mint(&claims(&started.nonce)),
+                code_challenge: Some(started.challenge.clone()),
+                redirect_uri: Some(support::REDIRECT_URI.to_string()),
+            },
+        );
+    }
+    // The browser's cookie jar holds the newer attempt's cookie only.
+    let callback = |code: &str, state: &str, cookie: Option<&str>| {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(format!("/auth/callback?code={code}&state={state}"))
+            .header("host", SHARED_HOST)
+            .header("accept", "text/html");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+
+    // 1. The older tab: refused, nothing exchanged, the newer cookie kept.
+    let refused = app
+        .app
+        .send(callback("code-old", &older.state, Some(&newer.cookie)))
+        .await;
+    assert_eq!(refused.status.as_u16(), 401);
+    assert!(session_cookie_of(&refused).is_none(), "no session");
+    assert_eq!(idp.token_calls(), 0, "refused before any token request");
+    assert!(
+        refused
+            .headers
+            .get_all("set-cookie")
+            .iter()
+            .next()
+            .is_none(),
+        "the newer attempt's cookie is left alone"
+    );
+    assert!(refused
+        .text()
+        .contains("That newer sign-in is not affected"));
+
+    // 2. The newer tab finishes, as that page said.
+    let done = app
+        .app
+        .send(callback("code-new", &newer.state, Some(&newer.cookie)))
+        .await;
+    assert_eq!(done.status.as_u16(), 303, "{:?}", done.headers);
+    assert!(session_cookie_of(&done).is_some(), "signed in");
+    assert!(
+        login_cookie_clear_of(&done).is_some(),
+        "its cookie is spent"
+    );
+    assert_eq!(idp.token_calls(), 1);
+
+    // CONTROL: the newer attempt cannot be finished twice, even by a copy of
+    // its cookie: its state was redeemed.
+    let again = app
+        .app
+        .send(callback("code-new", &newer.state, Some(&newer.cookie)))
+        .await;
+    assert_eq!(again.status.as_u16(), 401);
+    assert!(session_cookie_of(&again).is_none());
+    assert!(again.text().contains("login_state_replayed"));
+    assert_eq!(idp.token_calls(), 1, "no second token request");
+
+    // CONTROL: a callback with no state still clears the cookie.
+    let no_state = app
+        .app
+        .send(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/callback?code=code-new")
+                .header("host", SHARED_HOST)
+                .header("cookie", &newer.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(no_state.status.as_u16(), 401);
+    assert!(login_cookie_clear_of(&no_state).is_some());
+
+    // The other order: after the newer finished, the browser has no login
+    // cookie, and the older tab reads that no sign-in waits here.
+    let late = app.app.send(callback("code-old", &older.state, None)).await;
+    assert_eq!(late.status.as_u16(), 401);
+    assert!(session_cookie_of(&late).is_none());
+    let text = late.text();
+    assert!(
+        text.contains("This browser has no sign-in waiting to finish here")
+            && text.contains("login_state_absent"),
+        "{text}"
+    );
+    assert_eq!(idp.token_calls(), 1);
+}
+
 /// **The callback consumes the login cookie: it clears it, so the same browser
 /// does not present it again.** Clearing is advice to the browser; what makes
 /// the `state` single-use against someone who kept a copy is the replica's
@@ -787,14 +916,25 @@ async fn every_refused_callback_clears_the_login_cookie() {
 
     let (_, s) = start_login(&app, "").await;
     let s = s.expect("login redirects");
-    cases.push((
-        "a state that is not this login's",
-        send(
-            "/auth/callback?code=c&state=someone-elses".into(),
-            Some(s.cookie.clone()),
-        )
-        .await,
-    ));
+    // DUI-45: the one refusal that keeps the cookie, because it is another
+    // attempt's (a newer sign-in in another tab): refused, and nothing cleared.
+    let mismatched = send(
+        "/auth/callback?code=c&state=someone-elses".into(),
+        Some(s.cookie.clone()),
+    )
+    .await;
+    mismatched.assert_problem(401, "unauthenticated");
+    assert!(session_cookie_of(&mismatched).is_none());
+    assert!(
+        mismatched
+            .headers
+            .get_all("set-cookie")
+            .iter()
+            .next()
+            .is_none(),
+        "no Set-Cookie at all: the newer attempt's cookie keeps its own expiry: {:?}",
+        mismatched.headers.get_all("set-cookie")
+    );
     cases.push((
         "the provider refused",
         send(
@@ -853,7 +993,7 @@ async fn every_refused_callback_clears_the_login_cookie() {
             "{label}: no session on a refusal"
         );
     }
-    assert_eq!(cases.len(), 7);
+    assert_eq!(cases.len(), 6);
     app.app.fake.assert_strict();
 }
 

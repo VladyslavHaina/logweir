@@ -170,6 +170,20 @@ describe("a restore's page", () => {
     expect(screen.getAllByText(/partial: partitions 0, 2 of topic orders/).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /Retry to a fresh target/ })).toBeNull();
   });
+  it("DUI-48.2: a complete restore's counts never read \"sampled\"; a sampled one's do (the control)", async () => {
+    const completion = { recordsExpected: 398, recordsRestored: 398, recordsSampled: 398, recordsSampledMatching: 398, integrityLevel: "byte-fingerprint", newTopics: [] };
+    showRestore(R(subsetRestore), { ...O(subsetOperation), completion } as OperationView);
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText("Records compared")).toBeTruthy();
+    expect(screen.getByText("Compared and matching")).toBeTruthy();
+    expect(screen.queryByText(/sampled/i, { selector: "dt, dt *" })).toBeNull();
+    cleanup();
+    const sampledOp = { ...O(subsetOperation), completion, verificationScope: { ...O(subsetOperation).verificationScope, coverage: "sampled" } } as OperationView;
+    showRestore({ ...R(subsetRestore), coverage: { requested: "sampled", recorded: "sampled", covered: true } }, sampledOp);
+    expect(await screen.findByText("Records sampled")).toBeTruthy();
+    expect(screen.getByText("Sampled and matching")).toBeTruthy();
+  });
+
   it("a stopped creation step names the topic it left and the one it cannot account for", async () => {
     const r = R(unconfirmedRestore);
     showRestore(r, { ...O(uncoveredOperation), state: "failed", verifiedSuccess: false });
@@ -210,12 +224,16 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     expect(screen.getAllByText("Verifying").length).toBeGreaterThan(0);
     expect(screen.queryByText("Done, not verified")).toBeNull();
     expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    // DUI-47: no "Verified at" beside a pending verdict; its instant is the attempt's.
+    expect(screen.getAllByText("Last attempt at").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Verified at")).toBeNull();
     // The controller verifies: the page is still reading, and shows it.
     net.answers.set(`/namespaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
     net.answers.set(`/namespaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
     await screen.findByText("Restored and verified");
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+    expect(screen.getAllByText("Verified at").length).toBeGreaterThan(0);
   });
 
   // Review L2: the bound holds on the page's reads, not only in the hook. Past

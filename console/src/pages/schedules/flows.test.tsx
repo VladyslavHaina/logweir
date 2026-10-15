@@ -265,6 +265,25 @@ describe("guided create", () => {
     expect(sent.body).toEqual({ schedule: "0 2 * * * ", suspended: false, topics: ["orders", "payments"], destinationRef: { name: "primary" }, sourceRef: { name: "orders-prod" } });
   });
 
+  it("DUI-48.3: a connection whose last probe recorded no reading is never \"not checked yet\"", async () => {
+    const noReading = { name: "orders-noexit", uid: "c-2", namespace: "team-a", role: "source", reachability: { state: "unknown", reason: "NoExitCode", observedAt: new Date().toISOString() } };
+    const unprobed = { name: "orders-new", uid: "c-3", namespace: "team-a", role: "source", reachability: { state: "unknown" } };
+    CONNECTIONS.push(noReading as never, unprobed as never);
+    try {
+      formNetwork();
+      renderAt("/team-a/schedules/new");
+      // The first render of the form can be slow on a loaded host: the wait is the read, not the rule.
+      const probed = await screen.findByRole("option", { name: /orders-noexit/ }, { timeout: 15_000 });
+      expect(probed.textContent).toBe("orders-noexit (last probe recorded no reading (NoExitCode))");
+      // CONTROL: a connection with no probe at all says exactly that, and a reading reads as one.
+      expect(screen.getByRole("option", { name: /orders-new/ }).textContent).toBe("orders-new (not probed yet)");
+      expect(screen.getByRole("option", { name: /orders-prod/ }).textContent).toBe("orders-prod (reachable)");
+      expect(document.body.textContent).not.toContain("not checked yet");
+    } finally {
+      CONNECTIONS.splice(1);
+    }
+  });
+
   it("an unknown zone is refused beside the zone field, and nothing can be created", async () => {
     formNetwork();
     renderAt("/team-a/schedules/new");

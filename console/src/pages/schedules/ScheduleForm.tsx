@@ -37,6 +37,7 @@ import {
 import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-icon";
 import PlusIcon from "@patternfly/react-icons/dist/esm/icons/plus-icon";
 import { useConnections, useDestinations } from "../../api/queries";
+import { probeShortWords } from "../../api/connections";
 import {
   useCadencePreview,
   useDiscoveredTopics,
@@ -442,7 +443,8 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
             }
             options={[
               ["", "Choose a connection"],
-              ...sources.map((c): [string, string] => [c.name, `${c.name} (${c.reachability.state === "reachable" ? "reachable" : c.reachability.state === "unreachable" ? "unreachable" : "not checked yet"})`]),
+              // DUI-48.3: the probe in the connection page's own terms, never "not checked yet" for one that ran.
+              ...sources.map((c): [string, string] => [c.name, `${c.name} (${probeShortWords(c.reachability)})`]),
             ]}
           />
         )}

@@ -2323,6 +2323,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a switchover runs only on its own bundle",
             "`ApprovalBundleConflict`",
         ),
+        // DUI-45 (item 125): the refusal page's own stylesheet.
+        ("the newer of two sign-ins finishes", "`/ui/sign-in.css`"),
+        // DUI-46, DUI-47 (item 126): a pending verdict's instant, in words.
+        ("a switchover record links by mode", "Last attempt at"),
+        // DUI-48 (item 127): a complete restore's counts, in its own words.
+        ("first probes and complete counts", "Compared and matching"),
     ];
     assert_eq!(
         items.len(),

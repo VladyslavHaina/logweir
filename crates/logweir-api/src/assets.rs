@@ -10,8 +10,10 @@
 //! anything not in the map is 404. `/ui/` is `index.html`, served `no-cache`; a
 //! hashed file is `immutable`, because its name changes whenever its bytes do.
 //!
-//! ONE ENTRY IS NOT A FILE: the page icon, [`ICON_PATH`], compiled in so that no
-//! file can shadow it (`.svg` is selected only under `assets/`). A `data:,` icon
+//! TWO ENTRIES ARE NOT FILES: the page icon, [`ICON_PATH`], compiled in so that
+//! no file can shadow it (`.svg` is selected only under `assets/`), and the
+//! sign-in refusal page's stylesheet, [`SIGN_IN_CSS_PATH`] (DUI-45), rendered at
+//! startup from the console's own fonts, which replaces any file of that name. A `data:,` icon
 //! would be refused by this server's Content-Security-Policy (`img-src` falls back
 //! to `default-src 'self'`); served from `'self'`, the icon needs no widening of
 //! the policy.
@@ -54,6 +56,56 @@ pub const ICON_SVG: &str = concat!(
     r##"<path fill="#ffffff" d="M6 8h20v3.2H6zM12 14.4h14v3.2H12zM18 20.8h8v3.2h-8z"/>"##,
     "</svg>\n"
 );
+
+/// The sign-in refusal page's stylesheet, under `/ui/` (`auth::login`'s page).
+pub const SIGN_IN_CSS_PATH: &str = "sign-in.css";
+
+/// The console's three font families, by the base name of the variable font
+/// PatternFly's base stylesheet loads, as the build hashes it
+/// (`assets/RedHatTextVF-<hash>.woff2`).
+const SIGN_IN_FONTS: [(&str, &str); 3] = [
+    ("Red Hat Text", "RedHatTextVF-"),
+    ("Red Hat Display", "RedHatDisplayVF-"),
+    ("Red Hat Mono", "RedHatMonoVF-"),
+];
+
+/// The sign-in refusal page's stylesheet: the console's fonts (an `@font-face`
+/// for each of its variable fonts found among `paths`, the served asset paths)
+/// and its colours, light and dark by the system's preference. Fixed text; the
+/// one input is which served font files exist.
+#[must_use]
+pub fn sign_in_css(paths: &[String]) -> String {
+    let mut css = String::new();
+    for (family, base) in SIGN_IN_FONTS {
+        let prefix = format!("{ASSETS_DIR}{base}");
+        if let Some(path) = paths
+            .iter()
+            .find(|p| p.starts_with(&prefix) && p.ends_with(".woff2") && !p.contains("-Italic"))
+        {
+            css.push_str(&format!(
+                "@font-face{{font-family:\"{family}\";src:url(\"/ui/{path}\") format(\"woff2\");\
+                 font-weight:300 900;font-style:normal;font-display:swap}}\n"
+            ));
+        }
+    }
+    css.push_str(SIGN_IN_CSS_RULES);
+    css
+}
+
+/// The rules: PatternFly's palette and Logweir's accent, as the console uses them.
+const SIGN_IN_CSS_RULES: &str = r#":root{color-scheme:light dark;--bg:#f2f2f2;--surface:#ffffff;--text:#151515;--subtle:#4d4d4d;--border:#c7c7c7;--link:#0b5cad;--code:#f2f2f2}
+@media (prefers-color-scheme:dark){:root{--bg:#151515;--surface:#1f1f1f;--text:#ffffff;--subtle:#c7c7c7;--border:#4d4d4d;--link:#92c5f9;--code:#292929}}
+html{background:var(--bg)}
+body{margin:0;padding:1rem;background:var(--bg);color:var(--text);font-family:"Red Hat Text","RedHatText",Helvetica,Arial,sans-serif;font-size:1rem;line-height:1.5}
+main{box-sizing:border-box;max-width:36rem;margin:3rem auto;padding:1.5rem 2rem;background:var(--surface);border:1px solid var(--border);border-radius:16px}
+.lw-brand{display:flex;align-items:center;gap:.5rem;margin:0 0 1.5rem;font-family:"Red Hat Display","RedHatDisplay",Helvetica,Arial,sans-serif;font-weight:500;font-size:1.125rem}
+h1{margin:0 0 1rem;font-family:"Red Hat Display","RedHatDisplay",Helvetica,Arial,sans-serif;font-weight:500;font-size:1.5rem;line-height:1.3}
+p{margin:0 0 1rem;overflow-wrap:anywhere}
+.lw-detail{color:var(--subtle)}
+code{font-family:"Red Hat Mono","RedHatMono",ui-monospace,monospace;font-size:.875em;background:var(--code);padding:0 .25rem;border-radius:4px}
+a{color:var(--link)}
+@media (max-width:480px){body{padding:.5rem}main{margin:1rem auto;padding:1rem 1.25rem}}
+"#;
 
 /// One served file.
 #[derive(Clone, Debug)]
@@ -132,6 +184,15 @@ impl StaticAssets {
             Asset {
                 bytes: Bytes::from_static(ICON_SVG.as_bytes()),
                 content_type: "image/svg+xml",
+            },
+        );
+        // Rendered, and inserted last, so a file of the same name never stands in.
+        let paths: Vec<String> = files.keys().cloned().collect();
+        files.insert(
+            SIGN_IN_CSS_PATH.to_string(),
+            Asset {
+                bytes: Bytes::from(sign_in_css(&paths)),
+                content_type: "text/css; charset=utf-8",
             },
         );
         Ok(StaticAssets { files })
@@ -252,5 +313,39 @@ mod tests {
         assert_eq!(hashed_content_type_for("a.html"), None);
         assert_eq!(hashed_content_type_for("a.js.map"), None);
         assert_eq!(hashed_content_type_for("a.woff"), None);
+    }
+
+    /// DUI-45: the refusal page's stylesheet names the console's own fonts when
+    /// the build has them (the upright variable fonts, never an italic or a
+    /// file outside `assets/`), and only fixed rules otherwise.
+    #[test]
+    fn the_sign_in_stylesheet_uses_the_consoles_fonts_when_served() {
+        let paths: Vec<String> = [
+            "assets/RedHatTextVF-AbC123.woff2",
+            "assets/RedHatTextVF-Italic-Zz9.woff2",
+            "assets/RedHatDisplayVF-Dd4.woff2",
+            "RedHatMonoVF-top.woff2",
+            "index.html",
+        ]
+        .map(String::from)
+        .to_vec();
+        let css = sign_in_css(&paths);
+        assert!(
+            css.contains("url(\"/ui/assets/RedHatTextVF-AbC123.woff2\")"),
+            "{css}"
+        );
+        assert!(
+            css.contains("url(\"/ui/assets/RedHatDisplayVF-Dd4.woff2\")"),
+            "{css}"
+        );
+        assert!(
+            !css.contains("Italic") && !css.contains("RedHatMonoVF"),
+            "{css}"
+        );
+        assert!(css.contains("prefers-color-scheme:dark"));
+        // CONTROL: no fonts served, no @font-face, and the same rules.
+        let bare = sign_in_css(&[]);
+        assert!(!bare.contains("@font-face"));
+        assert!(bare.ends_with(SIGN_IN_CSS_RULES));
     }
 }

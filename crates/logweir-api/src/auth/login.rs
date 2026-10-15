@@ -357,30 +357,60 @@ fn escape_html(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// The refusals a sign-in that expired, or was replaced by a newer one in another
-/// tab, ends in.
-const REPLACED_OR_EXPIRED: &[&str] = &[
-    "state_mismatch",
-    "login_state_absent",
-    "login_state_invalid",
-    "login_state_replayed",
-];
+/// The one refusal that leaves the login cookie alone (DUI-45): a callback whose
+/// `state` does not match the cookie this browser now carries. That cookie is
+/// another attempt's, a newer sign-in started since (in another tab), and that
+/// attempt must stay able to finish. The refusal itself is unchanged (401, no
+/// session, no token request), and nothing about the cookie changes: no
+/// `Set-Cookie` is sent, so it keeps its own ten-minute expiry and stays
+/// single-use. A callback cannot learn or refresh the cookie it does not match.
+pub const KEEPS_THE_LOGIN_COOKIE: &[&str] = &["state_mismatch"];
+
+/// The page's lead sentence for a refusal: true whichever of two sign-ins in two
+/// tabs comes back first (DUI-45).
+#[must_use]
+pub fn refused_sign_in_lead(code: &str) -> &'static str {
+    match code {
+        // The older of two: the newer one's cookie is kept, so it can finish.
+        "state_mismatch" => {
+            "Another sign-in was started in this browser after this one (for example in another \
+             tab), so this one cannot finish here. That newer sign-in is not affected: finish it \
+             in its own tab."
+        }
+        // The older of two after the newer finished (its cookie is spent), or an
+        // attempt that took too long or did not start here.
+        "login_state_absent" | "login_state_invalid" => {
+            "This browser has no sign-in waiting to finish here. It may have finished already, \
+             for example in another tab (then you are signed in), it may have taken too long, or \
+             it did not start here."
+        }
+        "login_state_replayed" => {
+            "This sign-in was already finished once, and a sign-in finishes only once."
+        }
+        _ => "This sign-in was not completed.",
+    }
+}
+
+/// The page's stylesheet and icon, served from `/ui/` (`crate::assets`): the
+/// console's font and colours with no inline style or script, so the API's
+/// Content-Security-Policy (`default-src 'self'`) needs no widening, and a
+/// browser asks for no `/favicon.ico`.
+pub const SIGN_IN_PAGE_HEAD: &str = concat!(
+    "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/ui/favicon.svg\">",
+    "<link rel=\"stylesheet\" href=\"/ui/sign-in.css\">"
+);
 
 /// A refused callback as a small page for a browser (DUI-41.7): 401, fixed text
 /// only (the refusal's own `&'static` sentence, never a query parameter or a
 /// provider's words), and a link back to the console.
 fn refused_sign_in_page(code: &'static str, detail: &'static str) -> Response {
-    let lead = if REPLACED_OR_EXPIRED.contains(&code) {
-        "This sign-in expired, or a newer sign-in replaced it (for example one started in another \
-         tab), so it was not completed. If you signed in in another tab, that sign-in is the one \
-         that counts."
-    } else {
-        "This sign-in was not completed."
-    };
+    let lead = refused_sign_in_lead(code);
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" \
-         content=\"width=device-width, initial-scale=1\"><title>Sign-in not completed</title></head>\
-         <body><main><h1>Sign-in not completed</h1><p>{lead}</p><p>{detail} ({code})</p>\
+         content=\"width=device-width, initial-scale=1\"><title>Sign-in not completed</title>\
+         {SIGN_IN_PAGE_HEAD}</head><body><main><p class=\"lw-brand\"><img src=\"/ui/favicon.svg\" \
+         alt=\"\" width=\"28\" height=\"28\"> Logweir</p><h1>Sign-in not completed</h1>\
+         <p>{lead}</p><p class=\"lw-detail\">{detail} <code>{code}</code></p>\
          <p><a href=\"/ui/\">Back to the Logweir console</a></p></main></body></html>",
         detail = escape_html(detail),
     );
@@ -413,7 +443,7 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
 
     // DUI-41.7: a browser that followed the provider's redirect here reads a page,
     // not a JSON problem with no way back. Only the wording changes: the refusal,
-    // its status and the cleared login cookie are the same for every caller.
+    // its status and the cookie it clears are the same for every caller.
     let browser = wants_html(&parts.headers);
     let refuse = |code: &'static str, detail: &'static str| -> Response {
         audit.set_failure(code);
@@ -422,10 +452,14 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         } else {
             ApiError::new(ProblemCode::Unauthenticated, detail).into_response()
         };
-        // Whatever went wrong, the login attempt is over: clear its cookie so
-        // a retry starts a fresh `state`/`nonce`/verifier.
-        if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(session::LOGIN_COOKIE)) {
-            response.headers_mut().append(header::SET_COOKIE, value);
+        // The login attempt is over: clear its cookie so a retry starts a fresh
+        // `state`/`nonce`/verifier. Except when the cookie is not this
+        // attempt's (DUI-45, `KEEPS_THE_LOGIN_COOKIE`): it is a newer sign-in's.
+        if !KEEPS_THE_LOGIN_COOKIE.contains(&code) {
+            if let Ok(value) = HeaderValue::from_str(&session::clear_cookie(session::LOGIN_COOKIE))
+            {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
         }
         response
     };

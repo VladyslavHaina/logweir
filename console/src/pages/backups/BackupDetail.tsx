@@ -3,7 +3,7 @@
 // it. The run's operation view (stage, diagnoses, result, evidence) is read
 // beside it and followed until the run ends and its verdict settles; leaving
 // the page stops the read, never the run.
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
@@ -54,6 +54,7 @@ import "./evidence.css";
 import {
   BASIS_WORDS,
   SIGNATURE_WORDS,
+  verdictInstantTerm,
   TRUST_BASIS_NOT_OBSERVED,
   TRUST_WORDS,
   HISTORICAL_SUFFIX,
@@ -105,8 +106,31 @@ export function liveStepIndex(stage: string | null | undefined, state: string): 
   return STEPS.findIndex((s) => (s.at as readonly string[]).includes(now));
 }
 
-function LiveProgress({ b, op }: { b: Backup; op: OperationView | undefined }) {
-  const at = liveStepIndex(op?.stage, op?.state ?? b.operation.state);
+/**
+ * DUI-48.4: where the stepper stands from the Backup's own summary alone, when no operation
+ * view has been read yet or its read failed. The summary's `running` covers both preparing
+ * and copying, so it names no step: Started is done and no step is current (0.5), never a
+ * later one. A state that names its step exactly places it.
+ */
+export function summaryStepPosition(state: string): number {
+  if (state === "verifying") return STEPS.findIndex((s) => s.id === "verify");
+  if (state === "preparing") return STEPS.findIndex((s) => s.id === "prepare");
+  if ((STEPS[0].at as readonly string[]).includes(state)) return 0;
+  return 0.5;
+}
+
+/**
+ * The live stepper. A position is a step index (that step current, the ones before it done),
+ * or a half step (the ones before it done, none current). DUI-48.4: it never moves backward:
+ * a later read that says less (a summary after an operation view, a failed read) keeps the
+ * furthest position this page has shown for this run.
+ */
+export function LiveProgress({ b, op }: { b: Backup; op: OperationView | undefined }) {
+  const position = op ? liveStepIndex(op.stage, op.state) : summaryStepPosition(b.operation.state);
+  const furthest = useRef<{ uid: string; at: number }>({ uid: b.uid, at: -1 });
+  if (furthest.current.uid !== b.uid) furthest.current = { uid: b.uid, at: -1 };
+  furthest.current.at = Math.max(furthest.current.at, position);
+  const at = furthest.current.at;
   return (
     <ProgressStepper isCenterAligned aria-label="Backup progress" className="lw-stepper">
       {STEPS.map((s, i) => (
@@ -460,7 +484,7 @@ function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView 
             {trust?.policy?.name ? `${trust.policy.name}${typeof trust.policy.generation === "number" ? ` g${trust.policy.generation}` : ""}` : <Value value={null} />}
           </Term>
           <Term term="Verified with key">{v.matchedKeyId ? <Ident value={v.matchedKeyId} label="signer key id" /> : <Value value={null} />}</Term>
-          <Term term="Verified at">
+          <Term term={verdictInstantTerm(v.state)}>
             <When value={v.verifiedAt} exact />
           </Term>
           <Term term="Signed at">
