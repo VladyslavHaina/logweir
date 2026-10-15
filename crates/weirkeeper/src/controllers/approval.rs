@@ -2707,12 +2707,16 @@ pub async fn reconcile_approval_with_policy_at(
             consumed = outcome.is_consumed(),
             "approval verdict unchanged; nothing written"
         );
-    } else if outcome.is_consumed() {
+    } else if let ApprovalOutcome::Consumed(consumption) = &outcome {
+        // F2: the kind that consumed it, a Switchover's as a Restore's.
         info!(
             approval = %name,
             namespace = %namespace,
-            "approval consumed by its Restore's admission; the verified record is kept and not \
-             judged again"
+            subject_kind = %consumption.subject.kind,
+            subject = %consumption.subject.name,
+            "approval consumed by its {}'s admission; the verified record is kept and not judged \
+             again",
+            consumption.subject.kind
         );
     } else if outcome.is_verified() {
         info!(
