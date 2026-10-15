@@ -5,13 +5,14 @@
 // its ticket), and a refusal or a lost answer said where it belongs. The typed client's
 // fetch is the real mock with a recorder in front, so every request is seen.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import type { components } from "../../api/schema";
 import { RestoreWizard, restoreSearch } from "./RestoreWizard";
 import { RestoreDetail } from "./RestoreDetail";
+import { readCatalogOffers } from "../../api/restores";
 
 type S = components["schemas"];
 
@@ -103,10 +104,58 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+describe("DUI-41.4: Restore this point from a recovery catalog", () => {
+  it("opens step 1 with that point chosen, in view, in an open catalog section", async () => {
+    const { offers } = await readCatalogOffers("team-a");
+    expect(offers.length).toBeGreaterThan(0);
+    const chosen = offers[offers.length - 1]!;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      renderAt(`/team-a/restores/new?catalog=${chosen.catalog.name}&point=${chosen.entry.pointId}`);
+      const radios = await screen.findAllByRole("radio", { checked: true }, { timeout: 15_000 });
+      const ticked = radios.find((r) => r.getAttribute("name") === "point");
+      expect(ticked, "the chosen catalog point is ticked and visible").toBeTruthy();
+      expect(ticked!.closest(".lw-list__row")?.textContent).toContain(`catalog ${chosen.catalog.name}`);
+      await waitFor(() => expect(scrolled).toHaveBeenCalled());
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it("shows it chosen when its set is also a Backup listed above (the catalog of this namespace's own destination)", async () => {
+    const { offers } = await readCatalogOffers("team-a");
+    const backups = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/namespaces/team-a/backups"))).json()) as { items: S["Backup"][] };
+    const chosen = offers.find((o) => backups.items.some((b) => b.backupId === o.entry.backupId));
+    expect(chosen, "a catalog point whose set a listed Backup produced").toBeTruthy();
+    renderAt(`/team-a/restores/new?catalog=${chosen!.catalog.name}&point=${chosen!.entry.pointId}`);
+    const radios = await screen.findAllByRole("radio", { checked: true }, { timeout: 15_000 });
+    const ticked = radios.find((r) => r.getAttribute("name") === "point" && r.closest("[aria-label='Catalog points']"));
+    expect(ticked, "the point the link named is listed and ticked").toBeTruthy();
+    expect(ticked!.closest(".lw-list__row")?.textContent).toContain(`catalog ${chosen!.catalog.name}`);
+    // Only that one: the catalog's other points of listed Backups stay those Backups' rows.
+    const listed = within(screen.getByRole("radiogroup", { name: "Catalog points" })).getAllByRole("radio");
+    const others = offers.filter((o) => !backups.items.some((b) => b.backupId === o.entry.backupId));
+    expect(listed.length).toBe(Math.min(50, others.length + 1));
+  });
+
+  it("keeps the catalog section closed when no catalog point was chosen (the control)", async () => {
+    renderAt("/team-a/restores/new");
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    const toggle = await screen.findByRole("button", { name: /From recovery catalogs/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
 describe("the restore wizard", () => {
   it("sends the reviewed plan unchanged, and two clicks make one restore with one key", async () => {
     const router = renderAt("/team-a/restores/new");
     await toReview();
+    // DUI-41.3: the review names the approval minted from the plan, never a "restore-…" name the
+    // service does not use (it gives the Restore its own, rst-…, on create).
+    expect(screen.getByText("Approval name")).toBeTruthy();
+    expect(screen.queryByText("Names minted")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/restore-[0-9a-f]{8}\b/);
     const create = screen.getByRole("button", { name: "Create restore" });
     fireEvent.click(create);
     fireEvent.click(create);

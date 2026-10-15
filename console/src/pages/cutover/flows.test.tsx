@@ -200,6 +200,17 @@ describe("the review offers only what the preflight admits", () => {
     expect(screen.queryByRole("button", { name: /^Continue with/ })).toBeNull();
   });
 
+  it("DUI-42: the runner's remedy renders its code span, never raw backticks", async () => {
+    // crates/logweir/src/check/kinds/switchover.rs EVIDENCE_REMEDY, verbatim.
+    const remedy =
+      "Restore again with `coverage: complete` from a point that captured these consumer groups, or fix the namespace's evidence trust; the message names the switchover's own reason.";
+    serve({ review: review({}, { state: "notReady", code: "RestoreEvidenceRefused", message: "NoPositionsMapping: the restore's scorecard binds no positions mapping", remedy }) });
+    renderAt(FLOW);
+    const alert = (await screen.findByText("The review refused this restore")).closest(".pf-v6-c-alert") as HTMLElement;
+    expect(alert.textContent).not.toContain("`");
+    expect([...alert.querySelectorAll("code")].map((c) => c.textContent)).toContain("coverage: complete");
+  });
+
   it("a restore that cannot be switched over is refused from its own facts, with no review", async () => {
     serve({ restore: { ...RESTORE, coverage: { requested: "sampled", recorded: "sampled", covered: true } } });
     renderAt(FLOW);

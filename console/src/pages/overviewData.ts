@@ -1,7 +1,7 @@
 // The Overview's numbers, strips and activity, from the lists the API publishes.
 // Pure functions of the documents and `now`; overviewData.test.ts pins them.
 import type { Backup, OperationSummary, PointView, ProtectionPolicy, Restore } from "../api/types";
-import { lastDay, pointAgeSeconds, pointVerified } from "../app/attention";
+import { didNotBackUp, lastDay, notBackedUpWords, pointAgeSeconds, pointVerified } from "../app/attention";
 import { utcIso } from "../components/When";
 
 export type Freshest = { policy: ProtectionPolicy; ageSeconds: number; withinObjective: boolean; verified: boolean };
@@ -69,13 +69,29 @@ export function newestPoint(policies: ProtectionPolicy[], backups: Backup[], cat
   return best;
 }
 
-/** Backups created in the last 24 hours that verified or failed, and every run still moving. */
+/** Backups created in the last 24 hours that verified, failed or were refused, and every run still moving. */
 export function backupDay(backups: Backup[], now: number) {
   const day = lastDay(backups, now);
   return {
     verified: day.filter((b) => b.operation.verifiedSuccess).length,
     failed: day.filter((b) => b.operation.state === "failed").length,
+    refused: day.filter((b) => b.operation.state === "refused").length,
     running: backups.filter((b) => !b.operation.terminal).length,
+    missedWords: notBackedUpWords(day.filter(didNotBackUp), " · "),
+  };
+}
+
+/**
+ * The "Backups, last 24 hours" tile (DUI-32): a refused run backed up nothing, so it is
+ * counted, in its own word, and the tile is not a green check while any run failed or
+ * was refused.
+ */
+export function backupDayTile(day: ReturnType<typeof backupDay>): { value: string; detail: string; tone: "warning" | "success" | undefined } {
+  const missed = day.failed + day.refused;
+  return {
+    value: `${day.verified} verified`,
+    detail: `${missed > 0 ? day.missedWords : "0 failed"}${day.running ? ` · ${day.running} running` : ""}`,
+    tone: missed > 0 ? "warning" : day.verified > 0 ? "success" : undefined,
   };
 }
 
@@ -99,8 +115,8 @@ export function strip(backups: Backup[], schedule: string): Cell[] {
       // Runs of a strip span days: each cell names its date as well as its time (DUI-12).
       const iso = utcIso(b.createdAt);
       const at = iso ? iso.slice(0, 16).replace("T", " ") + " UTC" : b.createdAt ? "not a time" : "time not recorded";
-      if (b.operation.state === "failed" && retry?.operation.verifiedSuccess) {
-        return { backup: b, target: retry, cls: "retried", word: "failed, then verified on retry", at };
+      if (didNotBackUp(b) && retry?.operation.verifiedSuccess) {
+        return { backup: b, target: retry, cls: "retried", word: `${b.operation.state}, then verified on retry`, at };
       }
       if (!b.operation.terminal) return { backup: b, target: b, cls: "running", word: "in progress", at };
       if (b.operation.verifiedSuccess) return { backup: b, target: b, cls: "ok", word: "verified", at };

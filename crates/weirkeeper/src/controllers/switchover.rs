@@ -15,12 +15,27 @@
 //!
 //! Then one immutable bundle ConfigMap (the two plans, the approval, the
 //! approver's key, the evidence keyring, and for an authorization v2 the
-//! policy snapshot and the console key) and one Job, `logweir switchover
+//! policy snapshot and the console key), the admission marker
+//! (`Admitted=True`, [`admitted_status`]) and one Job, `logweir switchover
 //! run`, with the restore's target credential projection and the evidence
 //! destination's two grants: `evidenceRead` to read the restore's evidence,
 //! `evidenceWrite` to write the record (theme A's D1,
 //! [`crate::destination::EvidenceAccessEnv`]). It reads no archive. The
 //! controller never dials Kafka.
+//!
+//! A bundle that already exists is used only when it is exactly the one this
+//! admission would write ([`compatible_bundle`]); anything else is refused
+//! `ApprovalBundleConflict` and no Job is created (the Restore twin's rule).
+//!
+//! # One admission per Switchover
+//!
+//! `Admitted=True` is written once, before the Job, and its time is the
+//! admission instant the approval controller records the Approval consumed at.
+//! A Job named after this Switchover before its admission is not adopted
+//! ([`JOB_NOT_ADMITTED`]); after it, a Job under its name is the run only when
+//! it is this Switchover's own ([`own_job`]), and any other ends it
+//! `JobNameConflict`. A recorded Job that is gone ends the run ([`JOB_LOST`]):
+//! it is never admitted again ([`job_step`]).
 //!
 //! # The run's result
 //!
@@ -70,6 +85,13 @@ pub const HOLD_RESTORE_RUNNING: &str = "RestoreNotFinished";
 /// The refusal an approval for another subject gets.
 pub const SUBJECT_KIND_MISMATCH: &str = "SubjectKindMismatch";
 
+/// A Job named after this Switchover exists, and no admission of it created
+/// that Job: it is not adopted, and the Switchover waits for it to go.
+pub const JOB_NOT_ADMITTED: &str = "SwitchoverJobNotAdmitted";
+/// The Job this Switchover's admission recorded is gone before it finished:
+/// the run ends, and is never admitted again.
+pub const JOB_LOST: &str = "SwitchoverJobLost";
+
 /// How long a hold waits before it looks again.
 pub const HOLD_REQUEUE_SECS: u64 = 15;
 
@@ -106,6 +128,111 @@ pub fn is_terminal(status: Option<&SwitchoverStatus>) -> bool {
     status
         .and_then(|s| s.phase.as_deref())
         .is_some_and(|p| TERMINAL_PHASES.contains(&p))
+}
+
+/// The admission marker, when this Switchover carries one: `Admitted=True`,
+/// written by this controller (`Switchover.status` is its own) on the pass that
+/// admitted the run, before its Job.
+#[must_use]
+pub fn admission_marker(status: Option<&SwitchoverStatus>) -> Option<&crate::crds::Condition> {
+    crate::conditions::current_condition(
+        status.and_then(|s| s.conditions.as_ref()),
+        crate::conditions::CONDITION_ADMITTED,
+    )
+    .filter(|c| c.status == "True")
+}
+
+/// What a non-terminal Switchover's next step is, from its own status and
+/// whether a Job named after it exists. Pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStep {
+    /// The run's Job: observe it.
+    Observe,
+    /// A Job no admission of this Switchover created: not adopted, wait.
+    NotAdmitted,
+    /// The run's recorded Job is gone: the run ends, never re-admitted.
+    Lost,
+    /// No Job and none recorded: admission (or, admitted, its Job created).
+    Admit,
+}
+
+/// [`JobStep`] for a non-terminal Switchover.
+///
+/// * A Job exists. It is this run's when the admission marker is there (this
+///   controller wrote it before creating the Job), or when `status.jobRef` is
+///   (an older build's run, admitted before the marker existed). Otherwise no
+///   admission created it, and it is never adopted: adopting it is how a Job
+///   anyone made would read as this Switchover's run.
+/// * No Job. A recorded Job (`status.jobRef`, written only once this
+///   controller created or observed it) is gone: the run is lost, and is not
+///   admitted again on an approval that may have expired since. With none
+///   recorded, admission runs; an admitted Switchover whose Job was not yet
+///   created (the pass stopped between the marker and the Job) completes that
+///   one admission, at the marker's time.
+#[must_use]
+pub fn job_step(status: Option<&SwitchoverStatus>, job_exists: bool) -> JobStep {
+    let recorded = status.and_then(|s| s.job_ref.as_ref()).is_some();
+    match (job_exists, admission_marker(status).is_some() || recorded) {
+        (true, true) => JobStep::Observe,
+        (true, false) => JobStep::NotAdmitted,
+        (false, _) if recorded => JobStep::Lost,
+        (false, _) => JobStep::Admit,
+    }
+}
+
+/// Whether a Job named after `sw` is the one this controller created for it:
+/// its one owner reference is this Switchover UID as controller, as
+/// [`job_spec`] writes it (review L10, the Restore twin's
+/// `restore::compatible_restore_job`). A Job anyone made under that name is
+/// never observed as the run. An owner reference can be written by whoever
+/// may create Jobs, so this matches the twin and no more.
+#[must_use]
+pub fn own_job(job: &Job, sw: &Switchover) -> bool {
+    let owners = job.metadata.owner_references.as_deref().unwrap_or_default();
+    job.metadata.name.as_deref() == Some(sw.name_any().as_str())
+        && owners.len() == 1
+        && owners[0] == owner_reference(sw)
+}
+
+/// The admitting patch: `Admitted=True` (its time kept once written, by
+/// [`crate::conditions::merge_condition`]) and phase `Running`, written after
+/// the bundle and before the Job.
+#[must_use]
+pub fn admitted_status(sw: &Switchover, now: chrono::DateTime<Utc>) -> SwitchoverStatus {
+    let stored = sw.status.as_ref().and_then(|s| s.conditions.clone());
+    let marker = crate::conditions::merge_condition(
+        crate::conditions::current_condition(
+            stored.as_ref(),
+            crate::conditions::CONDITION_ADMITTED,
+        ),
+        crate::crds::Condition {
+            r#type: crate::conditions::CONDITION_ADMITTED.to_string(),
+            status: "True".to_string(),
+            observed_generation: sw.meta().generation,
+            last_transition_time: Some(now),
+            reason: Some(crate::conditions::REASON_ADMITTED.to_string()),
+            message: Some(format!(
+                "admitted under Approval {}; this is its one admission",
+                sw.spec.approval_ref.name
+            )),
+        },
+    );
+    let mut conditions: Vec<crate::crds::Condition> = stored
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.r#type != crate::conditions::CONDITION_ADMITTED)
+        .collect();
+    conditions.push(marker);
+    SwitchoverStatus {
+        phase: Some(PHASE_RUNNING.into()),
+        reason: Some(crate::conditions::REASON_ADMITTED.into()),
+        message: Some(format!(
+            "admitted under Approval {}; the Job follows",
+            sw.spec.approval_ref.name
+        )),
+        conditions: Some(conditions),
+        ..SwitchoverStatus::default()
+    }
 }
 
 /// **Admission** (steps 1 to 4), pure. `others` are the namespace's other
@@ -321,6 +448,81 @@ pub fn bundle_config_map(
         immutable: Some(true),
         data: Some(data),
         ..ConfigMap::default()
+    }
+}
+
+/// Whether an existing `<sw>-switchover` ConfigMap is exactly the bundle this
+/// admission would write (M1): its one owner is this Switchover UID as its
+/// controller, it is immutable, and its members are byte-identical. Anything
+/// else could put another plan, approval or key in front of the Job, which
+/// mounts the bundle by name. The Restore twin is
+/// `restore::compatible_approval_bundle`.
+#[must_use]
+pub fn compatible_bundle(existing: &ConfigMap, desired: &ConfigMap) -> bool {
+    let owners = existing
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default();
+    let wanted = desired
+        .metadata
+        .owner_references
+        .as_deref()
+        .and_then(<[OwnerReference]>::first);
+    existing.metadata.name == desired.metadata.name
+        && owners.len() == 1
+        && wanted.is_some_and(|w| owners[0] == *w)
+        && existing.immutable == Some(true)
+        && existing.data == desired.data
+        && existing.binary_data == desired.binary_data
+}
+
+/// The members whose bytes differ between an existing bundle and the desired
+/// one, by name, sorted: the refusal names keys, never bytes.
+#[must_use]
+pub fn differing_bundle_members(existing: &ConfigMap, desired: &ConfigMap) -> Vec<String> {
+    let empty = BTreeMap::new();
+    let a = existing.data.as_ref().unwrap_or(&empty);
+    let b = desired.data.as_ref().unwrap_or(&empty);
+    let mut keys: Vec<String> = a.keys().chain(b.keys()).cloned().collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter().filter(|k| a.get(k) != b.get(k)).collect()
+}
+
+/// Create the bundle, or accept the one already there only when it is
+/// [`compatible_bundle`]. `Ok(Some(message))` is the refusal.
+///
+/// # Errors
+///
+/// A Kubernetes API failure.
+pub async fn ensure_bundle(
+    maps: &Api<ConfigMap>,
+    desired: &ConfigMap,
+) -> Result<Option<String>, kube::Error> {
+    let name = desired.metadata.name.clone().unwrap_or_default();
+    match maps.create(&PostParams::default(), desired).await {
+        Ok(_) => Ok(None),
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            let Some(existing) = maps.get_opt(&name).await? else {
+                return Ok(Some(format!(
+                    "the bundle ConfigMap {name} answered 409 to create and was gone on the                      following read"
+                )));
+            };
+            if compatible_bundle(&existing, desired) {
+                return Ok(None);
+            }
+            let differing = differing_bundle_members(&existing, desired);
+            let members = if differing.is_empty() {
+                String::new()
+            } else {
+                format!("; the differing member(s) are {}", differing.join(", "))
+            };
+            Ok(Some(format!(
+                "the ConfigMap {name} already exists but its owner, immutable bit or members                  differ from this admission's bundle; the Job mounts it by name, so it cannot                  stand in for the verified approval{members}"
+            )))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -729,12 +931,65 @@ pub async fn reconcile(
         return Ok(Action::await_change());
     }
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
-    // A Job exists: observe it.
-    if let Some(job) = jobs.get_opt(&name).await? {
+    let job = jobs.get_opt(&name).await?;
+    match job_step(sw.status.as_ref(), job.is_some()) {
+        JobStep::Observe | JobStep::Admit => {}
+        JobStep::NotAdmitted => {
+            warn!(switchover = %name, "a Job named after this Switchover exists that no admission created; not adopted");
+            patch_status(
+                &api,
+                &name,
+                &hold_or_refuse(
+                    PHASE_PENDING,
+                    JOB_NOT_ADMITTED,
+                    format!(
+                        "a Job named {name} exists, and this Switchover was never admitted: this                          controller did not create it and does not adopt it, so it is not this                          run; the Switchover waits until that Job is gone"
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(Action::requeue(std::time::Duration::from_secs(
+                HOLD_REQUEUE_SECS,
+            )));
+        }
+        JobStep::Lost => {
+            warn!(switchover = %name, "the recorded switchover Job is gone; the run ends");
+            let status = SwitchoverStatus {
+                phase: Some(so::RUN_FAILED.into()),
+                reason: Some(JOB_LOST.into()),
+                message: Some(format!(
+                    "the Job {name} this Switchover's admission created is gone before it                      finished; the run is not admitted again (its approval was used by that                      admission): which groups moved is not known here, and a new Switchover                      with a new approval applies the positions"
+                )),
+                job_ref: sw.status.as_ref().and_then(|s| s.job_ref.clone()),
+                ..SwitchoverStatus::default()
+            };
+            patch_status(&api, &name, &status).await?;
+            return Ok(Action::await_change());
+        }
+    }
+    // The run's Job: observe it, when it is this Switchover's own.
+    if let Some(job) = job {
+        if !own_job(&job, &sw) {
+            warn!(switchover = %name, "a Job named after this Switchover is not controlled by its UID; not adopted");
+            patch_status(
+                &api,
+                &name,
+                &hold_or_refuse(
+                    so::RUN_REFUSED,
+                    crate::conditions::TERMINAL_STATE_JOB_NAME_CONFLICT,
+                    format!(
+                        "the Job {name} is not controlled by this Switchover UID, so it is not \
+                         this run and was not adopted"
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
         let st = job.status.clone().unwrap_or_default();
         if st.succeeded.unwrap_or(0) == 0 && st.failed.unwrap_or(0) == 0 {
             let mut status = sw.status.clone().unwrap_or_default();
-            if status.phase.as_deref() != Some(PHASE_RUNNING) {
+            if status.phase.as_deref() != Some(PHASE_RUNNING) || status.job_ref.is_none() {
                 status.phase = Some(PHASE_RUNNING.into());
                 status.job_ref = Some(name.clone());
                 patch_status(&api, &name, &status).await?;
@@ -1015,17 +1270,25 @@ pub async fn reconcile(
         v2,
     };
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace);
-    match maps
-        .create(
-            &PostParams::default(),
-            &bundle_config_map(&sw, &restore, &approval, &bundle),
-        )
-        .await
+    // M1: a bundle already there is used only when it is this admission's own.
+    if let Some(message) =
+        ensure_bundle(&maps, &bundle_config_map(&sw, &restore, &approval, &bundle)).await?
     {
-        Ok(_) => {}
-        Err(kube::Error::Api(e)) if e.code == 409 => {}
-        Err(e) => return Err(e),
+        warn!(switchover = %name, "switchover bundle conflict: {message}");
+        patch_status(
+            &api,
+            &name,
+            &refuse(
+                crate::conditions::TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT,
+                message,
+            ),
+        )
+        .await?;
+        return Ok(Action::await_change());
     }
+    // L6: the admission marker, before the Job. Its time is the instant the
+    // approval controller records the Approval consumed at.
+    patch_status(&api, &name, &admitted_status(&sw, Utc::now())).await?;
     let mut spec = job_spec(&sw, access, &scorecard_key, bundle.v2.is_some());
     spec.image = ctx.runner_image.image.clone();
     spec.image_pull_policy = ctx.runner_image.image_pull_policy.clone();
@@ -1035,7 +1298,34 @@ pub async fn reconcile(
         .await
     {
         Ok(_) => {}
-        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        // L10: a Job created under this name since the read at the top of this
+        // pass is used only when it is this Switchover's own (the pass that
+        // stopped after creating it); a stranger's is refused, never recorded.
+        Err(kube::Error::Api(e)) if e.code == 409 => match jobs.get_opt(&name).await? {
+            Some(raced) if own_job(&raced, &sw) => {}
+            Some(_) => {
+                warn!(switchover = %name, "a concurrent Job under this name is not this Switchover's");
+                patch_status(
+                    &api,
+                    &name,
+                    &refuse(
+                        crate::conditions::TERMINAL_STATE_JOB_NAME_CONFLICT,
+                        format!(
+                            "the Job {name} won a concurrent create but is not controlled by \
+                             this Switchover UID; it was not adopted"
+                        ),
+                    ),
+                )
+                .await?;
+                return Ok(Action::await_change());
+            }
+            // Deleted between the 409 and the read: the next pass creates it.
+            None => {
+                return Ok(Action::requeue(std::time::Duration::from_secs(
+                    HOLD_REQUEUE_SECS,
+                )))
+            }
+        },
         Err(e) => return Err(e),
     }
     let status = SwitchoverStatus {

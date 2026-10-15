@@ -18,7 +18,8 @@ import { StatusLabel } from "../../components/Status";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When } from "../../components/When";
 import { ADJUSTMENT_WORDS, localWords, outcomeOf, scheduleState } from "./model";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 
 /** What the signed-in actor may do in `ns`, from the session; undefined without a grant there. */
 export function useGrant(ns: string) {
@@ -145,17 +146,7 @@ const UNKNOWN: Record<WriteKind, string> = {
 
 const capital = (text: string) => `${text[0]!.toUpperCase()}${text.slice(1)}`;
 
-/** The words a failed write gets: what is known, about the request that was made. */
-export function WriteAlert({
-  error,
-  kind,
-  subject,
-  verb,
-  unmatched = [],
-  children,
-  onRetry,
-  retryText = "Try again",
-}: {
+type WriteAlertProps = {
   error: unknown;
   kind: WriteKind;
   /** "the schedule" */
@@ -166,7 +157,18 @@ export function WriteAlert({
   children?: ReactNode;
   onRetry?: () => void;
   retryText?: string;
-}) {
+};
+
+/** The words a failed write gets: what is known, about the request that was made. Scrolled into view and focused (DUI-33). */
+export function WriteAlert(props: WriteAlertProps) {
+  return (
+    <Revealed when={props.error}>
+      <WriteAlertBody {...props} />
+    </Revealed>
+  );
+}
+
+function WriteAlertBody({ error, kind, subject, verb, unmatched = [], children, onRetry, retryText = "Try again" }: WriteAlertProps) {
   const outcome = outcomeOf(error);
   const api = error instanceof ApiError ? error : null;
   const meta = api ? `${api.status} ${api.code}${api.requestId ? ` · request ${api.requestId}` : ""}` : "No answer reached this page.";
@@ -188,7 +190,9 @@ export function WriteAlert({
       {unmatched.length > 0 && (
         <ul>
           {unmatched.map((m) => (
-            <li key={m}>{m}</li>
+            <li key={m}>
+              <Prose text={m} />
+            </li>
           ))}
         </ul>
       )}

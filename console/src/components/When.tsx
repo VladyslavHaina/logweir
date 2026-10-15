@@ -46,7 +46,9 @@ export function useNow(): number {
 }
 
 export function When({ value, exact = false }: { value: string | number | null | undefined; exact?: boolean }) {
-  const now = useNow();
+  // The tick only re-renders; the time is read now. A value recorded after the last tick
+  // (a verdict landing seconds after the page opened) is past, never "in a moment" (DUI-41.1).
+  const now = Math.max(useNow(), Date.now());
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
   const iso = utcIso(value);
   if (iso === null) return <span className="lw-subtle" title={String(value)}>Not a time</span>;
@@ -68,10 +70,15 @@ export function count(n: number | null | undefined): string {
   return typeof n === "number" ? n.toLocaleString("en-US") : "Not recorded";
 }
 
-/** "604800000 (7 days)": a millisecond setting with its value in words, when that helps. */
+/** "1 day", "7 days": a count and its noun, singular for one (DUI-40.6). */
+export function counted(n: number, one: string, many = `${one}s`): string {
+  return `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+}
+
+/** "604800000 (7 days)", "86400000 (1 day)": a millisecond setting with its value in words, when that helps. */
 export function msValue(key: string, value: string): string {
   const n = Number(value);
   if (!key.endsWith(".ms") || !Number.isFinite(n) || n < 60_000) return value;
   const days = n / 86_400_000;
-  return `${value} (${days >= 1 && Number.isInteger(days) ? `${days} days` : duration(n / 1000)})`;
+  return `${value} (${days >= 1 && Number.isInteger(days) ? counted(days, "day") : duration(n / 1000)})`;
 }

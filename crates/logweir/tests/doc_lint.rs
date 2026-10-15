@@ -2297,6 +2297,32 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the engine is build 4",
             "0001-lockfile-rustls-h2-spin.patch",
         ),
+        // DUI-38 (item 118): the state a restore's verdict reads while owed.
+        (
+            "a restore page follows its verdict",
+            "`verification.state: pending`",
+        ),
+        // DUI-39, DUI-36 (item 119): what a long sampled name used to read.
+        ("readiness checks name their topics", "`[redacted]`"),
+        // DUI-43 (item 120): the reason a switchover's approval is consumed.
+        (
+            "a switchover's approval stays its record",
+            "`SwitchoverAdmitted`",
+        ),
+        // DUI-42 (item 121): the refusal the restore page no longer leads to.
+        (
+            "no switchover where nothing switches",
+            "`NoPositionsMapping`",
+        ),
+        // DUI-41.7 (item 122): the navigation that reads a page.
+        ("a replaced sign-in reads a page", "`Accept: text/html`"),
+        // DUI-22.3 to DUI-44 (item 123): a refused run is counted.
+        ("the console counts refused runs", "\"1 refused\""),
+        // Review M1 (item 124): the refusal a bundle that is not the admission's gets.
+        (
+            "a switchover runs only on its own bundle",
+            "`ApprovalBundleConflict`",
+        ),
     ];
     assert_eq!(
         items.len(),

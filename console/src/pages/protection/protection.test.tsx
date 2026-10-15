@@ -15,7 +15,7 @@ import { SessionProvider } from "../../api/session";
 import type { Session } from "../../api/types";
 import { scheduleRoutes } from "../schedules/routes";
 import sessionDoc from "../../../fixtures/console/session.json";
-import { failedWords, ledgerOf, openProblems, protectedWords } from "./Protection";
+import { attemptWords, failedWords, ledgerOf, openProblems, protectedWords } from "./Protection";
 import listFixture from "../../../fixtures/console/protection-policies-list.json";
 import healthy from "../../../fixtures/console/protection-policy.json";
 import unknown from "../../../fixtures/console/protection-policy-unknown.json";
@@ -72,6 +72,16 @@ describe("age against the objective", () => {
     expect(at(7200)).toMatchObject({ percent: 100, variant: ProgressVariant.danger });
     // Negative control: no point is never a young one.
     expect(at(undefined)).toMatchObject({ percent: 100, variant: ProgressVariant.danger, text: "No recovery point" });
+  });
+});
+
+describe("DUI-31.6: the last attempt's words", () => {
+  it("say a reason without a phase alone, never beside \"Not recorded\"", () => {
+    expect(attemptWords({ phase: null, reason: "GuardRefused" })).toBe("GuardRefused");
+    expect(attemptWords({ phase: "Failed", reason: "GuardRefused" })).toBe("Failed (GuardRefused)");
+    expect(attemptWords({ phase: "Succeeded" })).toBe("Succeeded");
+    // Control: neither is recorded.
+    expect(attemptWords({})).toBe("Not recorded");
   });
 });
 

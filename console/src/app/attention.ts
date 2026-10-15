@@ -134,8 +134,24 @@ export function lastDay(backups: Backup[], now = Date.now()): Backup[] {
   return backups.filter((b) => now - ms(b.createdAt) < DAY_MS);
 }
 
+/**
+ * A run that backed up nothing: it failed, or it was refused before it ran (DUI-32).
+ * Neither is a success; the words keep the two apart ("failed", "refused").
+ */
+export function didNotBackUp(b: Pick<Backup, "operation">): boolean {
+  return b.operation.state === "failed" || b.operation.state === "refused";
+}
+
+/** The runs of the last 24 hours that backed up nothing: failed or refused. */
 export function failedLastDay(backups: Backup[], now = Date.now()): Backup[] {
-  return lastDay(backups, now).filter((b) => b.operation.state === "failed");
+  return lastDay(backups, now).filter(didNotBackUp);
+}
+
+/** "1 failed", "2 refused", "1 failed, 2 refused": each state its own word; "" for none. */
+export function notBackedUpWords(runs: Pick<Backup, "operation">[], join = ", "): string {
+  const failed = runs.filter((b) => b.operation.state === "failed").length;
+  const refused = runs.filter((b) => b.operation.state === "refused").length;
+  return [failed > 0 && `${failed} failed`, refused > 0 && `${refused} refused`].filter(Boolean).join(join);
 }
 
 export type NavCount = { n: number; tone: "danger" | "warning" | "brand"; text: string };
@@ -156,7 +172,7 @@ export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
   const readable = useAttentionReadable(ns);
   const ready = readable && protection.data && connections.data && backups.data;
   const attention = ready ? attentionItems(ns, protection.data!, backups.data!, connections.data!) : [];
-  const failed = backups.data ? failedLastDay(backups.data).length : 0;
+  const missed = backups.data ? failedLastDay(backups.data) : [];
   const approvals = useApprovalsNavCount(ns);
   return {
     "": attention.length
@@ -166,7 +182,7 @@ export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
           text: `${attention.length} ${attention.length === 1 ? "item needs" : "items need"} attention`,
         }
       : undefined,
-    backups: failed ? { n: failed, tone: "danger", text: `${failed} failed in the last 24 hours` } : undefined,
+    backups: missed.length ? { n: missed.length, tone: "danger", text: `${notBackedUpWords(missed)} in the last 24 hours` } : undefined,
     approvals,
   };
 }

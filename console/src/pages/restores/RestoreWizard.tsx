@@ -523,7 +523,9 @@ function WizardBody({
           <PointStep
             control={form.control}
             points={points.filter((b) => isRecoveryPoint(b))}
-            offers={(offers.data?.offers ?? []).filter((o) => !points.some((b) => b.backupId === o.entry.backupId))}
+            // A catalog point whose set is a listed Backup is that Backup's row, except the one
+            // the link named (DUI-41.4): it stays listed, so it can be shown as the one chosen.
+            offers={(offers.data?.offers ?? []).filter((o) => offerKeyOf(o) === initialKey || !points.some((b) => b.backupId === o.entry.backupId))}
             offerNotes={offers.data?.notes ?? []}
             offersPending={offers.isPending}
             retryOf={retryOf}

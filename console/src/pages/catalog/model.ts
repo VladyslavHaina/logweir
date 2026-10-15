@@ -43,6 +43,17 @@ export function countsWords(c: Pick<Catalog, "conditions" | "counts" | "syncedAt
   return `${count(c.counts.available)} of ${count(c.counts.total)} available`;
 }
 
+/**
+ * DUI-40.2: why a catalog has no view to count, in the 390 list's words, or null when it has
+ * one. The wide table says this once across its count columns rather than "Not recorded" five
+ * times.
+ */
+export function noViewWords(c: Pick<Catalog, "conditions" | "counts" | "syncedAt">): string | null {
+  if (duplicateOf(c)) return countsWords(c);
+  if (typeof c.counts.total !== "number" && !c.syncedAt) return "Not synced yet";
+  return null;
+}
+
 /** The catalog page's one-line description. */
 export function catalogSentence(c: Pick<Catalog, "conditions" | "counts" | "syncedAt" | "destinationRef">): string {
   const over = `A read-only view over ${c.destinationRef ? `destination ${c.destinationRef.name}` : "an inline archive"}`;

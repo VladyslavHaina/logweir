@@ -118,6 +118,13 @@ struct Observed<'a> {
     evidence_recorded: bool,
     /// At least one evidence key is recorded.
     evidence_mentioned: bool,
+    /// DUI-38: an evidence-fetch Job's read is owed and its first verdict
+    /// (`Pending`) is not written yet: the restore controller's own
+    /// crash-window rule (`continue_evidence_fetch`'s `unrecorded`). The run
+    /// names an evidence destination, both keys are recorded, and no
+    /// verification block exists. The controller's next pass creates the Job,
+    /// so the verdict is coming: pending, never "not attempted".
+    fetch_owed: bool,
 }
 
 fn find<'a>(conditions: Option<&'a Vec<Condition>>, type_: &str) -> Option<&'a Condition> {
@@ -250,12 +257,14 @@ fn result_of(o: &Observed<'_>, state: OperationState, outcome: Option<&str>) -> 
 fn verification_of(o: &Observed<'_>, terminal_run: bool) -> OperationVerification {
     let Some(v) = o.verification else {
         // No verdict on the object. Not finished, or finished with complete
-        // evidence the controller has not verified yet: pending. Finished
-        // with SOME evidence keys but no digest: the controller never attempts
-        // verification for that shape, and its badge rule reads an absent
-        // verdict as not attempted — so does this projection. Finished with no
+        // evidence the controller has not verified yet, or with an
+        // evidence-fetch Job's read owed (its relay brings the digest):
+        // pending. Finished with SOME evidence keys but no digest and no Job
+        // owed: the controller never attempts verification for that shape,
+        // and its badge rule reads an absent verdict as not attempted — so
+        // does this projection. Finished with no
         // evidence at all (exits 1, 3, 4, refusals, crashes): nothing to verify.
-        let (state, detail) = if !terminal_run || o.evidence_recorded {
+        let (state, detail) = if !terminal_run || o.evidence_recorded || o.fetch_owed {
             (VerificationState::Pending, None)
         } else if o.evidence_mentioned {
             (
@@ -334,6 +343,9 @@ pub fn backup_operation(backup: &Backup) -> Operation {
         verification: evidence.and_then(|e| e.verification.as_ref()),
         evidence_recorded,
         evidence_mentioned,
+        // A Backup's digest comes off the pod log with its keys, so a read a
+        // Job owes is already `evidence_recorded`: pending, then `verifying`.
+        fetch_owed: false,
     };
     let (state, state_reason) = state_of(&observed);
     let result_status = result_of(&observed, state, None);
@@ -393,6 +405,10 @@ pub fn restore_operation(restore: &Restore) -> Operation {
         verification: evidence.and_then(|e| e.verification.as_ref()),
         evidence_recorded,
         evidence_mentioned,
+        fetch_owed: restore.spec.evidence_destination_ref.is_some()
+            && evidence.is_some_and(|e| {
+                e.verification.is_none() && e.scorecard_key.is_some() && e.sidecar_key.is_some()
+            }),
     };
     let (state, state_reason) = state_of(&observed);
     let outcome = status.and_then(|s| s.outcome.as_deref());

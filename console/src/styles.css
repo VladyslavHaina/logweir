@@ -532,6 +532,20 @@ body {
 .lw-list--flush .lw-list__row {
   padding-inline: 0;
 }
+/* DUI-43: a status beside a title (a phone list row's end, a card header's actions) that names
+   the run it was used by stacks under its label and wraps in a bounded column, so the title and
+   meta keep their room. */
+.lw-list__end .lw-used-by,
+.pf-v6-c-card__actions .lw-used-by {
+  display: block;
+  max-width: 9rem;
+  margin-inline-start: auto;
+  text-align: end;
+}
+.lw-list__end .lw-used-by__sep,
+.pf-v6-c-card__actions .lw-used-by__sep {
+  display: none;
+}
 
 /* --------------------------------------------------------------- overview */
 .lw-stat__title {
@@ -703,6 +717,17 @@ body {
   padding: var(--pf-t--global--spacer--sm) 0;
   border-bottom: 1px solid var(--pf-t--global--border--color--default);
 }
+/* DUI-44: a check row's words take the room its verdict leaves and wrap their long tokens
+   (a cluster id, "[brokersAnswered=…; engineRequests=…]"), so at 390 px the verdict stays
+   on screen and the form around the list never widens with it. */
+.lw-checks li > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.lw-checks li > :last-child {
+  flex: none;
+}
 .lw-time-input,
 .lw-prefix-input {
   max-width: 20rem;
@@ -859,6 +884,13 @@ body {
 .pf-v6-c-table tr > :where(td, th).lw-break {
   overflow-wrap: anywhere;
 }
+/* DUI-22.8: a table never inherits `anywhere` from around it. PatternFly's wizard body
+   sets it, and a column header lost its word's width and broke mid-word ("Record" /
+   "s") while the table had room. In a table a word breaks only when it alone is wider
+   than its column can be; only a cell marked .lw-break (code or a token) breaks anywhere. */
+.pf-v6-c-table {
+  overflow-wrap: break-word;
+}
 /* Column headers wrap between words rather than end in an ellipsis
    ("Reco…") while the table has room: a header's words claim their width. */
 .pf-v6-c-table thead:where(.pf-v6-c-table__thead) {
@@ -898,4 +930,22 @@ body {
 .pf-v6-c-modal-box__title-text {
   white-space: normal;
   overflow-wrap: anywhere;
+}
+/* DUI-37: a chip that holds a name (a topic) shows it whole. PatternFly cuts a
+   label's text with an ellipsis and puts the rest only in a tooltip; in a narrow
+   column ("What it backs up") a 38-character topic read "rc1-settlement-ledger-e…".
+   Here the name wraps inside its chip instead. */
+.lw-names .pf-v6-c-label,
+.lw-names .pf-v6-c-label__text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+/* DUI-34: the session warning sits above the page header and pushes it down; it
+   covers nothing. Its section has no bottom padding: the header's own spacing follows. */
+.lw-session-warning {
+  flex-shrink: 0;
+}
+.pf-v6-c-page__main-section.lw-session-warning__section {
+  --pf-v6-c-page__main-section--PaddingBlockEnd: 0;
 }

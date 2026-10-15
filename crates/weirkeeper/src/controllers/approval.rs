@@ -113,6 +113,20 @@ pub const CONDITION_CONSUMED: &str = "Consumed";
 /// The `reason` on [`CONDITION_CONSUMED`].
 pub const REASON_RESTORE_ADMITTED: &str = "RestoreAdmitted";
 
+/// The `reason` on [`CONDITION_CONSUMED`] when the referent is a `Switchover`
+/// (DUI-43): its Job ran under this verdict, so the verdict is a record from
+/// then on, exactly as a Restore's is.
+pub const REASON_SWITCHOVER_ADMITTED: &str = "SwitchoverAdmitted";
+
+/// [`CONDITION_CONSUMED`]'s reason for a referent of `kind`.
+#[must_use]
+pub const fn consumed_reason(kind: &SubjectKind) -> &'static str {
+    match kind {
+        SubjectKind::Switchover => REASON_SWITCHOVER_ADMITTED,
+        _ => REASON_RESTORE_ADMITTED,
+    }
+}
+
 /// The `Verified` reason on a consumed `Approval` one of whose keys was
 /// revoked for `KeyCompromise` after this controller recorded the admission.
 ///
@@ -1358,13 +1372,14 @@ impl Compromise {
             t.map_or_else(|| "an unrecorded instant".to_string(), |t| t.to_rfc3339())
         };
         format!(
-            "the key {} ({}) is revoked for KeyCompromise, effective {}. Restore {}/{} (UID {}) \
+            "the key {} ({}) is revoked for KeyCompromise, effective {}. {} {}/{} (UID {}) \
              was admitted under this Approval at {}, {}. The authorization, key ids, approver \
              and Consumed record are kept for the investigation; the verdict is never green \
              while the revocation stands",
             self.key_id,
             self.field,
             at(self.effective_from),
+            subject.kind.as_str(),
             subject.namespace,
             subject.name,
             subject.uid,
@@ -1386,10 +1401,11 @@ impl Consumption {
     /// nothing.
     #[must_use]
     pub fn message(&self) -> String {
+        let kind = self.subject.kind.as_str();
         format!(
-            "Restore {}/{} (UID {}) was admitted under this verdict{}; an authorization's expiry \
+            "{kind} {}/{} (UID {}) was admitted under this verdict{}; an authorization's expiry \
              bounds the time to admission, so the verified record beside this condition is the \
-             audit trail of that admission and is not judged again. It binds only that Restore \
+             audit trail of that admission and is not judged again. It binds only that {kind} \
              UID and authorises nothing else",
             self.subject.namespace,
             self.subject.name,
@@ -1477,12 +1493,17 @@ impl ApprovalOutcome {
             ),
             Self::Consumed(c) => match c.reverified.as_deref() {
                 Some(v) => format!(
-                    "{} — verified as of the admission at {}, the instant the Restore controller \
-                     recorded Admitted=True (an earlier build had withdrawn this verdict after \
-                     the admission)",
+                    "{} — verified as of the admission at {}, the instant the {} (an earlier \
+                     build had withdrawn this verdict after the admission)",
                     Self::Verified(v.clone()).message(),
                     c.admitted_at
-                        .map_or_else(|| "an unrecorded instant".to_string(), |t| t.to_rfc3339())
+                        .map_or_else(|| "an unrecorded instant".to_string(), |t| t.to_rfc3339()),
+                    match c.subject.kind {
+                        SubjectKind::Switchover => {
+                            "Switchover controller materialised this Approval's bytes for its Job"
+                        }
+                        _ => "Restore controller recorded Admitted=True",
+                    }
                 ),
                 None => c.message(),
             },
@@ -1711,6 +1732,33 @@ pub async fn decide_with_policy_at(
     let stored = approval.status.as_ref();
     let mut prefetched: Option<Option<Restore>> = None;
     let mut candidate = recorded_consumption(approval);
+    // DUI-43: a Switchover's Approval is consumed by its admission too. Without
+    // this its verdict was judged again on every pass, and the document's expiry
+    // rewrote a two-person-approved, succeeded switchover's record `Refused`,
+    // erasing its approver, key and authorization.
+    if candidate.is_none()
+        && subject.kind == SubjectKind::Switchover
+        && stored.and_then(|s| s.verified) == Some(true)
+    {
+        if let Some(previous) = stored.and_then(|s| s.verified_subject_ref.as_ref()) {
+            let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
+            if let Some(sw) = api.get_opt(&subject.name).await? {
+                let current = switchover_subject(&sw, &subject.name, &namespace)?;
+                if &current == previous {
+                    if let Some(admitted_at) =
+                        switchover_admission(client, &namespace, &sw, approval).await?
+                    {
+                        candidate = Some(Consumption {
+                            subject: current,
+                            admitted_at: Some(admitted_at),
+                            reverified: None,
+                            standing: Standing::Clean,
+                        });
+                    }
+                }
+            }
+        }
+    }
     if candidate.is_none()
         && subject.kind == SubjectKind::Restore
         && stored.and_then(|s| s.verified) == Some(true)
@@ -1884,6 +1932,11 @@ pub async fn decide_with_policy_at(
                                 },
                             ));
                         }
+                        // DUI-43: only a verdict recorded for this UID can have
+                        // been consumed by its admission; a record an earlier
+                        // build rewrote is asked at that admission instant.
+                        consumed_at =
+                            switchover_admission(client, &namespace, &sw, approval).await?;
                     }
                     (sw.spec.plan_bytes, Some(current))
                 }
@@ -2070,7 +2123,7 @@ fn consumed_status(
                 status: "True".to_string(),
                 observed_generation: approval.metadata.generation,
                 last_transition_time: Some(consumption.admitted_at.unwrap_or(now)),
-                reason: Some(REASON_RESTORE_ADMITTED.to_string()),
+                reason: Some(consumed_reason(&consumption.subject.kind).to_string()),
                 message: Some(consumption.message()),
             },
         ),
@@ -2265,6 +2318,119 @@ pub fn admitted_under(
         },
     };
     bound.then_some(admitted.last_transition_time)
+}
+
+/// When `sw` was admitted under `approval`, from what the Switchover
+/// controller wrote: [`switchover_admitted_under`] (the admission marker), or,
+/// for a Switchover an older build ran before the marker existed,
+/// [`legacy_switchover_ran_under`] over its bundle (read only then).
+async fn switchover_admission(
+    client: &kube::Client,
+    namespace: &str,
+    sw: &Switchover,
+    approval: &Approval,
+) -> Result<Option<DateTime<Utc>>, ReconcileError> {
+    if let Some(at) = switchover_admitted_under(sw, approval) {
+        return Ok(Some(at));
+    }
+    if !legacy_run_recorded(sw) {
+        return Ok(None);
+    }
+    let api: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(client.clone(), namespace);
+    let bundle = api
+        .get_opt(&super::switchover::bundle_name(&sw.name_any()))
+        .await?;
+    Ok(legacy_switchover_ran_under(sw, approval, bundle.as_ref()))
+}
+
+/// When `sw` records that it was admitted under `approval` (DUI-43, L6): its
+/// admission marker, `Admitted=True`, which the Switchover controller writes
+/// once, on the pass that admitted the run, before its Job.
+///
+/// * The Switchover names this `Approval` in `spec.approvalRef` (immutable).
+/// * It carries `Admitted=True`. `Switchover.status` is written only by that
+///   controller's service account, the trust the Restore twin places in its
+///   own `Admitted=True`. A Job, a `status.jobRef` or a ConfigMap is not
+///   admission: a Job named after a Switchover can be anyone's, and the
+///   controller adopts none (`switchover::job_step`).
+/// * The `Approval` existed at that instant (`creationTimestamp` at or before
+///   it): one re-created under the same name later is another object.
+///
+/// The instant is the marker's `lastTransitionTime`. Nothing here is a
+/// verdict: a record an earlier build rewrote is re-verified from its signed
+/// bytes at that instant, and a verdict still standing is kept as it stands.
+#[must_use]
+pub fn switchover_admitted_under(sw: &Switchover, approval: &Approval) -> Option<DateTime<Utc>> {
+    if sw.spec.approval_ref.name.trim() != approval.name_any() {
+        return None;
+    }
+    let at = super::switchover::admission_marker(sw.status.as_ref())?.last_transition_time?;
+    approval
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .is_some_and(|created| created.0 <= at)
+        .then_some(at)
+}
+
+/// Whether `sw` is a run an older build admitted and finished before the
+/// admission marker existed: no marker, a terminal phase with the run's own
+/// exit code (written only from a finished Job's pod), and `status.jobRef`
+/// naming its Job. Never true of a run this build admitted, which carries the
+/// marker, nor of one it refused or never admitted, which has no exit code or
+/// no recorded Job: this build records a Job only after its own admission.
+#[must_use]
+pub fn legacy_run_recorded(sw: &Switchover) -> bool {
+    let status = sw.status.as_ref();
+    super::switchover::admission_marker(status).is_none()
+        && super::switchover::is_terminal(status)
+        && status.and_then(|s| s.exit_code).is_some()
+        && status.and_then(|s| s.job_ref.as_deref()) == Some(sw.name_any().as_str())
+}
+
+/// When a Switchover an older build ran ([`legacy_run_recorded`]) was admitted
+/// under `approval`: only from what proves that run used this approval.
+///
+/// * Its status proves it ran (above), and it names this `Approval`.
+/// * Its bundle, which that Job mounted, is exactly that build's: one owner,
+///   this Switchover UID as its controller, immutable, and carrying this
+///   `Approval`'s own signed bytes and sidecar byte for byte.
+/// * The `Approval` existed when the bundle was made.
+///
+/// The instant is the bundle's `creationTimestamp`, which the API server sets
+/// (that build made it just before the Job). `jobRef` alone is never enough.
+#[must_use]
+pub fn legacy_switchover_ran_under(
+    sw: &Switchover,
+    approval: &Approval,
+    bundle: Option<&k8s_openapi::api::core::v1::ConfigMap>,
+) -> Option<DateTime<Utc>> {
+    if !legacy_run_recorded(sw) || sw.spec.approval_ref.name.trim() != approval.name_any() {
+        return None;
+    }
+    let bundle = bundle?;
+    let sw_uid = sw.uid()?;
+    let owners = bundle
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default();
+    let owned = owners.len() == 1
+        && owners[0].controller == Some(true)
+        && owners[0].kind == Switchover::kind(&())
+        && owners[0].uid == sw_uid;
+    let data = bundle.data.as_ref()?;
+    let carries = bundle.immutable == Some(true)
+        && data.get(super::switchover::APPROVAL_FILE) == Some(&approval.spec.approval_bytes)
+        && data.get(super::switchover::APPROVAL_SIG_FILE) == Some(&approval.spec.sidecar_bytes);
+    let at = bundle.metadata.creation_timestamp.as_ref()?.0;
+    let existed = approval
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .is_some_and(|created| created.0 <= at);
+    (owned && carries && existed).then_some(at)
 }
 
 /// Whether the signature the stored verdict records still verifies over

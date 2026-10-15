@@ -3,6 +3,7 @@
 // and manual-run-queue.spec.js. Fixtures are the API's (console/fixtures/console/).
 // Every row has a negative control: a value that makes the assertion fail.
 import { describe, expect, it } from "vitest";
+import { liveStepIndex } from "./BackupDetail";
 import type { Backup, OperationView } from "../../api/backups";
 import {
   backupSentence,
@@ -238,5 +239,15 @@ describe("DUI-11: a backup's description", () => {
   it("names the window when one is recorded (the control)", () => {
     const done = backupSentence({ ...b, topics: ["orders"], windowCovered: { fromMs: 0, toMs: 60_000 }, operation: { terminal: true } } as never);
     expect(done).toBe("1 topic from conn-a, covering 1970-01-01 00:00:00 UTC to 1970-01-01 00:01:00 UTC.");
+  });
+});
+
+describe("DUI-41.6: the live steps while a backup verifies", () => {
+  it("has Started, Preparing and Copying done and Verifying current, not every step empty", () => {
+    expect(liveStepIndex("finished", "verifying")).toBe(3);
+    expect(liveStepIndex(undefined, "verifying")).toBe(3);
+    // Controls: a run copying is at Copying; a finished stage has every step done.
+    expect(liveStepIndex("running", "running")).toBe(2);
+    expect(liveStepIndex("finished", "succeeded")).toBe(4);
   });
 });

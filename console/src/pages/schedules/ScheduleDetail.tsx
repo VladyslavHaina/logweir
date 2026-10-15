@@ -47,6 +47,7 @@ import { BackUpNow } from "./BackUpNow";
 import { RetentionCard } from "./Retention";
 import { cadenceWords, latestPoint, outcomeOf, runsOf, zoneOf } from "./model";
 import { NextRuns, ScheduleStatus, Term, WriteAlert, useGrant } from "./parts";
+import { Prose } from "../../components/Prose";
 
 function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; canRestore: boolean; label: string }) {
   const narrow = useNarrow();
@@ -201,7 +202,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
       {[...new Set(groups.earlier.map((b) => b.scheduleRef!.uid!))].map((identity, i) => {
         const runs = groups.earlier.filter((b) => b.scheduleRef?.uid === identity);
         return (
-          <Section key={identity} open={!uid} text={uid ? `${runs.length} runs of an earlier schedule with this name` : `${runs.length} runs of ${name}, identity ${i + 1}`}>
+          <Section key={identity} open={!uid} text={uid ? `${runs.length} ${runs.length === 1 ? "run" : "runs"} of an earlier schedule with this name` : `${runs.length} ${runs.length === 1 ? "run" : "runs"} of ${name}, identity ${i + 1}`}>
             <Content component="p" className="lw-subtle">
               They carry schedule identity {identity}. A schedule deleted and created again under one name is a different
               schedule, so these are never merged with another identity's runs. Their points can still be restored.
@@ -211,7 +212,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
         );
       })}
       {groups.legacy.length > 0 && (
-        <Section open={!uid} text={`${groups.legacy.length} runs naming this schedule without its identity`}>
+        <Section open={!uid} text={`${groups.legacy.length} ${groups.legacy.length === 1 ? "run names" : "runs name"} this schedule without its identity`}>
           <Content component="p" className="lw-subtle">
             They record no schedule identity, so nothing tells whether this schedule or an earlier one of the same name
             made them. They are never offered as this schedule's latest point; each can still be restored on its own.
@@ -250,7 +251,7 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
         ) : s.topics.length === 0 ? (
           <StatusLabel tone="danger" text="None" title="No topic and no dynamic selection: no run backs anything up" />
         ) : (
-          <LabelGroup numLabels={8}>
+          <LabelGroup numLabels={8} aria-label="Topics" className="lw-names">
             {s.topics.map((t) => (
               <Label key={t} isCompact variant="outline">
                 {t}
@@ -309,7 +310,11 @@ function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
           <>
             {ready.status === "True" ? "Ready" : ready.status === "False" ? "Not ready" : "Unknown"}
             {ready.reason ? <span className="lw-reason"> {ready.reason}</span> : null}
-            {ready.message && <div className="lw-subtle lw-small">{ready.message}</div>}
+            {ready.message && (
+              <div className="lw-subtle lw-small">
+                <Prose text={ready.message} />
+              </div>
+            )}
           </>
         ) : (
           <span className="lw-subtle">Not evaluated yet</span>

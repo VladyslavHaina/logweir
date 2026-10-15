@@ -3045,6 +3045,20 @@ pub fn is_relayable_topic_name(name: &str) -> bool {
     crate::guard::topic_name_is_kafka_legal(name)
 }
 
+/// Whether a row's `detail` sample is a Kafka topic NAME: a legal topic name,
+/// or `<topic>/<partition>` over one (a selected partition's sample). The rule
+/// the runner samples by (`logweir::check::kinds::readiness`), so the
+/// controller's pass over a row's detail keeps what the runner kept (DUI-39).
+#[must_use]
+pub fn is_relayable_topic_sample(value: &str) -> bool {
+    is_relayable_topic_name(value)
+        || value.rsplit_once('/').is_some_and(|(topic, partition)| {
+            is_relayable_topic_name(topic)
+                && !partition.is_empty()
+                && partition.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
 /// Whether `id` is relayed as a Kafka consumer GROUP id, unredacted: not
 /// blank, at most [`crate::consumer_positions::MAX_GROUP_ID_BYTES`] bytes (the
 /// bound a selection and the catalog hold a group id to), and only printable
@@ -3084,6 +3098,10 @@ pub const DETAIL_TOPIC_KEYS: &[&str] = &["topic", "mappedTopicExists"];
 /// the switchover review's source `group` and its `target` group.
 pub const DETAIL_GROUP_KEYS: &[&str] = &["group", "target"];
 
+/// A row detail's key whose strings are names when topic-shaped
+/// ([`is_relayable_topic_sample`]): `{"count": N, "sample": […]}` (DUI-39).
+pub const DETAIL_SAMPLE_KEYS: &[&str] = &["sample"];
+
 /// **One details line, its Kafka names redacted as names and everything else
 /// as free text** (DUI-26). A line that is a JSON object is walked: a string
 /// under a [`DETAIL_TOPIC_KEYS`] key that [`is_relayable_topic_name`] accepts,
@@ -3111,6 +3129,7 @@ pub fn redact_detail_line(line: &str, free_text: &dyn Fn(&str) -> String) -> Str
                 let named = match key {
                     Some(k) if DETAIL_TOPIC_KEYS.contains(&k) => is_relayable_topic_name(s),
                     Some(k) if DETAIL_GROUP_KEYS.contains(&k) => is_relayable_group_id(s),
+                    Some(k) if DETAIL_SAMPLE_KEYS.contains(&k) => is_relayable_topic_sample(s),
                     _ => false,
                 };
                 *s = if named { redact_name(s) } else { free_text(s) };

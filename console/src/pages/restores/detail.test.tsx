@@ -4,7 +4,7 @@
 // never a pass, a narrowed restore is said as partial, a stopped creation step names
 // every topic it left, and a failed run offers a retry to a fresh target.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, render, screen, within } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, within } from "@testing-library/react";
 import { SessionGate } from "../../app/SessionGate";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
@@ -36,8 +36,11 @@ import {
   verificationScopeSentence,
 } from "./words";
 import { When, exactUtc, relative } from "../../components/When";
-import { RestoreDetail } from "./RestoreDetail";
+import { RestoreDetail, VERDICT_PENDING_SENTENCE } from "./RestoreDetail";
+import { VERDICT_FOLLOW_MS, useVerdictFollow, verdictPending } from "../../api/restores";
 import { CheckStep } from "./WizardSteps";
+import { NO_GROUPS_CAPTURED, cutoverRefusal } from "../cutover/Cutover";
+import backupDoc from "../../../fixtures/console/backup.json";
 import { readinessRefusal, type Preflight } from "./model";
 
 configure({ asyncUtilTimeout: 10_000 });
@@ -111,13 +114,14 @@ describe("the words", () => {
 
 // --------------------------------------------------------------- the page
 
-const net = vi.hoisted(() => ({ answers: new Map<string, unknown>() }));
+const net = vi.hoisted(() => ({ answers: new Map<string, unknown>(), asked: [] as string[] }));
 vi.mock("../../mock/fetch", () => ({
   mockFetch: async (request: Request) => {
     const path = new URL(request.url).pathname.replace(/^.*?\/api\/v1/, "");
+    net.asked.push(path);
     const body = net.answers.get(path);
     if (path === "/session") {
-      const caps = { restoreCreate: true, operationsRead: true, restoresRead: true };
+      const caps = { restoreCreate: true, operationsRead: true, restoresRead: true, backupsRead: true };
       return new Response(JSON.stringify({ actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: caps, namespaces: [{ name: "t", roles: ["operator"], capabilities: caps }], requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (body === undefined) return new Response(JSON.stringify({ status: 404, code: "not_found", title: "x", detail: `no ${path}`, requestId: "r" }), { status: 404, headers: { "content-type": "application/problem+json" } });
@@ -125,8 +129,10 @@ vi.mock("../../mock/fetch", () => ({
   },
 }));
 
-function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null) {
+function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null, extra: Record<string, unknown> = {}) {
   net.answers.clear();
+  net.asked.length = 0;
+  for (const [path, body] of Object.entries(extra)) net.answers.set(path, body);
   net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
   net.answers.set("/namespaces/t/approval-policy", { item: policy, requestId: "r" });
@@ -180,6 +186,142 @@ describe("a restore's page", () => {
     cleanup();
     showRestore(R(plainRestore), { ...op, verifiedSuccess: true, trust: { ...op.trust, state: "verified", basis: "Current" }, verification: { ...op.verification, state: "valid" } });
     await screen.findByText("Restored and verified");
+  });
+});
+
+describe("DUI-38: a finished restore whose verdict is still coming", () => {
+  // A complete restore into new topics, verified: its page offers Switch consumers over.
+  const verifiedRestore = (): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" } };
+  };
+  const pendingRestore = (): Restore => {
+    const r = verifiedRestore();
+    return { ...r, operation: { ...r.operation, verificationState: "pending", verifiedSuccess: false } };
+  };
+  const pendingOperation = (): OperationView => {
+    const op = O(subsetOperation);
+    return { ...op, verifiedSuccess: false, verification: { state: "pending" }, trust: { ...op.trust, state: "pending" } } as OperationView;
+  };
+
+  it("says Verifying while the verdict is pending, then shows it and Switch consumers over without a reload", async () => {
+    showRestore(pendingRestore(), pendingOperation());
+    await screen.findByText(VERDICT_PENDING_SENTENCE);
+    expect(screen.getAllByText("Verifying").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Done, not verified")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    // The controller verifies: the page is still reading, and shows it.
+    net.answers.set(`/namespaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
+    net.answers.set(`/namespaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
+    await screen.findByText("Restored and verified");
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+  });
+
+  // Review L2: the bound holds on the page's reads, not only in the hook. Past
+  // VERDICT_FOLLOW_MS both polls stop and the page says the verdict is still pending.
+  it("stops reading a verdict that stays pending after two minutes, and says so", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const name = pendingRestore().name;
+      const asked = (path: string) => net.asked.filter((p) => p === path).length;
+      const item = `/namespaces/t/restores/${name}`;
+      const op = `/namespaces/t/operations/restore/${name}`;
+      showRestore(pendingRestore(), pendingOperation());
+      await screen.findByText(VERDICT_PENDING_SENTENCE);
+      // Following: both reads repeat.
+      const [item0, op0] = [asked(item), asked(op)];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(asked(item)).toBeGreaterThan(item0);
+      expect(asked(op)).toBeGreaterThan(op0);
+      // At the bound the page stops and says so.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(VERDICT_FOLLOW_MS);
+      });
+      expect(screen.getByText("The verdict is still pending")).toBeTruthy();
+      expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+      // The control: nothing reads it again on its own.
+      const [item1, op1] = [asked(item), asked(op)];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect([asked(item), asked(op)]).toEqual([item1, op1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a verdict that is not pending is not followed (the control): Done, not verified stays what it is", async () => {
+    const r = verifiedRestore();
+    showRestore({ ...r, operation: { ...r.operation, verificationState: "notAttempted", verifiedSuccess: false } }, { ...O(subsetOperation), verifiedSuccess: false, verification: { state: "notAttempted" } } as OperationView);
+    expect((await screen.findAllByText("Done, not verified")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
+    expect(verdictPending(r.operation)).toBe(false);
+    expect(verdictPending({ ...r.operation, verificationState: "pending" })).toBe(true);
+    // A run still moving is followed as before, not by this rule.
+    expect(verdictPending({ ...r.operation, terminal: false, verificationState: "pending" })).toBe(false);
+  });
+});
+
+describe("DUI-42: a restore of a point that captured no consumer group", () => {
+  const restore = (): Restore => {
+    const r = R(subsetRestore);
+    return { ...r, target: { ...r.target, mode: "newTopic" } };
+  };
+  const source = (consumerGroups?: string[]) => ({
+    items: [{ ...(backupDoc.item as object), name: "orders-hourly-x", backupId: restore().backupSetRef, ...(consumerGroups ? { consumerGroups } : {}) }],
+    page: { limit: 200 },
+    requestId: "r",
+  });
+
+  it("offers no switchover and says there is nothing to switch over", async () => {
+    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source() });
+    await screen.findByText("Restored and verified");
+    expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(NO_GROUPS_CAPTURED))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
+    expect(screen.queryByText(/your consumer groups still point at their old positions/)).toBeNull();
+  });
+
+  it("offers it when the point's backup recorded groups (the control)", async () => {
+    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toContain(NO_GROUPS_CAPTURED);
+    // An unknown source (no Backup carries the set id any more) refuses nothing: the review decides.
+    expect(cutoverRefusal(restore(), null)).toBeNull();
+    expect(cutoverRefusal(restore(), { consumerGroups: [] })?.word).toBe("NoPositionsMapping");
+  });
+});
+
+describe("DUI-38: the follow is bounded", () => {
+  function Probe({ pending }: { pending: boolean }) {
+    const v = useVerdictFollow(pending);
+    return (
+      <div>
+        <span>{v.following ? "following" : v.stopped ? "stopped" : "idle"}</span>
+        <button onClick={v.again}>again</button>
+      </div>
+    );
+  }
+  afterEach(() => vi.useRealTimers());
+
+  it("follows a pending verdict for two minutes, then stops until asked again", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<Probe pending />);
+    expect(screen.getByText("following")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(VERDICT_FOLLOW_MS - 1));
+    expect(screen.getByText("following")).toBeTruthy();
+    // The control: at the bound it stops.
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText("stopped")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "again" }));
+    expect(screen.getByText("following")).toBeTruthy();
+    // A verdict that lands ends the follow at once, and nothing stops later.
+    rerender(<Probe pending={false} />);
+    expect(screen.getByText("idle")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(VERDICT_FOLLOW_MS * 2));
+    expect(screen.getByText("idle")).toBeTruthy();
   });
 });
 
@@ -301,6 +443,37 @@ describe("FX-38: the restore readiness check", () => {
     expect(list.textContent).toContain("CatalogPointViewUnavailable");
     expect(list.textContent).toContain("Request a catalog sync and run this check again once the view is published.");
     expect(screen.getByText("Not ready", { selector: ".pf-v6-c-label__text" })).toBeTruthy();
+  });
+});
+
+describe("DUI-22.3: a check row's remediation line", () => {
+  it("renders the runner's code spans as code, never raw backticks", () => {
+    const REMEDY = "The runner still validates its signer before it writes anything, and `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.";
+    const result = {
+      id: "pf-r3", namespace: "t", uid: "u", resourceVersion: "1", operation: "restore", state: "ready", terminal: true, applicable: true,
+      stale: false, staleBasis: [], staleReasons: [], binding: { planHash: "sha256:aa", referents: [] }, warnings: [], executionOnly: [], conditions: [], detailsAvailable: false,
+      checks: [
+        { id: "signer.rostered", code: "SignerKeyIdNotObserved", state: "unknown", gating: "advisory", message: "a restore preflight's check plan projects no signing key", remedy: REMEDY },
+        // The control: a remedy with an unpaired backtick is shown as it came, never guessed into code.
+        { id: "target.clusterIdentity", code: "ClusterIdMismatch", state: "unknown", gating: "advisory", message: "m", remedy: "Add it to `spec.allowedTargetClusterIds" },
+      ],
+    } as unknown as Preflight;
+    render(
+      <CheckStep
+        readiness={{ result, boundHash: "sha256:aa", boundKey: "k", error: null, starting: false, stoppedAt: null }}
+        refusal={null}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={null}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: "Readiness checks" });
+    expect(within(list).getByText("TrustRoster.spec.signingKeys", { selector: "code" })).toBeTruthy();
+    expect(list.textContent).toContain(REMEDY.replace(/`/g, ""));
+    expect(list.textContent).toContain("Add it to `spec.allowedTargetClusterIds");
   });
 });
 

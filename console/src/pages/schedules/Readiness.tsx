@@ -3,7 +3,7 @@
 // check's own record, it goes stale when the form changes, and it never gates
 // a create: it is a statement about the minute it ran in.
 import { useState } from "react";
-import { Alert, Button, Content, Flex } from "@patternfly/react-core";
+import { Alert, Button, Content, Flex, Title } from "@patternfly/react-core";
 import type { components } from "../../api/schema";
 import { mintIntent, usePreflight, useStartReadiness, type Preflight } from "../../api/schedules";
 import { StatusLabel, type Tone } from "../../components/Status";
@@ -11,8 +11,11 @@ import { When } from "../../components/When";
 import { missingRead } from "./model";
 import { WriteAlert } from "./parts";
 import { Prose, checkMessage } from "../../components/Prose";
+import { advisoryRows } from "../connections/parts";
 
 type BackupCheck = components["schemas"]["BackupPreflightRequest"];
+
+type CheckRow = Preflight["checks"][number];
 
 const VERDICT: Record<string, { tone: Tone; text: string }> = {
   ready: { tone: "success", text: "Passed" },
@@ -20,6 +23,17 @@ const VERDICT: Record<string, { tone: Tone; text: string }> = {
   unknown: { tone: "warning", text: "Unknown" },
   skipped: { tone: "neutral", text: "Skipped" },
 };
+
+/** DUI-36: an advisory row never gates the verdict, so one that is not met is a warning, never a red "Not met". */
+const ADVISORY_VERDICT: Record<string, { tone: Tone; text: string }> = {
+  ready: { tone: "success", text: "Passed" },
+  notReady: { tone: "warning", text: "Not met (advisory)" },
+  unknown: { tone: "neutral", text: "Unknown" },
+  skipped: { tone: "neutral", text: "Skipped" },
+};
+
+/** The row that says whether the source names each consumer group's type: it matters only to a schedule that selects groups. */
+const GROUP_TYPES_ROW = "connection.groupTypes";
 
 export function readinessWords(p: Preflight): { tone: Tone; title: string } {
   if (!p.terminal) return { tone: "progress", title: "Checking" };
@@ -37,9 +51,71 @@ export function readinessWords(p: Preflight): { tone: Tone; title: string } {
   }
 }
 
-export function Verdict({ preflight }: { preflight: Preflight }) {
+/**
+ * The check's rows as Test connection shows them (DUI-7, DUI-36): the blocking rows the
+ * verdict rests on, then the advisory ones, which never move it. An execution-only row
+ * that could not be answered is in the run's own list below, not here. The consumer-group
+ * types row is left out for a draft that selects no group: what it says about selected
+ * groups does not apply to it.
+ */
+export function readinessRows(p: Preflight, groupsSelected: boolean): { blocking: CheckRow[]; advisory: CheckRow[] } {
+  const atRun = (c: CheckRow) => c.gating === "executionOnly" && (c.state === "unknown" || c.state === "skipped");
+  return {
+    blocking: p.checks.filter((c) => c.gating !== "advisory" && !atRun(c)),
+    advisory: advisoryRows(p).filter((c) => groupsSelected || c.id !== GROUP_TYPES_ROW),
+  };
+}
+
+function CheckList({ label, rows, advisory }: { label: string; rows: CheckRow[]; advisory: boolean }) {
+  return (
+    <ol className="lw-checks" aria-label={label}>
+      {rows.map((c) => {
+        const read = missingRead(c);
+        const verdict = (advisory ? ADVISORY_VERDICT : VERDICT)[c.state] ?? { tone: "neutral" as const, text: c.state };
+        return (
+          <li key={c.id}>
+            {read ? (
+              <span>
+                <strong>Missing READ on {read.count} topic(s)</strong>
+                {read.sample.length > 0 && (
+                  <span>
+                    : {read.sample.join(", ")}
+                    {read.count > read.sample.length ? `, and ${read.count - read.sample.length} more` : ""}
+                  </span>
+                )}
+                <span className="lw-subtle lw-small">
+                  {" "}
+                  <Prose text={read.message} />
+                </span>
+                {read.remedy && (
+                  <span className="lw-subtle lw-small">
+                    {" "}
+                    <Prose text={read.remedy} />
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span>
+                <Prose text={checkMessage(c.message ?? c.id)} />
+                {c.remedy && (
+                  <span className="lw-subtle lw-small">
+                    {" "}
+                    <Prose text={c.remedy} />
+                  </span>
+                )}
+              </span>
+            )}
+            <StatusLabel {...verdict} title={`${c.code ?? c.id}${advisory ? " (advisory)" : ""}`} />
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export function Verdict({ preflight, groupsSelected = true }: { preflight: Preflight; groupsSelected?: boolean }) {
   const words = readinessWords(preflight);
-  const rows = [...preflight.checks, ...preflight.warnings];
+  const { blocking, advisory } = readinessRows(preflight, groupsSelected);
   return (
     <div aria-live="polite">
       <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }}>
@@ -50,35 +126,24 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
           </span>
         )}
       </Flex>
-      {rows.length > 0 && (
-        <ol className="lw-checks">
-          {rows.map((c) => {
-            const read = missingRead(c);
-            return (
-              <li key={c.id}>
-                {read ? (
-                  <span>
-                    <strong>Missing READ on {read.count} topic(s)</strong>
-                    {read.sample.length > 0 && (
-                      <span>
-                        : {read.sample.join(", ")}
-                        {read.count > read.sample.length ? `, and ${read.count - read.sample.length} more` : ""}
-                      </span>
-                    )}
-                    <span className="lw-subtle lw-small"> {read.message}</span>
-                    {read.remedy && <span className="lw-subtle lw-small"> {read.remedy}</span>}
-                  </span>
-                ) : (
-                  <span>
-                    <Prose text={checkMessage(c.message ?? c.id)} />
-                    {c.remedy && <span className="lw-subtle lw-small"> {c.remedy}</span>}
-                  </span>
-                )}
-                <StatusLabel {...(VERDICT[c.state] ?? { tone: "neutral" as const, text: c.state })} title={c.code ?? c.id} />
-              </li>
-            );
-          })}
-        </ol>
+      {blocking.length > 0 && (
+        <>
+          <Title headingLevel="h3" size="md" className="lw-gap-top">
+            Blocking checks
+          </Title>
+          <CheckList label="Blocking checks" rows={blocking} advisory={false} />
+        </>
+      )}
+      {advisory.length > 0 && (
+        <>
+          <Title headingLevel="h3" size="md" className="lw-gap-top">
+            Advisory
+          </Title>
+          <Content component="p" className="lw-subtle lw-small">
+            These never change the verdict above: the backup runs either way, and each says what it records.
+          </Content>
+          <CheckList label="Advisory checks" rows={advisory} advisory />
+        </>
       )}
       {preflight.executionOnly.length > 0 && (
         <>
@@ -100,7 +165,7 @@ export function Verdict({ preflight }: { preflight: Preflight }) {
 }
 
 /** `request` null: this draft cannot be checked yet, for the reason given. */
-export function Readiness({ ns, request, why }: { ns: string; request: BackupCheck | null; why: string }) {
+export function Readiness({ ns, request, why, groupsSelected }: { ns: string; request: BackupCheck | null; why: string; groupsSelected: boolean }) {
   const start = useStartReadiness(ns);
   const [asked, setAsked] = useState<{ id: string; key: string } | null>(null);
   const preflight = usePreflight(ns, asked?.id);
@@ -140,7 +205,7 @@ export function Readiness({ ns, request, why }: { ns: string; request: BackupChe
       )}
       {asked && !outdated && preflight.data && (
         <div className="lw-gap-top">
-          <Verdict preflight={preflight.data} />
+          <Verdict preflight={preflight.data} groupsSelected={groupsSelected} />
         </div>
       )}
     </div>

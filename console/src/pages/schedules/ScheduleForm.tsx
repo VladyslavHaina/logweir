@@ -48,6 +48,7 @@ import {
   BOUNDS,
   DAYS,
   PRESETS,
+  groupList,
   list,
   movesLocation,
   placeFieldErrors,
@@ -709,6 +710,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
           <Readiness
             ns={ns}
             request={readiness}
+            groupsSelected={groupList(values.consumerGroups ?? "").length > 0}
             why={
               values.selection === "all"
                 ? "A readiness check needs named topics. All user topics are found when each run starts, so the run's own check records the result."

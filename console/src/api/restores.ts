@@ -2,9 +2,12 @@
 // Lists re-read while a run in them moves; one restore's page follows its operation
 // while it is not final. Every write carries the Idempotency-Key the plan's minted
 // name gives it, so a second click, a lost answer or a reload never makes a second object.
+import { useEffect, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LIST_PAGE_BUDGET, LIST_PAGE_SIZE, api, call, createHeaders, listAll } from "./client";
-import { keys, useBackups, useConnections, useDestinations, useOperation, useRestore, useRestores } from "./queries";
+import { keys, useBackups, useConnections, useDestinations, useOperation, useRestore, useRestores, verdictPending } from "./queries";
+
+export { verdictPending };
 import { grantOf, useCan, useSessionDoc } from "./session";
 import type { Clone } from "./switchovers";
 import type { components } from "./schema";
@@ -98,8 +101,34 @@ export function useClones(ns: string, restores: Restore[] | undefined): Map<stri
   return out;
 }
 
-export function useRestoreOperation(ns: string, name: string, streaming = false) {
-  return useOperation(ns, "restore", name, streaming);
+export function useRestoreOperation(ns: string, name: string, streaming = false, follow = false) {
+  return useOperation(ns, "restore", name, streaming, follow);
+}
+
+/** How long a page follows a terminal restore whose verdict is still pending (DUI-38). */
+export const VERDICT_FOLLOW_MS = 120_000;
+
+/**
+ * DUI-38: whether the page still follows a terminal restore whose verdict is pending: from
+ * the moment it saw it pending, for VERDICT_FOLLOW_MS, then it stops (`stopped`) until
+ * `again`. A verdict that lands ends it at once.
+ */
+export function useVerdictFollow(pending: boolean): { following: boolean; stopped: boolean; again: () => void } {
+  const [round, setRound] = useState(0);
+  const [stopped, setStopped] = useState(false);
+  useEffect(() => {
+    if (!pending) return undefined;
+    const timer = setTimeout(() => setStopped(true), VERDICT_FOLLOW_MS);
+    return () => clearTimeout(timer);
+  }, [pending, round]);
+  return {
+    following: pending && !stopped,
+    stopped: pending && stopped,
+    again: () => {
+      setStopped(false);
+      setRound((n) => n + 1);
+    },
+  };
 }
 
 /** The two-person request a restore waits on, when there is one (404 when none was made). */

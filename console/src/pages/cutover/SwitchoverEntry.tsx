@@ -9,10 +9,19 @@ import { cutoverRefusal } from "./Cutover";
 import { groupSummary } from "./SwitchoverList";
 import { PhaseLabel } from "./status";
 
-export function SwitchoverEntry({ restore: r, canCreate = true }: { restore: Restore; canCreate?: boolean }) {
+export function SwitchoverEntry({
+  restore: r,
+  canCreate = true,
+  source,
+}: {
+  restore: Restore;
+  canCreate?: boolean;
+  /** The Backup its point came from, when known (DUI-42: `useSourceBackup`). */
+  source?: { consumerGroups?: string[] | null } | null;
+}) {
   const navigate = useNavigate();
   const list = useSwitchovers(r.namespace);
-  const refusal = cutoverRefusal(r);
+  const refusal = cutoverRefusal(r, source);
   const mine = (list.data ?? []).filter((s) => s.restore.name === r.name && s.restore.uid === r.uid);
   return (
     <Card>

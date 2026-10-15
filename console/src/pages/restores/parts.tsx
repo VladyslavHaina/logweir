@@ -22,6 +22,7 @@ import { outcomeUnknown } from "../../api/client";
 import type { Restore } from "../../api/restores";
 import { restoreVerified, summaryCase } from "./words";
 import { ErrorText, Prose } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 
 /** A restore's status: green only by the restore badge rule, and a complete verification
  *  that did not cover is never green whatever the summary says. */
@@ -30,6 +31,8 @@ export function RestoreStatus({ r }: { r: Pick<Restore, "operation" | "coverage"
   const title = `state ${op.state}; verification ${op.verificationState}`;
   if (r.coverage?.covered === false) return <StatusLabel tone="danger" text="Not covered" title={`${title}; complete coverage did not cover this restore`} />;
   if (op.state === "pending" && op.stateReason === "ApprovalNotVerified") return <StatusLabel tone="info" text="Awaiting approval" title={title} />;
+  // DUI-38: finished, its verdict still coming: verifying, never "Done, not verified".
+  if (op.terminal && op.state === "succeeded" && op.verificationState === "pending") return <StatusLabel tone="progress" text="Verifying" title={title} />;
   if (op.terminal && op.state === "succeeded" && !restoreVerified(r)) {
     return <StatusLabel tone="warning" text="Done, not verified" title={`${title}: ${summaryCase(op)}`} />;
   }
@@ -118,7 +121,16 @@ export function Commands({ lines, label, exact }: { lines: string[]; label: stri
 }
 
 /** A refusal or a lost answer, in the console's one error wording. */
-export function WriteProblem({ error, title, unmatched = [] }: { error: unknown; title: string; unmatched?: string[] }) {
+/** A failed create's alert, scrolled into view and focused when it appears (DUI-33). */
+export function WriteProblem(props: { error: unknown; title: string; unmatched?: string[] }) {
+  return (
+    <Revealed when={props.error}>
+      <WriteProblemAlert {...props} />
+    </Revealed>
+  );
+}
+
+function WriteProblemAlert({ error, title, unmatched = [] }: { error: unknown; title: string; unmatched?: string[] }) {
   if (outcomeUnknown(error)) {
     return (
       <Alert variant="warning" isInline title="The answer was lost">
@@ -134,7 +146,9 @@ export function WriteProblem({ error, title, unmatched = [] }: { error: unknown;
       {error instanceof ApiError && unmatched.length > 0 && (
         <ul className="lw-plain-list">
           {unmatched.map((u) => (
-            <li key={u}>{u}</li>
+            <li key={u}>
+              <Prose text={u} />
+            </li>
           ))}
         </ul>
       )}

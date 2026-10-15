@@ -1378,3 +1378,132 @@ fn dui5_an_exit_1_cause_reaches_the_operation_message() {
         );
     }
 }
+
+/// DUI-38: a restore whose scorecard an evidence-fetch Job reads is terminal
+/// before its verdict exists. From the terminal write until the Job relays,
+/// its verification is `pending` (and the event stream is not settled), never
+/// "not attempted": the console followed it to the terminal write and stopped
+/// there, leaving a restore that verified four seconds later "Done, not
+/// verified".
+///
+/// CONTROL: the same keys without a digest on a run that names no evidence
+/// destination stay `notAttempted`, settled: no Job reads that run.
+#[test]
+fn dui38_a_restore_whose_evidence_a_job_reads_is_pending_until_the_job_relays() {
+    use logweir_api::status::{is_settled, restore_view};
+    let mut base = base_restore();
+    base["spec"]["evidenceDestinationRef"] = json!({"name": "primary"});
+    let (running, _) = patched::<Restore>(
+        base.clone(),
+        &restore_ctl::running_status_patch(&restore_of(&base), "r1", true, now()),
+    );
+    let keys = RestoreEvidenceKeys {
+        scorecard: Some("logweir/drills/x.json".into()),
+        sidecar: Some("logweir/drills/x.json.sig".into()),
+        offset_report: None,
+    };
+    // The terminal write of a FetchJob source: keys, no digest (nothing was read).
+    let terminal = restore_ctl::finished_status_patch(
+        &restore_of(&running),
+        0,
+        &keys,
+        None,
+        None,
+        None,
+        None,
+        now(),
+    );
+    let (owed, _) = patched::<Restore>(running.clone(), &terminal);
+    run_restore(
+        "fetch owed",
+        &owed,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::Pending, false),
+    );
+    assert!(
+        !is_settled(&restore_view(&restore_of(&owed), now())),
+        "the stream keeps the run open while its verdict is owed"
+    );
+
+    // The Job is reading: the controller's `Pending` block.
+    let pending = VerificationResult::pending(
+        "application/vnd.logweir.scorecard+json",
+        "an evidence-fetch Job is reading the scorecard",
+    )
+    .to_status_value(None);
+    let (reading, _) = patched::<Restore>(
+        owed.clone(),
+        &json!({"status": {"evidence": {"verification": pending}}}),
+    );
+    run_restore(
+        "fetch reading",
+        &reading,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::Pending, false),
+    );
+
+    // The relay's verdict, with the facts the relay copies out of the scorecard
+    // it read (its outcome and digest): verified, settled.
+    let (relayed, _) = patched::<Restore>(
+        reading.clone(),
+        &json!({"status": {"outcome": "pass", "evidence": {"scorecardSha256": "sha256:abcd"}}}),
+    );
+    let mut with_outcome = terminal.clone();
+    with_outcome["status"]["outcome"] = json!("pass");
+    let (done, _) = patched::<Restore>(
+        relayed.clone(),
+        &restore_second(&relayed, &with_outcome, VerificationVerdict::Valid),
+    );
+    run_restore(
+        "fetch relayed",
+        &done,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::Valid, true),
+    );
+    assert!(is_settled(&restore_view(&restore_of(&done), now())));
+
+    // CONTROL: no evidence destination, so no Job is owed: not attempted, settled.
+    let plain = base_restore();
+    let (running, _) = patched::<Restore>(
+        plain.clone(),
+        &restore_ctl::running_status_patch(&restore_of(&plain), "r1", true, now()),
+    );
+    let (unread, _) = patched::<Restore>(running.clone(), &terminal);
+    run_restore(
+        "no job owed",
+        &unread,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::NotAttempted, false),
+    );
+    assert!(is_settled(&restore_view(&restore_of(&unread), now())));
+
+    // CONTROL (DUI-38 review L1): an evidence destination, but the runner printed
+    // the scorecard key alone. The controller resumes a fetch only with both
+    // keys, so none is owed: not attempted, settled, never pending for ever.
+    let (running, _) = patched::<Restore>(
+        base.clone(),
+        &restore_ctl::running_status_patch(&restore_of(&base), "r1", true, now()),
+    );
+    let half = RestoreEvidenceKeys {
+        sidecar: None,
+        ..keys.clone()
+    };
+    let half_terminal = restore_ctl::finished_status_patch(
+        &restore_of(&running),
+        0,
+        &half,
+        None,
+        None,
+        None,
+        None,
+        now(),
+    );
+    let (no_sidecar, _) = patched::<Restore>(running, &half_terminal);
+    assert!(
+        no_sidecar["status"]["evidence"]["scorecardKey"].is_string()
+            && no_sidecar["status"]["evidence"]["sidecarKey"].is_null(),
+        "the run names its scorecard and no sidecar: {no_sidecar}"
+    );
+    run_restore(
+        "scorecard key alone",
+        &no_sidecar,
+        e(S::Succeeded, Some("Ok"), R::Pass, V::NotAttempted, false),
+    );
+    assert!(is_settled(&restore_view(&restore_of(&no_sidecar), now())));
+}

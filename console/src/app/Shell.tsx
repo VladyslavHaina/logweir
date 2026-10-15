@@ -61,6 +61,7 @@ import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "./theme";
 import { useNavCounts, type NavCount } from "./attention";
 import { shortSubject } from "./subject";
+import { SessionWarning } from "./SessionClock";
 import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
@@ -485,6 +486,8 @@ export function Shell() {
         }
       }}
     >
+      {/* DUI-34: the session warning sits above the page, under the masthead, and covers nothing. */}
+      <SessionWarning />
       {!grant ? <NoAccess ns={ns} names={names} /> : denied ? <NotGranted ns={ns} entry={denied} /> : <Outlet />}
     </Page>
   );

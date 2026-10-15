@@ -22,6 +22,7 @@ import operator from "../../../fixtures/console/session-manual-backups.json";
 import viewer from "../../../fixtures/console/session-viewer.json";
 import schedulesList from "../../../fixtures/console/schedules-list.json";
 import backupDoc from "../../../fixtures/console/backup.json";
+import destinationDoc from "../../../fixtures/console/destination.json";
 import backupsList from "../../../fixtures/console/backups-list.json";
 import operationBackup from "../../../fixtures/console/operation-backup.json";
 import catalogsList from "../../../fixtures/console/catalogs-list.json";
@@ -192,6 +193,9 @@ describe("Connect an archive", () => {
     reads(operator);
     renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
+    // DUI-40.1: the Sync mode helper names its command as code, never in raw backticks.
+    expect(within(dialog).getByText("logweir catalog sync", { selector: "code" })).toBeTruthy();
+    expect(dialog.textContent).not.toContain("`");
     fireEvent.click(within(dialog).getByRole("button", { name: "Connect archive" }));
     await within(dialog).findByText(/A catalog needs a name/);
     expect(within(dialog).getByText(/Name the saved destination/)).toBeTruthy();
@@ -321,6 +325,20 @@ describe("one backup's page", () => {
       return null;
     });
 
+  it("DUI-41.2: the Check it yourself note names its command as code, never in raw backticks", async () => {
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
+      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, operationBackup);
+      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path.startsWith("/namespaces/team-a/destinations/")) return json(200, { ...destinationDoc, item: { ...destinationDoc.item, locationDigest: backupDoc.item.locationDigest ?? null } });
+      return null;
+    });
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    const code = await screen.findByText("aws configure set s3.addressing_style path", { selector: "code" });
+    expect(code.closest("p")?.textContent).not.toContain("`");
+  });
+
   it("shows the controller's verdict and never claims the page checked anything", async () => {
     detail(operationBackup);
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
@@ -354,7 +372,15 @@ describe("one backup's page", () => {
     const doc = copy(backupDoc);
     doc.item.operation = { state: "refused", stateReason: "GuardRefused", terminal: true, verificationState: "notAttempted", verifiedSuccess: false };
     const op = copy(operationBackup) as { item: Record<string, unknown> };
-    Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: REFUSAL, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
+    Object.assign(op.item, {
+      state: "refused",
+      stateReason: "GuardRefused",
+      verifiedSuccess: false,
+      message: REFUSAL,
+      result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" },
+      // DUI-40.3: the Activity list's condition messages carry code spans too.
+      conditions: [{ type: "Failed", status: "True", reason: "GuardRefused", message: "the `runner` container exited 3", lastTransitionTime: "2026-09-12T08:01:00Z" }],
+    });
     reads(operator, (_r, path) => {
       if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
       if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
@@ -365,7 +391,38 @@ describe("one backup's page", () => {
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
     const title = await screen.findByText("This run was refused: GuardRefused");
     const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
-    await within(alert).findByText(REFUSAL);
+    // DUI-35: the sentence is the runner's, word for word, and its code span is code, never raw backticks.
+    const said = REFUSAL.replace(/`/g, "");
+    await waitFor(() => expect(alert.textContent).toContain(said));
+    expect(within(alert).getByText("payments", { selector: "code" })).toBeTruthy();
+    expect(alert.textContent).not.toContain("`");
+    // The same message under "Where it stands", and in a condition and a diagnosis, is prose too.
+    const where = screen.getByRole("heading", { name: "Where it stands" }).closest(".pf-v6-c-card") as HTMLElement;
+    expect(where.textContent).toContain(said);
+    expect(within(where).getAllByText("payments", { selector: "code" }).length).toBeGreaterThan(0);
+    expect(where.textContent).not.toContain("`");
+    expect(within(where).getByText("runner", { selector: "code" })).toBeTruthy();
+    expect(where.textContent).toContain("the runner container exited 3");
+  });
+
+  it("DUI-35: a message with an unpaired backtick is shown as it came, never guessed into code (the control)", async () => {
+    const ODD = "the runner's own reason: topic `orders does not exist";
+    const doc = copy(backupDoc);
+    doc.item.operation = { state: "refused", stateReason: "GuardRefused", terminal: true, verificationState: "notAttempted", verifiedSuccess: false };
+    const op = copy(operationBackup) as { item: Record<string, unknown> };
+    Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: ODD, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
+    reads(operator, (_r, path) => {
+      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
+      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, op);
+      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      return null;
+    });
+    renderAt("/team-a/backups/orders-hourly-20260912-080000");
+    const title = await screen.findByText("This run was refused: GuardRefused");
+    const alert = title.closest(".pf-v6-c-alert") as HTMLElement;
+    await waitFor(() => expect(alert.textContent).toContain(ODD));
+    expect(alert.querySelector("code")).toBeNull();
   });
 
   it("tells a role that cannot restore who can, instead of offering the action", async () => {
@@ -433,7 +490,9 @@ describe("FX-38: one catalog's page says what its view does not prove", () => {
 
   it("a window says so, from the Synced message (control)", async () => {
     show(catalogDoc, catalogPoints);
-    await screen.findByText(windowSentence);
+    // DUI-40.1: its command is code now; the sentence reads the same.
+    await screen.findByText((_content, el) => el?.classList.contains("lw-prose") === true && el.textContent === windowSentence);
+    expect(screen.getAllByText("logweir catalog list", { selector: "code" }).length).toBeGreaterThan(0);
   });
 
   it("a points page with incomplete: true says the list is partial", async () => {

@@ -27,6 +27,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { When, count } from "../../components/When";
+import { Prose } from "../../components/Prose";
 import { BackUpNow } from "./BackUpNow";
 import { BackupStatus, useFlags } from "./parts";
 import "./evidence.css";
@@ -144,7 +145,7 @@ export function Backups() {
       {
         title: "Restore this point",
         isAriaDisabled: !offer.offer,
-        tooltipProps: offer.offer ? undefined : { content: offer.reason },
+        tooltipProps: offer.offer ? undefined : { content: <Prose text={offer.reason} /> },
         onClick: () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } }),
       },
     ];

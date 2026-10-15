@@ -29,7 +29,7 @@ import { ErrorState, LoadingRows } from "../../components/States";
 import { StatusLabel } from "../../components/Status";
 import { When, count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
-import { Commands, Term, Value, useFlags } from "../backups/parts";
+import { Commands, MessageValue, Term, Value, useFlags } from "../backups/parts";
 import { RESTORE_NEEDS_ROLE } from "../backups/verdict";
 import "../backups/evidence.css";
 import { ReadyStatus, whereFrom } from "./CatalogList";
@@ -143,7 +143,7 @@ function ViewCard({ c }: { c: Catalog }) {
         )}
         {c.truncated && viewIsWindow(c) && (
           <Content component="p" className="lw-subtle lw-small">
-            {CATALOG_WINDOW_SENTENCE.replace(/`/g, "")}
+            <Prose text={CATALOG_WINDOW_SENTENCE} />
           </Content>
         )}
         {(c.conditions ?? []).length > 0 && (
@@ -151,7 +151,11 @@ function ViewCard({ c }: { c: Catalog }) {
             {(c.conditions ?? []).map((x) => (
               <li key={x.type} className="lw-break">
                 <strong>{x.type}</strong> <span className="lw-reason">{x.status} {x.reason ?? ""}</span>
-                {x.message ? <span className="lw-subtle">: {x.message.replace(/`/g, "")}</span> : null}
+                {x.message ? (
+                  <span className="lw-subtle">
+                    : <Prose text={x.message} />
+                  </span>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -285,7 +289,7 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                               Restore this point
                             </Button>
                           ) : (
-                            <Tooltip content={offer.offer ? RESTORE_NEEDS_ROLE : `Not offered: ${offer.reason}`}>
+                            <Tooltip content={offer.offer ? RESTORE_NEEDS_ROLE : <Prose text={`Not offered: ${offer.reason}`} />}>
                               <Button variant="secondary" size="sm" isAriaDisabled>
                                 Restore this point
                               </Button>
@@ -297,9 +301,9 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                         <Td colSpan={6}>
                           <ExpandableRowContent>
                             <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl">
-                              <Term term="Restore">{restore ? "Offered" : offer.offer ? RESTORE_NEEDS_ROLE : `Not offered: ${offer.reason}`}</Term>
+                              <Term term="Restore">{restore ? "Offered" : offer.offer ? RESTORE_NEEDS_ROLE : <Prose text={`Not offered: ${offer.reason}`} />}</Term>
                               <Term term="Remedy">
-                                <Value value={p.remedy} />
+                                <MessageValue value={p.remedy} />
                               </Term>
                               <Term term="Location">
                                 {location ? `${location.locationId} (${location.availability})` : <Value value={null} />}

@@ -37,6 +37,7 @@ import { Empty, ErrorState, LoadingRows } from "../../components/States";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { When, duration } from "../../components/When";
 import { Term } from "../schedules/parts";
+import { Prose } from "../../components/Prose";
 import "../schedules/schedules.css";
 
 /** The controller's alert kinds (crds/protection_policy.rs AlertKind), in words; a newer kind is shown as written. */
@@ -77,6 +78,12 @@ export function protectedWords(p: ProtectionPolicy): { tone: "success" | "danger
   if (c.status === "True") return { tone: "success", text: "Objective met", title };
   if (c.status === "Unknown") return { tone: "neutral", text: "Could not be evaluated", title };
   return { tone: "danger", text: "Objective not met", title };
+}
+
+/** A last attempt's phase and reason; "Not recorded" only when it carries neither. */
+export function attemptWords(a: { phase?: string | null; reason?: string | null }): string {
+  if (a.phase && a.reason) return `${a.phase} (${a.reason})`;
+  return a.phase || a.reason || "Not recorded";
 }
 
 /** The failure streak; an absent one is not known, never 0 (FX-38). */
@@ -254,7 +261,9 @@ export function ProtectionDetail() {
       {historyTooLarge(p) && (
         <PageSection>
           <Alert isInline variant="info" title="Could not be evaluated: too many Backup objects to read">
-            <p>{p.conditions?.find((c) => c.type === "Protected")?.message ?? "The controller recorded no message."}</p>
+            <p>
+              <Prose text={p.conditions?.find((c) => c.type === "Protected")?.message || "The controller recorded no message."} />
+            </p>
             <p>The newest point, the last attempt and the failure streak are not known until it can read them all. This is neither healthy nor a failure.</p>
           </Alert>
         </PageSection>
@@ -477,7 +486,7 @@ export function ProtectionDetail() {
                     <Term term="Source">{p.protects.sourceRef.name}</Term>
                     <Term term="Topics">
                       {p.protects.topics?.length ? (
-                        <LabelGroup numLabels={8}>
+                        <LabelGroup numLabels={8} aria-label="Topics" className="lw-names">
                           {p.protects.topics.map((t) => (
                             <Label key={t} isCompact variant="outline">
                               {t}
@@ -497,8 +506,8 @@ export function ProtectionDetail() {
                             {p.lastAttempt.backupRef.name}
                           </Link>
                           <div className="lw-subtle lw-small">
-                            {p.lastAttempt.phase ?? "Not recorded"}
-                            {p.lastAttempt.reason ? ` (${p.lastAttempt.reason})` : ""}, <When value={p.lastAttempt.at} />
+                            {/* DUI-31.6: a reason without a phase is said alone, never beside "Not recorded". */}
+                            {attemptWords(p.lastAttempt)}, <When value={p.lastAttempt.at} />
                           </div>
                         </>
                       ) : (
@@ -550,7 +559,11 @@ export function ProtectionDetail() {
                         <li key={c.type} className="lw-condition">
                           <strong>{c.type}</strong> {c.status}
                           {c.reason && <span className="lw-reason"> {c.reason}</span>}
-                          {c.message && <div className="lw-subtle lw-small">{c.message}</div>}
+                          {c.message && (
+                            <div className="lw-subtle lw-small">
+                              <Prose text={c.message} />
+                            </div>
+                          )}
                         </li>
                       ))}
                     </ul>

@@ -14,6 +14,7 @@ import { StatusLabel } from "../../components/Status";
 import { When, count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { Commands, Term, Value, useAnyFlags } from "../backups/parts";
+import { Prose } from "../../components/Prose";
 import { FINGERPRINT_COMMAND } from "../catalog/model";
 import "../backups/evidence.css";
 import {
@@ -83,7 +84,7 @@ function PolicyCard({ p }: { p: TrustPolicy }) {
         )}
         {guard && (
           <Alert isInline variant={guard.act ? "danger" : "info"} title={`Compromise guard: ${guard.reason}`}>
-            {guard.message}
+            <Prose text={guard.message ?? ""} />
           </Alert>
         )}
         <DescriptionList isCompact orientation={{ sm: "horizontal" }} className="lw-dl" columnModifier={{ lg: "2Col" }}>
@@ -144,7 +145,11 @@ function PolicyCard({ p }: { p: TrustPolicy }) {
               .map((c) => (
                 <li key={c.type} className="lw-break">
                   <strong>{c.type}</strong> <span className="lw-reason">{c.status} {c.reason ?? ""}</span>
-                  {c.message ? <span className="lw-subtle">: {c.message}</span> : null}
+                  {c.message ? (
+                    <span className="lw-subtle">
+                      : <Prose text={c.message} />
+                    </span>
+                  ) : null}
                 </li>
               ))}
           </ul>

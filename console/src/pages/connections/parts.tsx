@@ -40,6 +40,7 @@ import { When } from "../../components/When";
 import { Ident } from "../../components/Ident";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { ErrorText, Prose, checkMessage } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 
 // ------------------------------------------------------------------- forms
 
@@ -99,24 +100,29 @@ export function controlState(id: string, error: string | undefined, hasHelp = tr
 export const CREDENTIALS_CLEARED =
   "What you typed is kept, except the credential fields: those are cleared after every submit and are never kept anywhere, so type them again.";
 
-/**
- * What became of a write, in words that say only what is known. A create that
- * got no answer may or may not exist, and repeating it is safe because the
- * form still holds its idempotency key.
- */
-export function WriteOutcome({
-  error,
-  subject,
-  verb = "create",
-  credentials,
-  unmatched,
-}: {
+type WriteOutcomeProps = {
   error: unknown;
   subject: string;
   verb?: "create" | "rotate";
   credentials: boolean;
   unmatched: string[];
-}) {
+};
+
+/**
+ * What became of a write, in words that say only what is known. A create that
+ * got no answer may or may not exist, and repeating it is safe because the
+ * form still holds its idempotency key. Each new one is scrolled into view and
+ * focused (DUI-33): in a long dialog it would land below the fold.
+ */
+export function WriteOutcome(props: WriteOutcomeProps) {
+  return (
+    <Revealed when={props.error}>
+      <WriteOutcomeAlert {...props} />
+    </Revealed>
+  );
+}
+
+function WriteOutcomeAlert({ error, subject, verb = "create", credentials, unmatched }: WriteOutcomeProps) {
   const outcome = outcomeOf(error);
   const kept = credentials ? CREDENTIALS_CLEARED : "Your input is kept.";
   const api = error instanceof ApiError ? error : null;
@@ -238,6 +244,21 @@ export function ReasonText({ reason }: { reason: string }) {
   );
 }
 
+/**
+ * The probe's reason: a later probe's own (beside the earlier reading it leaves), else
+ * the reading's. "Not recorded" only when neither is there: never printed beside a
+ * reason that is (DUI-31.6).
+ */
+export function ProbeReason({ state }: { state: ProbeState }) {
+  if (!state.laterReason) return <ReasonText reason={state.reason} />;
+  return (
+    <>
+      <code>{state.laterReason}</code>
+      <span className="lw-subtle">: {state.laterGloss}</span>
+    </>
+  );
+}
+
 // ------------------------------------------------------- readiness checks
 
 /** A check's aggregate. The recorded state and nothing else: a state this build does not know is Unknown, never Ready. */
@@ -262,9 +283,10 @@ export function PreflightStatus({ state }: { state: string }) {
   }
 }
 
-function CheckVerdict({ state }: { state: string }) {
+/** One row's verdict. An advisory row never gates, so its "Not ready" is a warning, never red (DUI-36). */
+function CheckVerdict({ state, gating }: { state: string; gating?: string | null | undefined }) {
   if (state === "ready") return <StatusLabel tone="success" text="Ready" />;
-  if (state === "notReady") return <StatusLabel tone="danger" text="Not ready" />;
+  if (state === "notReady") return <StatusLabel tone={gating === "advisory" ? "warning" : "danger"} text="Not ready" />;
   if (state === "skipped") return <StatusLabel tone="neutral" text="Skipped (never a pass)" icon={<BanIcon />} />;
   return <StatusLabel tone="neutral" text="Unknown" icon={<UnknownIcon />} />;
 }
@@ -293,6 +315,21 @@ function DottedId({ id }: { id: string }) {
   );
 }
 
+/** A compact row's line: the code, the finding and the remedy, the server's sentences as prose (DUI-35). */
+function checkMeta(c: CheckEntry): ReactNode {
+  const parts: ReactNode[] = [];
+  if (c.code) parts.push(c.code);
+  if (c.message) parts.push(<Prose text={checkMessage(c.message)} />);
+  if (c.remedy) parts.push(<>Remedy: <Prose text={c.remedy} /></>);
+  if (parts.length === 0) return "No finding recorded";
+  return parts.map((part, i) => (
+    <Fragment key={i}>
+      {i > 0 && " · "}
+      {part}
+    </Fragment>
+  ));
+}
+
 function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
   const narrow = useNarrow();
   if (narrow) {
@@ -303,8 +340,8 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
         items={checks.map((c) => ({
           key: c.id,
           title: c.id,
-          meta: [c.code, c.message, c.remedy ? `Remedy: ${c.remedy}` : ""].filter(Boolean).join(" · ") || "No finding recorded",
-          status: <CheckVerdict state={c.state} />,
+          meta: checkMeta(c),
+          status: <CheckVerdict state={c.state} gating={c.gating} />,
         }))}
       />
     );
@@ -328,12 +365,16 @@ function CheckRows({ label, checks }: { label: string; checks: CheckEntry[] }) {
               <div className="lw-subtle lw-small">{c.code ?? "Not recorded"}</div>
             </Td>
             <Td dataLabel="Verdict">
-              <CheckVerdict state={c.state} />
+              <CheckVerdict state={c.state} gating={c.gating} />
               <div className="lw-subtle lw-small">{c.gating ?? "blocking"}</div>
             </Td>
             <Td dataLabel="Finding" className="lw-break">
               <div>{c.message ? <Prose text={checkMessage(c.message)} /> : <NotRecorded />}</div>
-              {c.remedy && <div className="lw-subtle lw-small">Remedy: {c.remedy}</div>}
+              {c.remedy && (
+                <div className="lw-subtle lw-small">
+                  Remedy: <Prose text={c.remedy} />
+                </div>
+              )}
               <div className="lw-subtle lw-small">Scope: {scopeText(c.scope)}</div>
             </Td>
             <Td dataLabel="When" modifier="nowrap">
@@ -500,7 +541,7 @@ export function CheckResult({
           <ul className="lw-plain-list">
             {p.executionOnly.map((e) => (
               <li key={e.id}>
-                <code>{e.id}</code> {e.note}
+                <code>{e.id}</code> <Prose text={e.note} />
               </li>
             ))}
           </ul>
@@ -532,7 +573,12 @@ export function ConnectionUsability({ preflight }: { preflight: Preflight }) {
         {u.lines.map((l) => (
           <li key={l.id}>
             {l.label}: <StatusLabel tone={USABLE[l.state].tone} text={USABLE[l.state].text} title={`${l.id} ${l.state}`} />
-            {l.state !== "yes" && l.message && <span className="lw-subtle"> {l.message}</span>}
+            {l.state !== "yes" && l.message && (
+              <span className="lw-subtle">
+                {" "}
+                <Prose text={l.message} />
+              </span>
+            )}
           </li>
         ))}
       </ul>

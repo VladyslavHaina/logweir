@@ -34,6 +34,7 @@ import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { PhaseLabel } from "./status";
 import { PlanBlock } from "./parts";
+import { Prose } from "../../components/Prose";
 import { SwitchoverResult, cutoverRefusal } from "./Cutover";
 import { SwitchoverApprovalSummary } from "./SwitchoverApprovalSummary";
 
@@ -205,7 +206,9 @@ export function SwitchoverPage() {
                   {s.message && (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Message</DescriptionListTerm>
-                      <DescriptionListDescription className="lw-break">{s.message}</DescriptionListDescription>
+                      <DescriptionListDescription className="lw-break">
+                        <Prose text={s.message} />
+                      </DescriptionListDescription>
                     </DescriptionListGroup>
                   )}
                   <DescriptionListGroup>

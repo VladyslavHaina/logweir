@@ -6,9 +6,10 @@ import { Alert, Content, DescriptionList, Stack } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import type { RetentionPolicy, Schedule } from "../../api/schedules";
 import CheckIcon from "@patternfly/react-icons/dist/esm/icons/check-circle-icon";
-import { When, count } from "../../components/When";
+import { When, count, counted } from "../../components/When";
 import { ENFORCEMENT_WORDS, NEVER_DELETES, deletes, retentionOf } from "./model";
 import { Term } from "./parts";
+import { Prose } from "../../components/Prose";
 
 const GUARANTEES: Record<string, string> = {
   LogweirEnforced: "Enforced by Logweir",
@@ -33,7 +34,7 @@ function Covering({ policy }: { policy: RetentionPolicy }) {
       </Content>
       {policy.mode === "Enforce" && enforced?.status === "False" && (
         <Alert isInline isPlain variant="warning" title={`Not enforcing: ${enforced.reason ?? "no reason recorded"}`}>
-          {enforced.message}
+          <Prose text={enforced.message ?? ""} />
         </Alert>
       )}
       {policy.enforcementDegraded && (
@@ -44,7 +45,7 @@ function Covering({ policy }: { policy: RetentionPolicy }) {
       <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "16ch" }}>
         <Term term="Mode">{policy.mode}</Term>
         <Term term="Keeps">
-          {[policy.keepLast ? `The newest ${policy.keepLast} points` : "", policy.keepDays ? `${policy.keepDays} days of points` : ""].filter(Boolean).join(" and ") || "Not recorded"}
+          {[policy.keepLast ? `The newest ${counted(policy.keepLast, "point")}` : "", policy.keepDays ? `${counted(policy.keepDays, "day")} of points` : ""].filter(Boolean).join(" and ") || "Not recorded"}
           <div className="lw-subtle lw-small">Never fewer than {policy.minUsablePoints} usable points.</div>
         </Term>
         <Term term="Age expiry">{GUARANTEES[policy.guarantees?.ageExpiry ?? ""] ?? "Not recorded"}</Term>

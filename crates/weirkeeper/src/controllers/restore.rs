@@ -4012,12 +4012,46 @@ async fn continue_evidence_fetch(
     )
     .await
     .map_err(RestoreError::Api)?;
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     let attempt = match (owed, &source) {
         (Some(attempt), _) => attempt,
         (None, backup::EvidenceSource::FetchJob { .. }) => 1,
+        // DUI-38 review L1: the crash window, and the source is no longer a Job's
+        // (the destination was edited or deleted before the requeue). Record the
+        // verdict the terminal pass records for that source (`terminal_evidence`),
+        // so the run is never `pending` for ever: the API reads an owed Job read
+        // as pending, and nothing else would write one.
+        (None, from) if unrecorded => {
+            let Some((result, observation)) = crash_window_verdict(
+                from,
+                evidence
+                    .and_then(|e| e.scorecard_key.as_deref())
+                    .unwrap_or_default(),
+                restore
+                    .spec
+                    .evidence_destination_ref
+                    .as_ref()
+                    .map(|r| r.name.as_str()),
+                now,
+            ) else {
+                return Ok(waiting);
+            };
+            write_fetch_verdict(
+                &restores,
+                restore,
+                &restore.name_any(),
+                &StatusVersion::observed(restore.meta()),
+                &result,
+                observation,
+                serde_json::Map::new(),
+                serde_json::Map::new(),
+                now,
+            )
+            .await?;
+            return Ok(Requeue::After(REQUEUE_SECS));
+        }
         (None, _) => return Ok(waiting),
     };
-    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     evidence_fetch_pass(
         &restores,
         restore,
@@ -4032,6 +4066,37 @@ async fn continue_evidence_fetch(
     )
     .await?;
     Ok(Requeue::After(REQUEUE_SECS))
+}
+
+/// What the crash-window arm of `continue_evidence_fetch` records for a run
+/// whose owed Job read can no longer be made, because its source is no longer
+/// a Job's (DUI-38 review L1): the verdict the terminal pass records for that
+/// source with no reference ([`terminal_evidence`]), and, for a controller
+/// read, attempt 1 of its read schedule as the terminal pass writes it (the
+/// observation `{mode, attempt: 1, retryAfter}`), so the read is tried again.
+/// `None` for a source that records nothing here (a Job's, or none). Pure.
+#[must_use]
+pub fn crash_window_verdict(
+    from: &backup::EvidenceSource,
+    scorecard_key: &str,
+    destination: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<(crate::verification::VerificationResult, Value)> {
+    let TerminalEvidence::Record(result) =
+        terminal_evidence(from, None, true, scorecard_key, destination)
+    else {
+        return None;
+    };
+    Some(match backup::controller_read_mode(from) {
+        Some(mode) => {
+            let (result, retry) = crate::evidence_fetch::scheduled(*result, 1, now);
+            let observation = retry.map_or(Value::Null, |retry| {
+                crate::evidence_fetch::observation_patch(Some(mode), None, 1, None, Some(retry))
+            });
+            (result, observation)
+        }
+        None => (*result, Value::Null),
+    })
 }
 
 /// What a terminal pass needs to read a run's scorecard AGAIN — the `Backup`

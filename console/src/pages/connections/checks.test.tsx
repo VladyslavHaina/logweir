@@ -2,7 +2,7 @@
 // console fixtures: nothing is a pass that did not pass, a successful listing
 // is never complete, and Test connection sends one reference.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api } from "../../api/client";
@@ -12,7 +12,8 @@ import { SessionProvider } from "../../api/session";
 import { session } from "../../mock/data";
 import { ConnectionCheck } from "./ConnectionDetail";
 import { Discovery } from "./Discovery";
-import { CheckResult, ConnectionUsability, LastTestLine, ReasonText, advisoryRows, basisWords } from "./parts";
+import { CheckResult, ConnectionUsability, LastTestLine, ProbeReason, ReasonText, advisoryRows, basisWords } from "./parts";
+import { probeState } from "../../api/connections";
 
 type S = components["schemas"];
 const fixtures = import.meta.glob("../../../fixtures/console/*.json", { eager: true, import: "default" });
@@ -270,6 +271,17 @@ describe("DUI-7 and DUI-11: what a check's rows say", () => {
     expect(blocking.textContent).not.toContain("connection.engineProtocol");
   });
 
+  it("DUI-36: an advisory row that is not met is a warning, never red; a blocking one stays red (the control)", () => {
+    const p = preflight("preflight-not-ready.json");
+    p.checks = [row("connection.resolved", "blocking", "notReady"), row("connection.groupTypes", "advisory", "notReady")];
+    p.warnings = [];
+    render(<CheckResult preflight={p} stopped="" />);
+    const tone = (table: HTMLElement) => within(table).getByText("Not ready").closest(".pf-v6-c-label")!.className;
+    expect(tone(screen.getByRole("grid", { name: "Advisory checks" }))).toMatch(/pf-m-warning/);
+    expect(tone(screen.getByRole("grid", { name: "Advisory checks" }))).not.toMatch(/pf-m-danger/);
+    expect(tone(screen.getByRole("grid", { name: "Blocking checks" }))).toMatch(/pf-m-danger/);
+  });
+
   it("does not list an advisory row twice when it is in checks and in warnings", () => {
     const twice = row("connection.groupTypes", "advisory", "notReady");
     expect(advisoryRows({ checks: [twice], warnings: [twice] })).toHaveLength(1);
@@ -292,5 +304,42 @@ describe("DUI-7 and DUI-11: what a check's rows say", () => {
   it("glosses a probe that reported the cluster unreachable with the controller's words", () => {
     render(<ReasonText reason="ProbeReportedUnreachable" />);
     expect(text()).toContain("the broker did not answer, or it refused the credential this connection names");
+  });
+});
+
+describe("DUI-41.5: a check's rows at phone width", () => {
+  it("render the server's code spans as code in the compact layout too, as the table does", () => {
+    const narrow = (matches: boolean) =>
+      (window.matchMedia = ((query: string) => ({ matches, media: query, addEventListener: () => undefined, removeEventListener: () => undefined })) as unknown as typeof window.matchMedia);
+    const p = preflight("preflight-not-ready.json");
+    p.checks = [{ id: "destination.archiveListable", gating: "blocking", state: "notReady", code: "InvalidCredentials", message: "the archive prefix `rc3m` on destination `rc3-badkey-390` is not listable", remedy: "Rotate the key under `logweir/readiness/`." } as Preflight["checks"][number]];
+    try {
+      narrow(true);
+      render(<CheckResult preflight={p} stopped="" />);
+      const list = screen.getByRole("list", { name: "Blocking checks" });
+      expect(within(list).getByText("rc3-badkey-390", { selector: "code" })).toBeTruthy();
+      expect(within(list).getByText("logweir/readiness/", { selector: "code" })).toBeTruthy();
+      expect(list.textContent).not.toContain("`");
+    } finally {
+      narrow(false);
+    }
+  });
+});
+
+describe("DUI-31.6: the Reason while a probe runs again", () => {
+  const at = new Date(Date.now() - 60_000).toISOString();
+
+  it("says the new probe's reason alone, never \"Not recorded\" beside it", () => {
+    render(<ProbeReason state={probeState({ state: "reachable", reason: "ProbeRunning", observedAt: at } as never)} />);
+    expect(text()).toBe("ProbeRunning: a new probe is running now; the reachable reading is from an earlier probe");
+    expect(text()).not.toContain("Not recorded");
+  });
+
+  it("says \"Not recorded\" only when there is no reason at all (the control), and the reading's own reason otherwise", () => {
+    render(<ProbeReason state={probeState({ state: "reachable", observedAt: at } as never)} />);
+    expect(text()).toBe("Not recorded");
+    cleanup();
+    render(<ProbeReason state={probeState({ state: "unreachable", reason: "ProbeReportedUnreachable", observedAt: at } as never)} />);
+    expect(text()).toMatch(/^ProbeReportedUnreachable: the probe ran and reported reachable=false/);
   });
 });

@@ -15,7 +15,8 @@ import { When, count } from "../../components/When";
 import { useFlags } from "../backups/parts";
 import "../backups/evidence.css";
 import { ConnectArchive } from "./ConnectArchive";
-import { CATALOG_WINDOW_SENTENCE, DUPLICATE_CATALOG, NO_CATALOG_SENTENCE, conditionOf, countsWords, windowedCatalogs } from "./model";
+import { CATALOG_WINDOW_SENTENCE, DUPLICATE_CATALOG, NO_CATALOG_SENTENCE, conditionOf, countsWords, noViewWords, windowedCatalogs } from "./model";
+import { Prose } from "../../components/Prose";
 
 /** The catalog's Ready condition as a word; never read from the browser's clock. */
 export function ReadyStatus({ c }: { c: Pick<Catalog, "conditions"> }) {
@@ -122,21 +123,30 @@ export function CatalogList() {
                     <Td dataLabel="Destination" className="lw-break">
                       {whereFrom(c)}
                     </Td>
-                    <Td dataLabel="Points" className="lw-num">
-                      {count(c.counts.total)}
-                    </Td>
-                    <Td dataLabel="Available" className="lw-num">
-                      {count(c.counts.available)}
-                    </Td>
-                    <Td dataLabel="Untrusted signer" className="lw-num">
-                      {count(c.counts.untrustedSigner)}
-                    </Td>
-                    <Td dataLabel="Synced">
-                      <When value={c.syncedAt} />
-                    </Td>
-                    <Td dataLabel="View expires">
-                      <When value={c.viewExpiresAt} />
-                    </Td>
+                    {noViewWords(c) !== null ? (
+                      // DUI-40.2: no view, so nothing to count: said once, as the phone list says it.
+                      <Td dataLabel="View" colSpan={5} className="lw-subtle">
+                        {noViewWords(c)}
+                      </Td>
+                    ) : (
+                      <>
+                        <Td dataLabel="Points" className="lw-num">
+                          {count(c.counts.total)}
+                        </Td>
+                        <Td dataLabel="Available" className="lw-num">
+                          {count(c.counts.available)}
+                        </Td>
+                        <Td dataLabel="Untrusted signer" className="lw-num">
+                          {count(c.counts.untrustedSigner)}
+                        </Td>
+                        <Td dataLabel="Synced">
+                          <When value={c.syncedAt} />
+                        </Td>
+                        <Td dataLabel="View expires">
+                          <When value={c.viewExpiresAt} />
+                        </Td>
+                      </>
+                    )}
                   </Tr>
                 ))}
               </Tbody>
@@ -145,7 +155,7 @@ export function CatalogList() {
           {items.length > 0 && (windowed.length > 0 || !mayConnect) && (
             <Content component="p" className="lw-subtle lw-small lw-ev-note">
               {/* DUI-19: the window sentence only under a view the controller says is a window, as on the catalog's page. */}
-              {windowed.length > 0 ? `${windowed.map((c) => c.name).join(", ")}: ${CATALOG_WINDOW_SENTENCE.replace(/`/g, "")} ` : ""}
+              {windowed.length > 0 ? <Prose text={`${windowed.map((c) => c.name).join(", ")}: ${CATALOG_WINDOW_SENTENCE} `} /> : ""}
               {mayConnect ? "" : CONNECT_READ_ONLY_SENTENCE}
             </Content>
           )}

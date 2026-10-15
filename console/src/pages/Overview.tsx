@@ -42,7 +42,7 @@ import { attentionItems, useAttentionReadable, type Attention } from "../app/att
 import { ageVsObjective, newestPointWords } from "../app/policyAge";
 import { mintKey, outcomeUnknown } from "../api/client";
 import { can, useSessionDoc } from "../api/session";
-import { activity, backupDay, newestPoint, protectionCount, strip, type NewestPoint } from "./overviewData";
+import { activity, backupDay, backupDayTile, newestPoint, protectionCount, strip, type NewestPoint } from "./overviewData";
 import { useCatalogs, useNewestCatalogPoints } from "../api/backups";
 import { Prose } from "../components/Prose";
 import { GettingStarted } from "./GettingStarted";
@@ -253,7 +253,9 @@ function NeedsAttention({ items }: { items: Attention[] }) {
           </span>
           <div>
             <strong>{item.title}</strong>
-            <div className="lw-subtle">{item.detail}</div>
+            <div className="lw-subtle">
+              <Prose text={item.detail} />
+            </div>
             <a href={`#${item.to}`}>
               {item.action} <ArrowRightIcon />
             </a>
@@ -473,12 +475,7 @@ export function Overview() {
             />
           )}
           {may.backups && (
-            <Stat
-              title="Backups, last 24 hours"
-              value={`${day.verified} verified`}
-              tone={day.failed > 0 ? "warning" : day.verified > 0 ? "success" : undefined}
-              detail={`${day.failed} failed${day.running ? ` · ${day.running} running` : ""}`}
-            />
+            <Stat title="Backups, last 24 hours" {...backupDayTile(day)} />
           )}
           {attentionReadable && (
             <Stat
@@ -544,7 +541,7 @@ export function Overview() {
                           <ul className="lw-legend" aria-label="Legend">
                             <li><span className="lw-strip__cell lw-strip__cell--ok" /> Verified</li>
                             <li><span className="lw-strip__cell lw-strip__cell--retried" /> Verified on retry</li>
-                            <li><span className="lw-strip__cell lw-strip__cell--failed" /> Failed</li>
+                            <li><span className="lw-strip__cell lw-strip__cell--failed" /> Failed, refused or not verified</li>
                             <li><span className="lw-strip__cell lw-strip__cell--running" /> In progress</li>
                           </ul>
                         </>

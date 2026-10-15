@@ -21,6 +21,7 @@ import {
   consoleApprovalOffered,
   instantText,
   LocalRefusal,
+  modeSentence,
   noApprovalSentence,
   outcomeOf,
   ownerCase,
@@ -113,6 +114,17 @@ describe("OD-8's modes", () => {
     expect(noApprovalSentence("confirm")).toContain("confirm");
     expect(noApprovalSentence("files")).toContain("logweir drill approve");
   });
+
+  it("DUI-40.4: names switchovers beside restores wherever they wait here too", () => {
+    expect(modeSentence("twoPerson", "poc-pair")).toBe(
+      "Policy poc-pair is two-person: a second person, signed in as an approver and not the requester, approves each restore and each switchover here. No key is involved.",
+    );
+    expect(noApprovalSentence("twoPerson")).toContain("a restore or a switchover waiting above");
+    expect(modeSentence("strict", "p")).toContain("each restore and each switchover");
+    expect(modeSentence("confirm", "p")).toContain("or a switchover in its cutover");
+    // The control: an unbound namespace's files are the restore's own (drill approve), and say only that.
+    expect(modeSentence("files", "p")).not.toContain("switchover");
+  });
 });
 
 describe("the private-key refusal", () => {
@@ -169,6 +181,22 @@ describe("an approval's state", () => {
     expect(said).toContain("KeyCompromise");
     expect(said).toContain("never green");
     // NEGATIVE CONTROL: the same refusal without the admission is a plain refusal.
+    // DUI-43: a consumed, clean verdict says which run used it: a Switchover's as a Restore's.
+    const usedSwitchover: Approval = {
+      ...revoked,
+      verified: true,
+      verifiedSubject: { ...revoked.verifiedSubject!, kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" },
+      conditions: revoked.conditions.map((c) => (c.type === "Verified" ? { ...c, status: "True", reason: "Verified" } : c.type === "Consumed" ? { ...c, reason: "SwitchoverAdmitted" } : c)),
+    };
+    const used = recordState(usedSwitchover);
+    expect(used).toMatchObject({ state: "verified", usedBy: { kind: "Switchover", name: "swo-ttusskxkeb5i65k4gx4jd6davm" } });
+    const sentence = stateSentence(used, { ...subject, name: "swo-ttusskxkeb5i65k4gx4jd6davm" });
+    expect(sentence).toContain("The Switchover was admitted under it at 2026-09-09T13:01:00Z");
+    // Review L9: the verdict names the Switchover it was verified for, never a Restore.
+    expect(sentence).toContain("for Switchover swo-ttusskxkeb5i65k4gx4jd6davm");
+    expect(sentence).not.toContain("Restore");
+    // ...and a verdict no run consumed names none.
+    expect(recordState({ ...usedSwitchover, conditions: usedSwitchover.conditions.filter((c) => c.type !== "Consumed") }).usedBy).toBeUndefined();
     const unconsumed = { ...revoked, conditions: revoked.conditions.filter((c) => c.type !== "Consumed") };
     expect(recordState(unconsumed).state).toBe("refused");
   });
@@ -179,6 +207,15 @@ describe("an approval's state", () => {
     expect(recordState(refusedBy("SignatureInvalid")).state).toBe("refused");
     // DUI-20: a two-person request's own record is a record, not a refusal; any other False reason still is (the control above).
     expect(recordState(refusedBy("GovernedApprovalRequired")).state).toBe("request-recorded");
+    // DUI-40.5: that record once its window closed (the controller checks the window first) is
+    // expired, never refused; an approval that is not a request record and expired before its
+    // use is still refused (the control): it is why its restore does not run.
+    const record = { ...refusedBy("AuthorizationExpired"), name: "approval-eb39856c-confirmation" };
+    const found = recordState(record);
+    expect(found.state).toBe("request-expired");
+    expect(stateSentence(found, { ...subject, approvalName: record.name })).toContain("refuses nothing");
+    expect(recordState({ ...refusedBy("AuthorizationExpired"), name: "approval-eb39856c" }).state).toBe("refused");
+    expect(recordState({ ...refusedBy("AuthorizationExpired"), name: "-confirmation" }).state).toBe("refused");
     expect(recordState({ ...approval, verified: null, verifiedSubject: undefined, conditions: [] }).state).toBe("awaiting-verification");
     // `verified: true` without the bound subject is not a verdict about anything.
     expect(recordState({ ...approval, verifiedSubject: undefined }).state).toBe("awaiting-verification");

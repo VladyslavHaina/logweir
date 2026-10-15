@@ -42,7 +42,7 @@ import { StatusLabel } from "../../components/Status";
 import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -66,9 +66,21 @@ export function ApprovalStatus({ found, waiting = false }: { found: Found; waiti
     case "awaiting-verification":
       return <StatusLabel tone="progress" text={STATE_WORDS["awaiting-verification"]} title={title} />;
     case "verified":
-      return <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />;
+      // DUI-43: a consumed verdict is the record of the run it admitted, a Restore or a Switchover.
+      return found.usedBy ? (
+        <span>
+          <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />
+          <span className="lw-subtle lw-small lw-break lw-used-by">
+            <span className="lw-used-by__sep"> · </span>used by {found.usedBy.name}
+          </span>
+        </span>
+      ) : (
+        <StatusLabel tone="success" text={STATE_WORDS.verified} title={`verified by the controller against key ${found.key}`} />
+      );
     case "request-recorded":
       return <StatusLabel tone="neutral" text={STATE_WORDS["request-recorded"]} title="the console's record of a request: it authorises nothing until a second person approves" />;
+    case "request-expired":
+      return <StatusLabel tone="neutral" text={STATE_WORDS["request-expired"]} title="the console's record of a request whose window closed: it authorised nothing, and refuses nothing" />;
     case "revoked-after-use":
       return <StatusLabel tone="danger" text={STATE_WORDS["revoked-after-use"]} title={REVOKED_AFTER_USE_WORDS} />;
     default:
@@ -222,8 +234,13 @@ export function ApprovalRecord({ approval, packet, grant, heading = "The approva
           <Term term="Verdict">
             {verified ? (
               <>
-                {verified.reason ?? "Not recorded"}
-                {verified.message && <div className="lw-subtle lw-small lw-break">{verified.message}</div>}
+                {/* DUI-31.6: "Not recorded" only when the condition carries neither a reason nor a message. */}
+                {verified.reason ?? (verified.message ? null : "Not recorded")}
+                {verified.message && (
+                  <div className="lw-subtle lw-small lw-break">
+                    <Prose text={verified.message} />
+                  </div>
+                )}
               </>
             ) : (
               <span className="lw-subtle">The controller has not decided yet.</span>

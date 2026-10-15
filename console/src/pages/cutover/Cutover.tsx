@@ -40,7 +40,7 @@ import {
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import { useCan } from "../../api/session";
-import { useRestore } from "../../api/queries";
+import { useRestore, useSourceBackup } from "../../api/queries";
 import { ApiError } from "../../api/client";
 import { useApprovalPolicy, type ApprovalPolicy } from "../../api/approvals";
 import {
@@ -81,14 +81,24 @@ import { useNarrow } from "../../components/CompactList";
 import { Legend, OutcomeCounts, OutcomeTable, PlanBlock, ReviewCards, ReviewTable, RollbackCard, planCounts, plural } from "./parts";
 import { PhaseLabel } from "./status";
 import "./cutover.css";
-import { ErrorText } from "../../components/Prose";
+import { ErrorText, Prose, checkMessage } from "../../components/Prose";
+import { Revealed } from "../../components/Revealed";
 import { exactUtc } from "../../components/When";
 
-/** Why this restore cannot be switched over, from the restore alone (§3.4's admission). */
-export function cutoverRefusal(r: Restore): { word: string; title: string; body: string } | null {
+/** The words for a restore whose point captured no consumer group (DUI-42). */
+export const NO_GROUPS_CAPTURED = "This point captured no consumer group, so there is nothing to switch over.";
+
+/**
+ * Why this restore cannot be switched over (§3.4's admission), from the restore and, when it
+ * is known, the Backup its point came from (`useSourceBackup`): a point whose backup selected
+ * no consumer group maps no position, and the review would refuse `NoPositionsMapping`.
+ * An unknown source (`undefined` or `null`) refuses nothing: the review decides.
+ */
+export function cutoverRefusal(r: Restore, source?: { consumerGroups?: string[] | null } | null): { word: string; title: string; body: string } | null {
   if (r.target.mode === "scratch") return { word: "RestoreIsScratch", title: "A clone cannot be switched over", body: "This restore is a clone (scratch mode): its topics are deleted when it expires, so consumers are never moved onto them." };
   if (!r.operation.terminal) return { word: "RestoreNotSucceeded", title: "The restore has not finished", body: "Positions are mapped when the restore passes its complete verification. Come back when it is verified." };
   if (r.operation.state !== "succeeded" || !r.operation.verifiedSuccess) return { word: "RestoreNotSucceeded", title: "This restore cannot be switched over", body: "Only a restore that succeeded with a verified scorecard has positions to apply." };
+  if (source && !source.consumerGroups?.length) return { word: "NoPositionsMapping", title: "Nothing to switch over", body: NO_GROUPS_CAPTURED };
   if (r.coverage.recorded !== "complete" || r.coverage.covered === false) {
     return { word: "VerificationNotComplete", title: "No positions to switch over", body: "This restore was not verified completely. Positions are mapped only by a complete verification of every partition; restore again with complete verification to switch consumers over." };
   }
@@ -450,20 +460,23 @@ function Confirm({
                 </FormHelperText>
               )}
             </FormGroup>
-            {err && outcomeUnknown(err) && (
-              <Alert isInline variant="warning" title="The outcome is not known">
-                {UNKNOWN_OUTCOME}
-              </Alert>
-            )}
-            {err && !outcomeUnknown(err) && (
-              <Alert isInline variant="danger" title={reasonWords(err.message) ? "Refused" : "The service refused the switchover"}>
-                <ErrorText error={err} />
-                {fieldErrors.filter((f) => f.field !== "ticket").map((f) => (
-                  <div key={f.field + f.code} className="lw-small">
-                    <span className="lw-mono">{f.field}</span>: {f.message}
-                  </div>
-                ))}
-              </Alert>
+            {err && (
+              <Revealed when={err}>
+                {outcomeUnknown(err) ? (
+                  <Alert isInline variant="warning" title="The outcome is not known">
+                    {UNKNOWN_OUTCOME}
+                  </Alert>
+                ) : (
+                  <Alert isInline variant="danger" title={reasonWords(err.message) ? "Refused" : "The service refused the switchover"}>
+                    <ErrorText error={err} />
+                    {fieldErrors.filter((f) => f.field !== "ticket").map((f) => (
+                      <div key={f.field + f.code} className="lw-small">
+                        <span className="lw-mono">{f.field}</span>: <Prose text={f.message} />
+                      </div>
+                    ))}
+                  </Alert>
+                )}
+              </Revealed>
             )}
             <Flex gap={{ default: "gapMd" }} flexWrap={{ default: "wrap" }}>
               <FlexItem>
@@ -539,18 +552,26 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
           {s.phase === "Refused" && (
             <Alert isInline variant="danger" title={`Refused: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
               <p>{reasonWords(s.reason) ?? "The switchover was refused."} Nothing was committed.</p>
-              {s.message && <p className="lw-break">{s.message}</p>}
+              {s.message && (
+                <p className="lw-break">
+                  <Prose text={s.message} />
+                </p>
+              )}
             </Alert>
           )}
           {s.phase === "Failed" && (
             <Alert isInline variant="danger" title={`Failed: ${s.reason ?? "no reason recorded"}`} className="lw-gap-below">
               <p>{reasonWords(s.reason) ?? "The switchover run failed; its signed record says what it applied."}</p>
-              {s.message && <p className="lw-break">{s.message}</p>}
+              {s.message && (
+                <p className="lw-break">
+                  <Prose text={s.message} />
+                </p>
+              )}
             </Alert>
           )}
           {groupsPartial(s) && (
             <Alert isInline variant="warning" title="Not every group is listed here" className="lw-gap-below">
-              {s.message}
+              <Prose text={s.message ?? ""} />
             </Alert>
           )}
           <OutcomeTable sw={s} plan={plan} target={target} />
@@ -623,7 +644,8 @@ function CutoverFlow() {
   const switchoverName = search.switchover;
   const sw = useSwitchover(ns, switchoverName);
   const r = restore.isFetchedAfterMount ? restore.data : undefined;
-  const refusal = r ? cutoverRefusal(r) : null;
+  const source = useSourceBackup(ns, r?.backupSetRef);
+  const refusal = r ? cutoverRefusal(r, source) : null;
 
   const beginReview = () => {
     if (!r) return;
@@ -789,8 +811,12 @@ function CutoverFlow() {
             {state.checks.every((c) => evidenceUnreadable(c.message)) && <p>{EVIDENCE_UNREADABLE_WORDS}</p>}
             {state.checks.map((c) => (
               <div key={c.id}>
-                <span className="lw-reason">{c.code ?? c.id}</span> {c.message}
-                {c.remedy && <div className="lw-subtle lw-small">{c.remedy}</div>}
+                <span className="lw-reason">{c.code ?? c.id}</span> <Prose text={checkMessage(c.message ?? "")} />
+                {c.remedy && (
+                  <div className="lw-subtle lw-small">
+                    <Prose text={c.remedy} />
+                  </div>
+                )}
               </div>
             ))}
           </Alert>

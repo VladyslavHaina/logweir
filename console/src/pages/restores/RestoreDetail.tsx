@@ -3,7 +3,7 @@
 // The old console's #/operations (restore) and #/history restore detail in one page.
 // It computes no state (the API's word is shown) and never merges the result with the
 // evidence: "the run passed" and "its signed scorecard verifies" are two facts.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
@@ -37,6 +37,8 @@ import {
   useCapabilities,
   useRestoreItem,
   useRestoreOperation,
+  useVerdictFollow,
+  verdictPending,
   type OperationView,
   type Restore,
 } from "../../api/restores";
@@ -51,6 +53,7 @@ import { CloneStatus } from "../cutover/CloneLifetime";
 import { TopicConfigurationResult } from "../cutover/TopicConfiguration";
 import { SwitchoverEntry } from "../cutover/SwitchoverEntry";
 import { cutoverRefusal } from "../cutover/Cutover";
+import { useSourceBackup } from "../../api/queries";
 import { Commands, Facts, Instant, RestoreStatus, shown } from "./parts";
 import { approvalRoute } from "./model";
 import {
@@ -274,6 +277,11 @@ function CompleteCoverage({ op, verified }: { op: OperationView; verified: boole
   );
 }
 
+export const VERDICT_PENDING_SENTENCE =
+  "The run has finished and the controller is verifying its signed scorecard. This page follows it until the verdict is recorded.";
+export const VERDICT_STOPPED_SENTENCE =
+  "The run finished, and after two minutes the controller has still recorded no verdict on its scorecard, so this page stopped following it. Nothing about the restore changed; read it again to see the verdict when it lands.";
+
 /** One page per restore: moving to another restore starts its page afresh. */
 export function RestoreDetail() {
   const { ns, name } = useParams({ from: "/$ns/restores/$name" });
@@ -283,10 +291,16 @@ export function RestoreDetail() {
 function Detail({ ns, name }: { ns: string; name: string }) {
   const navigate = useNavigate();
   const caps = useCapabilities(ns);
-  const restore = useRestoreItem(ns, name);
+  // DUI-38: a terminal restore whose verdict is still pending is followed until the
+  // verdict lands, for at most VERDICT_FOLLOW_MS (the decision is read below and fed back).
+  const [follow, setFollow] = useState(false);
+  const restore = useRestoreItem(ns, name, { follow });
   // While the run moves, its event stream (R1) writes the operation view and the poll stands down.
-  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && !restore.data.operation.terminal);
-  const operation = useRestoreOperation(ns, name, streaming);
+  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && (!restore.data.operation.terminal || follow));
+  const operation = useRestoreOperation(ns, name, streaming, follow);
+  const verdict = useVerdictFollow(verdictPending(restore.data?.operation) || verdictPending(operation.data));
+  const source = useSourceBackup(ns, restore.data?.backupSetRef);
+  useEffect(() => setFollow(verdict.following), [verdict.following]);
   const [showPlan, setShowPlan] = useState(false);
 
   const breadcrumb = (
@@ -323,7 +337,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
   const signed = op ? evidenceVerified(op) : verified;
   const failed = r.operation.terminal && (r.operation.state === "failed" || r.operation.state === "refused");
   // Theme A: a restore verified completely has positions to switch over (the review decides the rest).
-  const switchable = cutoverRefusal(r) === null;
+  const switchable = cutoverRefusal(r, source) === null;
   const complete = r.coverage?.requested === "complete";
   const scope = op?.verificationScope;
   const replayedMatch = op?.progress?.message?.match(/Replayed ([\d,]+) of ([\d,]+)/);
@@ -353,6 +367,33 @@ function Detail({ ns, name }: { ns: string; name: string }) {
       <PageSection>
         <div className="lw-stack">
           {op && <Awaiting ns={ns} r={r} op={op} />}
+          {verdict.following && (
+            <Content component="p" className="lw-subtle" role="status">
+              {VERDICT_PENDING_SENTENCE}
+            </Content>
+          )}
+          {verdict.stopped && (
+            <Alert
+              variant="info"
+              isInline
+              title="The verdict is still pending"
+              actionLinks={
+                <Button
+                  variant="link"
+                  isInline
+                  onClick={() => {
+                    verdict.again();
+                    void restore.refetch();
+                    void operation.refetch();
+                  }}
+                >
+                  Read it again
+                </Button>
+              }
+            >
+              {VERDICT_STOPPED_SENTENCE}
+            </Alert>
+          )}
           {r.operation.state === "queued" && <Alert variant="info" isInline title="Queued">{QUEUED_RUN_SENTENCE}</Alert>}
           <CreationStopped r={r} />
           {failed && (
@@ -532,7 +573,10 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                       { term: "Result", value: `${op.result.status}${typeof op.result.exitCode === "number" ? `, exit ${op.result.exitCode}` : ""}${op.result.exitReason ? ` (${op.result.exitReason})` : ""}` },
                       { term: "Outcome", value: <Claim value={outcomeShown(op)} verified={signed} /> },
                       { term: "Last phase completed", value: shown(op.result.lastPhaseCompleted) },
-                      { term: "Signature", value: `${op.verification.state}${op.verification.detail ? `: ${op.verification.detail}` : ""}` },
+                      {
+                        term: "Signature",
+                        value: op.verification.detail ? <Prose text={`${op.verification.state}: ${op.verification.detail}`} /> : op.verification.state,
+                      },
                       { term: "Verified at", value: <Instant value={op.verification.verifiedAt} exact /> },
                       op.verification.matchedKeyId ? { term: "Signed by key", value: <Ident value={op.verification.matchedKeyId} label="signer key id" /> } : null,
                       { term: "Trust", value: `${op.trust.state}, basis ${op.trust.basis}${op.trust.keyState ? `, key ${op.trust.keyState}` : ""}${op.trust.policy?.name ? `, policy ${op.trust.policy.name}` : ""}` },
@@ -699,7 +743,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                 </CardBody>
               </Card>
             ) : (
-              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} />
+              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} source={source} />
             )}
           </GridItem>
           {r.topicConfiguration && (
