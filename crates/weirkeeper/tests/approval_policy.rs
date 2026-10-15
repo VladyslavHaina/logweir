@@ -1467,9 +1467,11 @@ async fn dui43_an_admitted_switchover_keeps_its_approval_verified_past_its_expir
 
 #[tokio::test]
 async fn dui43_an_unused_switchover_approval_past_its_expiry_is_still_refused() {
-    // CONTROLS: no Job (never admitted), a bundle that is not this
-    // Switchover's, one carrying other bytes, and one admitted after the
-    // window: each is a request the expiry still refuses, with nothing kept.
+    // CONTROLS: no Job (never admitted), a Switchover that names another
+    // Approval, a bundle that is not this Switchover's, one carrying other
+    // approval or signature bytes, one older than the Approval, and one
+    // admitted after the window: each is a request the expiry still refuses,
+    // with nothing kept.
     let object = verified_sw_approval().await;
     let mut foreign: serde_json::Value =
         serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("JSON");
@@ -1477,7 +1479,37 @@ async fn dui43_an_unused_switchover_approval_past_its_expiry_is_still_refused() 
     let mut other_bytes: serde_json::Value =
         serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("JSON");
     other_bytes["data"]["approval.json"] = serde_json::json!("{}");
+    let mut other_signature: serde_json::Value =
+        serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("JSON");
+    other_signature["data"]["approval.sig"] = serde_json::json!("{}");
+    // The Switchover names another Approval: this one was never its authority.
+    let mut another_approval = sw_routes(
+        Some("sw1"),
+        Some(sw_bundle("2026-09-09T13:01:00Z", &object)),
+    );
+    for route in &mut another_approval {
+        if route.path_suffix == "/switchovers/sw1" {
+            route.body = route.body.replace(
+                r#""approvalRef":{"name":"a1"}"#,
+                r#""approvalRef":{"name":"a2"}"#,
+            );
+            assert!(route.body.contains(r#""name":"a2""#), "{}", route.body);
+        }
+    }
     for (label, routes) in [
+        ("the switchover names another approval", another_approval),
+        (
+            "other signature bytes",
+            sw_routes(Some("sw1"), Some(other_signature.to_string())),
+        ),
+        (
+            // Materialised at 12:50, before this Approval existed (12:55:30).
+            "a bundle older than the approval",
+            sw_routes(
+                Some("sw1"),
+                Some(sw_bundle("2026-09-09T12:50:00Z", &object)),
+            ),
+        ),
         (
             "not admitted",
             sw_routes(None, Some(sw_bundle("2026-09-09T13:01:00Z", &object))),
@@ -1503,6 +1535,23 @@ async fn dui43_an_unused_switchover_approval_past_its_expiry_is_still_refused() 
         assert_eq!(status.verified, Some(false), "{label}");
         assert_eq!(status.approver, None, "{label}");
     }
+    // The rule itself, asked directly: a bundle alone is no admission. Its
+    // caller reads no bundle without a Job, and the rule does not lean on that.
+    let switchover = |job: Option<&str>| -> weirkeeper::crds::switchover::Switchover {
+        serde_json::from_str(&switchover_body(job)).expect("a Switchover")
+    };
+    let bundle: k8s_openapi::api::core::v1::ConfigMap =
+        serde_json::from_str(&sw_bundle("2026-09-09T13:01:00Z", &object)).expect("a ConfigMap");
+    assert_eq!(
+        approval::switchover_admitted_under(&switchover(Some("sw1")), &object, Some(&bundle)),
+        Some(at("2026-09-09T13:01:00Z")),
+        "the control: admitted, at the bundle's creation"
+    );
+    assert_eq!(
+        approval::switchover_admitted_under(&switchover(None), &object, Some(&bundle)),
+        None,
+        "no Job recorded: never admitted, whatever bundle exists"
+    );
     // Admitted after its window closed: asked at that instant, still refused.
     let mut rewritten = object.clone();
     let withdrawn = sw_decide(&object, sw_routes(None, None), after_expiry()).await;
