@@ -476,6 +476,8 @@ async fn the_console_build_is_served_at_ui_and_nothing_else() {
     write("assets/index-DeF.css", b"a{}");
     write("assets/RedHatTextVF-Gh_i.woff2", b"wOF2");
     write("assets/PF-Bkg-Jk.svg", b"<svg/>");
+    // A file of the sign-in stylesheet's name never stands in for it (DUI-45).
+    write("sign-in.css", b"planted{}");
     for never in [
         "assets/stray.html",
         "assets/index-AbC_1-x.js.map",
@@ -507,8 +509,23 @@ async fn the_console_build_is_served_at_ui_and_nothing_else() {
             "assets/index-DeF.css",
             logweir_api::assets::ICON_PATH,
             "index.html",
+            logweir_api::assets::SIGN_IN_CSS_PATH,
         ],
-        "exactly the build's page, its hashed files and the compiled-in icon"
+        "exactly the build's page, its hashed files, the compiled-in icon and the sign-in \
+         page's rendered stylesheet"
+    );
+    // DUI-45: the sign-in refusal page's stylesheet, rendered from the console's
+    // own font, never the planted file of its name.
+    let css = app.get("/ui/sign-in.css").await;
+    assert_eq!(css.status, 200);
+    assert_eq!(
+        css.header("content-type").as_deref(),
+        Some("text/css; charset=utf-8")
+    );
+    let text = String::from_utf8(css.body.clone()).unwrap();
+    assert!(
+        text.contains("url(\"/ui/assets/RedHatTextVF-Gh_i.woff2\")") && !text.contains("planted"),
+        "{text}"
     );
     let index = app.get("/ui/").await;
     assert_eq!(index.status, 200);
