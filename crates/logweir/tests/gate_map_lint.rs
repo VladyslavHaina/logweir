@@ -243,10 +243,11 @@ const HIDDEN_READERS: &[(&str, &[&str])] = &[
             "unit-api",
             "unit-core",
             "unit-weirkeeper",
-            "unit-e2e",
             "docs",
         ],
     ),
+    // e2e's stack_params, in check today
+    ("docs/support-matrix.md", &["unit-e2e"]),
     ("docs/to-do/**", &["unit-logweir", "docs"]),
     ("README.md", &["unit-logweir", "unit-api", "docs"]),
     ("CONTRIBUTING.md", &["unit-logweir", "unit-api", "docs"]),

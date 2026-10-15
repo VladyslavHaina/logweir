@@ -210,7 +210,9 @@ readers = [
   "e2e/fixtures/**",
   "e2e/README.md",
   "examples/**",
-  "docs/**",
+  # the only docs/ files e2e/tests name
+  "docs/support-matrix.md",
+  "docs/verify_scorecard.py",
   "scripts/**",
   "justfile",
   ".github/workflows/**",
@@ -418,10 +420,10 @@ readers = [
   "console/tsconfig.json",
   # stack_params walks e2e/tests, e2e/compose and scripts, and reads
   # docs/support-matrix.md, the workflows and the justfile; check_image reads
-  # the Dockerfiles and third_party/
+  # the Dockerfiles and third_party/. No e2e binary names another docs/ file.
   "e2e/tests/**",
   "scripts/**",
-  "docs/**",
+  "docs/support-matrix.md",
   ".github/workflows/**",
   "Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper", ".dockerignore",
   "third_party/**",
