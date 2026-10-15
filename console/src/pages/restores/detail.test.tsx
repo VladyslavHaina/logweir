@@ -535,6 +535,38 @@ describe("DUI-22.3: a check row's remediation line", () => {
   });
 });
 
+describe("DUI-49.3: the target probe beside the readiness check", () => {
+  const show = (reachability: Record<string, unknown>) =>
+    render(
+      <CheckStep
+        readiness={{ result: null, boundHash: null, boundKey: null, error: null, starting: false, stoppedAt: null } as never}
+        refusal={null}
+        canCheck
+        hash="sha256:aa"
+        planProblem={null}
+        connection={{ name: "orders-dr", uid: "c1", namespace: "t", role: "target", bootstrapServers: ["b:9092"], reachability } as never}
+        onStart={() => undefined}
+        onCancel={() => undefined}
+      />,
+    );
+  const probe = () =>
+    [...document.querySelectorAll("dt")]
+      .find((dt) => dt.textContent === "Target probe (context)")
+      ?.nextElementSibling?.textContent ?? "";
+
+  it("says a reading is stale, and a probe in flight is probing, as the connection page does", () => {
+    show({ state: "reachable", reason: "Reachable", observedAt: new Date(Date.now() - 23 * 60_000).toISOString() });
+    expect(probe()).toBe("ReachableStale");
+    cleanup();
+    show({ state: "unknown", reason: "ProbeRunning" });
+    expect(probe()).toBe("Probing");
+    cleanup();
+    // CONTROL: a fresh reading is just that.
+    show({ state: "reachable", reason: "Reachable", observedAt: new Date(Date.now() - 60_000).toISOString() });
+    expect(probe()).toBe("Reachable");
+  });
+});
+
 describe("theme A's D6: the restore readiness check on an older runner", () => {
   it("lists runner.image not ready by CheckContractMismatch and runner.pod as a pod that ran", () => {
     const result = {

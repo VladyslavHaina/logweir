@@ -78,12 +78,6 @@ export function HealthStatus({ health }: { health: string | null | undefined }) 
   }
 }
 
-export function ReachStatus({ state }: { state: string }) {
-  if (state === "reachable") return <StatusLabel tone="success" text="Reachable" />;
-  if (state === "unreachable") return <StatusLabel tone="danger" text="Unreachable" />;
-  return <StatusLabel tone="neutral" text="Not checked yet" />;
-}
-
 /** Captured with a recovery point, or not (and why). */
 export function CaptureStatus({ captured, reason }: { captured: boolean; reason?: string | null }) {
   return captured ? <StatusLabel tone="success" text="Captured" /> : <StatusLabel tone="neutral" text="Not captured" title={reason ?? undefined} />;
