@@ -272,6 +272,9 @@ receipt_gen_changed_cases=0
 receipt_gen_unknown_cases=0
 receipt_sw_absent_cases=0
 receipt_sw_recorded_cases=0
+receipt_sr_absent_cases=0
+receipt_sr_captured_cases=0
+receipt_sr_uncaptured_cases=0
 receipt_sw_empty_cases=0
 while IFS=$'\t' read -r name want_rust want_py reason; do
     [ -n "$name" ] || continue
@@ -592,6 +595,37 @@ $rust_sw"
         case "$want_sw" in *"coverage not recorded"*) receipt_sw_absent_cases=$((receipt_sw_absent_cases + 1)) ;; esac
         case "$want_sw" in *"coverage recorded over"*) receipt_sw_recorded_cases=$((receipt_sw_recorded_cases + 1)) ;; esac
         case "$want_sw" in *"EMPTY CAPTURE"*) receipt_sw_empty_cases=$((receipt_sw_empty_cases + 1)) ;; esac
+        # PROD-03.1: both readers print the source registry's snapshot line --
+        # "registry not captured" for a receipt without the block or with an
+        # uncaptured one -- and the SAME line; what it says is derived here
+        # from the DOCUMENT.
+        rust_sr="$(grep -oE 'schema_registry: .*' "$tmp/rust.all" || true)"
+        py_sr="$(grep -oE 'schema_registry: .*' "$tmp/py.all" || true)"
+        [ -n "$rust_sr" ] || fail "$name: drill verify printed no schema_registry line for an accepted receipt"
+        if [ "$rust_sr" != "$py_sr" ]; then
+            fail "$name: the two readers print DIFFERENT schema_registry lines.
+  rust:   $rust_sr
+  python: $py_sr"
+        fi
+        want_sr="$("$PY" -c 'import json, sys
+b = json.load(open(sys.argv[1])).get("schema_registry")
+if b is None:
+    print("schema_registry: registry not captured:")
+elif not b["captured"]:
+    print("schema_registry: registry not captured (%s):" % b["reason"])
+else:
+    print("schema_registry: captured %d subject(s), %d version(s) in %s" % (b["subjects"], b["versions"], b["snapshot_key"]))' "$doc")"
+        case "$rust_sr" in
+            "$want_sr"*) ;;
+            *) fail "$name: the schema_registry line does not say what the receipt says.
+  want: $want_sr...
+  got:  $rust_sr" ;;
+        esac
+        case "$want_sr" in
+            "schema_registry: registry not captured:") receipt_sr_absent_cases=$((receipt_sr_absent_cases + 1)) ;;
+            "schema_registry: registry not captured ("*) receipt_sr_uncaptured_cases=$((receipt_sr_uncaptured_cases + 1)) ;;
+            *) receipt_sr_captured_cases=$((receipt_sr_captured_cases + 1)) ;;
+        esac
     fi
     echo "check-verifier-parity: $name  rust=$rust_rc python=$py_rc  ok  (backup receipt)"
 # A here-string, NOT `echo ... | while`, for the reason the first loop records.
@@ -621,6 +655,9 @@ if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ]
 fi
 if [ "$receipt_sw_absent_cases" -eq 0 ] || [ "$receipt_sw_recorded_cases" -eq 0 ] || [ "$receipt_sw_empty_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include a receipt without source_watermarks ($receipt_sw_absent_cases), one with them ($receipt_sw_recorded_cases) and an empty capture ($receipt_sw_empty_cases), so the coverage lines (PROD-02.1) were never told apart"
+fi
+if [ "$receipt_sr_absent_cases" -eq 0 ] || [ "$receipt_sr_captured_cases" -eq 0 ] || [ "$receipt_sr_uncaptured_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a receipt without schema_registry ($receipt_sr_absent_cases), one that captured it ($receipt_sr_captured_cases) and one that did not ($receipt_sr_uncaptured_cases), so the registry lines (PROD-03.1) were never told apart"
 fi
 echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $receipt_count backup-receipt documents"
 
@@ -2904,6 +2941,149 @@ for name in tcr1-under-1.9.0 tcr1-under-2.1.0 tcr2-stripped tcr3-twice tcr4-rese
     echo "check-verifier-parity: scorecard/creation-$name  rust=$rust_rc python=$py_rc  ok  (target creation refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_TARGET_CREATION_VERSION and $SCORECARD_SUBSET_TARGET_CREATION_VERSION scorecards that record what a run created, print the same line, and refuse each of TCR-1 to TCR-5 with the same words"
+
+# ---------------------------------------------------------------------------
+# PROD-03.2: `target.schemas` (scorecard 1.13.0, and 2.5.0), arms SC-1 to SC-3
+# ---------------------------------------------------------------------------
+# The schemas a restore put in the target registry keeping their IDs, or why
+# none were. Three documents both readers ACCEPT, with the `schemas:` line
+# compared byte for byte, and one per arm both readers REFUSE with the same
+# text. `FORMAT_VERSION_WITH_SCHEMAS` and `FORMAT_VERSION_SUBSET_WITH_SCHEMAS`;
+# a renumber moves them here.
+SCORECARD_SCHEMAS_VERSION="1.13.0"
+SCORECARD_SUBSET_SCHEMAS_VERSION="2.5.0"
+mkdir -p "$tmp/scorecard-sc"
+"$PY" - "$ROOT" "$tmp/scorecard-sc" "$SC_PT" "$SCORECARD_SCHEMAS_VERSION" \
+    "$SCORECARD_SUBSET_SCHEMAS_VERSION" <<'PYEOF'
+import base64, copy, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current, subset_current = sys.argv[4], sys.argv[5]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+corpus = root / "e2e" / "fixtures" / "invariants"
+plain = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+subset = json.loads((corpus / "subsets_2_0_sampled.json").read_text())
+SHA = "sha256:" + "7" * 64
+
+
+def imported(base, version=current, **over):
+    d = copy.deepcopy(base)
+    d["format_version"] = version
+    b = {"snapshot_sha256": SHA, "target_registry_url": "https://sr.example:8081",
+         "imported": [{"subject": "customer", "version": 1, "id": 4},
+                      {"subject": "orders-value", "version": 1, "id": 5}],
+         "imported_count": 2, "already_present": 1, "ids_not_in_snapshot": [99]}
+    b.update(over)
+    d["target"]["schemas"] = {k: v for k, v in b.items() if v is not None}
+    return d
+
+
+def not_imported(base, reason="noTargetRegistry", version=current):
+    d = copy.deepcopy(base)
+    d["format_version"] = version
+    d["target"]["schemas"] = {"not_imported": reason}
+    return d
+
+
+mixed = not_imported(plain)
+mixed["target"]["schemas"]["already_present"] = 3
+cases = {
+    "imported": imported(plain),
+    "subset": imported(subset, version=subset_current),
+    "not-imported": not_imported(plain, "noSnapshot"),
+    "sc1-under-1.12.0": imported(plain, version="1.12.0"),
+    "sc1-under-2.4.0": imported(subset, version="2.4.0"),
+    "sc2-reason-outside-the-set": not_imported(plain, "noReason"),
+    "sc2-not-imported-with-counts": mixed,
+    "sc2-no-registry-url": imported(plain, target_registry_url=None),
+    "sc3-count-short": imported(plain, imported_count=3),
+    "sc3-unsorted": imported(plain, imported=[{"subject": "orders-value", "version": 1, "id": 5},
+                                              {"subject": "customer", "version": 1, "id": 4}]),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+for name in imported subset not-imported; do
+    doc="$tmp/scorecard-sc/$name.json"
+    sig="$tmp/scorecard-sc/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/schemas-$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/schemas-$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE 'schemas: .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE 'schemas: .*' "$tmp/py.all" || true)"
+    case "$name" in
+        imported|subset) want="schemas: imported 2 subject-version(s) into https://sr.example:8081 keeping their source IDs, 1 already present; snapshot sha256:7777777777777777777777777777777777777777777777777777777777777777; record schema IDs the snapshot lacks: 99" ;;
+        not-imported) want="schemas: not imported (noSnapshot): the restored records carry their source schema IDs, which the target registry may not hold" ;;
+    esac
+    if [ "$rust_lines" != "$py_lines" ] || [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/schemas-$name: the schemas line differs between the readers or from its sentence.
+  rust:   $rust_lines
+  python: $py_lines
+  want:   $want"
+    fi
+    echo "check-verifier-parity: scorecard/schemas-$name  rust=$rust_rc python=$py_rc  ok  (schemas)"
+done
+if grep -q 'schemas: ' "$tmp/rust.plain" "$tmp/py.plain"; then
+    fail "scorecard/schemas-control: a document without target.schemas printed a schemas line"
+fi
+
+for name in sc1-under-1.12.0 sc1-under-2.4.0 sc2-reason-outside-the-set sc2-not-imported-with-counts sc2-no-registry-url sc3-count-short sc3-unsorted; do
+    doc="$tmp/scorecard-sc/$name.json"
+    sig="$tmp/scorecard-sc/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/schemas-$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/schemas-$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        sc1-*) want_msg="target.schemas is present but format_version does not define it: the block is defined from $SCORECARD_SCHEMAS_VERSION of format 1 and from $SCORECARD_SUBSET_SCHEMAS_VERSION of format 2" ;;
+        sc2-*) want_msg="target.schemas carries not_imported (noTargetRegistry or noSnapshot) and nothing else, or names the snapshot's sha256 and the target registry" ;;
+        sc3-*) want_msg="target.schemas.imported lists the first 256 of imported_count, sorted and distinct, and ids_not_in_snapshot at most 32 IDs from 1 to 16777215, sorted and distinct" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/schemas-$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/schemas-$name  rust=$rust_rc python=$py_rc  ok  (schemas refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_SCHEMAS_VERSION and $SCORECARD_SUBSET_SCHEMAS_VERSION scorecards that record the imported schemas, print the same line, and refuse each of SC-1 to SC-3 with the same words"
 
 # ---------------------------------------------------------------------------
 # POSITIONS MAPPING LOOP (PROD-04.2): the scorecard's

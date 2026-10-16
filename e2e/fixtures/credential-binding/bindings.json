@@ -212,6 +212,25 @@
         }
       },
       "binding": "v1:5b1e0000-0000-4000-8000-0000000000k4:sha256:91fa7974e1399c914ed620f6b28508401101ca0c49caaf2cf6eeb97fcec70446"
+    },
+    {
+      "uid": "5b1e0000-0000-4000-8000-0000000000k5",
+      "spec": {
+        "bootstrapServers": [
+          "kafka:9092"
+        ],
+        "auth": {
+          "mode": "plaintext"
+        },
+        "schemaRegistry": {
+          "url": "https://registry.example:8081",
+          "username": "sr-user",
+          "secretRef": {
+            "name": "kafka-credential"
+          }
+        }
+      },
+      "binding": "v1:5b1e0000-0000-4000-8000-0000000000k5:sha256:d051138434750bd012fef1a456d792217feebadbb4bf364a869a22ed2fc4d890"
     }
   ]
 }

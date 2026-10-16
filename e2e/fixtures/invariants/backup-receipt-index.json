@@ -838,5 +838,53 @@
     "python_exit": 1,
     "reason": "covered.from_ms 1757415739000 is not before covered.to_ms 1757415739000: the covered window's end is EXCLUSIVE, so an empty range covers no record",
     "arm": "covered.from_ms 1757415739000 is not before covered.to_ms 1757415739000: the covered window's end is EXCLUSIVE, so an empty range covers no record"
+  },
+  {
+    "id": "receipt_1_9_with_schema_registry",
+    "file": "receipt_1_9_with_schema_registry.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_9_registry_not_captured",
+    "file": "receipt_1_9_registry_not_captured.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "schema_registry_under_format_1_8_0",
+    "file": "schema_registry_under_format_1_8_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_registry is present but format_version \"1.8.0\" predates it: the field is defined from 1.9.0",
+    "arm": "schema_registry is present but format_version \"1.8.0\" predates it: the field is defined from 1.9.0"
+  },
+  {
+    "id": "schema_registry_reason_beside_captured",
+    "file": "schema_registry_reason_beside_captured.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_registry.reason is present exactly when captured is false, and is registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete",
+    "arm": "schema_registry.reason is present exactly when captured is false, and is registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete"
+  },
+  {
+    "id": "schema_registry_snapshot_of_another_run",
+    "file": "schema_registry_snapshot_of_another_run.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_registry names its snapshot (logweir/backups/<backup_id>/<run_id>.schema-registry.json and its sha256) and counts no more subjects than versions exactly when captured, and names and counts nothing otherwise",
+    "arm": "schema_registry names its snapshot (logweir/backups/<backup_id>/<run_id>.schema-registry.json and its sha256) and counts no more subjects than versions exactly when captured, and names and counts nothing otherwise"
+  },
+  {
+    "id": "schema_registry_ids_unsorted",
+    "file": "schema_registry_ids_unsorted.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "schema_registry.unresolved_references and ids_not_in_snapshot list at most 32 entries each, sorted and distinct, every reference at most 256 characters and every ID from 1 to 16777215",
+    "arm": "schema_registry.unresolved_references and ids_not_in_snapshot list at most 32 entries each, sorted and distinct, every reference at most 256 characters and every ID from 1 to 16777215"
   }
 ]

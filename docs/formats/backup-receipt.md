@@ -583,6 +583,26 @@ over the bound every reader caps it at
 
 ---
 
+## `schema_registry` — the source registry's snapshot (format 1.9.0)
+
+Present exactly when the source connection names a Schema Registry
+(`KafkaCluster.spec.schemaRegistry`, PROD-03.1). After the engine, the runner
+reads every subject (soft-deleted included) and every version with its ID, type,
+schema text and references through the registry's REST API, and writes them
+create-only beside this receipt as `<run_id>.schema-registry.json`
+(`{format: 1, captured_at, registry_url, versions: [...]}`). The block names it:
+`captured`, `snapshot_key`, `snapshot_sha256`, `subjects`, `versions`,
+`unresolved_references` (references to subject-versions the snapshot lacks,
+`<subject>@<version>`, at most 32) and `ids_not_in_snapshot` (schema IDs
+`schema_dependency` saw in the records that the snapshot lacks, at most 32).
+A capture that did not complete is `captured: false` with `reason`
+(`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge` over 100 000
+versions or 32 MiB, `snapshotIncomplete`); it never fails the backup. Either
+list non-empty, or `captured: false`, is incomplete registry coverage. A
+restore into a connection with a registry imports what its records reference,
+keeping the IDs (`docs/formats/drill-scorecard.md`, `target.schemas`). Absent:
+the registry was not captured.
+
 ## `consumer_positions` — consumer position evidence (format 1.7.0)
 
 **Why it exists (PROD-04.1).** A restore that brings a topic back still leaves
@@ -826,7 +846,7 @@ survive the source cluster. With the source gone:
 
 ---
 
-## The forty-five arms, and the positions document's fourteen
+## The forty-nine arms, and the positions document's fourteen
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -836,15 +856,15 @@ BOTH readers — compared byte-for-byte by
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
 arm 6–40, and
-`validate_invariants_has_exactly_forty_seven_return_err_statements` over the
-total — forty-five arms, forty-seven statements, because arm 5 is three since
+`validate_invariants_has_exactly_fifty_one_return_err_statements` over the
+total — forty-nine arms, fifty-one statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-forty-five arms in the same order.
+forty-nine arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -1182,6 +1202,26 @@ index order.
 
     > `covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but records["payments"] is 3: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition`
 
+Arms 46–49 read `schema_registry` (format 1.9.0, PROD-03.1) and nothing else,
+and run only when it is present.
+
+46. **`schema_registry` is present only under a minor of at least 9.**
+
+    > `schema_registry is present but format_version "1.8.0" predates it: the field is defined from 1.9.0`
+
+47. **A reason exactly when not captured, from the closed set.**
+
+    > `schema_registry.reason is present exactly when captured is false, and is registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete`
+
+48. **A captured block names its snapshot beside this receipt and counts no
+    more subjects than versions; an uncaptured one names and counts nothing.**
+
+    > `schema_registry names its snapshot (logweir/backups/<backup_id>/<run_id>.schema-registry.json and its sha256) and counts no more subjects than versions exactly when captured, and names and counts nothing otherwise`
+
+49. **The two lists are bounded, sorted and distinct.**
+
+    > `schema_registry.unresolved_references and ids_not_in_snapshot list at most 32 entries each, sorted and distinct, every reference at most 256 characters and every ID from 1 to 16777215`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -1225,12 +1265,13 @@ The `--scorecard` flag keeps its name even when it names a receipt. Renaming it
 would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
-**What each reader checks.** Both readers run **all forty-five arms above**
+**What each reader checks.** Both readers run **all forty-nine arms above**
 over a `--payload-type backup-receipt` document; each group of arms arrived in
 both readers together (1–5 in Task 5b, 6–11 in FX-4, 12–21 in PROD-05.1, 22–29
-in PROD-03.0, 36–40 in PROD-01.4a, 30–35 in PROD-04.1, 41–45 in PROD-02.1), so
+in PROD-03.0, 36–40 in PROD-01.4a, 30–35 in PROD-04.1, 41–45 in PROD-02.1,
+46–49 in PROD-03.1), so
 the two never disagreed in between. `logweir drill verify` prints `checked:
-the signature AND all forty-five backup-receipt invariants …`;
+the signature AND all forty-nine backup-receipt invariants …`;
 `docs/verify_scorecard.py` prints `verifier: verify_scorecard.py
 <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both print, in the same
 words, one line per topic for each block, or one line saying the block is not

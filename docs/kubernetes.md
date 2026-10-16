@@ -804,6 +804,41 @@ older than 630 s (`ProbeStale`) clears `reachable`, keeps `clusterId` and
 `observedAt`, and is probed again on the 315 s cadence. A `Restore` admits a
 target only on `reachable: true`.
 
+### Schema Registry (PROD-03.1, 03.2)
+
+`spec.schemaRegistry: {url, username?, secretRef?: {name, passwordKey}}` names the
+cluster's Confluent-compatible registry (immutable with the rest of `spec`; the
+password key defaults to `registry-password`; `username` and `secretRef` go
+together, for HTTP basic auth). The console writes the password into the
+connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
+
+- **Backup (source):** after the engine, the runner snapshots every subject and
+  version through the REST API into `<run_id>.schema-registry.json` beside the
+  receipt; the receipt's `schema_registry` block names it. A registry that does
+  not answer, refuses the credential, or is over 100 000 versions or 32 MiB never
+  fails the backup: the block says why it was not captured
+  ([backup-receipt.md](formats/backup-receipt.md#schema_registry--the-source-registrys-snapshot-format-190)).
+- **Restore (target):** before any topic is created, the runner reads the
+  framed schema IDs of every record it restores, takes the subjects holding them
+  and the subjects they reference, and registers what the target lacks in
+  `IMPORT` mode with the source's IDs and versions; each subject's mode is put
+  back exactly as it was. No record byte changes. Refused (exit 3, no topic
+  created): `SchemaConflict` (an ID or version held with other content),
+  `SchemaRegistryCannotKeepIds` (no `IMPORT` mode: Karapace, Apicurio's
+  compatibility API), `SchemaRegistryReadOnly`, `SchemaRegistryModeNotRestored`,
+  `SchemaSnapshotInvalid`, `SchemaRegistryUnreachable`. A target connection
+  without a registry is not refused; the scorecard says the schemas were not
+  imported. Imported schemas are never removed. The plan's
+  `target.schema_registry` must equal the target connection's
+  (`ConnectionPlanMismatch`).
+- **Checks:** `registry.reachable` (connection test and backup readiness,
+  advisory) and `target.schemas` (restore readiness, blocking) are listed only for
+  a connection that names a registry.
+- The registry Secret carries the connection's `logweir-binding` (it covers the
+  registry URL and username) and is projected as
+  `LOGWEIR_{SOURCE,TARGET}_REGISTRY_PASSWORD`, beside
+  `LOGWEIR_{SOURCE,TARGET}_REGISTRY_CREDENTIAL_BINDING`.
+
 ### Credential binding
 
 A credential Secret is used only when its data key `logweir-binding` equals the

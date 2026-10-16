@@ -181,8 +181,8 @@ original name: restored under the source's own topic names, into topics this run
 - `original name:` and its owner line appear only for a 1.8.0 restore under the
   source's names; the restored topic is a new generation of the name.
 
-A backup receipt has its own forty-five arms since format 1.8.0
-([the list](formats/backup-receipt.md#the-forty-five-arms-and-the-positions-documents-fourteen)),
+A backup receipt has its own forty-nine arms since format 1.9.0
+([the list](formats/backup-receipt.md#the-forty-nine-arms-and-the-positions-documents-fourteen)),
 and for an accepted receipt both readers print, per topic, its configuration
 capture (`config_coverage["orders"]: captured, message.timestamp.type
 LogAppendTime from dynamicDefaultBrokerConfig`, or `config_coverage: not

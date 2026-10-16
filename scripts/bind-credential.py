@@ -112,7 +112,8 @@ OBJECT_KINDS = {
 # archive LOCATION (their URL is the second path).
 INVENTORY = [
     (fq("kafkaclusters"), "KafkaCluster", "object",
-     [("spec", "auth", "secretRef", "name"), ("spec", "auth", "clientCertificate", "name")], None),
+     [("spec", "auth", "secretRef", "name"), ("spec", "auth", "clientCertificate", "name"),
+      ("spec", "schemaRegistry", "secretRef", "name")], None),
     (fq("backupdestinations"), "BackupDestination", "object",
      [("spec", "access", role, "secret", "name")
       for role in ("archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead")], None),
@@ -278,6 +279,10 @@ def kafka_binding(uid: str, spec: dict) -> str:
     servers = sorted({str(s).strip() for s in spec.get("bootstrapServers") or []})
     canonical = (f"logweir-credential-binding/v1\nuid={uid}\nbootstrap={','.join(servers)}\n"
                  f"mode={mode}\nusername={username}\ntls={_flag(tls)}\nca={ca}\n")
+    registry = spec.get("schemaRegistry") or {}
+    if registry.get("url"):
+        # PROD-03.1: the registry endpoint, only when the connection names one.
+        canonical += f"registry={registry['url']}\nregistryUsername={registry.get('username') or ''}\n"
     return f"v1:{uid}:sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -396,7 +401,8 @@ def object_target(kube: Kubectl, kind: str, name: str, secret: str) -> Target:
     detail: list[str] = []
     if kind == "KafkaCluster":
         names = {dig(spec, ("auth", "secretRef", "name")),
-                 dig(spec, ("auth", "clientCertificate", "name"))}
+                 dig(spec, ("auth", "clientCertificate", "name")),
+                 dig(spec, ("schemaRegistry", "secretRef", "name"))}
         computed = kafka_binding(uid, spec)
         published = status.get("credentialBinding") or ""
         endpoint = ",".join(spec.get("bootstrapServers") or [])

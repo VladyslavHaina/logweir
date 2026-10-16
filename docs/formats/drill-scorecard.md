@@ -68,6 +68,7 @@ chose.
 | 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
 | 1.11.0, 2.3.0 | PROD-05.2 | [`target.topic_configuration`](#targettopic_configuration-format-1110-and-230), arms TC-1 to TC-5 | a restore whose plan carries `target.topic_configuration` (2.3.0 for a subset) | MINOR, OD-7 (a) |
 | 1.12.0, 2.4.0 | PROD-04.2 | [`integrity.verification.positions_mapping`](#integrityverificationpositions_mapping-format-1120-and-240), arms PM-1 to PM-5 | a passing complete restore of a point that captured consumer groups (2.4.0 for a subset) | MINOR, OD-7 (a) |
+| 1.13.0, 2.5.0 | PROD-03.2 | [`target.schemas`](#targetschemas-format-1130-and-250), arms SC-1 to SC-3 | a restore whose point captured a registry or whose target connection names one (2.5.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -1225,6 +1226,29 @@ names a partition `complete.partitions[]` lists, in its restored topic, and
 one marked `PartitionNotRestored` names none; a group that was not captured has
 no entry. Both then print one `mapping:` line per entry. Applying the mapping
 is a `Switchover`'s ([kubernetes.md](../kubernetes.md#switching-consumer-groups-over)).
+
+### `target.schemas` (format 1.13.0 and 2.5.0)
+
+PROD-03.2. Present when the bound point's receipt captured a Schema Registry or
+the plan names a target registry (`target.schema_registry`, the target
+connection's). Before any topic is created, the run collects the Confluent
+framed schema IDs its records carry, takes every subject holding one and the
+subjects their references name, and registers what the target registry lacks
+in its `IMPORT` mode with the source's IDs and versions, so no record byte is
+rewritten. The block records `snapshot_sha256`, `target_registry_url`,
+`imported` (the first 256 subject-versions, sorted) and `imported_count`,
+`already_present`, and `ids_not_in_snapshot`; or only `not_imported`
+(`noTargetRegistry`: the point has a snapshot and the target connection names
+no registry; `noSnapshot`: the reverse). SC-1: only from 1.13.0 / 2.5.0. SC-2:
+`not_imported` from its closed set and nothing else, or the snapshot's digest
+and the target registry. SC-3: the lists bounded, sorted and distinct.
+A conflicting ID or subject-version (`SchemaConflict`), a registry that cannot
+keep IDs (`SchemaRegistryCannotKeepIds`), a read-only subject
+(`SchemaRegistryReadOnly`), a subject mode that could not be put back
+(`SchemaRegistryModeNotRestored`), a snapshot that is not the receipt's
+(`SchemaSnapshotInvalid`) or an unreachable registry
+(`SchemaRegistryUnreachable`) refuses the run, exit 3, before any topic is
+created. Imported schemas are never removed.
 
 ### `partial_reason` must SAY something
 
