@@ -902,6 +902,93 @@ spec:
                     nullable: true
                     type: array
                 type: object
+              interruption:
+                description: '**PROD-07.2.** A run that ended without a signed scorecard after it created its target topics (`phase: Interrupted`): why, the reconcile that verified what it left, and the cleanup. Absent on every other run.'
+                nullable: true
+                properties:
+                  attempts:
+                    description: 'How many reconcile Jobs were started: at most 3, five minutes apart.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  cause:
+                    description: '`Cancelled` (a cancel was requested), `RunnerStopped` (the runner was stopped or killed: a deleted or evicted pod, a deadline) or `RunFailed` (the run failed after it created its targets).'
+                    nullable: true
+                    type: string
+                  cleanup:
+                    description: The cleanup, once asked for.
+                    nullable: true
+                    properties:
+                      attempts:
+                        description: 'How many cleanup Jobs were started: at most 3, five minutes apart.'
+                        format: int64
+                        nullable: true
+                        type: integer
+                      jobRef:
+                        description: The current cleanup Job.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`, in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      phase:
+                        description: '`Removing`, `Removed` or `RemovalFailed`.'
+                        nullable: true
+                        type: string
+                      reason:
+                        description: Why it failed, when it did; bounded.
+                        maxLength: 1024
+                        nullable: true
+                        type: string
+                      requestedBy:
+                        description: Who asked for it, from `logweir.dev/cleanup-requested-by`.
+                        maxLength: 256
+                        nullable: true
+                        type: string
+                    type: object
+                  jobRef:
+                    description: The current reconcile Job.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  reconcileRunId:
+                    description: The run id of the reconcile's signed scorecard, which the cleanup reads.
+                    maxLength: 64
+                    nullable: true
+                    type: string
+                  requestedBy:
+                    description: Who asked for the cancel, from `logweir.dev/cancel-requested-by`.
+                    maxLength: 256
+                    nullable: true
+                    type: string
+                  runId:
+                    description: The interrupted run's id (its targets record is `logweir/drills/<runId>.targets.json`).
+                    maxLength: 64
+                    nullable: true
+                    type: string
+                  verification:
+                    description: '`Running`, `Done` or `Failed`: the reconcile''s state.'
+                    nullable: true
+                    type: string
+                  verificationReason:
+                    description: Why the reconcile failed (or the last attempt did); bounded.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  writerGoneAt:
+                    description: When the controller saw that no pod of the run was left.
+                    format: date-time
+                    nullable: true
+                    type: string
+                type: object
               jobRef:
                 description: The Job that ran, or is running, this restore.
                 nullable: true
@@ -973,7 +1060,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). Task 20 owns the phase vocabulary.'
+                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). `Interrupted` (PROD-07.2) is a run that ended without a signed scorecard after it created its target topics (`status.interruption`). Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
               progress:
