@@ -71,6 +71,9 @@ import {
   RESTORE_SEMANTICS_SENTENCE,
   RETRY_IDENTITY_SENTENCE,
   RETRY_OLD_RUN_SENTENCE,
+  RATE_LIMIT_HELP,
+  SCHEMA_PREVIEW_NOTE,
+  rateLimitWords,
   SCRATCH_MARKER_WARNING,
   SCRATCH_SENTENCE,
   TIME_BASIS_NOTE,
@@ -510,6 +513,16 @@ export function WhatStep({ control, point, errors }: { control: Control<WizardVa
           )}
         />
       )}
+      <Controller
+        control={control}
+        name="rateLimit"
+        render={({ field }) => (
+          <FormGroup label="Byte-rate limit, MB/s (optional)" fieldId="rate-limit">
+            <TextInput id="rate-limit" inputMode="decimal" value={field.value} onChange={(_e, t) => field.onChange(t)} validated={err(errors, "rateLimit") ? "error" : "default"} className="lw-short-input" />
+            <FieldHelp id="rate-limit" error={err(errors, "rateLimit")}>{RATE_LIMIT_HELP}</FieldHelp>
+          </FormGroup>
+        )}
+      />
     </Form>
   );
 }
@@ -798,6 +811,7 @@ export function CheckStep({
   const r = readiness.result;
   const running = r !== null && !r.terminal && readiness.stoppedAt === null;
   const rows = r?.checks ?? [];
+  const schemaRow = rows.find((c) => c.id === "target.schemas");
   const ok = r !== null && refusal === null;
   return (
     <>
@@ -878,6 +892,16 @@ export function CheckStep({
           )}
           {r && r.stale && <Content component="p" className="lw-subtle lw-small">Stale: {r.staleReasons.map(staleReasonLine).join("; ")}.</Content>}
           {running && rows.length === 0 && <LoadingRows rows={3} label="Checking" />}
+          {schemaRow && (
+            <>
+              <Title headingLevel="h3" size="lg" className="lw-gap-top">Schemas</Title>
+              <Flex gap={{ default: "gapSm" }} alignItems={{ default: "alignItemsCenter" }} id="schema-preview">
+                <CheckRowStatus c={schemaRow} />
+                <span>{schemaRow.message ? <Prose text={checkMessage(schemaRow.message)} /> : "No finding recorded."}</span>
+              </Flex>
+              <Content component="p" className="lw-subtle lw-small">{SCHEMA_PREVIEW_NOTE}</Content>
+            </>
+          )}
           {topicPreview && (
             <>
               <Title headingLevel="h3" size="lg" className="lw-gap-top">Topic configuration</Title>
@@ -957,6 +981,7 @@ export function ReviewStep({
           { term: "Into", value: `${fields.target.bootstrapServers.length ? v.target : "no target"}: ${mapping.map((m) => (m.source === m.target ? m.source : `${m.source} → ${m.target}`)).join(", ")}` },
           { term: "Mode", value: modeMeaning(fields.target.mode, fields.target.originalName === true) },
           { term: "Verification", value: fields.sample.coverage === "complete" ? `complete${typeof fields.sample.completeMaxRecords === "number" ? `, at most ${count(fields.sample.completeMaxRecords)} archived records` : ", no record bound"}` : "sampled: 25 records per partition and the manifest's counts" },
+          { term: "Byte-rate limit", value: rateLimitWords(fields.rateLimitBytesPerSec) },
           { term: "Replication factor", value: `${replication.value} (${replicationBasisText(replication, brokers)})` },
           { term: "Time basis", value: v.timeBasis ? "producer time (restore.time_basis: producerTime)" : "not stated: a LogAppendTime topic at this point is refused before anything is created" },
           { term: "Approval subject", value: original ? "originalName: only an approval signed for a restore under the original names authorises it" : "ordinary" },

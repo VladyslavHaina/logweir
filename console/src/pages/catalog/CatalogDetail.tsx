@@ -34,6 +34,7 @@ import { RESTORE_NEEDS_ROLE } from "../backups/verdict";
 import "../backups/evidence.css";
 import { ReadyStatus, whereFrom } from "./CatalogList";
 import { Prose } from "../../components/Prose";
+import { registryCaptureOf } from "../../api/od23";
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
   CATALOG_WINDOW_SENTENCE,
@@ -52,6 +53,7 @@ import {
   consumerPositionsWords,
   isRedacted,
   schemaDependentTopics,
+  registryCaptureWords,
   truncatedWords,
   viewIsUsable,
   catalogSentence,
@@ -197,7 +199,7 @@ function PointsCard({ ws, name }: { ws: string; name: string }) {
   const pageFacts = { viewExpired: pages.some((p) => p.viewExpired), backupVerdictsIncomplete: pages.find((p) => p.backupVerdictsIncomplete)?.backupVerdictsIncomplete };
   const rows = pages.flatMap((p) => p.items);
   const redacted = rows.some((p) => isRedacted(p.receiptKey) || isRedacted(p.backupId));
-  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p) })).filter((r) => r.topics.length > 0);
+  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p), captured: registryCaptureOf(p)?.captured === true })).filter((r) => r.topics.length > 0);
 
   return (
     <Card>
@@ -327,6 +329,7 @@ function PointsCard({ ws, name }: { ws: string; name: string }) {
                                   <Ident value={p.receiptSha256} label="receipt sha256" />
                                 </div>
                               </Term>
+                              <Term term="Schema Registry">{registryCaptureWords(registryCaptureOf(p))}</Term>
                               <Term term="Format">
                                 <Value value={p.formatVersion} />
                               </Term>
@@ -363,11 +366,12 @@ function PointsCard({ ws, name }: { ws: string; name: string }) {
                 <Content component="h3" className="lw-small">
                   Schema-dependent topics
                 </Content>
-                <Alert isInline isPlain variant="warning" title={SCHEMA_REGISTRY_NOT_CAPTURED} />
+                {schema.some((r) => !r.captured) && <Alert isInline isPlain variant="warning" title={SCHEMA_REGISTRY_NOT_CAPTURED} />}
                 <ul className="lw-plain-list lw-small">
                   {schema.map((r) => (
                     <li key={r.id} className="lw-break">
                       <span className="lw-mono">{r.id}</span>: {r.topics.join(", ")}
+                      {r.captured && <span className="lw-subtle"> (registry captured)</span>}
                     </li>
                   ))}
                 </ul>

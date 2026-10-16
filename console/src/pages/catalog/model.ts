@@ -9,7 +9,11 @@
 // 4. The view is a WINDOW and says so: an expired view is a missing view, not a
 //    missing archive.
 import type { Catalog, PointPage, PointView } from "../../api/backups";
-import { count } from "../../components/When";
+
+/** components/When's `count`, kept here so scripts/emit-schema-dependency.mjs can load this module under node (When is .tsx). */
+function count(n: number | null | undefined): string {
+  return typeof n === "number" ? n.toLocaleString("en-US") : "Not recorded";
+}
 
 type Condition = { type: string; status: string; reason?: string | null; message?: string | null };
 
@@ -300,7 +304,23 @@ export function consumerPositionsWords(e: Pick<PointView, "consumerPositions">):
 export const SCHEMA_REGISTRY_NOT_CAPTURED = "Registry not captured: applications may not read these records after restore.";
 
 export const SCHEMA_DEPENDENCY_NOTE =
-  "The backup that wrote these points judged their topics' archived records and found Confluent wire-format framing in their keys or values: a zero byte and a schema id that a schema registry issued. Logweir never contacts or captures a schema registry, so an application that deserializes the restored records needs the registry that issued these ids, reachable from where it runs. The restore copies the bytes unchanged either way, and nothing here blocks it.";
+  "The backup that wrote these points judged their topics' archived records and found Confluent wire-format framing in their keys or values: a zero byte and a schema id that a schema registry issued. A backup whose source connection names a Schema Registry captures it, and a restore into a target connection with a registry imports the schemas these records need, keeping their ids. Without that, an application that deserializes the restored records needs the registry that issued these ids. The restore copies the bytes unchanged either way.";
+
+const REGISTRY_REASONS: Record<string, string> = {
+  registryUnreachable: "the registry did not answer",
+  registryUnauthorized: "the registry refused the credential",
+  snapshotTooLarge: "the registry is larger than a snapshot holds (32 MiB, 100 000 versions)",
+  snapshotIncomplete: "some referenced schemas or ids are missing from the snapshot",
+};
+
+/** OD-23 (PROD-03.1): a backup's or point's Schema Registry capture in one line. Absent is "not captured". */
+export function registryCaptureWords(sr: { captured: boolean; subjects?: number | null; versions?: number | null; incompleteReason?: string | null } | null): string {
+  const why = (r: string) => REGISTRY_REASONS[r] ?? r;
+  if (!sr) return "Not captured";
+  if (!sr.captured) return `Not captured${sr.incompleteReason ? `: ${why(sr.incompleteReason)}` : ""}`;
+  const counts = `${sr.subjects ?? 0} ${sr.subjects === 1 ? "subject" : "subjects"}, ${sr.versions ?? 0} ${sr.versions === 1 ? "version" : "versions"}`;
+  return `Captured: ${counts}${sr.incompleteReason ? `; incomplete: ${why(sr.incompleteReason)}` : ""}`;
+}
 
 /** A point's schema-dependent topics, each as `topic (sides: schema ids …; basis)`. A point whose topics are not listed says nothing: not assessed, never "none". */
 export function schemaDependentTopics(e: Pick<PointView, "topics">): string[] {

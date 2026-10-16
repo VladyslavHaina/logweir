@@ -38,7 +38,8 @@ import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { Discovery } from "./Discovery";
-import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ProbeReason, Term, WriteOutcome } from "./parts";
+import { connectionRegistryOf } from "../../api/od23";
+import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ProbeReason, RegistryLine, Term, WriteOutcome } from "./parts";
 
 export const CONNECTION_CHECK_SENTENCE =
   "Test connection starts a readiness check: an isolated Job that projects this connection's own credential and dials these brokers now. What it records is that Job's own result at the moment it ran. It is not a promise about the next run, and Ready authorises nothing: every guard still runs when a backup or restore executes.";
@@ -83,6 +84,7 @@ function Probe({ c, onReRead, reading }: { c: Connection; onReRead: () => void; 
 
 function Settings({ c }: { c: Connection }) {
   const a = c.auth;
+  const registry = connectionRegistryOf(c);
   return (
     <Card>
       <CardHeader>
@@ -101,6 +103,16 @@ function Settings({ c }: { c: Connection }) {
           <Term term="TLS">{a.tls ? "On" : "Off"}</Term>
           <Term term="Private CA">
             {a.tlsCa ? `${a.tlsCa.kind === "secret" ? "Secret" : "ConfigMap"} ${a.tlsCa.name}, key ${a.tlsCa.key}` : "None: the runner image's own trust store"}
+          </Term>
+          <Term term="Schema Registry">
+            {registry ? (
+              <span className="lw-break">
+                {registry.url}
+                {registry.username ? `, user ${registry.username}` : ", no authentication"}
+              </span>
+            ) : (
+              "None"
+            )}
           </Term>
           <Term term="Marker topic">{c.markerTopic ?? <NotRecorded />}</Term>
           <Term term="Created">
@@ -193,6 +205,7 @@ export function ConnectionCheck({ ws, c, mayStart, readable }: { ws: string; c: 
                 <>
                   <LastTestLine test={c.lastTest} noun="connectivity check" subject="connection" />
                   {recorded.data && <ConnectionUsability preflight={recorded.data} />}
+                  {recorded.data && <RegistryLine preflight={recorded.data} />}
                   {recorded.isError && (
                     <Content component="p" className="lw-subtle lw-small">
                       The recorded check could not be read, so what this endpoint is usable for is not shown.
@@ -207,6 +220,7 @@ export function ConnectionCheck({ ws, c, mayStart, readable }: { ws: string; c: 
                 <>
                   <CheckResult preflight={check.data} stopped={stopped} onRunAgain={mayStart ? run : undefined} runAgainDisabled={start.isPending} />
                   <ConnectionUsability preflight={check.data} />
+                  <RegistryLine preflight={check.data} />
                 </>
               )}
             </div>

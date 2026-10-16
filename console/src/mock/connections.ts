@@ -5,6 +5,7 @@
 import type { components } from "../api/schema";
 import { connections, hex, requestId } from "./data";
 import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";
+import { connectionRegistryOf, type CreateConnectionRequest } from "../api/od23";
 
 type S = components["schemas"];
 type Connection = S["Connection"];
@@ -187,10 +188,24 @@ function connectionCheckResult(c: Connection, at = Date.now() + 4500): HeldCheck
           "the runner image was present and the container started [imageID=docker-pullable://registry.example/logweir@sha256:6aad79ee4625aed9555fd0de794ec7671f9247f5be590ed1e4b1c0d2f3a4b5c6]",
       }),
       ...capabilityRows(at, scope, reachable),
+      ...registryRows(c, at, scope),
     ],
-    warnings: [],
+    warnings: registryRows(c, at, scope).filter((r) => r.state !== "ready"),
     executionOnly: [],
   };
+}
+
+/** Connections made here whose registry password was typed as "wrong": the registry refuses it. No value is kept. */
+const registryRefused = new Set<string>();
+
+/** OD-23 (PROD-03.1): `registry.reachable`, advisory, on a connection that names a registry. */
+function registryRows(c: Connection, at: number, scope: CheckEntry["scope"]): CheckEntry[] {
+  const registry = connectionRegistryOf(c);
+  if (!registry) return [];
+  const advisory = { gating: "advisory" as const, scope };
+  return registryRefused.has(c.name)
+    ? [entry("registry.reachable", "notReady", "RegistryUnauthorized", at, { ...advisory, message: `${registry.url} answered 401 to the connection's registry credential`, remedy: "Add a new connection with the right registry password: a connection cannot be changed." })]
+    : [entry("registry.reachable", "ready", "RegistryReachable", at, { ...advisory, message: `${registry.url} answered with the connection's credential: 4 subjects` })];
 }
 
 // ------------------------------------------------------------------ topics
@@ -357,9 +372,14 @@ const HOST_PORT = /^[^\s:/@]+:\d{1,5}$/;
 const SASL = ["scramSha512", "scramSha256", "plain"];
 const connectionKeys = new Map<string, { name: string; digest: string }>();
 
-function createConnection(ws: string, key: string, body: S["CreateConnectionRequest"]): Response {
+function createConnection(ws: string, key: string, body: CreateConnectionRequest): Response {
   // Write-only fields hash as <write-only>: a value is not part of the request's identity.
-  const digest = JSON.stringify({ ...body, auth: { ...body.auth, credential: body.auth.credential ? "<write-only>" : undefined } });
+  const sr = body.schemaRegistry;
+  const digest = JSON.stringify({
+    ...body,
+    auth: { ...body.auth, credential: body.auth.credential ? "<write-only>" : undefined },
+    ...(sr ? { schemaRegistry: { ...sr, password: sr.password ? "<write-only>" : undefined } } : {}),
+  });
   const held = connectionKeys.get(`${ws}/${key}`);
   if (held) {
     if (held.digest !== digest) return problem(409, "idempotency_conflict", "This idempotency key was already used with a different request body.");
@@ -387,10 +407,13 @@ function createConnection(ws: string, key: string, body: S["CreateConnectionRequ
     }
   }
   if (a.mode === "plaintext" && a.credential) errors.push({ field: "auth.credential", code: "not_allowed", message: "plaintext takes no credential" });
+  if (sr && !/^https?:\/\/[^/@\s]+/.test(sr.url)) errors.push({ field: "schemaRegistry.url", code: "invalid_url", message: "must be an http or https URL with no userinfo" });
+  if (sr?.password && !sr.username) errors.push({ field: "schemaRegistry.username", code: "required", message: "a registry password needs a username" });
   if (errors.length > 0) return problem(422, "validation_failed", "One or more fields are invalid.", errors);
 
   const name = `conn-${base32(`${ws}/${key}`)}`;
-  const secret = a.mode === "plaintext" ? undefined : `${name}-credential`;
+  const secret = a.mode === "plaintext" && !sr?.password ? undefined : `${name}-credential`;
+  if (sr?.password === "wrong") registryRefused.add(name);
   if (secret) createdSecrets.push(secret);
   const item: Connection = {
     name,
@@ -410,6 +433,7 @@ function createConnection(ws: string, key: string, body: S["CreateConnectionRequ
       tlsCa: a.tlsCa ? { kind: "configMap", name: a.tlsCa.configMapKeyRef.name, key: a.tlsCa.configMapKeyRef.key } : undefined,
     },
     reachability: { state: "unknown", reason: "ProbeRunning" },
+    ...((sr ? { schemaRegistry: { url: sr.url, username: sr.username ?? null } } : {}) as object),
   };
   connections.unshift(item);
   probeFrom.set(name, Date.now());
@@ -435,7 +459,7 @@ export async function connectionsMock(request: Request, method: string, path: st
   }
   if (method === "POST" && /^\/workspaces\/[^/]+\/connections$/.test(path)) {
     if (key.length < 8) return problem(400, "idempotency_key_required", "This route requires an Idempotency-Key header.");
-    return createConnection(ws, key, (await request.json()) as S["CreateConnectionRequest"]);
+    return createConnection(ws, key, (await request.json()) as CreateConnectionRequest);
   }
   if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/connections\/([^/]+)$/))) {
     const c = find(p[1]!);

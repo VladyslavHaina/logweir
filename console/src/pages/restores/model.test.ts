@@ -116,6 +116,7 @@ const BLANK: WizardValues = {
   timeBasis: false,
   coverage: "sampled",
   completeMaxRecords: "",
+  rateLimit: "",
   target: "orders-dr",
   naming: "prefix",
   prefix: "",

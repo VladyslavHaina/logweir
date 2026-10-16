@@ -402,6 +402,17 @@ export function advisoryRows(p: Pick<Preflight, "checks" | "warnings">): CheckEn
   return rows;
 }
 
+/** OD-23 (PROD-03.1): the connection test's `registry.reachable` row as one line; nothing when the test had none. */
+export function RegistryLine({ preflight }: { preflight: Pick<Preflight, "checks" | "warnings"> }) {
+  const row = [...preflight.checks, ...preflight.warnings].find((c) => c.id === "registry.reachable");
+  if (!row) return null;
+  return (
+    <p className="lw-gap-top" id="registry-check-line">
+      <strong>Schema Registry:</strong> <CheckVerdict state={row.state} gating={row.gating} /> {row.message ? <Prose text={checkMessage(row.message)} /> : null}
+    </p>
+  );
+}
+
 const BASIS_WORDS: Record<string, string> = {
   expiry: "the expiry",
   planHash: "the plan hash",

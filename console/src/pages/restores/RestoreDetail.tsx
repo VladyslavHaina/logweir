@@ -22,6 +22,10 @@ import {
   FlexItem,
   Grid,
   GridItem,
+  Modal,
+  ModalBody,
+  ModalFooter,
+  ModalHeader,
   PageSection,
   Progress,
   ProgressMeasureLocation,
@@ -31,10 +35,12 @@ import {
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import RedoIcon from "@patternfly/react-icons/dist/esm/icons/redo-icon";
+import { interruptionOf, isInterrupted, restoreSchemasOf } from "../../api/od23";
 import {
   useApprovalPolicy,
   useApprovalRequest,
   useCapabilities,
+  useRestoreAction,
   useRestoreItem,
   useRestoreOperation,
   useVerdictFollow,
@@ -81,6 +87,16 @@ import {
   signedTimeBasisText,
   teardownLeftWords,
   verificationScopeSentence,
+  CANCEL_CONFIRM_SENTENCE,
+  CLEANUP_CONFIRM_SENTENCE,
+  INTERRUPTED_TITLE,
+  STOPPING_SENTENCE,
+  cleanupWords,
+  interruptionCause,
+  planRateLimit,
+  rateLimitWords,
+  reconcileWords,
+  restoreSchemasWords,
 } from "./words";
 import "./restores.css";
 import { Prose } from "../../components/Prose";
@@ -303,6 +319,8 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   const source = useSourceBackup(ws, restore.data?.backupSetRef);
   useEffect(() => setFollow(verdict.following), [verdict.following]);
   const [showPlan, setShowPlan] = useState(false);
+  const act = useRestoreAction(ws, name);
+  const [confirm, setConfirm] = useState<"cancel" | "cleanup" | null>(null);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
@@ -347,6 +365,17 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   const planBucket = planEvidenceBucket(r.planBytes);
   const evidenceKeys = op?.evidence.payloadKey && op.evidence.sidecarKey;
   const selection = scope?.selection ?? r.selection ?? null;
+  // PROD-07.2: Cancel while it has not ended; Interrupted with its partial targets, Retry and Clean up.
+  const interruption = interruptionOf(r);
+  const interrupted = isInterrupted(r.operation);
+  const stopping = !r.operation.terminal && !interrupted && r.operation.stateReason === "Stopping";
+  const mayCreate = caps?.restoreCreate !== false;
+  const cancellable = mayCreate && !r.operation.terminal && !interrupted && !stopping;
+  const partialTopics = [...new Set([...(scope?.complete?.partitions ?? []).map((p) => p.topic), ...r.newTopics])];
+  const cleanupLine = cleanupWords(interruption?.cleanup, interruption?.cleanupReason);
+  const schemasLine = restoreSchemasWords(restoreSchemasOf(r));
+  const retry = () => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { retryOf: r.name } });
+  const run = (action: "cancel" | "cleanup") => act.mutate(action, { onSettled: () => setConfirm(null) });
 
   return (
     <>
@@ -356,8 +385,16 @@ function Detail({ ws, name }: { ws: string; name: string }) {
         status={<RestoreStatus r={r} />}
         description={`From the point at ${exactUtc(r.pointInTime)} into ${r.target.clusterRef.name}.`}
         actions={
-          failed && caps?.restoreCreate !== false ? (
-            <Button variant="secondary" icon={<RedoIcon />} onClick={() => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { retryOf: r.name } })} id="retry-fresh-target">
+          cancellable ? (
+            <Button variant="secondary" isDanger onClick={() => setConfirm("cancel")} id="restore-cancel">
+              Cancel
+            </Button>
+          ) : interrupted && mayCreate ? (
+            <Button variant="secondary" icon={<RedoIcon />} onClick={retry} id="retry-new-topics">
+              Retry into new topics
+            </Button>
+          ) : failed && mayCreate ? (
+            <Button variant="secondary" icon={<RedoIcon />} onClick={retry} id="retry-fresh-target">
               Retry to a fresh target
             </Button>
           ) : verified && switchable && caps?.restoreCreate !== false ? (
@@ -399,6 +436,31 @@ function Detail({ ws, name }: { ws: string; name: string }) {
           )}
           {r.operation.state === "queued" && <Alert variant="info" isInline title="Queued">{QUEUED_RUN_SENTENCE}</Alert>}
           <CreationStopped r={r} />
+          {stopping && (
+            <Alert variant="info" isInline title="Stopping…" id="restore-stopping">
+              {STOPPING_SENTENCE}
+            </Alert>
+          )}
+          {interrupted && (
+            <Alert
+              variant="warning"
+              isInline
+              title={INTERRUPTED_TITLE}
+              id="restore-interrupted"
+              actionLinks={
+                interruption?.cleanupOffered && mayCreate ? (
+                  <Button variant="secondary" isDanger onClick={() => setConfirm("cleanup")} id="restore-cleanup">
+                    Clean up partial topics
+                  </Button>
+                ) : undefined
+              }
+            >
+              <p>{interruptionCause(interruption?.cause, interruption?.requestedBy)}</p>
+              <p>{reconcileWords(interruption?.verification, interruption?.verificationReason)}</p>
+              {cleanupLine && <p id="restore-cleanup-state">{cleanupLine}</p>}
+            </Alert>
+          )}
+          {act.isError && <ErrorState error={act.error} onRetry={() => act.reset()} />}
           {failed && (
             <Alert variant="danger" isInline title={`This restore ${r.operation.state === "refused" ? "was refused" : "failed"}${r.operation.stateReason ? `: ${r.operation.stateReason}` : ""}`}>
               {refusalSentence(op) && <p className="lw-break">{refusalSentence(op)}</p>}
@@ -410,7 +472,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
               {verificationScopeSentence(scope)}
             </Alert>
           )}
-          {op && (!op.terminal || verified) && (
+          {op && !interrupted && (!op.terminal || verified) && (
             <Card>
               <CardBody>
                 <Stages op={op} verified={signed} />
@@ -537,6 +599,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
                     { term: "Backup set", value: <Ident value={r.backupSetRef} label="backup set id" /> },
                     { term: "Archive", value: r.sourceDestinationRef ? `saved destination ${r.sourceDestinationRef.name}` : r.sourceArchive.url },
                     { term: "Deadline", value: `${Math.round(r.deadlineSeconds / 60)} min` },
+                    { term: "Byte-rate limit", value: rateLimitWords(planRateLimit(r.planBytes)) },
                   ]}
                 />
                 {r.planBytes ? (
@@ -636,6 +699,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
                     },
                     selectionWords(selection) ? { term: "Restored (signed)", value: <Claim value={selectionWords(selection)} verified={signed} /> } : null,
                     { term: "Time basis (signed)", value: r.timeBasis ? <Claim value={signedTimeBasisText(r.timeBasis)} verified={signed} /> : signedTimeBasisText(null) },
+                    schemasLine ? { term: "Schemas (signed)", value: <Claim value={schemasLine} verified={signed} /> } : null,
                   ]}
                 />
                 {scope && op?.terminal && <Content component="p" className="lw-gap-top">{verificationScopeSentence(scope)}</Content>}
@@ -764,6 +828,33 @@ function Detail({ ws, name }: { ws: string; name: string }) {
           )}
         </Grid>
       </PageSection>
+      {confirm && (
+        <Modal isOpen variant="small" onClose={() => setConfirm(null)} aria-labelledby="restore-confirm-title">
+          <ModalHeader title={confirm === "cancel" ? `Cancel ${r.name}?` : "Clean up the partial topics?"} labelId="restore-confirm-title" titleIconVariant="warning" />
+          <ModalBody>
+            {confirm === "cancel" ? (
+              <Content component="p">{CANCEL_CONFIRM_SENTENCE}</Content>
+            ) : (
+              <>
+                <ul className="lw-plain-list" aria-label="Topics to delete">
+                  {partialTopics.map((t) => (
+                    <li key={t} className="lw-mono lw-break">{t}</li>
+                  ))}
+                </ul>
+                <Content component="p" className="lw-gap-top">{CLEANUP_CONFIRM_SENTENCE}</Content>
+              </>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="danger" onClick={() => run(confirm)} isLoading={act.isPending} isDisabled={act.isPending} id="restore-confirm">
+              {confirm === "cancel" ? "Cancel the restore" : "Delete these topics"}
+            </Button>
+            <Button variant="link" onClick={() => setConfirm(null)}>
+              {confirm === "cancel" ? "Keep it running" : "Keep them"}
+            </Button>
+          </ModalFooter>
+        </Modal>
+      )}
     </>
   );
 }

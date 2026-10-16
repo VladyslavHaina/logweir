@@ -114,11 +114,12 @@ describe("the words", () => {
 
 // --------------------------------------------------------------- the page
 
-const net = vi.hoisted(() => ({ answers: new Map<string, unknown>(), asked: [] as string[] }));
+const net = vi.hoisted(() => ({ answers: new Map<string, unknown>(), asked: [] as string[], sent: [] as string[] }));
 vi.mock("../../mock/fetch", () => ({
   mockFetch: async (request: Request) => {
     const path = new URL(request.url).pathname.replace(/^.*?\/api\/v1/, "");
     net.asked.push(path);
+    if (request.method !== "GET") net.sent.push(`${request.method} ${path}`);
     const body = net.answers.get(path);
     if (path === "/session") {
       const caps = { restoreCreate: true, operationsRead: true, restoresRead: true, backupsRead: true };
@@ -132,6 +133,7 @@ vi.mock("../../mock/fetch", () => ({
 function showRestore(restore: Restore, operation?: OperationView, policy: unknown = null, extra: Record<string, unknown> = {}) {
   net.answers.clear();
   net.asked.length = 0;
+  net.sent.length = 0;
   for (const [path, body] of Object.entries(extra)) net.answers.set(path, body);
   net.answers.set(`/workspaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
   if (operation) net.answers.set(`/workspaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
@@ -616,5 +618,49 @@ describe("DUI-16: a value that is not a time never throws", () => {
     expect(timestampBoundWords(LONG_MAX)).toBe("Any age: the broker sets no bound (its default)");
     expect(timestampBoundWords(7 * 86_400_000)).toBe("Up to 7 days old (604,800,000 ms); an older record is refused or rewritten");
     expect(timestampBoundWords(null)).toBe("Not recorded");
+  });
+});
+
+describe("PROD-07.2: cancel and an interrupted restore", () => {
+  const running = (r: Restore): Restore => ({ ...r, operation: { state: "running", terminal: false, verificationState: "pending", verifiedSuccess: false } });
+  const movingOp = () => ({ ...O(subsetOperation), terminal: false, state: "running" as const, stage: "running" as const, verifiedSuccess: false });
+
+  it("offers Cancel while the run moves, asks first, sends one cancel, and then says Stopping", async () => {
+    const r = running(R(subsetRestore));
+    showRestore(r, movingOp());
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(screen.getByText(/the writer is stopped first/)).toBeTruthy();
+    expect(net.sent).toEqual([]);
+    const stopping = { ...r, operation: { ...r.operation, stateReason: "Stopping" } };
+    net.answers.set(`/workspaces/t/restores/${r.name}/cancel`, { item: stopping, requestId: "r" });
+    net.answers.set(`/workspaces/t/restores/${r.name}`, { item: stopping, requestId: "r" });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel the restore" }));
+    expect(await screen.findByText("Stopping…")).toBeTruthy();
+    expect(net.sent).toEqual([`POST /workspaces/t/restores/${r.name}/cancel`]);
+    // While it stops there is nothing more to cancel.
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
+  it("offers no Cancel on a restore that has ended (the control)", async () => {
+    showRestore(R(subsetRestore), O(subsetOperation));
+    await screen.findByText("Restored and verified");
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(screen.queryByText(/nothing was resumed/)).toBeNull();
+  });
+
+  it("an interrupted restore whose reconcile failed says why, keeps Retry and offers no Clean up", async () => {
+    const r = {
+      ...R(subsetRestore),
+      operation: { state: "interrupted", stateReason: "RunnerStopped", terminal: false, verificationState: "pending", verifiedSuccess: false },
+      interruption: { cause: "RunnerStopped", verification: "Failed", verificationReason: "the target credential was refused three times", cleanupOffered: false },
+    } as unknown as Restore;
+    showRestore(r, { ...O(subsetOperation), terminal: false, state: "interrupted" as never, verifiedSuccess: false });
+    expect(await screen.findByText("Stopped before it finished; nothing was resumed")).toBeTruthy();
+    expect(screen.getByText(/Its runner stopped/)).toBeTruthy();
+    expect(screen.getByText(/the target credential was refused three times/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Retry into new topics/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Clean up partial topics" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(screen.getAllByText("Interrupted").length).toBeGreaterThan(0);
   });
 });

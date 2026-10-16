@@ -428,3 +428,94 @@ export function timestampBoundWords(ms: number | null | undefined): string {
   if (ms < 0) return `${ms} ms, not a bound this page can read`;
   return `Up to ${duration(ms / 1000)} old (${ms.toLocaleString("en-US")} ms); an older record is refused or rewritten`;
 }
+
+// ------------------------------------------------- OD-23: interruption, schemas, rate
+
+export const STOPPING_SENTENCE =
+  "Stopping: the controller suspended the run's Job and the runner is stopping its engine. The restore becomes Interrupted only once no pod of its run is left; until then it may still be writing.";
+
+export const CANCEL_CONFIRM_SENTENCE =
+  "Cancel stops this restore. Before its run starts, nothing is created. While it runs, the writer is stopped first; any target topics it already created stay, are verified against the archive and are listed here, and you choose whether to clean them up. Nothing is resumed. A run that already signed its scorecard keeps its outcome.";
+
+export const INTERRUPTED_TITLE = "Stopped before it finished; nothing was resumed";
+
+const CAUSE_WORDS: Record<string, string> = {
+  Cancelled: "It was cancelled",
+  RunnerStopped: "Its runner stopped (the pod was deleted, evicted or ran out of time)",
+  RunFailed: "Its run failed after it had created its target topics",
+};
+
+/** Why a restore is Interrupted, in a sentence; an unknown cause is named as the API gave it. */
+export function interruptionCause(cause: string | null | undefined, requestedBy: string | null | undefined): string {
+  const said = cause ? (CAUSE_WORDS[cause] ?? `Cause ${cause}`) : "The cause is not recorded";
+  return cause === "Cancelled" && requestedBy ? `${said} by ${requestedBy}.` : `${said}.`;
+}
+
+/** What the reconcile of the partial targets says now. */
+export function reconcileWords(verification: string | null | undefined, reason: string | null | undefined): string {
+  switch (verification) {
+    case "Done":
+      return "The topics it created were verified against the archive, without restoring anything: the signed counts per partition are below.";
+    case "Failed":
+      return `The topics it created could not be verified${reason ? ` (${reason})` : ""}. The recovery point stays held, and Clean up is not offered without a signed record of what was created.`;
+    case "Running":
+      return "Verifying the topics it created against the archive, without restoring anything. The counts per partition appear here once that check signs its scorecard.";
+    default:
+      return "The topics it created have not been verified yet.";
+  }
+}
+
+export const CLEANUP_CONFIRM_SENTENCE =
+  "Deletes only these topics, each only while its topic ID is still the one this restore recorded when it created it; a topic someone recreated under the same name is left and named. Imported schemas are never removed. The recovery point is released once the cleanup succeeds.";
+
+/** The cleanup's state, in a sentence. */
+export function cleanupWords(cleanup: string | null | undefined, reason: string | null | undefined): string | null {
+  switch (cleanup) {
+    case "Removing":
+      return "Removing the partial topics.";
+    case "Removed":
+      return "The partial topics were removed. The recovery point is no longer held for this restore.";
+    case "RemovalFailed":
+      return `The cleanup did not remove every topic${reason ? `: ${reason}` : ""}. The recovery point stays held.`;
+    default:
+      return cleanup ? `Cleanup ${cleanup}${reason ? `: ${reason}` : ""}.` : null;
+  }
+}
+
+/** What the restore did with the archive's schemas (the scorecard's `schemas`), or null when it says nothing. */
+export function restoreSchemasWords(s: { imported?: { subject: string; version: number; id: number }[] | null; alreadyPresent?: number | null; notImported?: string | null } | null): string | null {
+  if (!s) return null;
+  if (s.notImported === "noTargetRegistry") return "Not imported: the target connection names no Schema Registry.";
+  if (s.notImported === "noSnapshot") return "Not imported: the backup captured no registry snapshot.";
+  if (s.notImported) return `Not imported (${s.notImported}).`;
+  const imported = s.imported ?? [];
+  const present = typeof s.alreadyPresent === "number" ? s.alreadyPresent : 0;
+  const shown = imported.slice(0, 20).map((i) => `${i.subject} v${i.version} (id ${i.id})`);
+  const head = `Imported ${imported.length} with the source's IDs; ${present} already present`;
+  return shown.length ? `${head}: ${shown.join(", ")}${imported.length > shown.length ? ` and ${imported.length - shown.length} more` : ""}.` : `${head}.`;
+}
+
+/** The byte-rate limit, typed in MB/s, as the plan's integer bytes per second; "" is no limit. */
+export function rateLimitBytes(text: string): number | null | "invalid" {
+  const t = text.trim();
+  if (!t) return null;
+  if (!/^[0-9]+(\.[0-9]{1,6})?$/.test(t)) return "invalid";
+  const bytes = Math.round(Number(t) * 1_000_000);
+  return bytes >= 1 && Number.isSafeInteger(bytes) ? bytes : "invalid";
+}
+
+export function rateLimitWords(bytes: number | null | undefined): string {
+  return typeof bytes === "number" ? `at most ${(bytes / 1_000_000).toLocaleString("en-US", { maximumFractionDigits: 6 })} MB/s (${bytes.toLocaleString("en-US")} bytes per second) for the whole restore` : "no limit";
+}
+
+export const RATE_LIMIT_HELP =
+  "Optional. At most this many megabytes per second of record keys and values, for the whole restore, every partition together, so a restore does not crowd the target cluster. Empty means no limit. It is part of the plan the approver sees.";
+
+/** The plan's `restore.rate_limit_bytes_per_sec`, or null. */
+export function planRateLimit(planBytes: string | null | undefined): number | null {
+  const v = planBlockValue(planBytes, "restore", "rate_limit_bytes_per_sec");
+  return v !== null && /^[0-9]+$/.test(v) ? Number(v) : null;
+}
+
+export const SCHEMA_PREVIEW_NOTE =
+  "A preview, from the schema IDs the backup's receipt lists for these topics. The run reads every selected record again and, before it creates any topic, imports exactly the subjects those records reference into the target connection's registry, keeping each schema's ID and version. An ID the target already holds with other content refuses the run before anything is written.";

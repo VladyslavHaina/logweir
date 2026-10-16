@@ -12,7 +12,8 @@ import type { components, operations } from "./schema";
 
 type S = components["schemas"];
 export type Connection = S["Connection"];
-export type CreateConnectionRequest = S["CreateConnectionRequest"];
+export type { CreateConnectionRequest } from "./od23";
+import type { CreateConnectionRequest } from "./od23";
 export type ConnectionAuthMode = S["ConnectionAuthMode"];
 export type Reachability = S["ReachabilityView"];
 export type LastTest = S["LastTestView"];
@@ -353,12 +354,17 @@ export interface ConnectionValues {
   tls: boolean;
   caName: string;
   caKey: string;
+  /** OD-23 (PROD-03.1): the optional Schema Registry, set when the connection is created. */
+  registryUrl: string;
+  registryUsername: string;
+  /** Write-only: goes into the connection's own Secret under `registry-password`. */
+  registryPassword: string;
 }
 
 export type ConnectionField = keyof ConnectionValues;
 
 /** The fields that carry a credential: read for the one request, then cleared. */
-export const CONNECTION_SECRET_FIELDS = ["password", "certificatePem", "privateKeyPem"] as const satisfies readonly ConnectionField[];
+export const CONNECTION_SECRET_FIELDS = ["password", "certificatePem", "privateKeyPem", "registryPassword"] as const satisfies readonly ConnectionField[];
 
 export const CONNECTION_DEFAULTS: ConnectionValues = {
   role: "source",
@@ -371,6 +377,9 @@ export const CONNECTION_DEFAULTS: ConnectionValues = {
   tls: true,
   caName: "",
   caKey: "",
+  registryUrl: "",
+  registryUsername: "",
+  registryPassword: "",
 };
 
 const HOST_PORT = /^(\[[0-9A-Fa-f:.]+\]|[^\s:[\]/@]+):([0-9]{1,5})$/;
@@ -429,7 +438,16 @@ export function connectionProblems(v: ConnectionValues): Partial<Record<Connecti
     else if (!isObjectName(caName)) p.caName = "The name of a ConfigMap in this workspace that holds the PEM CA certificate(s).";
     if (!isDataKey(caKey)) p.caKey = "The data key inside it: letters, digits, '-', '_' and '.'.";
   }
-  for (const f of ["servers", "username", "caName", "caKey"] as const) {
+  const registry = v.registryUrl.trim();
+  if (registry) {
+    const url = URL.canParse(registry) ? new URL(registry) : null;
+    if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) p.registryUrl = "An http or https URL, such as https://schema-registry.kafka.svc:8081.";
+    else if (url.username || url.password) p.registryUrl = "The URL carries no username or password: type them in the fields below.";
+  } else if (v.registryUsername.trim() || v.registryPassword) {
+    p.registryUrl = "A registry username or password needs the registry URL.";
+  }
+  if (v.registryPassword && !v.registryUsername.trim()) p.registryUsername = "A registry password goes with a username (HTTP basic authentication).";
+  for (const f of ["servers", "username", "caName", "caKey", "registryUrl", "registryUsername"] as const) {
     if (carriesKeyMaterial(v[f])) p[f] = KEY_IN_PLAIN_FIELD;
   }
   return p;
@@ -447,7 +465,15 @@ export function connectionBody(v: ConnectionValues): CreateConnectionRequest {
   if (v.caName.trim().length > 0) {
     auth.tlsCa = { configMapKeyRef: { name: v.caName.trim(), key: v.caKey.trim() } };
   }
-  return { role: v.role, bootstrapServers: serverList(v.servers), auth };
+  const body: CreateConnectionRequest = { role: v.role, bootstrapServers: serverList(v.servers), auth };
+  if (v.registryUrl.trim()) {
+    body.schemaRegistry = {
+      url: v.registryUrl.trim(),
+      ...(v.registryUsername.trim() ? { username: v.registryUsername.trim() } : {}),
+      ...(v.registryPassword ? { password: v.registryPassword } : {}),
+    };
+  }
+  return body;
 }
 
 /** The form field an API field path is about, so a 422 lands beside it. */
@@ -463,12 +489,16 @@ export function connectionField(path: string, mode: ConnectionAuthMode): Connect
   if (path === "auth.credential" || path === "auth.credentialRef") return mode === "mtls" ? "certificatePem" : "password";
   if (path === "auth.tlsCa.configMapKeyRef.key") return "caKey";
   if (path.startsWith("auth.tlsCa")) return "caName";
+  if (path === "schemaRegistry.username") return "registryUsername";
+  if (path === "schemaRegistry.password") return "registryPassword";
+  if (path.startsWith("schemaRegistry")) return "registryUrl";
   return undefined;
 }
 
 /** Drops the credential from a request once it has been sent, so nothing that holds the request keeps it. */
 export function forgetConnectionCredential(body: CreateConnectionRequest): void {
   delete body.auth.credential;
+  if (body.schemaRegistry) delete body.schemaRegistry.password;
 }
 
 // ----------------------------------------------------------------- reads

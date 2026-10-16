@@ -11,6 +11,7 @@ import { backups, connections, hex, pointOf, requestId, restores as baseRestores
 import { renderPlanBytes, type PlanFields } from "../pages/restores/plan";
 import { planBlockValue } from "../pages/restores/words";
 import { cloneOf, themeAPlanOf, topicConfigurationOf } from "./themeA";
+import { connectionRegistryOf, interruptionOf, type RestoreInterruption, type RestoreSchemas } from "../api/od23";
 
 type S = components["schemas"];
 type Restore = S["Restore"];
@@ -216,17 +217,144 @@ interface Kept {
   awaiting?: boolean;
   requester?: string;
   ticket?: string;
+  /** PROD-07.2: when the run stopped (a cancel, or its runner stopping), why, and when Clean up was asked. */
+  stoppedMs?: number;
+  cause?: string;
+  requestedBy?: string;
+  cleanupMs?: number;
+}
+
+// ------------------------------------------------------------- PROD-07.2
+
+const STOP_MS = 3000;
+const RECONCILE_MS = 4000;
+const CLEANUP_MS = 3000;
+
+/** A run stopped after it created its targets, its runner gone for a day: the partial targets verified, Clean up offered. */
+const interrupted: Restore = {
+  ...baseRestores[2]!,
+  name: "orders-drill-stopped-m3t8q",
+  uid: "4d8a2c6e-0b5f-4e19-8a37-5c1e9d3b7f02",
+  createdAt: iso(NOW - 22 * HOUR),
+  newTopics: ["drill3-orders", "drill3-orders-dlq", "drill3-payments"],
+  coverage: { requested: "complete", recorded: "complete", covered: true },
+  target: { clusterRef: { name: "orders-dr" }, mode: "newTopic", originalName: false, topicPrefix: "drill3-" },
+  pointInTime: iso(NOW - 23 * HOUR),
+};
+
+/** The Restore as a stop leaves it: Cancelled before it created anything, Stopping, then Interrupted. */
+function stoppedNow(k: Kept): Restore | null {
+  if (k.stoppedMs === undefined) return null;
+  const ran = k.stoppedMs - k.createdMs;
+  if (k.awaiting || (k.key !== undefined && ran < 2000)) {
+    return { ...k.item, operation: { state: "cancelled", stateReason: "Cancelled", terminal: true, verificationState: "notAttempted", verifiedSuccess: false } };
+  }
+  const t = Date.now() - k.stoppedMs;
+  if (t < STOP_MS) return { ...k.item, operation: { state: "running", stateReason: "Stopping", terminal: false, verificationState: "pending", verifiedSuccess: false } };
+  const verification = t < STOP_MS + RECONCILE_MS ? "Running" : "Done";
+  const cleanup = k.cleanupMs === undefined ? null : Date.now() - k.cleanupMs < CLEANUP_MS ? "Removing" : "Removed";
+  const interruption: RestoreInterruption = {
+    cause: k.cause ?? "Cancelled",
+    ...(k.requestedBy ? { requestedBy: k.requestedBy } : {}),
+    verification,
+    cleanupOffered: verification === "Done" && cleanup === null,
+    ...(cleanup ? { cleanup } : {}),
+  };
+  return {
+    ...k.item,
+    operation: { state: "interrupted" as Restore["operation"]["state"], stateReason: k.cause ?? "Cancelled", terminal: false, verificationState: "pending", verifiedSuccess: false },
+    ...({ interruption } as object),
+  };
+}
+
+/** The operation view of a stopped run: the reconcile's signed counts once it is done. */
+function stoppedOperation(k: Kept, r: Restore): OperationView {
+  const intr = interruptionOf(r);
+  const done = intr?.verification === "Done";
+  const at = k.stoppedMs!;
+  const conditions: S["ConditionView"][] = [
+    { type: "Admitted", status: "True", reason: "ApprovalVerified", message: "Plan approved; the approval verified.", lastTransitionTime: iso(k.createdMs) },
+  ];
+  if (r.operation.state !== "cancelled") {
+    conditions.push({ type: "Preparing", status: "True", reason: "CreatingTopics", message: `Created ${r.newTopics.length} topics on ${r.target.clusterRef.name}.`, lastTransitionTime: iso(k.createdMs + 2000) });
+    conditions.push({ type: "Running", status: "True", reason: "Replaying", message: "Replaying records from the archive.", lastTransitionTime: iso(k.createdMs + 6000) });
+  }
+  if (r.operation.stateReason === "Stopping") conditions.push({ type: "Running", status: "True", reason: "Stopping", message: "The run's Job is suspended; waiting for its pod to go.", lastTransitionTime: iso(at) });
+  if (intr) {
+    conditions.push({ type: "Interrupted", status: "True", reason: intr.cause ?? "Cancelled", message: "The run ended without a signed scorecard after it created its targets; nothing was resumed.", lastTransitionTime: iso(at + STOP_MS) });
+    if (done) conditions.push({ type: "Reconciled", status: "True", reason: "PartialTargetsVerified", message: "The partial targets were verified against the archive and the scorecard signed.", lastTransitionTime: iso(at + STOP_MS + RECONCILE_MS) });
+  }
+  if (r.operation.state === "cancelled") conditions.push({ type: "Failed", status: "True", reason: "Cancelled", message: "Cancelled before its run started; nothing was created.", lastTransitionTime: iso(at) });
+  // The first topic was part-way when the writer stopped: partition 0 whole, 1 part-way, the rest not reached.
+  const rows = done ? partitionRows(k.topics, PARTS, (t, p) => (t !== k.topics[0] ? 0 : p === 0 ? 118_241 : p === 1 ? 61_208 : 0), () => 118_241) : null;
+  const sum = (f: (x: { replay: { expected: number; matching: number; missing: number } }) => number) => (rows ?? []).reduce((a, b) => a + f(b), 0);
+  const complete: S["CompleteVerificationView"] | undefined = rows
+    ? { covered: true, partitionCount: rows.length, partitions: rows, recordsDecoded: sum((x) => x.replay.expected), offsetHoles: 0, segments: rows.length * 4, segmentsVerified: rows.length * 4, segmentsFailed: 0, segmentsUnverified: 0, replay: { expected: sum((x) => x.replay.expected), restored: sum((x) => x.replay.matching), matching: sum((x) => x.replay.matching), missing: sum((x) => x.replay.missing), unexpected: 0, duplicates: 0, outOfOrder: 0, mismatched: 0 } }
+    : undefined;
+  const signedAt = at + STOP_MS + RECONCILE_MS;
+  return {
+    kind: "restore",
+    name: r.name,
+    namespace: r.namespace,
+    uid: r.uid,
+    resourceVersion: String(71000 + Math.floor((Date.now() - at) / 1000)),
+    createdAt: r.createdAt,
+    lastUpdatedAt: iso(Math.min(Date.now(), signedAt)),
+    state: r.operation.state,
+    stateReason: r.operation.stateReason,
+    message: conditions[conditions.length - 1]?.message,
+    terminal: r.operation.terminal,
+    stale: false,
+    awaitingApproval: false,
+    verifiedSuccess: false,
+    targetMode: r.target.mode,
+    conditions,
+    diagnostics: [],
+    progress: { message: "" },
+    readiness: { state: "unknown", basis: "notImplemented" },
+    result: done ? { status: "notPass", exitCode: 2, exitReason: "fail-integrity", outcome: "fail-integrity", lastPhaseCompleted: 7 } : { status: r.operation.terminal ? "notPass" : "pending" },
+    verification: done ? { state: "valid", verifiedAt: iso(signedAt), matchedKeyId: SIGNER, payloadType: "application/vnd.logweir.scorecard+json" } : { state: r.operation.terminal ? "noEvidence" : "pending" },
+    trust: done ? { state: "verified", basis: "Current", signedAt: iso(signedAt - 1000), keyState: "Active", policy: { name: "team-a", generation: 2 } } : { state: "pending", basis: "None" },
+    evidence: done ? { payloadKey: `logweir/drills/${r.uid.slice(0, 8)}-reconcile.scorecard.json`, payloadSha256: `sha256:${hex(r.uid.charCodeAt(1) + 9, 64)}`, sidecarKey: `logweir/drills/${r.uid.slice(0, 8)}-reconcile.scorecard.sig` } : {},
+    verificationScope: complete ? { level: "sampled", coverage: "complete", complete } : { level: "none" },
+    ...(intr?.cleanup === "Removed" ? { teardown: { deleted: r.newTopics, deletedTruncated: false } } : {}),
+  } as OperationView;
+}
+
+/** PROD-03.2: what the scorecard says about schemas, for a restore into a connection with a registry or without one. */
+function schemasFor(r: Restore): RestoreSchemas {
+  const target = connections.find((c) => c.namespace === r.namespace && c.name === r.target.clusterRef.name);
+  if (!target || !connectionRegistryOf(target)) return { notImported: "noTargetRegistry" };
+  return {
+    imported: [
+      { subject: "orders-value", version: 1, id: 4 },
+      { subject: "orders-value", version: 2, id: 7 },
+      { subject: "com.ex.Order", version: 1, id: 6 },
+      { subject: "payments-value", version: 1, id: 5 },
+    ],
+    alreadyPresent: 0,
+  };
 }
 
 const store: Kept[] = [];
 const ready: Promise<void> = (async () => {
-  for (const r of [...baseRestores, failed, uncovered, subset]) {
+  for (const r of [...baseRestores, failed, uncovered, subset, interrupted]) {
     const topics = r === subset ? ["orders"] : ORDERS;
     const planBytes = mockPlan(r, topics, r === uncovered ? { completeMaxRecords: 2_000_000 } : {});
+    const passed = r.operation.state === "succeeded";
     store.push({
-      item: { ...r, planBytes, planBytesLength: new TextEncoder().encode(planBytes).length, planHash: await sha256(planBytes), sourceDestinationRef: { name: "primary" }, evidenceDestinationRef: { name: "primary" } },
+      item: {
+        ...r,
+        planBytes,
+        planBytesLength: new TextEncoder().encode(planBytes).length,
+        planHash: await sha256(planBytes),
+        sourceDestinationRef: { name: "primary" },
+        evidenceDestinationRef: { name: "primary" },
+        ...((passed && r !== interrupted ? { schemas: schemasFor(r) } : {}) as object),
+      },
       topics,
       createdMs: Date.parse(String(r.createdAt)),
+      ...(r === interrupted ? { stoppedMs: Date.parse(String(r.createdAt)) + 10 * MINUTE, cause: "RunnerStopped" } : {}),
     });
   }
 })();
@@ -241,6 +369,8 @@ const RECORDS = 1_182_410;
 
 /** A new restore moves through its stages once admitted; one waiting for approval does not. */
 function live(k: Kept): Restore {
+  const stopped = stoppedNow(k);
+  if (stopped) return stopped;
   if (k.key === undefined) return k.item;
   if (k.awaiting) return { ...k.item, operation: { state: "pending", stateReason: "ApprovalNotVerified", terminal: false, verificationState: "pending", verifiedSuccess: false } };
   const e = (Date.now() - k.createdMs) / 1000;
@@ -250,6 +380,7 @@ function live(k: Kept): Restore {
     ...k.item,
     coverage: { ...k.item.coverage, recorded: k.item.coverage.requested, ...(k.item.coverage.requested === "complete" ? { covered: true } : {}) },
     operation: { state: "succeeded", stateReason: "Ok", terminal: true, verificationState: "valid", verifiedSuccess: true, exitCode: 0, outcome: "pass" },
+    ...({ schemas: schemasFor(k.item) } as object),
   };
 }
 
@@ -282,6 +413,7 @@ const PARTS: Record<string, number> = { orders: 3, "orders-dlq": 1, payments: 6 
 
 function operationOf(k: Kept): OperationView {
   const r = live(k);
+  if (k.stoppedMs !== undefined) return stoppedOperation(k, r);
   const since = k.createdMs;
   const e = (Date.now() - since) / 1000;
   const done = r.operation.terminal;
@@ -546,6 +678,10 @@ function restoreChecks(ws: string, body: S["RestorePreflightRequest"]): { checks
       ? row("target.topicCreate", "ReplicationFactorExceedsBrokers", "notReady", { message: `${target} has ${brokers} brokers and the plan asks for ${rf} replicas`, remedy: `Set the replication factor to ${brokers} or fewer.` })
       : row("target.topicCreate", "TopicCreateAllowed", "ready"),
     row("approval.state", "SubjectNotCreated", "skipped", { message: "No Restore exists for this plan yet, so no approval can be checked." }),
+    // PROD-03.2: the target connection names a registry, so the check previews the import.
+    ...(connections.some((c) => c.namespace === ws && c.name === target && connectionRegistryOf(c))
+      ? [row("target.schemas", "SchemasImportable", "ready", { message: "will import 3 subjects (4 versions) with the source's IDs; none conflict. The run recomputes the set from every record." })]
+      : []),
   ];
   const blocking = out.filter((c) => c.state !== "ready");
   const aggregate = blocking.some((c) => c.state === "notReady") ? "notReady" : blocking.length ? "unknown" : "ready";
@@ -638,6 +774,22 @@ export async function restoresMock(request: Request): Promise<Response | null> {
     await ready;
     const k = list(m[1]!).find((x) => x.item.name === m![2]);
     return k ? json(200, { item: operationOf(k), requestId: requestId() }) : problem(404, "not_found", `No restore named ${m[2]}.`);
+  }
+  if (method === "POST" && (m = at(path, /^\/workspaces\/([^/]+)\/restores\/([^/]+)\/(cancel|cleanup)$/))) {
+    await ready;
+    const k = list(m[1]!).find((x) => x.item.name === m![2]);
+    if (!k) return problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
+    const now = live(k);
+    if (m[3] === "cancel") {
+      if (now.operation.terminal || interruptionOf(now)) return problem(409, "state_conflict", `Restore ${k.item.name} has ended; there is nothing to cancel.`);
+      if (k.stoppedMs === undefined) Object.assign(k, { stoppedMs: Date.now(), cause: "Cancelled", requestedBy: "https://dex.logweir.localtest.me#alice" });
+    } else {
+      if (k.cleanupMs === undefined && !interruptionOf(now)?.cleanupOffered) {
+        return problem(409, "state_conflict", "Clean up is offered only on an Interrupted restore whose partial topics were verified and signed.");
+      }
+      k.cleanupMs ??= Date.now();
+    }
+    return json(200, { item: live(k), requestId: requestId() });
   }
   if (method === "POST" && (m = at(path, /^\/workspaces\/([^/]+)\/preflights$/))) {
     return startCheck(m[1]!, request.clone());

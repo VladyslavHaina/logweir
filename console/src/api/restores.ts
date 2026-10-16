@@ -10,7 +10,8 @@ import { keys, useBackups, useConnections, useDestinations, useOperation, useRes
 export { verdictPending };
 import { grantOf, useCan, useSessionDoc } from "./session";
 import type { Clone } from "./switchovers";
-import type { components } from "./schema";
+import type { Client } from "openapi-fetch";
+import type { components, paths } from "./schema";
 
 type S = components["schemas"];
 export type Restore = S["Restore"];
@@ -302,4 +303,52 @@ export function useCreateRestore(ws: string) {
       call(() => api.POST("/api/v1/workspaces/{ws}/restores", { params: { path: { ws }, header: createHeaders(key) }, body })),
     onSuccess: () => client.invalidateQueries({ queryKey: restoreKeys.list(ws) }),
   });
+}
+
+/** PROD-07.2: Cancel, or Clean up an interrupted restore's partial topics. The answer is the
+ *  Restore as the request left it; the page then follows it as it moves. */
+export function useRestoreAction(ws: string, name: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (action: "cancel" | "cleanup") => restoreAction(ws, name, action),
+    onSuccess: (item) => {
+      client.setQueryData(restoreKeys.item(ws, name), item);
+      void client.invalidateQueries({ queryKey: restoreKeys.list(ws) });
+      void client.invalidateQueries({ queryKey: restoreKeys.operation(ws, name) });
+    },
+  });
+}
+
+// PROD-07.2's two routes, typed here until the OpenAPI document carries them (see od23.ts).
+
+type Action = {
+  parameters: { query?: never; header: { Origin: string }; path: { ws: string; name: string }; cookie?: never };
+  requestBody?: never;
+  responses: {
+    200: { headers: { [name: string]: unknown }; content: { "application/json": S["RestoreResponse"] } };
+    default: { headers: { [name: string]: unknown }; content: { "application/problem+json": S["Problem"] } };
+  };
+};
+type ActionPath = {
+  parameters: { query?: never; header?: never; path?: never; cookie?: never };
+  get?: never;
+  put?: never;
+  post: Action;
+  delete?: never;
+  options?: never;
+  head?: never;
+  patch?: never;
+  trace?: never;
+};
+type Od23Paths = {
+  "/api/v1/workspaces/{ws}/restores/{name}/cancel": ActionPath;
+  "/api/v1/workspaces/{ws}/restores/{name}/cleanup": ActionPath;
+};
+
+const actions = api as unknown as Client<paths & Od23Paths>;
+
+/** Cancel or Clean up: an annotation on the Restore, so a repeated click writes nothing (no Idempotency-Key). */
+export async function restoreAction(ws: string, name: string, action: "cancel" | "cleanup"): Promise<S["Restore"]> {
+  const path = action === "cancel" ? "/api/v1/workspaces/{ws}/restores/{name}/cancel" : "/api/v1/workspaces/{ws}/restores/{name}/cleanup";
+  return (await call(() => actions.POST(path, { params: { path: { ws, name }, header: { Origin: window.location.origin } } }))).item;
 }

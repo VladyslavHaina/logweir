@@ -29,6 +29,7 @@ import {
   type Destination,
   type RecoveryPoint,
 } from "./points";
+import { rateLimitBytes } from "./words";
 
 
 type S = components["schemas"];
@@ -49,6 +50,8 @@ export interface WizardValues {
   timeBasis: boolean;
   coverage: "complete" | "sampled";
   completeMaxRecords: string;
+  /** The byte-rate limit as typed, in MB/s; empty is no limit (PROD-00.3h). */
+  rateLimit: string;
   target: string;
   naming: "prefix" | "original";
   /** As typed; empty means the default for the point in time. */
@@ -401,12 +404,14 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
   const bound = complete ? boundOf(v.completeMaxRecords) : undefined;
   const choice = replicationChoice(ctx, v);
   const binding = pointBindingOf(p);
+  const rate = rateLimitBytes(v.rateLimit);
   return {
     backupSetRef: p.backupSetRef,
     topics: selectedTopics(p, v),
     ...(binding ? { point: binding } : {}),
     pointInTime: pit,
     timeBasis: v.timeBasis ? TIME_BASIS_PRODUCER_TIME : "",
+    ...(typeof rate === "number" ? { rateLimitBytesPerSec: rate } : {}),
     source: store,
     target: {
       bootstrapServers: ctx.connection?.bootstrapServers.slice() ?? [],
@@ -479,6 +484,7 @@ export function validate(ctx: WizardContext, v: WizardValues, f: PlanFields, des
   const rf = replicationProblem(replicationChoice(ctx, v), ctx.brokers);
   if (rf) out.replication = rf;
   if (!ctx.connection) out.target = "choose the target connection this restore writes to";
+  if (rateLimitBytes(v.rateLimit) === "invalid") out.rateLimit = "a number of megabytes per second greater than zero, such as 50 or 0.5, or empty for no limit";
   const ttl = v.scratch ? cloneTtlError(v.cloneTtl) : null;
   if (ttl) out.cloneTtl = ttl;
   if (originalNameChosen(v) && !v.noOwner) out.noOwner = "state that no declarative owner manages these names, or restore under a prefix";

@@ -51,11 +51,17 @@ const schema = z
     tls: z.boolean(),
     caName: z.string(),
     caKey: z.string(),
+    registryUrl: z.string(),
+    registryUsername: z.string(),
+    registryPassword: z.string(),
   })
   .superRefine(withProblems(connectionProblems));
 
 export const CREDENTIAL_NOTE =
   "The credential you type is sent once, to the Logweir service, which stores it in a Secret owned by and bound to this connection. It is never shown again, never kept by this page and never written to browser storage; no response can read it back.";
+
+export const REGISTRY_NOTE =
+  "Only when these topics' records carry Confluent wire-format schema IDs. A backup from a source connection with a registry captures every schema in it; a restore into a target connection with a registry imports the schemas the restored records need, keeping their IDs. A connection cannot be changed later: to add a registry, add a new connection. The password goes into this connection's own Secret, as the Kafka credential does.";
 
 export function AddConnection({
   ws,
@@ -84,8 +90,10 @@ export function AddConnection({
     for (const f of CONNECTION_SECRET_FIELDS) setValue(f, "");
   };
   // A credential typed for one kind of authentication never rides along with
-  // another, and none outlives the form.
-  useEffect(clearSecrets, [credentialKind]);
+  // another (the registry's is its own), and none outlives the form.
+  useEffect(() => {
+    for (const f of CONNECTION_SECRET_FIELDS) if (f !== "registryPassword") setValue(f, "");
+  }, [credentialKind, setValue]);
   useEffect(() => clearSecrets, []);
 
   const submit = handleSubmit((values) => {
@@ -126,6 +134,11 @@ export function AddConnection({
   useEffect(() => {
     if (caProblem) setCaExpanded(true);
   }, [caProblem]);
+  const registryProblem = Boolean(err("registryUrl") || err("registryUsername") || err("registryPassword"));
+  const [registryExpanded, setRegistryExpanded] = useState(false);
+  useEffect(() => {
+    if (registryProblem) setRegistryExpanded(true);
+  }, [registryProblem]);
 
   return (
     <Modal isOpen onClose={onClose} variant="medium" aria-labelledby="add-connection-title" aria-describedby="add-connection-description">
@@ -261,6 +274,43 @@ export function AddConnection({
                     </Field>
                   )}
                 />
+              </GridItem>
+            </Grid>
+          </ExpandableSection>
+          <ExpandableSection
+            toggleText="Schema Registry (optional)"
+            isIndented
+            isExpanded={registryExpanded}
+            onToggle={(_e, open) => setRegistryExpanded(open)}
+          >
+            <Content component="p" className="lw-subtle lw-small">
+              {REGISTRY_NOTE}
+            </Content>
+            <Controller
+              name="registryUrl"
+              control={control}
+              render={({ field }) => (
+                <Field id="connection-registry-url" label="Registry URL" error={err("registryUrl")} help="For example https://schema-registry.kafka.svc:8081. The connection's private CA, when set, is trusted for it too.">
+                  <TextInput {...controlState("connection-registry-url", err("registryUrl"))} type="url" value={field.value} onChange={(_e, v) => field.onChange(v)} onBlur={field.onBlur} ref={field.ref} autoComplete="off" />
+                </Field>
+              )}
+            />
+            <Grid hasGutter md={6}>
+              <GridItem>
+                <Controller
+                  name="registryUsername"
+                  control={control}
+                  render={({ field }) => (
+                    <Field id="connection-registry-username" label="Registry username" error={err("registryUsername")} help="Blank for a registry without authentication.">
+                      <TextInput {...controlState("connection-registry-username", err("registryUsername"))} value={field.value} onChange={(_e, v) => field.onChange(v)} onBlur={field.onBlur} ref={field.ref} autoComplete="off" />
+                    </Field>
+                  )}
+                />
+              </GridItem>
+              <GridItem>
+                <Field id="connection-registry-password" label="Registry password" error={err("registryPassword")} help="Entered once. Never shown again.">
+                  <TextInput {...controlState("connection-registry-password", err("registryPassword"))} type="password" autoComplete="new-password" {...register("registryPassword")} />
+                </Field>
               </GridItem>
             </Grid>
           </ExpandableSection>

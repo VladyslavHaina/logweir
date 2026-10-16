@@ -50,7 +50,7 @@ switcher only when the session holds roles in more than one.
 | `#/<ws>` | Overview |
 | `#/<ws>/backups`, `schedules`, `protection` | Protect; each has `/<name>` for one object |
 | `#/<ws>/restores`, `restores/<name>` | Restores and one restore's page |
-| `#/<ws>/restores/new?backup=&uid=`, `?catalog=&point=`, `?retryOf=` | the five-step wizard from a backup, a catalog point, or a failed restore (to a fresh target) |
+| `#/<ws>/restores/new?backup=&uid=`, `?catalog=&point=`, `?retryOf=` | the five-step wizard from a backup, a catalog point, or a failed or interrupted restore (into new topics) |
 | `#/<ws>/restores/<name>/cutover`, `switchovers`, `switchovers/<name>` | theme A's switchover review, and the Switchovers |
 | `#/<ws>/approvals`, `approvals/<restore>?hash=&approval=`, `approvals/switchover/<name>` | Approvals, one restore's, one switchover's |
 | `#/<ws>/catalog`, `trust` | the Recovery catalog and Trust |
@@ -159,6 +159,7 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
 | `src/api/session.tsx` | the session document under the gate: `useSessionDoc`, `useGrant`, `useCan` |
 | `src/api/stream.ts` | one run's event stream, written into the query cache |
 | `src/api/schema.d.ts` | generated from the schema; never edited by hand |
+| `src/api/od23.ts` | OD-23-core shapes the schema does not carry yet (the registry fields, a restore's interruption and schemas); goes once `npm run gen:api` carries them |
 | `src/app/` | the session gate, the shell (masthead, workspace switcher, shown only with more than one workspace, user menu, navigation with counts) and the Overview's numbers |
 | `src/lib/shell.ts` | `shellArg`: a value reaches a command an operator copies only shaped and single-quoted, or as a placeholder |
 | `src/router.tsx` | the hash routes; each page group adds its routes in one line |
