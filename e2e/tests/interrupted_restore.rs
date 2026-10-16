@@ -553,7 +553,7 @@ fn an_interrupted_restore_is_honest_live() {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    create_topic(&t1[1], PARTS);
+    create_topic_for_fixed_timestamps(&t1[1], PARTS, &[]);
     let spec_path = flag(&cancelled.argv, "--spec");
     let key_path = flag(&cancelled.argv, "--signing-key");
     let cleanup = logweir(&[
