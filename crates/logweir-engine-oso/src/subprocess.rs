@@ -7,7 +7,114 @@
 //! Kubernetes" true rather than aspirational.
 use logweir_core::engine::EngineError;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+/// **PROD-07.2: a stop reaches the engine.** Set once by [`request_stop`]
+/// (the runner's SIGTERM or SIGINT); never cleared. While it is set no engine
+/// is started, and the run signs nothing.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// The engine children this process is waiting for, each under the id of the
+/// [`run_engine`] call that started it. A child stays here until it has been
+/// reaped, so a signal sent while the lock is held never reaches a reused PID.
+static CHILDREN: Mutex<Vec<(u64, Child)>> = Mutex::new(Vec::new());
+static NEXT_CHILD: AtomicU64 = AtomicU64::new(0);
+
+/// How long an engine has between the forwarded SIGTERM and the SIGKILL.
+pub const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// Whether this process was asked to stop.
+#[must_use]
+pub fn stop_requested() -> bool {
+    STOP.load(Ordering::SeqCst)
+}
+
+/// **Stop the engine**: remember the stop, send SIGTERM to every engine child,
+/// and SIGKILL each one still running [`STOP_GRACE`] later. Called by the
+/// runner's signal handler; idempotent.
+pub fn request_stop() {
+    if STOP.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let ids: Vec<u64> = match CHILDREN.lock() {
+        Ok(children) => children
+            .iter()
+            .map(|(id, child)| {
+                // `pid_t` fits every PID this process can hold.
+                let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+                *id
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    if ids.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(STOP_GRACE);
+        if let Ok(mut children) = CHILDREN.lock() {
+            for (id, child) in children.iter_mut() {
+                if ids.contains(id) {
+                    // `Child::kill` is SIGKILL.
+                    let _ = child.kill();
+                }
+            }
+        }
+    });
+}
+
+/// The argument that makes the `logweir` binary the engine's launcher
+/// ([`exec_engine`]). Not a subcommand: it is never typed.
+pub const ENGINE_EXEC_ARG: &str = "__engine-exec";
+
+/// The launcher [`run_engine`] starts the engine through, when the binary
+/// registered one ([`launch_engines_through`]).
+static LAUNCHER: OnceLock<PathBuf> = OnceLock::new();
+
+/// **Linux: the engine dies with the runner.** The `logweir` binary registers
+/// itself here at start; every engine is then started as `logweir
+/// __engine-exec <parent pid> <engine> <args…>`, which sets
+/// `PR_SET_PDEATHSIG(SIGKILL)` and execs the engine ([`exec_engine`]). The
+/// death signal survives `exec`, so a SIGKILLed runner leaves no engine
+/// writing. Library callers (tests) never register one and start the engine
+/// directly.
+pub fn launch_engines_through(launcher: PathBuf) {
+    if cfg!(target_os = "linux") {
+        let _ = LAUNCHER.set(launcher);
+    }
+}
+
+/// The launcher's body: `args` is `<parent pid> <engine> <args…>`. Returns
+/// only when it could not exec, with the exit code to use.
+#[must_use]
+pub fn exec_engine(args: &[std::ffi::OsString]) -> i32 {
+    use std::os::unix::process::CommandExt as _;
+    let (Some(parent), Some(binary)) = (args.first(), args.get(1)) else {
+        eprintln!("{ENGINE_EXEC_ARG}: expected <parent pid> <engine> [args…]");
+        return 1;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL) {
+            eprintln!("{ENGINE_EXEC_ARG}: PR_SET_PDEATHSIG failed: {e}");
+            return 1;
+        }
+        // The parent may have died before the death signal was armed.
+        if parent.to_str() != Some(&nix::unistd::getppid().to_string()) {
+            eprintln!("{ENGINE_EXEC_ARG}: the runner is gone; the engine is not started");
+            return 1;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = parent;
+    let err = Command::new(binary).args(&args[2..]).exec();
+    eprintln!("{ENGINE_EXEC_ARG}: {}: {err}", Path::new(binary).display());
+    127
+}
 
 /// The destination CA bundle the controller projected into the runner pod.
 /// Set only for a destination-backed run whose `BackupDestination`
@@ -171,10 +278,15 @@ pub fn scan_unknown_key_warnings(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Runs `binary` with `args`, capturing stdout/stderr in full (this is
-/// `Command::output`, a batch capture — the child is not streamed live; every
-/// line is handed to `on_line` only after the process has exited), and
-/// extracts every unknown-config-key warning.
+/// Runs `binary` with `args`, capturing stdout/stderr in full (a batch
+/// capture — the child is not streamed live; every line is handed to
+/// `on_line` only after the process has exited), and extracts every
+/// unknown-config-key warning.
+///
+/// The child is spawned and supervised rather than run with
+/// `Command::output`, so a stop ([`request_stop`]) reaches it: SIGTERM, then
+/// SIGKILL after [`STOP_GRACE`]. Once a stop was requested no engine is
+/// started.
 ///
 /// # Which stream carries the warning [VERIFIED, both points below]
 ///
@@ -210,7 +322,16 @@ pub fn run_engine(
     args: &[&str],
     on_line: &mut dyn FnMut(&str, &str),
 ) -> Result<EngineRun, EngineError> {
-    let mut command = Command::new(binary);
+    let mut command = match LAUNCHER.get() {
+        Some(launcher) => {
+            let mut c = Command::new(launcher);
+            c.arg(ENGINE_EXEC_ARG)
+                .arg(std::process::id().to_string())
+                .arg(binary);
+            c
+        }
+        None => Command::new(binary),
+    };
     command
         .args(args)
         // `warn`, not `error`: the unknown-key readback depends on the
@@ -226,11 +347,9 @@ pub fn run_engine(
     if let Some(bundle) = engine_trust_bundle(on_line) {
         command.env("SSL_CERT_FILE", &bundle);
     }
-    let out = command
-        .output()
-        .map_err(|e| EngineError::Operational(format!("{}: {e}", binary.display())))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let (status, stdout, stderr) = supervise(command, binary)?;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
     for l in stderr.lines() {
         on_line("stderr", l);
     }
@@ -238,7 +357,7 @@ pub fn run_engine(
         on_line("stdout", l);
     }
     Ok(EngineRun {
-        exit_code: out.status.code().unwrap_or(-1),
+        exit_code: status.code().unwrap_or(-1),
         unknown_key_warnings: {
             // BOTH streams: see the doc comment above.
             let mut v = scan_unknown_key_warnings(&stdout);
@@ -248,4 +367,88 @@ pub fn run_engine(
         stdout,
         stderr,
     })
+}
+
+/// Spawn `command` with both streams piped, register the child for
+/// [`request_stop`], and wait for it while draining both pipes.
+fn supervise(
+    mut command: Command,
+    binary: &Path,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), EngineError> {
+    use std::io::Read as _;
+    let failed = |e: std::io::Error| EngineError::Operational(format!("{}: {e}", binary.display()));
+    let id = NEXT_CHILD.fetch_add(1, Ordering::SeqCst);
+    let (out, err) = {
+        // The stop check and the registration under one lock, so a stop
+        // either finds this child or prevents it.
+        let mut children = CHILDREN
+            .lock()
+            .map_err(|_| EngineError::Operational("the engine registry is poisoned".into()))?;
+        if stop_requested() {
+            return Err(EngineError::Operational(
+                "the run was stopped (SIGTERM or SIGINT) before the engine started".into(),
+            ));
+        }
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(failed)?;
+        let out = child.stdout.take();
+        let err = child.stderr.take();
+        children.push((id, child));
+        (out, err)
+    };
+    // Each pipe is drained on its own thread, which hands its bytes back on a
+    // channel: after a stop, a grandchild that kept a pipe open (a shell's
+    // `sleep`, the docker client of `engine-docker.sh`) must not hold the run
+    // past the pod's grace, so the wait for the bytes is then bounded.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut bytes);
+            }
+            let _ = tx.send(bytes);
+        });
+        rx
+    };
+    let out = drain(out.map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let err = drain(err.map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let status = loop {
+        {
+            let mut children = CHILDREN
+                .lock()
+                .map_err(|_| EngineError::Operational("the engine registry is poisoned".into()))?;
+            let Some(i) = children.iter().position(|(c, _)| *c == id) else {
+                return Err(EngineError::Operational(
+                    "the engine child left the registry".into(),
+                ));
+            };
+            match children[i].1.try_wait() {
+                Ok(Some(status)) => {
+                    children.remove(i);
+                    break status;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let (_, mut child) = children.remove(i);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(failed(e));
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| -> Vec<u8> {
+        if stop_requested() {
+            rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
+        } else {
+            rx.recv().unwrap_or_default()
+        }
+    };
+    Ok((status, collect(out), collect(err)))
 }

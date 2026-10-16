@@ -88,7 +88,15 @@ mkdir -p "$mount"
 #   `docker run -e NAME` with no `=` passes the caller's value and passes
 #   NOTHING when the caller does not have it set, so a plaintext run is
 #   unaffected: no variable is created inside the container.
-exec docker run --rm -i \
+# PROD-07.2: THE CONTAINER IS NAMED PER RUN AND KILLED ON SIGTERM. `logweir`
+# stops its engine with SIGTERM, then SIGKILL after 10 s; a SIGKILL of the
+# `docker run` client would leave the container writing. So this script stays
+# the engine's process, and a SIGTERM or SIGINT kills the container by name. A
+# SIGKILLed `logweir` (no handler runs) can still leave it running; Linux CI
+# runs the native engine, which dies with `logweir` (PR_SET_PDEATHSIG).
+name="logweir-engine-$$-$(date +%s)"
+trap 'docker kill "$name" >/dev/null 2>&1; exit 143' TERM INT
+docker run --rm -i --name "$name" \
   --platform "$platform" \
   --user 0:0 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e RUST_LOG \
@@ -101,4 +109,5 @@ exec docker run --rm -i \
       if [ -z "$gw" ]; then echo "engine-docker: no host.docker.internal" >&2; exit 1; fi
       printf "%s\tlocalhost\n%s\thost.docker.internal\n::1\tip6-localhost ip6-loopback\n" \
         "$gw" "$gw" > /etc/hosts
-      exec kafka-backup "$@"' kafka-backup "$@"
+      exec kafka-backup "$@"' kafka-backup "$@" &
+wait $!

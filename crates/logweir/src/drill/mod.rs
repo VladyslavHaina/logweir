@@ -17,6 +17,7 @@ pub mod phase7_verify;
 pub mod phase8_score;
 pub mod phase9_teardown;
 pub mod phase9_transition;
+pub mod reconcile;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
@@ -32,6 +33,7 @@ use logweir_core::scorecard::{
 };
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::Store;
+use logweir_engine_oso::subprocess;
 use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicCreator, TopicDeleter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -261,6 +263,11 @@ pub struct RunArgs {
     pub kafka_topic_resources: Option<PathBuf>,
     /// `--strimzi-cluster`: count only resources labelled for this cluster.
     pub strimzi_cluster: Option<String>,
+    /// `--run-id` (PROD-07.2). For `restore run`, the id this run uses, so
+    /// the controller that started it can name its targets record after its
+    /// pod is gone; absent, one is minted. For `restore reconcile`, the
+    /// interrupted run it reconciles.
+    pub run_id: Option<String>,
 }
 
 /// Controller-pinned identity and byte digests carried by a new Restore Job's
@@ -909,7 +916,19 @@ pub fn run(args: RunArgs) -> ExitCode {
 /// both `restore run` and `drill run`.
 pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
     // Spec §13: structured JSON logs on stdout with run_id on every line.
-    let run_id = crate::ids::new_run_id();
+    // The controller's id when it named one (PROD-07.2), else a fresh one.
+    let run_id = args.run_id.clone().unwrap_or_else(crate::ids::new_run_id);
+    init_logging(&run_id);
+    let _span = tracing::info_span!("drill", run_id = %run_id).entered();
+    // The alias's ONE line, before anything else this process says.
+    let _ = print_deprecation_to(&mut std::io::stderr().lock(), invoked_as);
+
+    let outcome = execute_for_reporting(&args, &run_id);
+    report(&args, &run_id, outcome)
+}
+
+/// The run's JSON log subscriber, once per process.
+pub(crate) fn init_logging(_run_id: &str) {
     // With RUST_LOG unset, `EnvFilter::from_default_env()` defaults to ERROR,
     // which disables the INFO `drill` span and `exiting()`'s INFO line. So
     // the default is computed here, and a blank RUST_LOG (a Kubernetes `env:`
@@ -929,12 +948,6 @@ pub fn run_named(args: RunArgs, invoked_as: InvokedAs) -> ExitCode {
         .with_current_span(true)
         .with_env_filter(filter)
         .try_init();
-    let _span = tracing::info_span!("drill", run_id = %run_id).entered();
-    // The alias's ONE line, before anything else this process says.
-    let _ = print_deprecation_to(&mut std::io::stderr().lock(), invoked_as);
-
-    let outcome = execute_for_reporting(&args, &run_id);
-    report(&args, &run_id, outcome)
 }
 
 /// `run_named` with the run's handles SUPPLIED rather than constructed — the
@@ -1127,12 +1140,25 @@ fn exiting(
     if let (ExitCode::Operational, Some(error)) = (code, failure_detail) {
         last.failure_detail(error);
     }
+    // PROD-07.2: a run that wrote its targets record and signed nothing names
+    // it, so the controller reconciles the topics it left.
+    if matches!(code, ExitCode::Operational | ExitCode::SigningOrLock) {
+        if let Some(key) = targets_record_of(run_id) {
+            last.push(format!("{}{key}", reconcile::TARGETS_RECORD_KEY_PREFIX));
+        }
+    }
     // The stopped creation step, named. Exit 1 like any operational failure,
     // but the controller lifts `failure-reason=` onto `status.exitReason` and
     // the bounded line before it onto `status.targetTopicsAppeared`. The
     // reason is the last line (`creation_stop_lines`).
     if let (ExitCode::Operational, Some(race)) = (code, race) {
         last.extend(creation_stop_lines(race));
+    } else if code == ExitCode::Operational && subprocess::stop_requested() {
+        // PROD-07.2: the run was stopped by a signal, LAST.
+        last.push(format!(
+            "{}{CANCELLED_REASON}",
+            logweir_core::guard::FAILURE_REASON_PREFIX
+        ));
     }
     // [I8], and the order is the contract: `scorecard-key=`, `sidecar-key=`,
     // `offset-report-key=` are the final stdout lines of a run that signed a
@@ -1837,6 +1863,30 @@ pub fn execute(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillErro
 /// Execute, after the exact plan bytes have passed the argv/environment
 /// contract and approval verification.
 fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome, DrillError> {
+    let prepared = prepare(args)?;
+    execute_with_prevalidated(
+        args,
+        run_id,
+        &prepared.ctx,
+        &prepared.signer,
+        prepared.approved,
+    )
+}
+
+/// What [`prepare`] established: the run's context, its signer, the verified
+/// approval, and whether the stores come from the store contract.
+pub(crate) struct Prepared {
+    pub(crate) ctx: Ctx,
+    pub(crate) signer: ValidatedSigner,
+    pub(crate) approved: phase1_approval::Approved,
+    pub(crate) store_contract: bool,
+}
+
+/// Everything a run does before phase 0: the contracts, the credential and
+/// signing checks, the approval, the point binding and the context. Shared by
+/// `restore run` and `restore reconcile` (PROD-07.2), which verify the same
+/// inputs the same way.
+fn prepare(args: &RunArgs) -> Result<Prepared, DrillError> {
     let contract =
         execution_contract_for_invocation(args.execution_contract_version.as_deref(), |name| {
             std::env::var(name).ok()
@@ -1954,17 +2004,20 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     // what only the runner holds about an original-name restore's source and
     // owners, read once, before any client exists.
     let original_name = original_name_inputs(args, &authenticated_spec, bindings.point_source)?;
-    match context(
+    let ctx = context(
         startup.spec_text,
         startup.allowed_text,
         store_contract,
         original_name,
         bindings.source_config_coverage,
         bindings.bound_set,
-    ) {
-        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
-        Err(error) => Err(error),
-    }
+    )?;
+    Ok(Prepared {
+        ctx,
+        signer,
+        approved,
+        store_contract,
+    })
 }
 
 /// What the execution-contract-v2 point binding established.
@@ -2118,7 +2171,7 @@ fn execute_with_signer(
     c: &Ctx,
     signer: &ValidatedSigner,
 ) -> Result<RestoreOutcome, DrillError> {
-    execute_with_validated_approval(args, run_id, c, signer, None)
+    execute_with_validated_approval(args, run_id, c, signer, None, None)
 }
 
 fn execute_with_prevalidated(
@@ -2128,7 +2181,49 @@ fn execute_with_prevalidated(
     signer: &ValidatedSigner,
     approved: phase1_approval::Approved,
 ) -> Result<RestoreOutcome, DrillError> {
-    execute_with_validated_approval(args, run_id, c, signer, Some(approved))
+    execute_with_validated_approval(args, run_id, c, signer, Some(approved), None)
+}
+
+/// PROD-07.2: the run's phases over an interrupted run's kept targets
+/// (`reconcile::Kept`): phase 0 admits exactly them and creates nothing, the
+/// creation step and phase 6 are skipped, phase 7 verifies, phase 8 signs,
+/// and nothing is torn down.
+pub(crate) fn execute_reconcile(
+    args: &RunArgs,
+    run_id: &str,
+    c: &Ctx,
+    signer: &ValidatedSigner,
+    approved: phase1_approval::Approved,
+    kept: &reconcile::Kept,
+) -> Result<RestoreOutcome, DrillError> {
+    execute_with_validated_approval(args, run_id, c, signer, Some(approved), Some(kept))
+}
+
+/// The `failure-reason=` a run stopped by SIGTERM or SIGINT ends on
+/// (PROD-07.2): exit 1, nothing signed.
+pub const CANCELLED_REASON: &str = "Cancelled";
+
+/// The targets records this process wrote, by run id (PROD-07.2), for the
+/// run's final lines.
+static TARGETS_WRITTEN: std::sync::Mutex<BTreeMap<String, String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn targets_written(run_id: &str, key: String) {
+    if let Ok(mut m) = TARGETS_WRITTEN.lock() {
+        m.insert(run_id.to_string(), key);
+    }
+}
+
+fn targets_record_of(run_id: &str) -> Option<String> {
+    TARGETS_WRITTEN.lock().ok()?.get(run_id).cloned()
+}
+
+/// What a stopped run says (PROD-07.2): exit 1, nothing signed.
+fn stopped() -> DrillError {
+    DrillError::Operational(
+        "the run was stopped (SIGTERM or SIGINT): its engine was stopped and nothing was signed"
+            .to_string(),
+    )
 }
 
 fn execute_with_validated_approval(
@@ -2137,6 +2232,7 @@ fn execute_with_validated_approval(
     c: &Ctx,
     signer: &ValidatedSigner,
     prevalidated_approval: Option<phase1_approval::Approved>,
+    reconcile: Option<&reconcile::Kept>,
 ) -> Result<RestoreOutcome, DrillError> {
     // `--approver-key-ids` is not checked here: the client already exists, and
     // exit 3 means refused before anything ran, so the check lives in
@@ -2158,8 +2254,11 @@ fn execute_with_validated_approval(
         check_original_name_subject(&c.spec, Some(approved))?;
     }
     // 0
-    let admitted = record(&mut sc, 0, "admit", || {
-        phase0_admit::run_with_original_name(
+    let admitted = record(&mut sc, 0, "admit", || match reconcile {
+        // A reconcile admits exactly the interrupted run's kept topics and
+        // writes nothing.
+        Some(kept) => Ok(kept.admitted(&c.spec)),
+        None => phase0_admit::run_with_original_name(
             &c.spec,
             &c.spec_text,
             &c.allowed,
@@ -2168,7 +2267,7 @@ fn execute_with_validated_approval(
             deleter,
             &c.original_name,
             chrono::Utc::now(),
-        )
+        ),
     })?;
     let mut topic_preflight = admitted.topic_preflight.clone();
     sc.target = target_info(&c.spec, &admitted)?;
@@ -2245,13 +2344,17 @@ fn execute_with_validated_approval(
     // the target's `validate_only` verdict, once the restored set is proved
     // the point's and before anything is created. Every refusal is exit 3
     // with nothing written (`validate_only` creates nothing).
-    let configured = phase0_admit::admit_topic_configuration(
-        &c.spec,
-        &c.source_config_coverage,
-        &admitted.topic_mapping,
-        reader,
-        creator,
-    )?;
+    let configured = match reconcile {
+        // The topics exist; a reconcile creates and configures nothing.
+        Some(_) => None,
+        None => phase0_admit::admit_topic_configuration(
+            &c.spec,
+            &c.source_config_coverage,
+            &admitted.topic_mapping,
+            reader,
+            creator,
+        )?,
+    };
     // An empty capture is refused by name, here: a set with no segment for any
     // topic this restore names is refused exit 3 before phase 2 and before any
     // other archive-based refusal, never phase 4's exit 1 over an "empty
@@ -2578,29 +2681,67 @@ fn execute_with_validated_approval(
         )
         .to_string();
     }
-    // The rendered `restore.yaml` says `create_topics: false`, so this is what
-    // creates them, with `TARGET_TOPIC_CONFIGS` on every one (or, with
-    // `target.topic_configuration`, each topic's own creation set).
-    phase0_admit::create_target_topics_from(
-        creator,
-        reader,
-        &admitted.topic_mapping,
-        &facts,
-        c.spec.target.default_replication_factor,
-        configured.as_ref(),
-        &mut topic_preflight,
-    )?;
-    let created = topic_preflight.topics_created.clone();
-    // PROD-11.1a: what this run created, with each topic's ID at creation,
-    // signed as `target.creation` (and a TTL clone's lifetime). The clone's
-    // cleanup and the switchover read it.
-    sc.target.creation = phase0_admit::created_topics_identity(
-        reader,
-        &admitted.topic_mapping,
-        &facts,
-        &created,
-        c.spec.target.teardown.ttl_seconds(),
-    );
+    // PROD-07.2: a run stopped before its creation step creates nothing.
+    if subprocess::stop_requested() {
+        return Err(stopped());
+    }
+    let created = if let Some(kept) = reconcile {
+        // The interrupted run's kept topics, with the IDs it recorded when
+        // it created them: what `logweir restore cleanup` removes.
+        sc.target.creation = Some(kept.creation.clone());
+        // Nothing of this run's own to tear down.
+        Vec::new()
+    } else {
+        // The rendered `restore.yaml` says `create_topics: false`, so this is
+        // what creates them, with `TARGET_TOPIC_CONFIGS` on every one (or,
+        // with `target.topic_configuration`, each topic's own creation set).
+        phase0_admit::create_target_topics_from(
+            creator,
+            reader,
+            &admitted.topic_mapping,
+            &facts,
+            c.spec.target.default_replication_factor,
+            configured.as_ref(),
+            &mut topic_preflight,
+        )?;
+        let created = topic_preflight.topics_created.clone();
+        // PROD-11.1a: what this run created, with each topic's ID at
+        // creation, signed as `target.creation` (and a TTL clone's lifetime).
+        // The clone's cleanup and the switchover read it.
+        sc.target.creation = phase0_admit::created_topics_identity(
+            reader,
+            &admitted.topic_mapping,
+            &facts,
+            &created,
+            c.spec.target.teardown.ttl_seconds(),
+        );
+        // PROD-07.2: the targets record, before the engine starts, so a run
+        // that ends without a scorecard can be reconciled.
+        if let Some(creation) = sc.target.creation.as_ref() {
+            let record = reconcile::TargetsRecord {
+                run_id: run_id.to_string(),
+                plan_hash: logweir_core::ids::sha256_prefixed(c.spec_text.as_bytes()),
+                cluster_id: admitted.target_cluster_id.clone(),
+                topics: creation.topics.clone(),
+            };
+            match reconcile::write(&c.store, &record) {
+                Ok(key) => targets_written(run_id, key),
+                Err(e) => {
+                    phase9_teardown::after_failure(
+                        deleter,
+                        &admitted.topic_mapping,
+                        &created,
+                        c.spec.target.teardown.phase9_policy(false),
+                        c.spec.target.mode,
+                        run_id,
+                        &mut std::io::stdout().lock(),
+                    );
+                    return Err(e);
+                }
+            }
+        }
+        created
+    };
     sc.format_version = logweir_core::scorecard::format_version_with_target_creation(
         &sc.format_version,
         sc.target.creation.as_ref(),
@@ -2614,15 +2755,31 @@ fn execute_with_validated_approval(
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
     let mut obs = phase_observer(run_id);
-    let restored = match record(&mut sc, 6, "restore", || {
-        phase6_restore::run(
-            c.engine.as_ref(),
-            &plan,
-            reader,
-            &admitted.topic_mapping,
-            &mut obs,
-        )
-    }) {
+    let restored = match reconcile {
+        // Nothing is restored: the target is what the interrupted run left.
+        Some(_) => Ok(phase6_restore::Restored {
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            restored_end_offsets: BTreeMap::new(),
+            unknown_key_warnings: Vec::new(),
+            engine_report: logweir_core::engine::EngineReport::Absent,
+        }),
+        None => record(&mut sc, 6, "restore", || {
+            phase6_restore::run(
+                c.engine.as_ref(),
+                &plan,
+                reader,
+                &admitted.topic_mapping,
+                &mut obs,
+            )
+        }),
+    };
+    // PROD-07.2: an engine that exited after a stop is never completion,
+    // whatever its exit code; nothing is signed.
+    if subprocess::stop_requested() {
+        return Err(torn_down(stopped()));
+    }
+    let restored = match restored {
         Ok(r) => r,
         // Mirrors the phase-5 `Verdict::Block` branch: a restore that ran,
         // exited 0 and left every selected partition at end offset <= 0 is a
@@ -2680,9 +2837,10 @@ fn execute_with_validated_approval(
     // 7
     // PROD-04.2: a complete verification of a point that captured consumer
     // groups also probes their positions in its scan of the target.
-    let bound_positions = (c.spec.sample.coverage == logweir_core::spec::Coverage::Complete)
-        .then(|| phase7_verify::positions::fetch(&c.spec, &c.archive))
-        .flatten();
+    let bound_positions = (c.spec.sample.coverage == logweir_core::spec::Coverage::Complete
+        && reconcile.is_none())
+    .then(|| phase7_verify::positions::fetch(&c.spec, &c.archive))
+    .flatten();
     let probes = bound_positions.as_ref().map(|b| b.probes());
     let (verified, position_scans) = record(&mut sc, 7, "verify", || {
         phase7_verify::run_after_restore_with_probes(
@@ -2737,8 +2895,24 @@ fn execute_with_validated_approval(
         plan.time_window.1.timestamp_millis(),
         verified.newest_restored_ts_ms,
     );
-    let (outcome, objectives) =
-        phase8_score::decide(&sc.measured, &c.spec.objectives, &sc.integrity);
+    let (outcome, objectives) = match reconcile {
+        // A reconcile judges the target, not the run's time: no objective,
+        // no measured RTO.
+        Some(kept) => {
+            sc.measured = new_scorecard(run_id, args, c).measured;
+            sc.sample.coverage_note = format!("{}; {}", kept.note(), sc.sample.coverage_note);
+            phase8_score::decide(
+                &sc.measured,
+                &logweir_core::spec::ObjectivesSpec {
+                    rto_seconds: None,
+                    rpo_seconds: None,
+                    pass_rate: None,
+                },
+                &sc.integrity,
+            )
+        }
+        None => phase8_score::decide(&sc.measured, &c.spec.objectives, &sc.integrity),
+    };
     sc.outcome = outcome;
     sc.objectives = objectives;
     // Nothing assigns `sc.integrity.pass_rate_measured` here: phase 7's
@@ -2759,27 +2933,35 @@ fn execute_with_validated_approval(
     }
 
     // 8
+    // PROD-07.2: stopped during the verification: nothing is signed.
+    if subprocess::stop_requested() {
+        return Err(torn_down(stopped()));
+    }
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
-    // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
-    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
-        .map_err(torn_down)?;
+    // those exact bytes at `logweir/drills/<run_id>.offsets.json`. A
+    // reconcile restored nothing and has none.
+    let report = reconcile.is_none().then_some(plan.offset_report.as_path());
+    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, report).map_err(torn_down)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
     let evidence = EvidenceKeys::of(&signed);
     sc = signed.scorecard.clone();
-    // 9
-    teardown(
-        &mut sc,
-        run_id,
-        c,
-        signer,
-        deleter,
-        &admitted.topic_mapping,
-        &signed_bytes_sha256,
-        configured.as_ref(),
-    );
+    // 9, never for a reconcile: the kept topics are the interrupted run's,
+    // removed only by `logweir restore cleanup`.
+    if reconcile.is_none() {
+        teardown(
+            &mut sc,
+            run_id,
+            c,
+            signer,
+            deleter,
+            &admitted.topic_mapping,
+            &signed_bytes_sha256,
+            configured.as_ref(),
+        );
+    }
     // The mainline exit-2 gate: a drill that ran every phase and was scored
     // `fail-objective` or `fail-integrity` is a drill result, exit 2, with the
     // signed scorecard already in the bucket and its keys carried out
@@ -4192,12 +4374,12 @@ mod tests {
             "exactly the `None` default and the verified assignment"
         );
         assert!(body.contains("let mut bound_set = None;"));
-        let run = fn_body(src, "execute_for_reporting");
+        let run = fn_body(src, "prepare");
         let call = run
-            .split("match context(")
+            .split("let ctx = context(")
             .nth(1)
-            .and_then(|r| r.split(") {").next())
-            .expect("execute_for_reporting builds its context with `match context(…) {`");
+            .and_then(|r| r.split(")?;").next())
+            .expect("prepare builds its context with `let ctx = context(…)?;`");
         assert!(
             call.contains("bindings.bound_set"),
             "the run context must be built WITH the verified binding's set: {call}"
@@ -4298,12 +4480,12 @@ mod tests {
     #[test]
     fn the_run_context_is_built_with_the_verified_coverage() {
         let src = include_str!("mod.rs");
-        let run = fn_body(src, "execute_for_reporting");
+        let run = fn_body(src, "prepare");
         let call = run
-            .split("match context(")
+            .split("let ctx = context(")
             .nth(1)
-            .and_then(|r| r.split(") {").next())
-            .expect("execute_for_reporting builds its context with `match context(…) {`");
+            .and_then(|r| r.split(")?;").next())
+            .expect("prepare builds its context with `let ctx = context(…)?;`");
         assert!(
             call.contains("bindings.source_config_coverage"),
             "the run context must be built WITH the verified binding's coverage; the call \
@@ -4311,7 +4493,7 @@ mod tests {
         );
         assert!(
             !run.contains("SourceConfigCoverage::unknown()"),
-            "execute_for_reporting must not substitute UNKNOWN for the verified coverage"
+            "prepare must not substitute UNKNOWN for the verified coverage"
         );
         let ctx = fn_body(src, "context");
         assert!(
@@ -4501,6 +4683,7 @@ mod tests {
             evidence_keys: None,
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            run_id: None,
         }
     }
 
