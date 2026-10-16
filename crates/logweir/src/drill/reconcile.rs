@@ -86,8 +86,10 @@ pub fn write(
     signer: &crate::signer::ValidatedSigner,
 ) -> Result<String, DrillError> {
     let key = targets_record_key(&record.run_id);
+    // An evidence write that fails is the evidence-failure class, exit 4,
+    // as the scorecard's own put is.
     let failed = |what: String| {
-        DrillError::Operational(format!(
+        DrillError::SigningOrLock(format!(
             "the targets record {key} could not be {what}; no engine was started"
         ))
     };
@@ -436,14 +438,7 @@ pub(super) fn execute(
         trusted.extend(crate::restore_cleanup::keyring(path)?);
     }
     let record = open(&record_key, &bytes, sidecar.as_deref(), &trusted)?;
-    if record.run_id != interrupted || record.plan_hash != plan_hash {
-        return Err(GuardRefusal(format!(
-            "{record_key} records run {} over plan {}, not run {interrupted} over this plan \
-             ({plan_hash}); nothing was verified",
-            record.run_id, record.plan_hash
-        ))
-        .into());
-    }
+    check_record(&record_key, &record, &interrupted, &plan_hash)?;
     let reader = prepared.ctx.client.as_reader();
     let cluster = reader.cluster_id()?;
     let names: Vec<String> = record.topics.iter().map(|t| t.name.clone()).collect();
@@ -481,6 +476,25 @@ pub(super) fn execute(
         prepared.approved,
         &kept,
     ))))
+}
+
+/// The record is the interrupted run's, over this plan: a record signed for
+/// another run or plan is refused, nothing verified.
+fn check_record(
+    record_key: &str,
+    record: &TargetsRecord,
+    interrupted: &str,
+    plan_hash: &str,
+) -> Result<(), DrillError> {
+    if record.run_id != interrupted || record.plan_hash != plan_hash {
+        return Err(GuardRefusal(format!(
+            "{record_key} records run {} over plan {}, not run {interrupted} over this plan \
+             ({plan_hash}); nothing was verified",
+            record.run_id, record.plan_hash
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// `logweir restore reconcile`: print what [`execute`] found and exit by the
@@ -761,6 +775,37 @@ mod tests {
     }
 
     /// The record round-trips, and its key is the run's.
+    /// A genuine record of another run, or of this run over another plan,
+    /// is refused (od23 review L-2); the control is the run's own.
+    #[test]
+    fn a_record_of_another_run_or_plan_is_refused() {
+        let k = targets_record_key("R1");
+        assert!(check_record(&k, &record(), "R1", "sha256:x").is_ok());
+        for (run, plan) in [("R2", "sha256:x"), ("R1", "sha256:y")] {
+            let refused = check_record(&k, &record(), run, plan).unwrap_err();
+            assert!(matches!(refused, DrillError::Guard(_)), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_targets_record_that_cannot_be_written_is_exit_4() {
+        let signer = crate::signer::ValidatedSigner::load(
+            std::path::Path::new("../../e2e/fixtures/signed/signing.pem"),
+            logweir_evidence::PAYLOAD_TYPE_TARGETS_RECORD,
+            b"probe",
+            "nothing was written",
+        )
+        .unwrap();
+        let store = Store::in_memory("logweir");
+        write(&store, &record(), &signer).expect("the first put");
+        // The control above; the same create-only put again fails, as an
+        // unwritable evidence sink does: the evidence-failure class (CI's
+        // `an_unwritable_evidence_sink_exits_4_and_uploads_nothing`).
+        let failed = write(&store, &record(), &signer).unwrap_err();
+        assert!(matches!(failed, DrillError::SigningOrLock(_)), "{failed}");
+        assert_eq!(ExitCode::from(failed), ExitCode::SigningOrLock);
+    }
+
     #[test]
     fn the_record_round_trips_under_the_runs_key() {
         let r = record();
