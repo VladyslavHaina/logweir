@@ -152,13 +152,13 @@ function Slot({ d, heading, stopped, onRunAgain }: { d: TopicDiscovery; heading:
 const NO_FILTERS: TopicFilters = { q: "", prefix: "", internal: "exclude", errored: "include" };
 
 /** The stored inventory of the last successful discovery, with the service's own filters and paging. */
-function Topics({ ns, discovery }: { ns: string; discovery: TopicDiscovery }) {
+function Topics({ ws, discovery }: { ws: string; discovery: TopicDiscovery }) {
   const narrow = useNarrow();
   const [typed, setTyped] = useState<TopicFilters>(NO_FILTERS);
   const [filters, setFilters] = useState<TopicFilters>(NO_FILTERS);
   const [cursors, setCursors] = useState<string[]>([]);
   const cursor = cursors.length > 0 ? cursors[cursors.length - 1]! : null;
-  const page = useTopicPage(ns, discovery.id, filters, cursor);
+  const page = useTopicPage(ws, discovery.id, filters, cursor);
   const apply = () => {
     setFilters(typed);
     setCursors([]);
@@ -286,10 +286,10 @@ function Topics({ ns, discovery }: { ns: string; discovery: TopicDiscovery }) {
 }
 
 /** The discovery card on a connection's page. */
-export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: string; mayStart: boolean; readable: boolean }) {
-  const { query: slots, stopped } = useDiscoverySlots(ns, name, readable);
-  const start = useStartDiscovery(ns, name);
-  const cancel = useCancelDiscovery(ns, name);
+export function Discovery({ ws, name, mayStart, readable }: { ws: string; name: string; mayStart: boolean; readable: boolean }) {
+  const { query: slots, stopped } = useDiscoverySlots(ws, name, readable);
+  const start = useStartDiscovery(ws, name);
+  const cancel = useCancelDiscovery(ws, name);
   const [includeInternal, setIncludeInternal] = useState(false);
   const [expected, setExpected] = useState("");
   const intent = useIntentKey("discovery");
@@ -336,7 +336,7 @@ export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: 
         </Content>
         {!readable ? (
           <Content component="p" className="lw-subtle">
-            Topic discovery is not available to you in {ns}.
+            Topic discovery is not available to you in {ws}.
           </Content>
         ) : (
           <>
@@ -401,7 +401,7 @@ export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: 
               </Form>
             ) : (
               <Content component="p" className="lw-subtle">
-                This login may read topic discoveries in this namespace and not start one.
+                This login may read topic discoveries in this workspace and not start one.
               </Content>
             )}
             <div className="lw-gap-top">
@@ -439,7 +439,7 @@ export function Discovery({ ns, name, mayStart, readable }: { ns: string; name: 
                 </Grid>
               )}
             </div>
-            {success !== null && <Topics key={success.id} ns={ns} discovery={success} />}
+            {success !== null && <Topics key={success.id} ws={ws} discovery={success} />}
           </>
         )}
       </CardBody>

@@ -12,22 +12,22 @@ import { createBody, draftValues, editBody, outcomeOf, placeFieldErrors, valuesO
 import { WriteAlert, useGrant } from "./parts";
 import { ScheduleForm } from "./ScheduleForm";
 
-function Crumbs({ ns, name, last }: { ns: string; name?: string; last: string }) {
+function Crumbs({ ws, name, last }: { ws: string; name?: string; last: string }) {
   return (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/schedules" params={{ ns }}>Schedules</Link>} />
-      {name && <BreadcrumbItem render={() => <Link to="/$ns/schedules/$name" params={{ ns, name }} search={{}}>{name}</Link>} />}
+      <BreadcrumbItem render={() => <Link to="/$ws/schedules" params={{ ws }}>Schedules</Link>} />
+      {name && <BreadcrumbItem render={() => <Link to="/$ws/schedules/$name" params={{ ws, name }} search={{}}>{name}</Link>} />}
       <BreadcrumbItem isActive>{last}</BreadcrumbItem>
     </Breadcrumb>
   );
 }
 
-function ReadOnly({ ns, what }: { ns: string; what: string }) {
+function ReadOnly({ ws, what }: { ws: string; what: string }) {
   return (
     <PageSection>
       <Card>
         <Empty title="Not available to this login" icon={LockIcon}>
-          This login may read the schedules in {ns} and not {what}: that needs the operator or administrator role.
+          This login may read the schedules in {ws} and not {what}: that needs the operator or administrator role.
         </Empty>
       </Card>
     </PageSection>
@@ -35,17 +35,17 @@ function ReadOnly({ ns, what }: { ns: string; what: string }) {
 }
 
 export function ScheduleCreate() {
-  const { ns } = useParams({ from: "/$ns/schedules/new" });
+  const { ws } = useParams({ from: "/$ws/schedules/new" });
   const navigate = useNavigate();
-  const grant = useGrant(ns);
-  const destinations = useDestinations(ns);
-  const create = useCreateSchedule(ns);
+  const grant = useGrant(ws);
+  const destinations = useDestinations(ws);
+  const create = useCreateSchedule(ws);
   // One intent per draft: a double click, or a resend after no answer, is ONE schedule.
   const [intent, setIntent] = useState(() => mintIntent("schedule"));
   const header = (
     <PageHeader
       title="Create a schedule"
-      breadcrumb={<Crumbs ns={ns} last="Create" />}
+      breadcrumb={<Crumbs ws={ws} last="Create" />}
       description="What to back up, when, and where. The server names the schedule."
     />
   );
@@ -53,7 +53,7 @@ export function ScheduleCreate() {
     return (
       <>
         {header}
-        <ReadOnly ns={ns} what="create one" />
+        <ReadOnly ws={ws} what="create one" />
       </>
     );
   }
@@ -76,18 +76,18 @@ export function ScheduleCreate() {
         <Card>
           <CardBody>
             <ScheduleForm
-              ns={ns}
+              ws={ws}
               initial={draftValues(destinations.data)}
               submitText="Create schedule"
               pending={create.isPending}
               error={create.error}
-              onCancel={() => void navigate({ to: "/$ns/schedules", params: { ns } })}
+              onCancel={() => void navigate({ to: "/$ws/schedules", params: { ws } })}
               onSubmit={(values, line) =>
                 create.mutate(
                   { body: createBody(values, line), intent },
                   {
                     onSuccess: (r) =>
-                      void navigate({ to: "/$ns/schedules/$name", params: { ns, name: r.item.name }, search: { done: "created" } }),
+                      void navigate({ to: "/$ws/schedules/$name", params: { ws, name: r.item.name }, search: { done: "created" } }),
                   },
                 )
               }
@@ -127,11 +127,11 @@ export function ScheduleCreate() {
 }
 
 export function ScheduleEdit() {
-  const { ns, name } = useParams({ from: "/$ns/schedules/$name/edit" });
+  const { ws, name } = useParams({ from: "/$ws/schedules/$name/edit" });
   const navigate = useNavigate();
-  const grant = useGrant(ns);
-  const schedule = useSchedule(ns, name);
-  const edit = useEditPolicy(ns, name);
+  const grant = useGrant(ws);
+  const schedule = useSchedule(ws, name);
+  const edit = useEditPolicy(ws, name);
   // DUI-13: the revision this form was opened on, held until "Read it again". A re-read
   // the page did not ask for (the write's invalidation after a 412, a refocus) must not
   // swap the form for a newer revision and drop what was typed.
@@ -139,12 +139,12 @@ export function ScheduleEdit() {
   useEffect(() => {
     if (opened === null && schedule.data) setOpened(schedule.data);
   }, [opened, schedule.data]);
-  const header = <PageHeader title={`Edit ${name}`} breadcrumb={<Crumbs ns={ns} name={name} last="Edit policy" />} />;
+  const header = <PageHeader title={`Edit ${name}`} breadcrumb={<Crumbs ws={ws} name={name} last="Edit policy" />} />;
   if (grant && !grant.scheduleCreate) {
     return (
       <>
         {header}
-        <ReadOnly ns={ns} what="change their policies" />
+        <ReadOnly ws={ws} what="change their policies" />
       </>
     );
   }
@@ -195,16 +195,16 @@ export function ScheduleEdit() {
             <ScheduleForm
               // A re-read revision is a different form: what was typed was typed against the old one.
               key={generation}
-              ns={ns}
+              ws={ws}
               saved={s}
               initial={valuesOf(s)}
               submitText="Save policy"
               pending={edit.isPending}
               error={edit.error}
-              onCancel={() => void navigate({ to: "/$ns/schedules/$name", params: { ns, name }, search: {} })}
+              onCancel={() => void navigate({ to: "/$ws/schedules/$name", params: { ws, name }, search: {} })}
               onSubmit={(values, line) =>
                 edit.mutate(editBody(values, line, generation), {
-                  onSuccess: () => void navigate({ to: "/$ns/schedules/$name", params: { ns, name }, search: { done: "saved" } }),
+                  onSuccess: () => void navigate({ to: "/$ws/schedules/$name", params: { ws, name }, search: { done: "saved" } }),
                 })
               }
               status={

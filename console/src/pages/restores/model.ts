@@ -546,15 +546,15 @@ export function restoreBody(
 
 /** The Idempotency-Key: the old console's own, from the name minted from the bytes, so
  *  a second click, a lost answer or a reload of the same plan never makes a second Restore. */
-export function restoreIdempotencyKey(ns: string, prepared: PreparedPlan): string {
-  return `logweir-ui.restores.${ns}.${prepared.restoreName}`;
+export function restoreIdempotencyKey(ws: string, prepared: PreparedPlan): string {
+  return `logweir-ui.restores.${ws}.${prepared.restoreName}`;
 }
 
 // ---------------------------------------------------------- approval routing
 
 export type ApprovalPolicy = S["ApprovalPolicyView"];
 
-/** The mode a submission meets, in the operator's words, from the namespace's EFFECTIVE
+/** The mode a submission meets, in the operator's words, from the workspace's EFFECTIVE
  *  policy. An unknown word never reads as "no key needed": it is strict. */
 export type ApprovalRoute =
   | "confirm"
@@ -577,15 +577,15 @@ export function approvalRoute(p: ApprovalPolicy | null): ApprovalRoute {
 export function policyRefusal(p: ApprovalPolicy | null): string | null {
   const route = approvalRoute(p);
   if (route === "confirm-unavailable") {
-    return `Namespace policy ${p!.name} is confirm, and this console cannot sign a confirmation yet: its confirmation key is not there. Try again in a minute.`;
+    return `Workspace policy ${p!.name} is confirm, and this console cannot sign a confirmation yet: its confirmation key is not there. Try again in a minute.`;
   }
   if (route === "two-person-unavailable") {
-    return `Namespace policy ${p!.name} is two-person, and this console cannot take part in it: request and approve this restore in the shared console.`;
+    return `Workspace policy ${p!.name} is two-person, and this console cannot take part in it: request and approve this restore in the shared console.`;
   }
   return null;
 }
 
-/** The ticket sent: only under an explicit (non-legacy) binding; an unbound namespace signs nothing. */
+/** The ticket sent: only under an explicit (non-legacy) binding; an unbound workspace signs nothing. */
 export function ticketFor(p: ApprovalPolicy | null, ticket: string): string | undefined {
   const t = ticket.trim();
   return p !== null && !p.legacy && t ? t : undefined;

@@ -165,15 +165,15 @@ function CreationStopped({ r }: { r: Restore }) {
   );
 }
 
-/** What a restore waits for, under the namespace's approval policy. */
-function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) {
-  const policy = useApprovalPolicy(ns);
+/** What a restore waits for, under the workspace's approval policy. */
+function Awaiting({ ws, r, op }: { ws: string; r: Restore; op: OperationView }) {
+  const policy = useApprovalPolicy(ws);
   const route = approvalRoute(policy.data ?? null);
-  const request = useApprovalRequest(ns, r.name, op.awaitingApproval && route === "two-person");
+  const request = useApprovalRequest(ws, r.name, op.awaitingApproval && route === "two-person");
   if (!op.awaitingApproval) return null;
   // R6's page for this request; it refuses the link if the restore moved since (hash, approval).
   const approvals = (
-    <Link to="/$ns/approvals/$name" params={{ ns, name: r.name }} search={{ hash: r.planHash, approval: r.approvalRef.name }}>
+    <Link to="/$ws/approvals/$name" params={{ ws, name: r.name }} search={{ hash: r.planHash, approval: r.approvalRef.name }}>
       Open its approval
     </Link>
   );
@@ -195,12 +195,12 @@ function Awaiting({ ns, r, op }: { ns: string; r: Restore; op: OperationView }) 
     );
   }
   if (route === "confirm" || route === "confirm-unavailable") {
-    // DUI-18: a one-person namespace needs nobody else. Creating the restore confirmed it;
+    // DUI-18: a one-person workspace needs nobody else. Creating the restore confirmed it;
     // the controller verifies that confirmation, then the run starts.
     return (
       <Alert variant="info" isInline title="The controller is verifying your confirmation" id="awaiting-approval">
         <p>
-          This namespace needs no second person: creating the restore confirmed it ({r.approvalRef.name}). The run starts once the
+          This workspace needs no second person: creating the restore confirmed it ({r.approvalRef.name}). The run starts once the
           controller has verified that confirmation, usually within half a minute.
         </p>
       </Alert>
@@ -285,28 +285,28 @@ export const VERDICT_STOPPED_SENTENCE =
 
 /** One page per restore: moving to another restore starts its page afresh. */
 export function RestoreDetail() {
-  const { ns, name } = useParams({ from: "/$ns/restores/$name" });
-  return <Detail key={`${ns}/${name}`} ns={ns} name={name} />;
+  const { ws, name } = useParams({ from: "/$ws/restores/$name" });
+  return <Detail key={`${ws}/${name}`} ws={ws} name={name} />;
 }
 
-function Detail({ ns, name }: { ns: string; name: string }) {
+function Detail({ ws, name }: { ws: string; name: string }) {
   const navigate = useNavigate();
-  const caps = useCapabilities(ns);
+  const caps = useCapabilities(ws);
   // DUI-38: a terminal restore whose verdict is still pending is followed until the
   // verdict lands, for at most VERDICT_FOLLOW_MS (the decision is read below and fed back).
   const [follow, setFollow] = useState(false);
-  const restore = useRestoreItem(ns, name, { follow });
+  const restore = useRestoreItem(ws, name, { follow });
   // While the run moves, its event stream (R1) writes the operation view and the poll stands down.
-  const streaming = useOperationStream(ns, "restore", name, restore.data !== undefined && (!restore.data.operation.terminal || follow));
-  const operation = useRestoreOperation(ns, name, streaming, follow);
+  const streaming = useOperationStream(ws, "restore", name, restore.data !== undefined && (!restore.data.operation.terminal || follow));
+  const operation = useRestoreOperation(ws, name, streaming, follow);
   const verdict = useVerdictFollow(verdictPending(restore.data?.operation) || verdictPending(operation.data));
-  const source = useSourceBackup(ns, restore.data?.backupSetRef);
+  const source = useSourceBackup(ws, restore.data?.backupSetRef);
   useEffect(() => setFollow(verdict.following), [verdict.following]);
   const [showPlan, setShowPlan] = useState(false);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/restores" params={{ ws }}>Restores</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -357,11 +357,11 @@ function Detail({ ns, name }: { ns: string; name: string }) {
         description={`From the point at ${exactUtc(r.pointInTime)} into ${r.target.clusterRef.name}.`}
         actions={
           failed && caps?.restoreCreate !== false ? (
-            <Button variant="secondary" icon={<RedoIcon />} onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { retryOf: r.name } })} id="retry-fresh-target">
+            <Button variant="secondary" icon={<RedoIcon />} onClick={() => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { retryOf: r.name } })} id="retry-fresh-target">
               Retry to a fresh target
             </Button>
           ) : verified && switchable && caps?.restoreCreate !== false ? (
-            <Button variant="primary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name } })}>
+            <Button variant="primary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ws/restores/$name/cutover", params: { ws, name } })}>
               Switch consumers over
             </Button>
           ) : undefined
@@ -369,7 +369,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
       />
       <PageSection>
         <div className="lw-stack">
-          {op && <Awaiting ns={ns} r={r} op={op} />}
+          {op && <Awaiting ws={ws} r={r} op={op} />}
           {verdict.following && (
             <Content component="p" className="lw-subtle" role="status">
               {VERDICT_PENDING_SENTENCE}
@@ -747,7 +747,7 @@ function Detail({ ns, name }: { ns: string; name: string }) {
                 </CardBody>
               </Card>
             ) : (
-              r.target.mode !== "scratch" && <SwitchoverEntry restore={r} canCreate={caps?.restoreCreate !== false} source={source} />
+              r.target.mode !== "scratch" && <SwitchoverEntry ws={ws} restore={r} canCreate={caps?.restoreCreate !== false} source={source} />
             )}
           </GridItem>
           {r.topicConfiguration && (

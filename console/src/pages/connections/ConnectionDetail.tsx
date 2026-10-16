@@ -119,14 +119,14 @@ function Settings({ c }: { c: Connection }) {
 }
 
 /** Test connection: the started check's own rows, or the newest recorded one as a summary. */
-export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: Connection; mayStart: boolean; readable: boolean }) {
-  const start = useStartConnectionCheck(ns, c.name);
+export function ConnectionCheck({ ws, c, mayStart, readable }: { ws: string; c: Connection; mayStart: boolean; readable: boolean }) {
+  const start = useStartConnectionCheck(ws, c.name);
   const intent = useIntentKey("connection-check");
   const [started, setStarted] = useState<string | null>(null);
   const [local, setLocal] = useState<unknown>(null);
-  const { query: check, stopped } = useFollowedPreflight(ns, started);
+  const { query: check, stopped } = useFollowedPreflight(ws, started);
   // FX-46: the recorded test's own rows say what the endpoint is usable for; `lastTest` carries only its id.
-  const { query: recorded } = useFollowedPreflight(ns, started === null && readable ? (c.lastTest?.preflightId ?? null) : null);
+  const { query: recorded } = useFollowedPreflight(ws, started === null && readable ? (c.lastTest?.preflightId ?? null) : null);
   const refused = CONNECTION_REFUSAL_REASONS.includes(c.reachability.reason ?? "") ? (c.reachability.reason as string) : "";
 
   const run = () => {
@@ -162,7 +162,7 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
         </Content>
         {!readable ? (
           <Content component="p" className="lw-subtle">
-            Readiness checks are not available to you in {ns}.
+            Readiness checks are not available to you in {ws}.
           </Content>
         ) : (
           <>
@@ -183,7 +183,7 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
               </Flex>
             ) : (
               <Content component="p" className="lw-subtle">
-                This login may read connection checks in this namespace and not start one.
+                This login may read connection checks in this workspace and not start one.
               </Content>
             )}
             <div aria-live="polite" className="lw-gap-top">
@@ -218,18 +218,18 @@ export function ConnectionCheck({ ns, c, mayStart, readable }: { ns: string; c: 
 }
 
 export function ConnectionDetail() {
-  const { ns, name } = useParams({ from: "/$ns/connections/$name" });
+  const { ws, name } = useParams({ from: "/$ws/connections/$name" });
   // One page per connection: a check started here never carries over to another.
-  return <ConnectionPage key={`${ns}/${name}`} ns={ns} name={name} />;
+  return <ConnectionPage key={`${ws}/${name}`} ws={ws} name={name} />;
 }
 
-function ConnectionPage({ ns, name }: { ns: string; name: string }) {
-  const grant = useGrant(ns);
+function ConnectionPage({ ws, name }: { ws: string; name: string }) {
+  const grant = useGrant(ws);
   const readable = grant.can?.connectionsRead !== false;
-  const connection = useConnection(ns, name, readable);
+  const connection = useConnection(ws, name, readable);
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/connections" params={{ ns }}>Connections</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/connections" params={{ ws }}>Connections</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -239,7 +239,7 @@ function ConnectionPage({ ns, name }: { ns: string; name: string }) {
         <PageHeader title={name} breadcrumb={breadcrumb} />
         <PageSection>
           {!readable ? (
-            <Content component="p">Your roles in {ns} do not include reading connections.</Content>
+            <Content component="p">Your roles in {ws} do not include reading connections.</Content>
           ) : connection.isPending ? (
             <LoadingRows rows={6} label="Loading the connection" />
           ) : (
@@ -270,10 +270,10 @@ function ConnectionPage({ ns, name }: { ns: string; name: string }) {
             <Settings c={c} />
           </GridItem>
           <GridItem>
-            <ConnectionCheck ns={ns} c={c} readable={can?.preflight !== false} mayStart={mayStart(grant, "preflight")} />
+            <ConnectionCheck ws={ws} c={c} readable={can?.preflight !== false} mayStart={mayStart(grant, "preflight")} />
           </GridItem>
           <GridItem>
-            <Discovery ns={ns} name={c.name} readable={can?.topicDiscovery !== false} mayStart={mayStart(grant, "topicDiscovery")} />
+            <Discovery ws={ws} name={c.name} readable={can?.topicDiscovery !== false} mayStart={mayStart(grant, "topicDiscovery")} />
           </GridItem>
         </Grid>
       </PageSection>

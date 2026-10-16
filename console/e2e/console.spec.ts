@@ -59,7 +59,7 @@ async function clean(page: Page, w: Watch, what: string) {
   w.offOrigin.length = 0;
 }
 
-/** The namespace the session lands on: the address after `#/`. */
+/** The workspace the session lands on: the address after `#/`. */
 async function landing(page: Page): Promise<string> {
   await page.goto("/ui/");
   await expect(page).toHaveURL(/#\/[a-z0-9-]+/);
@@ -83,13 +83,14 @@ test("the page is served at /ui/ under the policy, its hashed files are immutabl
   }
 });
 
-test("the session lands on its namespace's Overview, with the navigation its role allows", async ({ page }) => {
+test("the session lands on its workspace's Overview, with the navigation its role allows", async ({ page }) => {
   const w = await watch(page);
-  const ns = await landing(page);
+  const ws = await landing(page);
   await expect(page.getByRole("heading", { level: 1, name: "Overview" })).toBeVisible();
   const nav = page.getByRole("navigation").first();
   await expect(nav.getByRole("link", { name: /Overview/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: new RegExp(ns) }).first()).toBeVisible();
+  // The switcher shows only with more than one workspace; the brand link names this one either way.
+  await expect(page.getByRole("link", { name: "Logweir console, overview" })).toHaveAttribute("href", `#/${ws}`);
   // A settled screen: while its reads are in flight, a control is disabled, and a
   // disabled control's contrast is not held (WCAG 1.4.3) though axe may report it.
   await page.waitForLoadState("networkidle");
@@ -114,12 +115,12 @@ test("every page the navigation offers opens on its own heading", async ({ page 
 
 test("the restore wizard walks from a recovery point to its target", async ({ page }) => {
   const w = await watch(page);
-  const ns = await landing(page);
-  await page.goto(`/ui/#/${ns}/restores/new`);
+  const ws = await landing(page);
+  await page.goto(`/ui/#/${ws}/restores/new`);
   await expect(page.getByRole("heading", { name: "Which recovery point?" })).toBeVisible();
   // A table on a wide screen, a radio group on a phone: either way, labelled.
   const points = page.getByLabel("Recovery points").getByRole("radio");
-  test.skip((await points.count()) === 0, "this namespace has no verified recovery point to start from");
+  test.skip((await points.count()) === 0, "this workspace has no verified recovery point to start from");
   await points.first().check();
   await clean(page, w, "wizard: point");
   const next = page.getByRole("button", { name: "Next" });
@@ -133,10 +134,10 @@ test("the restore wizard walks from a recovery point to its target", async ({ pa
   await clean(page, w, "wizard: target");
 });
 
-test("a namespace the session does not hold, and an address with no page, each say so", async ({ page }) => {
+test("a workspace the session does not hold, and an address with no page, each say so", async ({ page }) => {
   const w = await watch(page);
-  const ns = await landing(page);
-  await page.goto(`/ui/#/${ns}/no-such-page`);
+  const ws = await landing(page);
+  await page.goto(`/ui/#/${ws}/no-such-page`);
   await expect(page.getByText("This page does not exist")).toBeVisible();
   await clean(page, w, "not found");
   await page.goto("/ui/#/lw-e2e-not-granted");

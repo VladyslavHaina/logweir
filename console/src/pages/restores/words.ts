@@ -242,7 +242,7 @@ export const SCORECARD_CLAIM_SENTENCE =
   "The outcome, integrity and counts on this run are copied from its scorecard, whose signature has not verified: each is the scorecard's claim, not a verified fact.";
 
 export const QUEUED_RUN_SENTENCE =
-  "Queued: this manual restore waits for a slot in the namespace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
+  "Queued: this manual restore waits for a slot in the workspace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
 
 export const RETRY_IDENTITY_SENTENCE =
   "The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
@@ -263,7 +263,7 @@ export const ORIGINAL_NAME_COVERAGE_SENTENCE =
   "Required for a restore under the original names, so it is selected and cannot be turned off: under a production name another producer may still be writing, and only the complete check names a record the archive does not hold (OriginalNameNeedsCompleteCoverage).";
 
 export const ORIGINAL_NAME_TYPED_SENTENCE =
-  "This namespace is confirmed by one person. A restore under the original names is confirmed only by re-typing every original topic name, exactly, one per line: the console signs what you typed, and the controller and the runner hold it to the plan again (OD-10).";
+  "This workspace is confirmed by one person. A restore under the original names is confirmed only by re-typing every original topic name, exactly, one per line: the console signs what you typed, and the controller and the runner hold it to the plan again (OD-10).";
 
 export const COMPLETE_COVERAGE_COST =
   "Complete coverage reads every archived record of the restored topics and every restored record back, and compares each one with the archive by its source offset. It costs far more than the sampled check: about a minute per GiB of one-KiB records on a laptop, against seconds for the sample. A record bound that stops it, or an archive it cannot compare, signs covered: false, which is never a pass.";

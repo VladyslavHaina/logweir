@@ -55,7 +55,7 @@ describe("Add a destination", () => {
     const onCreated = vi.fn();
     render(
       <QueryClientProvider client={qc}>
-        <AddDestination ns="team-a" onClose={() => {}} onCreated={onCreated} />
+        <AddDestination ws="team-a" onClose={() => {}} onCreated={onCreated} />
       </QueryClientProvider>,
     );
     type("destination-name", "archive-secret-row");
@@ -81,7 +81,7 @@ describe("Add a destination", () => {
     const sent = recordPosts();
     render(
       <QueryClientProvider client={client()}>
-        <AddDestination ns="team-a" onClose={() => {}} onCreated={() => {}} />
+        <AddDestination ws="team-a" onClose={() => {}} onCreated={() => {}} />
       </QueryClientProvider>,
     );
     type("destination-name", "archive-http");
@@ -106,7 +106,7 @@ describe("Rotate access", () => {
     const qc = client();
     render(
       <QueryClientProvider client={qc}>
-        <RotateAccess ns="team-a" destination={d} onClose={() => {}} onRotated={onRotated} onReRead={() => {}} />
+        <RotateAccess ws="team-a" destination={d} onClose={() => {}} onRotated={onRotated} onReRead={() => {}} />
       </QueryClientProvider>,
     );
     return { qc, onRotated };

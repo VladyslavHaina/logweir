@@ -137,28 +137,28 @@ function writeOnly(access: S["AccessRequest"]): string {
   return JSON.stringify(access, (k, v) => (k === "new" ? "<write-only>" : v));
 }
 
-function create(ns: string, key: string, body: S["CreateDestinationRequest"]): Response {
+function create(ws: string, key: string, body: S["CreateDestinationRequest"]): Response {
   const digest = JSON.stringify({ ...body, access: writeOnly(body.access) });
-  const held = createKeys.get(`${ns}/${key}`);
+  const held = createKeys.get(`${ws}/${key}`);
   if (held) {
     if (held.digest !== digest) return problem(409, "idempotency_conflict", "This idempotency key was already used with a different request body.");
-    return json(200, { item: now(destinations.find((d) => d.namespace === ns && d.name === held.name)!), replayed: true, requestId: requestId() });
+    return json(200, { item: now(destinations.find((d) => d.namespace === ws && d.name === held.name)!), replayed: true, requestId: requestId() });
   }
   const errors = [...locationErrors(body), ...accessErrors(body.access, [])];
   if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(body.name)) errors.unshift({ field: "name", code: "invalid_name", message: "is not a Kubernetes object name" });
   if (errors.length > 0) return problem(422, "destination_invalid", "The destination's location or access is invalid.", errors);
-  if (destinations.some((d) => d.namespace === ns && d.name === body.name)) {
-    return problem(409, "state_conflict", `A destination named ${body.name} already exists in ${ns}. Nothing was written.`);
+  if (destinations.some((d) => d.namespace === ws && d.name === body.name)) {
+    return problem(409, "state_conflict", `A destination named ${body.name} already exists in ${ws}. Nothing was written.`);
   }
-  if (body.default && destinations.some((d) => d.namespace === ns && d.default)) {
-    const holder = destinations.find((d) => d.namespace === ns && d.default)!;
-    return problem(409, "state_conflict", `${holder.name} is already the default destination in ${ns}. Clear it there first; nothing was written.`);
+  if (body.default && destinations.some((d) => d.namespace === ws && d.default)) {
+    const holder = destinations.find((d) => d.namespace === ws && d.default)!;
+    return problem(409, "state_conflict", `${holder.name} is already the default destination in ${ws}. Clear it there first; nothing was written.`);
   }
   const prefix = body.storage.prefix ?? "";
   const item: Destination = {
     name: body.name,
-    namespace: ns,
-    uid: uuid(`${ns}/destination/${body.name}`),
+    namespace: ws,
+    uid: uuid(`${ws}/destination/${body.name}`),
     resourceVersion: String(2429100 + destinations.length),
     generation: 1,
     createdAt: iso(Date.now()),
@@ -177,7 +177,7 @@ function create(ns: string, key: string, body: S["CreateDestinationRequest"]): R
   };
   destinations.push(item);
   judgedAfter.set(item.name, Date.now() + JUDGE_MS);
-  createKeys.set(`${ns}/${key}`, { name: item.name, digest });
+  createKeys.set(`${ws}/${key}`, { name: item.name, digest });
   return json(201, { item: now(item), replayed: false, requestId: requestId() });
 }
 
@@ -260,48 +260,48 @@ function accessCheck(d: Destination, roles: Role[]): Parameters<typeof startChec
 /** The Destinations routes, or null for any other request. */
 export async function destinationsMock(request: Request, method: string, path: string): Promise<Response | null> {
   let p: RegExpMatchArray | null;
-  const ns = path.match(/^\/namespaces\/([^/]+)\//)?.[1] ?? "";
+  const ws = path.match(/^\/workspaces\/([^/]+)\//)?.[1] ?? "";
   const key = request.headers.get("Idempotency-Key") ?? "";
-  const find = (name: string) => destinations.find((d) => d.namespace === ns && d.name === name);
-  const missing = (name: string) => problem(404, "not_found", `No destination named ${name} in ${ns}.`);
+  const find = (name: string) => destinations.find((d) => d.namespace === ws && d.name === name);
+  const missing = (name: string) => problem(404, "not_found", `No destination named ${name} in ${ws}.`);
 
-  if (method === "GET" && /^\/namespaces\/[^/]+\/destinations$/.test(path)) {
-    const items = destinations.filter((d) => d.namespace === ns).map((d) => summary(now(d)));
+  if (method === "GET" && /^\/workspaces\/[^/]+\/destinations$/.test(path)) {
+    const items = destinations.filter((d) => d.namespace === ws).map((d) => summary(now(d)));
     return json(200, { items, page: { limit: 200, snapshot: String(2429022 + items.length) }, requestId: requestId() });
   }
-  if (method === "POST" && /^\/namespaces\/[^/]+\/destinations$/.test(path)) {
+  if (method === "POST" && /^\/workspaces\/[^/]+\/destinations$/.test(path)) {
     if (key.length < 8) return problem(400, "idempotency_key_required", "This route requires an Idempotency-Key header.");
-    return create(ns, key, (await request.json()) as S["CreateDestinationRequest"]);
+    return create(ws, key, (await request.json()) as S["CreateDestinationRequest"]);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/destinations\/([^/:]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/destinations\/([^/:]+)$/))) {
     const d = find(p[1]!);
     return d ? json(200, { item: now(d), requestId: requestId() }) : missing(p[1]!);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/destinations\/([^/:]+)\/usage$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/destinations\/([^/:]+)\/usage$/))) {
     const d = find(p[1]!);
     if (!d) return missing(p[1]!);
     const use = (kind: string) => (x: { name: string; createdAt?: string | null }) => ({ kind, name: x.name, createdAt: x.createdAt ?? null });
     return json(200, {
       name: d.name,
-      schedules: schedules.filter((s) => s.namespace === ns && s.destinationRef?.name === d.name).map(use("BackupSchedule")),
-      backups: backups.filter((b) => b.namespace === ns && b.destinationRef?.name === d.name).slice(0, 5).map(use("Backup")),
+      schedules: schedules.filter((s) => s.namespace === ws && s.destinationRef?.name === d.name).map(use("BackupSchedule")),
+      backups: backups.filter((b) => b.namespace === ws && b.destinationRef?.name === d.name).slice(0, 5).map(use("Backup")),
       truncated: false,
-      basis: "schedules and backups in this namespace whose spec.destinationRef names this destination, from at most 1600 of each",
+      basis: "schedules and backups in this workspace whose spec.destinationRef names this destination, from at most 1600 of each",
       requestId: requestId(),
     });
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/[^/]+\/destinations\/([^/:]+):update-access$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/[^/]+\/destinations\/([^/:]+):update-access$/))) {
     const d = find(p[1]!);
     if (!d) return missing(p[1]!);
     if (key) return problem(400, "malformed_request", "This route takes no Idempotency-Key: its guard is expectedGeneration.");
     return rotate(d, (await request.json()) as S["UpdateDestinationAccessRequest"]);
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/[^/]+\/destinations\/([^/:]+):test$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/[^/]+\/destinations\/([^/:]+):test$/))) {
     const d = find(p[1]!);
     if (!d) return missing(p[1]!);
     if (key.length < 8) return problem(400, "idempotency_key_required", "This route requires an Idempotency-Key header.");
     const body = (await request.json()) as S["TestDestinationRequest"];
-    const made = startCheck(ns, key, "destinationAccess", { kind: "BackupDestination", name: d.name, uid: d.uid }, accessCheck(now(d), (body.roles ?? []) as Role[]));
+    const made = startCheck(ws, key, "destinationAccess", { kind: "BackupDestination", name: d.name, uid: d.uid }, accessCheck(now(d), (body.roles ?? []) as Role[]));
     return json(made.replayed ? 200 : 202, { item: made.item, replayed: made.replayed, requestId: requestId() });
   }
   return null;

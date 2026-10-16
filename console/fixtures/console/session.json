@@ -35,7 +35,7 @@
     "trustAdministration": false,
     "trustPoliciesRead": false
   },
-  "namespaces": [
+  "workspaces": [
     {
       "capabilities": {
         "approvalPacketRead": true,

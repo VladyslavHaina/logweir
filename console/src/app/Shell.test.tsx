@@ -35,9 +35,9 @@ describe("DUI-24: the main region on a route change", () => {
     let top = 640;
     Object.defineProperty(main, "scrollTop", { configurable: true, get: () => top, set: (v: number) => (top = v) });
     // CONTROL: the same page with another filter keeps the reader's place.
-    await act(() => router.navigate({ to: "/$ns/backups", params: { ns: "team-a" }, search: { filter: "unverified" } }));
+    await act(() => router.navigate({ to: "/$ws/backups", params: { ws: "team-a" }, search: { filter: "unverified" } }));
     expect(top).toBe(640);
-    await act(() => router.navigate({ to: "/$ns/connections", params: { ns: "team-a" } }));
+    await act(() => router.navigate({ to: "/$ws/connections", params: { ws: "team-a" } }));
     await screen.findByRole("heading", { name: "Connections", level: 1 });
     expect(top).toBe(0);
   });

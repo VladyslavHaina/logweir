@@ -220,7 +220,7 @@ describe("FX-36, FX-38: what a catalog's view does not prove", () => {
 });
 
 describe("DUI-10: a duplicate catalog", () => {
-  const message = "RecoveryCatalog team-a/archive already catalogs BackupDestination team-a/primary, and one destination has one catalog per namespace (D3 §5.5): this newer catalog runs no sync and publishes no view. Use archive, or delete it and this catalog takes over within a minute.";
+  const message = "RecoveryCatalog team-a/archive already catalogs BackupDestination team-a/primary, and one destination has one catalog per workspace (D3 §5.5): this newer catalog runs no sync and publishes no view. Use archive, or delete it and this catalog takes over within a minute.";
   const duplicate = {
     conditions: [{ type: "Ready", status: "False", reason: "DuplicateCatalog", message }],
     counts: {},

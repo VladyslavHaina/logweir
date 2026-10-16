@@ -326,9 +326,9 @@ const catalogs = new Map<string, Catalog>([
   ],
 ]);
 
-/** The namespace's own catalog, built from the base mock's point view of destination primary. */
-async function primary(route: Route, ns: string): Promise<Catalog> {
-  const answer = await route(new Request(`https://logweir.invalid/api/v1/namespaces/${ns}/catalogs/primary/points`));
+/** The workspace's own catalog, built from the base mock's point view of destination primary. */
+async function primary(route: Route, ws: string): Promise<Catalog> {
+  const answer = await route(new Request(`https://logweir.invalid/api/v1/workspaces/${ws}/catalogs/primary/points`));
   const points = ((await answer.json()) as { items?: PointView[] }).items ?? [];
   return view("primary", {
     destinationRef: { name: "primary" },
@@ -344,20 +344,20 @@ async function primary(route: Route, ns: string): Promise<Catalog> {
   });
 }
 
-async function allCatalogs(route: Route, ns: string): Promise<Catalog[]> {
-  if (ns !== "team-a") return [...catalogs.values()].filter((c) => c.namespace === ns);
-  return [await primary(route, ns), ...[...catalogs.values()].filter((c) => c.namespace === ns)];
+async function allCatalogs(route: Route, ws: string): Promise<Catalog[]> {
+  if (ws !== "team-a") return [...catalogs.values()].filter((c) => c.namespace === ws);
+  return [await primary(route, ws), ...[...catalogs.values()].filter((c) => c.namespace === ws)];
 }
 
 /** What a key was spent on, so a replay answers 200 and a different body under it 409. */
 const spent = new Map<string, { body: string; name: string }>();
 
-async function connect(request: Request, ns: string, route: Route): Promise<Response> {
+async function connect(request: Request, ws: string, route: Route): Promise<Response> {
   const key = request.headers.get("Idempotency-Key") ?? "";
   if (key.length < 8 || key.length > 128) return problem(400, "idempotency_key_required", "Durable creates need an Idempotency-Key of 8 to 128 visible characters.");
   const body = (await request.json()) as S["ConnectArchiveRequest"];
   const text = JSON.stringify(body);
-  const before = spent.get(`${ns}/${key}`);
+  const before = spent.get(`${ws}/${key}`);
   if (before) {
     if (before.body !== text) return problem(409, "idempotency_conflict", "This Idempotency-Key was already used for a different request.");
     return json(200, { item: catalogs.get(before.name), replayed: true, requestId: requestId() });
@@ -368,17 +368,17 @@ async function connect(request: Request, ns: string, route: Route): Promise<Resp
   }
   if (!body.destinationRef?.name) errors.push({ field: "destinationRef.name", code: "required", message: "name the saved destination to index" });
   if (errors.length > 0) return problem(422, "validation_failed", "One or more fields are invalid.", errors);
-  const taken = (await allCatalogs(route, ns)).some((c) => c.name === body.name);
+  const taken = (await allCatalogs(route, ws)).some((c) => c.name === body.name);
   if (taken) return problem(409, "state_conflict", `A RecoveryCatalog named ${body.name} already exists and this request did not create it.`);
   const made = view(body.name, {
-    namespace: ns,
+    namespace: ws,
     createdAt: iso(Date.now()),
     destinationRef: body.destinationRef ?? undefined,
     mode: body.syncMode === "index" ? "Index" : "Full",
     conditions: [],
   });
   catalogs.set(made.name, made);
-  spent.set(`${ns}/${key}`, { body: text, name: made.name });
+  spent.set(`${ws}/${key}`, { body: text, name: made.name });
   return json(201, { item: made, replayed: false, requestId: requestId() });
 }
 
@@ -493,24 +493,24 @@ export async function backupsMock(request: Request, route: Route): Promise<Respo
   const method = request.method;
   let p: RegExpMatchArray | null;
 
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/operations\/backup\/([^/]+)$/))) {
-    const answer = await route(new Request(`https://logweir.invalid/api/v1/namespaces/${p[1]}/backups/${p[2]}`));
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/operations\/backup\/([^/]+)$/))) {
+    const answer = await route(new Request(`https://logweir.invalid/api/v1/workspaces/${p[1]}/backups/${p[2]}`));
     if (!answer.ok) return problem(404, "not_found", `No backup named ${p[2]}.`);
     const { item } = (await answer.json()) as { item: Backup };
     return json(200, { item: operationOf(item), requestId: requestId() });
   }
 
-  if ((p = path.match(/^\/namespaces\/([^/]+)\/catalogs$/))) {
-    const ns = p[1]!;
-    if (method === "POST") return connect(request, ns, route);
-    if (method === "GET") return json(200, page(await allCatalogs(route, ns)));
+  if ((p = path.match(/^\/workspaces\/([^/]+)\/catalogs$/))) {
+    const ws = p[1]!;
+    if (method === "POST") return connect(request, ws, route);
+    if (method === "GET") return json(200, page(await allCatalogs(route, ws)));
     return null;
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/catalogs\/([^/]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/catalogs\/([^/]+)$/))) {
     const found = (await allCatalogs(route, p[1]!)).find((c) => c.name === p![2]);
     return found ? json(200, { item: found, requestId: requestId() }) : problem(404, "not_found", `No RecoveryCatalog named ${p[2]} in ${p[1]}.`);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/catalogs\/([^/]+)\/points$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/catalogs\/([^/]+)\/points$/))) {
     const name = p[2]!;
     if (name === "primary") return null; // the base mock's view, the one the restore wizard reads too
     const c = catalogs.get(name);
@@ -524,7 +524,7 @@ export async function backupsMock(request: Request, route: Route): Promise<Respo
     if (!second) body.page = { ...body.page, nextCursor: "page-2" };
     return json(200, body);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/catalogs\/([^/]+)\/signers$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/catalogs\/([^/]+)\/signers$/))) {
     const found = (await allCatalogs(route, p[1]!)).find((c) => c.name === p![2]);
     if (!found) return problem(404, "not_found", `No RecoveryCatalog named ${p[2]}.`);
     const signers = found.signers ?? [];

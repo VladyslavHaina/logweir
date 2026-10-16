@@ -53,7 +53,7 @@ const LEGACY: ApprovalPolicy = { ...TWO_PERSON, name: "legacy-governed-v1", lega
 
 function session(approver = true) {
   const caps = { ...sessionFixture.capabilities, approvalSubmit: approver };
-  return { ...sessionFixture, actor: { displayName: "Bob", id: BOB, issuer: "https://idp.example", subject: "bob" }, capabilities: caps, namespaces: [{ name: "team-a", roles: ["approver"], capabilities: caps }] };
+  return { ...sessionFixture, actor: { displayName: "Bob", id: BOB, issuer: "https://idp.example", subject: "bob" }, capabilities: caps, workspaces: [{ name: "team-a", roles: ["approver"], capabilities: caps }] };
 }
 
 async function restore(over: Record<string, unknown> = {}) {
@@ -105,7 +105,7 @@ const swoRequest = (over: Record<string, unknown> = {}) => ({
 const approvalX = (over: Record<string, unknown> = {}) => ({ ...approvalFixture.item, name: "approval-x", subjectRef: { kind: "Restore", name: "restore-x" }, ...over });
 
 interface World {
-  /** `null`: the namespace answers no policy; `"error"`: its policy cannot be read. */
+  /** `null`: the workspace answers no policy; `"error"`: its policy cannot be read. */
   policy: ApprovalPolicy | null | "error";
   approver?: boolean;
   restore?: Record<string, unknown> | null;
@@ -116,7 +116,7 @@ interface World {
   approvals?: Record<string, unknown>[] | "error";
   restores?: Record<string, unknown>[];
   requests?: Record<string, Record<string, unknown>>;
-  /** DUI-27: the namespace's Switchovers, and their two-person requests by name. */
+  /** DUI-27: the workspace's Switchovers, and their two-person requests by name. */
   switchovers?: Record<string, unknown>[];
   switchoverRequests?: Record<string, Record<string, unknown>>;
   post?: (path: string, body: unknown) => Response;
@@ -128,35 +128,35 @@ function serve(w: World) {
     const ok = (item: unknown) => json(200, { item, requestId: "r" });
     if (r.method === "POST") return w.post ? w.post(path, net.sent.at(-1)!.body) : null;
     if (path === "/session") return json(200, session(w.approver ?? true));
-    if (path === "/namespaces/team-a/approval-policy") return w.policy === "error" ? json(500, { code: "internal", detail: "the policy read failed", requestId: "p" }) : ok(w.policy);
-    if (path.startsWith("/namespaces/team-a/approvals?")) {
+    if (path === "/workspaces/team-a/approval-policy") return w.policy === "error" ? json(500, { code: "internal", detail: "the policy read failed", requestId: "p" }) : ok(w.policy);
+    if (path.startsWith("/workspaces/team-a/approvals?")) {
       return w.approvals === "error" ? json(500, { code: "internal", detail: "the list failed", requestId: "q" }) : json(200, { items: w.approvals ?? [], page: { limit: 200 }, requestId: "r" });
     }
-    if (path.startsWith("/namespaces/team-a/restores?")) return json(200, { items: w.restores ?? [], page: { limit: 200 }, requestId: "r" });
-    if (path.startsWith("/namespaces/team-a/switchovers?")) return json(200, { items: w.switchovers ?? [], page: { limit: 200 }, requestId: "r" });
-    const swReq = path.match(/^\/namespaces\/team-a\/switchovers\/([^/]+)\/approval-request$/);
+    if (path.startsWith("/workspaces/team-a/restores?")) return json(200, { items: w.restores ?? [], page: { limit: 200 }, requestId: "r" });
+    if (path.startsWith("/workspaces/team-a/switchovers?")) return json(200, { items: w.switchovers ?? [], page: { limit: 200 }, requestId: "r" });
+    const swReq = path.match(/^\/workspaces\/team-a\/switchovers\/([^/]+)\/approval-request$/);
     if (swReq) return w.switchoverRequests?.[swReq[1]!] ? ok(w.switchoverRequests[swReq[1]!]) : json(404, { code: "not_found", detail: "none" });
-    if (path === "/namespaces/team-a/restores/restore-x") return w.restore === null ? json(404, { code: "not_found", detail: "none" }) : ok(w.restore ?? (await restore()));
-    if (path === "/namespaces/team-a/approvals/approval-x") {
+    if (path === "/workspaces/team-a/restores/restore-x") return w.restore === null ? json(404, { code: "not_found", detail: "none" }) : ok(w.restore ?? (await restore()));
+    if (path === "/workspaces/team-a/approvals/approval-x") {
       if (w.approval === "error") return json(500, { code: "internal", detail: "the read failed", requestId: "q" });
       return w.approval ? ok(w.approval) : json(404, { code: "not_found", detail: "none" });
     }
-    if (path === "/namespaces/team-a/restores/restore-y") return ok(await restore({ name: "restore-y", uid: "uid-y", approvalRef: { name: "approval-y" } }));
-    if (path === "/namespaces/team-a/approvals/approval-y") return json(404, { code: "not_found", detail: "none" });
-    if (path === "/namespaces/team-a/approvals/approval-x/packet") return w.packet ? ok(w.packet) : json(404, { code: "not_found", detail: "none" });
-    if (path === "/namespaces/team-a/approvals/approval-x-confirmation/packet") return w.confirmation ? ok(w.confirmation) : json(404, { code: "not_found", detail: "none" });
-    const req = path.match(/^\/namespaces\/team-a\/restores\/([^/]+)\/approval-request$/);
+    if (path === "/workspaces/team-a/restores/restore-y") return ok(await restore({ name: "restore-y", uid: "uid-y", approvalRef: { name: "approval-y" } }));
+    if (path === "/workspaces/team-a/approvals/approval-y") return json(404, { code: "not_found", detail: "none" });
+    if (path === "/workspaces/team-a/approvals/approval-x/packet") return w.packet ? ok(w.packet) : json(404, { code: "not_found", detail: "none" });
+    if (path === "/workspaces/team-a/approvals/approval-x-confirmation/packet") return w.confirmation ? ok(w.confirmation) : json(404, { code: "not_found", detail: "none" });
+    const req = path.match(/^\/workspaces\/team-a\/restores\/([^/]+)\/approval-request$/);
     if (req) return ok(w.requests?.[req[1]!] ?? w.request ?? pending());
     return null;
   };
 }
 
-/** The Approvals routes under `#/<ns>/`, starting at `path`. */
+/** The Approvals routes under `#/<ws>/`, starting at `path`. */
 function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...approvalRoutes(ns as never)])]),
+    routeTree: root.addChildren([ws.addChildren([...approvalRoutes(ws as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -179,7 +179,7 @@ const created = () => json(201, { item: approvalX({ verified: null, verifiedSubj
 
 describe("two-person: the second person's page", () => {
   it("shows who asked, the plan hash, the target, the window and every topic before one Approve, which sends only the hash shown", async () => {
-    serve({ policy: TWO_PERSON, post: (path) => (path === "/namespaces/team-a/restores/restore-x/console-approval" ? created() : json(404, {})) });
+    serve({ policy: TWO_PERSON, post: (path) => (path === "/workspaces/team-a/restores/restore-x/console-approval" ? created() : json(404, {})) });
     renderAt("/team-a/approvals/restore-x");
     const approve = await screen.findByRole("button", { name: "Approve" });
     // Every fact is the server's, shown before the button.
@@ -234,7 +234,7 @@ describe("two-person: the second person's page", () => {
     cleanup();
     serve({ policy: TWO_PERSON, approver: false });
     renderAt("/team-a/approvals/restore-x");
-    await screen.findByText(/needs the approver role in this namespace/);
+    await screen.findByText(/needs the approver role in this workspace/);
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 
@@ -260,7 +260,7 @@ describe("two-person: the second person's page", () => {
     const router = renderAt("/team-a/approvals/restore-x");
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
     await screen.findByText("Recorded as Approval approval-x");
-    await router.navigate({ to: "/$ns/approvals/$name", params: { ns: "team-a", name: "restore-y" }, search: {} });
+    await router.navigate({ to: "/$ws/approvals/$name", params: { ws: "team-a", name: "restore-y" }, search: {} });
     await screen.findByText("You cannot approve your own request");
     expect(screen.queryByText(/Recorded as Approval/)).toBeNull();
   });
@@ -420,7 +420,7 @@ describe("the Approvals list", () => {
     expect(screen.queryByRole("link", { name: "swo-2" })).toBeNull();
   });
 
-  it("DUI-46: a switchover's recorded approval opens its two-person page only in a two-person namespace", async () => {
+  it("DUI-46: a switchover's recorded approval opens its two-person page only in a two-person workspace", async () => {
     const used = {
       ...(approvalFixture.item as Record<string, unknown>),
       name: "swo-approval-1",
@@ -443,7 +443,7 @@ describe("the Approvals list", () => {
       cleanup();
       net.sent.length = 0;
     }
-    // CONTROL: in a two-person namespace the record opens the switchover's approval page.
+    // CONTROL: in a two-person workspace the record opens the switchover's approval page.
     serve({ policy: TWO_PERSON, restores: [], approvals: [used], switchovers: [] });
     renderAt("/team-a/approvals");
     const twoPerson = await screen.findByRole("link", { name: "swo-1" });
@@ -470,7 +470,7 @@ describe("the navigation's count", () => {
     return renderHook(() => useApprovalsNavCount("team-a"), { wrapper });
   }
 
-  it("counts the requests that wait for this session in a two-person namespace, and is absent under confirm", async () => {
+  it("counts the requests that wait for this session in a two-person workspace, and is absent under confirm", async () => {
     const x = await restore();
     const y = await restore({ name: "restore-y", uid: "uid-y" });
     serve({
@@ -485,7 +485,7 @@ describe("the navigation's count", () => {
     net.sent = [];
     serve({ policy: CONFIRM, restores: [x, y] });
     const confirm = hook();
-    await waitFor(() => expect(net.sent.some((s) => s.path === "/namespaces/team-a/approval-policy")).toBe(true));
+    await waitFor(() => expect(net.sent.some((s) => s.path === "/workspaces/team-a/approval-policy")).toBe(true));
     await new Promise((r) => setTimeout(r, 50));
     expect(confirm.result.current).toBeUndefined();
     expect(net.sent.some((s) => s.path.endsWith("/approval-request"))).toBe(false);
@@ -500,7 +500,7 @@ describe("the navigation's count", () => {
     // CONTROL: the requester's own switchover is not offered to them, so nothing waits for this session.
     serve({ policy: TWO_PERSON, restores: [], switchovers: [swo()], switchoverRequests: { "swo-1": swoRequest({ approve: { offered: false, refusal: "requester", sentence: "s" } }) } });
     const own = hook();
-    await waitFor(() => expect(net.sent.some((s) => s.path === "/namespaces/team-a/switchovers/swo-1/approval-request")).toBe(true));
+    await waitFor(() => expect(net.sent.some((s) => s.path === "/workspaces/team-a/switchovers/swo-1/approval-request")).toBe(true));
     await new Promise((r) => setTimeout(r, 50));
     expect(own.result.current).toBeUndefined();
   });

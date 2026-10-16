@@ -1,10 +1,10 @@
-// The approvals mock: each namespace's approval policy, its Approval records,
+// The approvals mock: each workspace's approval policy, its Approval records,
 // two-person requests and the three submissions, with the API's refusals
 // (docs/api.md "Approval policy" and "Two-person approval in the console").
 //
 // team-a and team-b are confirm (OD-8's default): every Restore there carries the
 // console's signed confirmation, derived here from the shared restore list. The
-// three demo namespaces (approvalNamespaces.ts) show the other modes, and their
+// three demo workspaces (approvalWorkspaces.ts) show the other modes, and their
 // restores are served from this file:
 //   payments  two-person: one request by Bob waits for Alice; one is Alice's own
 //             (she may not approve it); one Alice approved yesterday.
@@ -54,9 +54,9 @@ function uid(seed: number): string {
 
 const DIGEST = (seed: number) => "sha256:" + hex(seed, 64);
 
-function policy(ns: string, over: Partial<ApprovalPolicy>): ApprovalPolicy {
+function policy(ws: string, over: Partial<ApprovalPolicy>): ApprovalPolicy {
   return {
-    namespace: ns,
+    workspace: ws,
     name: "default-confirm-v1",
     mode: "ordinary",
     operatorMode: "confirm",
@@ -74,10 +74,10 @@ function policy(ns: string, over: Partial<ApprovalPolicy>): ApprovalPolicy {
   };
 }
 
-function policyOf(ns: string): ApprovalPolicy {
-  switch (ns) {
+function policyOf(ws: string): ApprovalPolicy {
+  switch (ws) {
     case "payments":
-      return policy(ns, {
+      return policy(ws, {
         name: "prod-pair",
         mode: "governed",
         operatorMode: "two-person",
@@ -90,7 +90,7 @@ function policyOf(ns: string): ApprovalPolicy {
         digest: DIGEST(502),
       });
     case "ledger":
-      return policy(ns, {
+      return policy(ws, {
         name: "prod-strict",
         mode: "governed",
         operatorMode: "strict",
@@ -102,7 +102,7 @@ function policyOf(ns: string): ApprovalPolicy {
         digest: DIGEST(503),
       });
     case "sandbox":
-      return policy(ns, {
+      return policy(ws, {
         name: "legacy-governed-v1",
         mode: "governed",
         operatorMode: "strict",
@@ -115,7 +115,7 @@ function policyOf(ns: string): ApprovalPolicy {
         digest: null,
       });
     default:
-      return policy(ns, {});
+      return policy(ws, {});
   }
 }
 
@@ -162,10 +162,10 @@ function planText(name: string, topics: string[], prefix: string, point: number,
     .concat("\n");
 }
 
-function baseRestore(ns: string, name: string, seed: number, over: Partial<Restore>): Omit<Restore, "planHash"> {
+function baseRestore(ws: string, name: string, seed: number, over: Partial<Restore>): Omit<Restore, "planHash"> {
   return {
     name,
-    namespace: ns,
+    namespace: ws,
     uid: uid(seed),
     resourceVersion: String(64100 + seed),
     createdAt: iso(NOW - 12 * MINUTE),
@@ -322,14 +322,14 @@ async function planHashOf(d: Demo): Promise<string> {
   return h;
 }
 
-/** Approvals recorded through this mock: by namespace, then by name. */
+/** Approvals recorded through this mock: by workspace, then by name. */
 const recorded = new Map<string, Map<string, { approval: Approval; at: number; body: string }>>();
 
-function stored(ns: string): Map<string, { approval: Approval; at: number; body: string }> {
-  let m = recorded.get(ns);
+function stored(ws: string): Map<string, { approval: Approval; at: number; body: string }> {
+  let m = recorded.get(ws);
   if (!m) {
     m = new Map();
-    recorded.set(ns, m);
+    recorded.set(ws, m);
   }
   return m;
 }
@@ -348,11 +348,11 @@ function settled(entry: { approval: Approval; at: number }, restore: { name: str
   };
 }
 
-function approvalOf(ns: string, name: string, over: Partial<Approval>): Approval {
+function approvalOf(ws: string, name: string, over: Partial<Approval>): Approval {
   return {
     name,
-    namespace: ns,
-    uid: uid(name.length * 97 + ns.length),
+    namespace: ws,
+    uid: uid(name.length * 97 + ws.length),
     resourceVersion: String(65000 + name.length),
     createdAt: iso(Date.now()),
     approvalBytesLength: 540,
@@ -383,12 +383,12 @@ async function restoreOf(d: Demo, withPlan: boolean): Promise<Restore> {
   return r;
 }
 
-function demoOf(ns: string, name: string): Demo | undefined {
-  return demos.find((d) => d.restore.namespace === ns && d.restore.name === name);
+function demoOf(ws: string, name: string): Demo | undefined {
+  return demos.find((d) => d.restore.namespace === ws && d.restore.name === name);
 }
 
-function ownsNamespace(ns: string): boolean {
-  return demos.some((d) => d.restore.namespace === ns);
+function ownsWorkspace(ws: string): boolean {
+  return demos.some((d) => d.restore.namespace === ws);
 }
 
 // ---------------------------------------------------------------- confirm-mode records
@@ -442,7 +442,7 @@ async function requestOf(d: Demo): Promise<ApprovalRequest> {
     confirmationSha256: DIGEST(d.restore.name.length * 17),
     issuedAt: iso(d.issuedAt),
     expiresAt: iso(d.issuedAt + HOUR),
-    namespace: r.namespace,
+    workspace: r.namespace,
     planHash: r.planHash,
     policy: "prod-pair",
     policyDigest: DIGEST(502),
@@ -555,31 +555,31 @@ function carriesPrivateKey(text: unknown): boolean {
   return typeof text === "string" && /private[\s_-]*key/i.test(text);
 }
 
-async function listApprovals(ns: string): Promise<Approval[]> {
-  if (!ownsNamespace(ns)) {
-    return sharedRestores.filter((r) => r.namespace === ns).map(confirmedApproval);
+async function listApprovals(ws: string): Promise<Approval[]> {
+  if (!ownsWorkspace(ws)) {
+    return sharedRestores.filter((r) => r.namespace === ws).map(confirmedApproval);
   }
   const out: Approval[] = [];
-  for (const d of demos.filter((x) => x.restore.namespace === ns)) {
-    const one = await approvalNamed(ns, d.restore.approvalRef.name);
+  for (const d of demos.filter((x) => x.restore.namespace === ws)) {
+    const one = await approvalNamed(ws, d.restore.approvalRef.name);
     if (one) out.push(one);
   }
   return out;
 }
 
-async function approvalNamed(ns: string, name: string): Promise<Approval | null> {
-  if (!ownsNamespace(ns)) {
-    const r = sharedRestores.find((x) => x.namespace === ns && x.approvalRef.name === name);
+async function approvalNamed(ws: string, name: string): Promise<Approval | null> {
+  if (!ownsWorkspace(ws)) {
+    const r = sharedRestores.find((x) => x.namespace === ws && x.approvalRef.name === name);
     return r ? confirmedApproval(r) : null;
   }
-  const d = demos.find((x) => x.restore.namespace === ns && x.restore.approvalRef.name === name);
+  const d = demos.find((x) => x.restore.namespace === ws && x.restore.approvalRef.name === name);
   if (!d) return null;
   const r = await restoreOf(d, false);
   if (d.approvedBy) {
     return settled(
       {
         at: d.approvedBy.at,
-        approval: approvalOf(ns, name, {
+        approval: approvalOf(ws, name, {
           createdAt: iso(d.approvedBy.at),
           planHash: r.planHash,
           approver: d.approvedBy.who,
@@ -591,7 +591,7 @@ async function approvalNamed(ns: string, name: string): Promise<Approval | null>
       r,
     );
   }
-  const entry = stored(ns).get(name);
+  const entry = stored(ws).get(name);
   return entry ? settled(entry, r) : null;
 }
 
@@ -599,75 +599,75 @@ async function approvalNamed(ns: string, name: string): Promise<Approval | null>
 export async function approvalsMock(request: Request, method: string, path: string): Promise<Response | null> {
   let p: RegExpMatchArray | null;
 
-  // The demo namespaces' policies; every other namespace's is the restores mock's
+  // The demo workspaces' policies; every other workspace's is the restores mock's
   // (mock/restores.ts), which the wizard's tests switch between modes.
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approval-policy$/)) && ownsNamespace(p[1]!)) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/approval-policy$/)) && ownsWorkspace(p[1]!)) {
     return json(200, { item: policyOf(p[1]!), requestId: requestId() });
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approvals$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/approvals$/))) {
     return json(200, page(await listApprovals(p[1]!)));
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approvals\/([^/]+)\/packet$/))) {
-    const [ns, name] = [p[1]!, p[2]!];
-    const ledger = demos.find((d) => d.restore.namespace === ns && `${d.restore.approvalRef.name}-confirmation` === name && ns === "ledger");
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/approvals\/([^/]+)\/packet$/))) {
+    const [ws, name] = [p[1]!, p[2]!];
+    const ledger = demos.find((d) => d.restore.namespace === ws && `${d.restore.approvalRef.name}-confirmation` === name && ws === "ledger");
     if (ledger) {
       const r = await restoreOf(ledger, false);
       return json(200, {
-        item: { name, namespace: ns, uid: uid(name.length * 31), planHash: r.planHash, subjectRef: { kind: "Restore", name: r.name }, approvalBytes: governedDocument(ledger, r.planHash), sidecarBytes: CONSOLE_SIDECAR },
+        item: { name, namespace: ws, uid: uid(name.length * 31), planHash: r.planHash, subjectRef: { kind: "Restore", name: r.name }, approvalBytes: governedDocument(ledger, r.planHash), sidecarBytes: CONSOLE_SIDECAR },
         requestId: requestId(),
       });
     }
-    const shared = !ownsNamespace(ns) ? sharedRestores.find((x) => x.namespace === ns && x.approvalRef.name === name) : undefined;
+    const shared = !ownsWorkspace(ws) ? sharedRestores.find((x) => x.namespace === ws && x.approvalRef.name === name) : undefined;
     if (shared) {
       return json(200, {
-        item: { name, namespace: ns, uid: uid(name.length * 97 + ns.length), planHash: shared.planHash, subjectRef: { kind: "Restore", name: shared.name }, approvalBytes: confirmationDocument(shared), sidecarBytes: CONSOLE_SIDECAR },
+        item: { name, namespace: ws, uid: uid(name.length * 97 + ws.length), planHash: shared.planHash, subjectRef: { kind: "Restore", name: shared.name }, approvalBytes: confirmationDocument(shared), sidecarBytes: CONSOLE_SIDECAR },
         requestId: requestId(),
       });
     }
-    const entry = stored(ns).get(name);
+    const entry = stored(ws).get(name);
     if (entry) {
       const sent = JSON.parse(entry.body) as { approvalBytes?: string; sidecarBytes?: string };
       return json(200, {
-        item: { name, namespace: ns, uid: entry.approval.uid, planHash: entry.approval.planHash, subjectRef: entry.approval.subjectRef, approvalBytes: sent.approvalBytes ?? "", sidecarBytes: sent.sidecarBytes ?? "" },
+        item: { name, namespace: ws, uid: entry.approval.uid, planHash: entry.approval.planHash, subjectRef: entry.approval.subjectRef, approvalBytes: sent.approvalBytes ?? "", sidecarBytes: sent.sidecarBytes ?? "" },
         requestId: requestId(),
       });
     }
-    return problem(404, "not_found", `No Approval named ${name} in ${ns}.`);
+    return problem(404, "not_found", `No Approval named ${name} in ${ws}.`);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/approvals\/([^/]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/approvals\/([^/]+)$/))) {
     const found = await approvalNamed(p[1]!, p[2]!);
     return found ? json(200, { item: found, requestId: requestId() }) : problem(404, "not_found", `No Approval named ${p[2]} in ${p[1]}.`);
   }
 
-  // The demo namespaces' restores: listed, read with their plan, and followed.
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/restores$/)) && ownsNamespace(p[1]!)) {
-    const ns = p[1]!;
-    return json(200, page(await Promise.all(demos.filter((d) => d.restore.namespace === ns).map((d) => restoreOf(d, false)))));
+  // The demo workspaces' restores: listed, read with their plan, and followed.
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/restores$/)) && ownsWorkspace(p[1]!)) {
+    const ws = p[1]!;
+    return json(200, page(await Promise.all(demos.filter((d) => d.restore.namespace === ws).map((d) => restoreOf(d, false)))));
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/restores\/([^/]+)$/)) && ownsNamespace(p[1]!)) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/restores\/([^/]+)$/)) && ownsWorkspace(p[1]!)) {
     const d = demoOf(p[1]!, p[2]!);
     return d ? json(200, { item: await restoreOf(d, true), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${p[2]} in ${p[1]}.`);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/operations\/restore\/([^/]+)$/)) && ownsNamespace(p[1]!)) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/operations\/restore\/([^/]+)$/)) && ownsWorkspace(p[1]!)) {
     const d = demoOf(p[1]!, p[2]!);
     return d ? json(200, { item: operationOf(await restoreOf(d, false)), requestId: requestId() }) : problem(404, "not_found", `No restore named ${p[2]}.`);
   }
 
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/restores\/([^/]+)\/approval-request$/))) {
-    const [ns, name] = [p[1]!, p[2]!];
-    if (policyOf(ns).operatorMode !== "two-person") {
-      return problem(409, "policy_mismatch", `Namespace ${ns} does not take its approval from the console (not_a_console_approval_policy).`);
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/restores\/([^/]+)\/approval-request$/))) {
+    const [ws, name] = [p[1]!, p[2]!];
+    if (policyOf(ws).operatorMode !== "two-person") {
+      return problem(409, "policy_mismatch", `Workspace ${ws} does not take its approval from the console (not_a_console_approval_policy).`);
     }
-    const d = demoOf(ns, name);
-    return d ? json(200, { item: await requestOf(d), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${name} in ${ns}.`);
+    const d = demoOf(ws, name);
+    return d ? json(200, { item: await requestOf(d), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${name} in ${ws}.`);
   }
 
-  if (method === "POST" && (p = path.match(/^\/namespaces\/([^/]+)\/restores\/([^/]+)\/console-approval$/))) {
-    const [ns, name] = [p[1]!, p[2]!];
+  if (method === "POST" && (p = path.match(/^\/workspaces\/([^/]+)\/restores\/([^/]+)\/console-approval$/))) {
+    const [ws, name] = [p[1]!, p[2]!];
     const sent = await body(request);
-    const d = demoOf(ns, name);
-    if (policyOf(ns).operatorMode !== "two-person") return problem(409, "policy_mismatch", `Namespace ${ns} does not take its approval from the console.`);
-    if (!d) return problem(404, "not_found", `No Restore named ${name} in ${ns}.`);
+    const d = demoOf(ws, name);
+    if (policyOf(ws).operatorMode !== "two-person") return problem(409, "policy_mismatch", `Workspace ${ws} does not take its approval from the console.`);
+    if (!d) return problem(404, "not_found", `No Restore named ${name} in ${ws}.`);
     if (Object.keys(sent).some((k) => k !== "confirmationSha256")) {
       return problem(422, "validation_failed", "The body names the request that was shown and nothing else.", [{ field: Object.keys(sent).find((k) => k !== "confirmationSha256")!, code: "unknown_field", message: "unknown field" }]);
     }
@@ -678,27 +678,27 @@ export async function approvalsMock(request: Request, method: string, path: stri
     if (d.requester === ALICE) {
       return problem(403, "forbidden", `Policy prod-pair needs a second person: you requested this restore (${ALICE}). Nothing was approved.`);
     }
-    const existing = stored(ns).get(d.restore.approvalRef.name);
+    const existing = stored(ws).get(d.restore.approvalRef.name);
     if (existing || d.approvedBy) {
       if (existing && existing.approval.approver === ALICE) {
-        return json(200, { item: await approvalNamed(ns, d.restore.approvalRef.name), replayed: true, requestId: requestId() });
+        return json(200, { item: await approvalNamed(ws, d.restore.approvalRef.name), replayed: true, requestId: requestId() });
       }
       return problem(409, "state_conflict", "Someone else already approved this request (already_approved).");
     }
     const r = await restoreOf(d, false);
-    const approval = approvalOf(ns, r.approvalRef.name, {
+    const approval = approvalOf(ws, r.approvalRef.name, {
       planHash: r.planHash,
       approver: ALICE,
       matchedKeyId: CONSOLE_KEY,
       ticket: d.ticket ?? null,
       authorization: { confirmationKeyId: CONSOLE_KEY, mode: "Governed", policyDigest: DIGEST(502), policyName: "prod-pair", requester: d.requester },
     });
-    stored(ns).set(r.approvalRef.name, { approval, at: Date.now(), body: JSON.stringify(sent) });
+    stored(ws).set(r.approvalRef.name, { approval, at: Date.now(), body: JSON.stringify(sent) });
     return json(201, { item: approval, requestId: requestId() });
   }
 
-  if (method === "POST" && (p = path.match(/^\/namespaces\/([^/]+)\/restores\/([^/]+)\/approval$/))) {
-    const [ns, name] = [p[1]!, p[2]!];
+  if (method === "POST" && (p = path.match(/^\/workspaces\/([^/]+)\/restores\/([^/]+)\/approval$/))) {
+    const [ws, name] = [p[1]!, p[2]!];
     const sent = await body(request);
     const keyed = (["sidecarBytes", "approvalBytes"] as const).filter((f) => carriesPrivateKey(sent[f]));
     if (keyed.length > 0) {
@@ -713,15 +713,15 @@ export async function approvalsMock(request: Request, method: string, path: stri
     if (!sidecar || typeof sidecar !== "object") {
       return problem(422, "validation_failed", "The sidecar is not a DSSE sidecar.", [{ field: "sidecarBytes", code: "not_a_sidecar", message: "must be the DSSE sidecar `logweir drill countersign` wrote" }]);
     }
-    const mode = policyOf(ns);
-    const d = demoOf(ns, name) ?? undefined;
-    if (!d && ownsNamespace(ns)) return problem(404, "not_found", `No Restore named ${name} in ${ns}.`);
+    const mode = policyOf(ws);
+    const d = demoOf(ws, name) ?? undefined;
+    if (!d && ownsWorkspace(ws)) return problem(404, "not_found", `No Restore named ${name} in ${ws}.`);
     if (mode.legacy) {
       if (typeof sent.approvalBytes !== "string" || sent.approvalBytes.length === 0) {
-        return problem(422, "validation_failed", "Both documents are needed.", [{ field: "approvalBytes", code: "required", message: "an unbound namespace records the approval.json `logweir drill approve` wrote, beside its sidecar" }]);
+        return problem(422, "validation_failed", "Both documents are needed.", [{ field: "approvalBytes", code: "required", message: "an unbound workspace records the approval.json `logweir drill approve` wrote, beside its sidecar" }]);
       }
       if (sidecar.payloadType !== V1_APPROVAL_PAYLOAD) {
-        return problem(409, "policy_mismatch", `Namespace ${ns} is bound to no approval policy (legacy-governed-v1), which records the approval logweir drill approve signs; this sidecar's payload type is ${String(sidecar.payloadType ?? "absent")}.`);
+        return problem(409, "policy_mismatch", `Workspace ${ws} is bound to no approval policy (legacy-governed-v1), which records the approval logweir drill approve signs; this sidecar's payload type is ${String(sidecar.payloadType ?? "absent")}.`);
       }
       const r = await restoreOf(d!, false);
       let signed: unknown;
@@ -733,10 +733,10 @@ export async function approvalsMock(request: Request, method: string, path: stri
       if (signed !== r.planHash) {
         return problem(422, "validation_failed", "The approval names another plan.", [{ field: "approvalBytes", code: "plan_mismatch", message: `the approval document names plan hash ${String(signed ?? "none")} and Restore ${r.name} hashes to ${r.planHash}; sign this Restore's plan` }]);
       }
-      return record(ns, r, sent, APPROVER_KEY, "incident-commander");
+      return record(ws, r, sent, APPROVER_KEY, "incident-commander");
     }
     if (mode.mode !== "governed" || mode.operatorMode === "two-person") {
-      return problem(409, "policy_mismatch", `Namespace ${ns} is bound to ${mode.name} (${mode.operatorMode}), not a strict policy, so there is no countersignature to submit here.`);
+      return problem(409, "policy_mismatch", `Workspace ${ws} is bound to ${mode.name} (${mode.operatorMode}), not a strict policy, so there is no countersignature to submit here.`);
     }
     if (sent.approvalBytes !== undefined) {
       return problem(422, "validation_failed", "Only the sidecar is accepted.", [{ field: "approvalBytes", code: "not_accepted", message: "under an explicit approval policy the console's confirmation document is the one signed; submit only the countersigned sidecar" }]);
@@ -747,7 +747,7 @@ export async function approvalsMock(request: Request, method: string, path: stri
     if (!Array.isArray(sidecar.signatures) || sidecar.signatures.length < 2) {
       return problem(422, "validation_failed", "The sidecar adds no signature.", [{ field: "sidecarBytes", code: "no_countersignature", message: "the sidecar carries no signature beside the console's: run logweir drill countersign over the confirmation" }]);
     }
-    return record(ns, await restoreOf(d!, false), sent, APPROVER_KEY, ALICE, {
+    return record(ws, await restoreOf(d!, false), sent, APPROVER_KEY, ALICE, {
       ticket: d!.ticket ?? null,
       authorization: { confirmationKeyId: CONSOLE_KEY, mode: "Governed", policyDigest: DIGEST(503), policyName: "prod-strict", requester: d!.requester },
     });
@@ -756,14 +756,14 @@ export async function approvalsMock(request: Request, method: string, path: stri
   return null;
 }
 
-function record(ns: string, r: Restore, sent: Record<string, unknown>, key: string, approver: string, over: Partial<Approval> = {}): Response {
+function record(ws: string, r: Restore, sent: Record<string, unknown>, key: string, approver: string, over: Partial<Approval> = {}): Response {
   const text = JSON.stringify(sent);
-  const existing = stored(ns).get(r.approvalRef.name);
+  const existing = stored(ws).get(r.approvalRef.name);
   if (existing) {
     if (existing.body === text) return json(200, { item: settled(existing, r), replayed: true, requestId: requestId() });
     return problem(409, "state_conflict", `Another Approval already holds the name ${r.approvalRef.name}; it is never overwritten.`);
   }
-  const approval = approvalOf(ns, r.approvalRef.name, { planHash: r.planHash, approver, matchedKeyId: key, approvalSubject: r.approvalSubject, ...over });
-  stored(ns).set(r.approvalRef.name, { approval, at: Date.now(), body: text });
+  const approval = approvalOf(ws, r.approvalRef.name, { planHash: r.planHash, approver, matchedKeyId: key, approvalSubject: r.approvalSubject, ...over });
+  stored(ws).set(r.approvalRef.name, { approval, at: Date.now(), body: text });
   return json(201, { item: approval, requestId: requestId() });
 }

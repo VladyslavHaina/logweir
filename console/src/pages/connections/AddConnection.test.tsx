@@ -13,13 +13,13 @@ import { AddConnection } from "./AddConnection";
 
 const SECRET = "Sup3r-s3cret-typed-once-7731";
 
-function setup(ns = "team-a") {
+function setup(ws = "team-a") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const onCreated = vi.fn();
   const view = render(
     <QueryClientProvider client={client}>
       <SessionProvider session={session}>
-        <AddConnection ns={ns} onClose={() => {}} onCreated={onCreated} />
+        <AddConnection ws={ws} onClose={() => {}} onCreated={onCreated} />
       </SessionProvider>
     </QueryClientProvider>,
   );

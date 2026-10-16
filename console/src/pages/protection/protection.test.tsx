@@ -36,9 +36,9 @@ vi.mock("../../mock/fetch", () => ({
 
 function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...scheduleRoutes(ns as never)])]),
+    routeTree: root.addChildren([ws.addChildren([...scheduleRoutes(ws as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   render(
@@ -101,7 +101,7 @@ describe("the policy's statuses", () => {
   });
 
   it("an evaluated Unknown is shown as Unknown, never as not evaluated yet", async () => {
-    net.answer = (path) => (path === "/namespaces/team-a/protection-policies/protect-unknown" ? unknown : undefined);
+    net.answer = (path) => (path === "/workspaces/team-a/protection-policies/protect-unknown" ? unknown : undefined);
     renderAt("/team-a/protection/protect-unknown");
     const header = await screen.findByRole("heading", { level: 1 });
     const region = header.closest("section")!;
@@ -122,7 +122,7 @@ describe("the policy's statuses", () => {
 
   it("the list draws each policy's age from the shared derivation", async () => {
     const items = [policy({ name: "p-ok", objectives: { ...(healthy.item.objectives as P["objectives"]), maxRecoveryPointAgeSeconds: 7200 }, lastAvailablePoint: { ageSeconds: 3600, topicsTruncated: false } })];
-    net.answer = (path) => (path === "/namespaces/team-a/protection-policies" ? { items, page: { limit: 50 }, requestId: "r" } : undefined);
+    net.answer = (path) => (path === "/workspaces/team-a/protection-policies" ? { items, page: { limit: 50 }, requestId: "r" } : undefined);
     renderAt("/team-a/protection");
     const bar = await screen.findByRole("progressbar", { name: /p-ok: newest recovery point/ });
     expect(bar.getAttribute("aria-label")).toBe(`p-ok: newest recovery point ${ageVsObjective(items[0]!).text}`);
@@ -132,7 +132,7 @@ describe("the policy's statuses", () => {
 
 describe("FX-38: a Backup listing cut at its bound (BackupHistoryTooLarge)", () => {
   const REMEDY =
-    "the namespace holds more Backups than one evaluation reads (5 pages of 200), and they are listed by name, so the newest runs may be the ones not read; delete old terminal Backup objects (the archive keeps their points) and the policy evaluates again";
+    "the workspace holds more Backups than one evaluation reads (5 pages of 200), and they are listed by name, so the newest runs may be the ones not read; delete old terminal Backup objects (the archive keeps their points) and the policy evaluates again";
   const cut = (): P =>
     policy({
       name: "protect-cut",
@@ -162,7 +162,7 @@ describe("FX-38: a Backup listing cut at its bound (BackupHistoryTooLarge)", () 
   });
 
   it("the page shows the message with its remedy, and not known for the point, the attempt and the streak", async () => {
-    net.answer = (path) => (path === "/namespaces/team-a/protection-policies/protect-cut" ? { item: cut(), requestId: "r" } : undefined);
+    net.answer = (path) => (path === "/workspaces/team-a/protection-policies/protect-cut" ? { item: cut(), requestId: "r" } : undefined);
     renderAt("/team-a/protection/protect-cut");
     await screen.findByText("Could not be evaluated: too many Backup objects to read");
     const body = () => document.body.textContent ?? "";

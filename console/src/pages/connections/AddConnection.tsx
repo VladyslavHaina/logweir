@@ -58,15 +58,15 @@ export const CREDENTIAL_NOTE =
   "The credential you type is sent once, to the Logweir service, which stores it in a Secret owned by and bound to this connection. It is never shown again, never kept by this page and never written to browser storage; no response can read it back.";
 
 export function AddConnection({
-  ns,
+  ws,
   onClose,
   onCreated,
 }: {
-  ns: string;
+  ws: string;
   onClose: () => void;
   onCreated: (name: string, replayed: boolean) => void;
 }) {
-  const create = useCreateConnection(ns);
+  const create = useCreateConnection(ws);
   const intent = useIntentKey("connection");
   const [unmatched, setUnmatched] = useState<string[]>([]);
   const [local, setLocal] = useState<unknown>(null);
@@ -237,7 +237,7 @@ export function AddConnection({
           >
             <Content component="p" className="lw-subtle lw-small">
               Only when the brokers' certificates are signed by an authority the runner image does not already trust: one key of a ConfigMap
-              in this namespace holding the PEM certificate(s). It replaces the default trust store for this connection and needs TLS on.
+              in this workspace holding the PEM certificate(s). It replaces the default trust store for this connection and needs TLS on.
             </Content>
             <Grid hasGutter md={6}>
               <GridItem>

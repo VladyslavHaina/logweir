@@ -21,9 +21,9 @@ import { ADJUSTMENT_WORDS, localWords, outcomeOf, scheduleState } from "./model"
 import { ErrorText, Prose } from "../../components/Prose";
 import { Revealed } from "../../components/Revealed";
 
-/** What the signed-in actor may do in `ns`, from the session; undefined without a grant there. */
-export function useGrant(ns: string) {
-  return grantOf(useSessionDoc(), ns)?.capabilities;
+/** What the signed-in actor may do in `ws`, from the session; undefined without a grant there. */
+export function useGrant(ws: string) {
+  return grantOf(useSessionDoc(), ws)?.capabilities;
 }
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {

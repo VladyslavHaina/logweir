@@ -1,7 +1,7 @@
 // Theme A's cutover on the product API (PROD-04.2; decisions/PROD-04.2-cutover.md):
 // the Switchover preflight (§3.8) and its details, the plan the approver signs (§3.2),
 // the Switchover kind (§3.3) with its per-group outcomes (§3.5), the rollback a record
-// allows (§3.6), and the approval a two-person namespace shows (§6, `switchover_scope`).
+// allows (§3.6), and the approval a two-person workspace shows (§6, `switchover_scope`).
 // Every read and write goes through the one typed client (`api`), as the other groups do.
 //
 // THE PREFLIGHT'S WORD DECIDES. A group is offered only when the review's own details
@@ -598,32 +598,32 @@ export function fileName(stem: string, suffix: string, fallback: string): string
 export const UNKNOWN_OUTCOME = "The service did not confirm the switchover. It may or may not exist; submitting again is safe, because it carries the same request key.";
 
 // --------------------------------------------------------------- queries
-// R1's keys and session: a list is [kind, ns], one object [kind, ns, name]; a Switchover is
+// R1's keys and session: a list is [kind, ws], one object [kind, ws, name]; a Switchover is
 // read under `restoresRead` and created under `restoreCreate` (the API authorizes it as a
 // restore), and a read the session does not grant stays idle.
 
 const moving = (items: Switchover[] | undefined) => (items?.some((s) => !isTerminal(s)) ? LIVE_MS : false);
 
-export function useSwitchovers(ns: string, enabled = true) {
-  const readable = useCan(ns, "restoresRead");
+export function useSwitchovers(ws: string, enabled = true) {
+  const readable = useCan(ws, "restoresRead");
   return useQuery({
-    queryKey: keys.list("switchovers", ns),
+    queryKey: keys.list("switchovers", ws),
     enabled: enabled && readable,
     queryFn: ({ signal }) =>
       listAll("switchovers", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/switchovers", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/switchovers", { params: { path: { ws }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
     refetchInterval: (q) => moving(q.state.data),
   });
 }
 
-export function useSwitchover(ns: string, name: string | undefined) {
-  const readable = useCan(ns, "restoresRead");
+export function useSwitchover(ws: string, name: string | undefined) {
+  const readable = useCan(ws, "restoresRead");
   return useQuery({
-    queryKey: keys.item("switchovers", ns, name ?? ""),
+    queryKey: keys.item("switchovers", ws, name ?? ""),
     enabled: readable && !!name,
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}", { params: { path: { ns, name: name! } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/switchovers/{name}", { params: { path: { ws, name: name! } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !isTerminal(q.state.data) ? LIVE_MS : false),
     retry: (n, error) => !(error instanceof ApiError && error.status === 404) && n < 2,
   });
@@ -631,13 +631,13 @@ export function useSwitchover(ns: string, name: string | undefined) {
 
 /** Start a switchover review of one restore (every group its mapping maps). Each click is a
  *  new review, so each gets a fresh key. */
-export function useStartReview(ns: string) {
+export function useStartReview(ws: string) {
   return useMutation({
     mutationFn: async (restore: { name: string; uid: string }): Promise<Preflight> =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/preflights", {
-            params: { path: { ns }, header: createHeaders(mintKey("switchover-review")) },
+          api.POST("/api/v1/workspaces/{ws}/preflights", {
+            params: { path: { ws }, header: createHeaders(mintKey("switchover-review")) },
             body: { operation: "switchover", switchover: { restoreName: restore.name, restoreUid: restore.uid } },
           }),
         )
@@ -645,25 +645,25 @@ export function useStartReview(ns: string) {
   });
 }
 
-export function usePreflight(ns: string, id: string | undefined) {
-  const readable = useCan(ns, "preflight");
+export function usePreflight(ws: string, id: string | undefined) {
+  const readable = useCan(ws, "preflight");
   return useQuery({
-    queryKey: keys.item("preflights", ns, id ?? ""),
+    queryKey: keys.item("preflights", ws, id ?? ""),
     enabled: readable && !!id,
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id! } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/preflights/{id}", { params: { path: { ws, id: id! } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.terminal ? 1000 : false),
   });
 }
 
 /** Every page of a preflight's details (at most 64 pages of 200). */
-export async function readDetails(ns: string, id: string, check?: string, signal?: AbortSignal): Promise<DetailEntry[]> {
+export async function readDetails(ws: string, id: string, check?: string, signal?: AbortSignal): Promise<DetailEntry[]> {
   const out: DetailEntry[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 64; page += 1) {
     const res = await call(() =>
-      api.GET("/api/v1/namespaces/{ns}/preflights/{id}/details", {
-        params: { path: { ns, id }, query: { limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}), ...(check ? { check } : {}) } },
+      api.GET("/api/v1/workspaces/{ws}/preflights/{id}/details", {
+        params: { path: { ws, id }, query: { limit: LIST_PAGE_SIZE, ...(cursor ? { cursor } : {}), ...(check ? { check } : {}) } },
         signal,
       }),
     );
@@ -674,11 +674,11 @@ export async function readDetails(ns: string, id: string, check?: string, signal
   return out;
 }
 
-export function usePreflightDetails(ns: string, pf: Preflight | undefined, check?: string) {
+export function usePreflightDetails(ws: string, pf: Preflight | undefined, check?: string) {
   return useQuery({
-    queryKey: ["preflight-details", ns, pf?.id, check ?? ""],
+    queryKey: ["preflight-details", ws, pf?.id, check ?? ""],
     enabled: !!pf && pf.terminal && pf.detailsAvailable,
-    queryFn: ({ signal }) => readDetails(ns, pf!.id, check, signal),
+    queryFn: ({ signal }) => readDetails(ws, pf!.id, check, signal),
     staleTime: Infinity,
   });
 }
@@ -696,13 +696,13 @@ export interface CreateSwitchover {
 /** The Job's deadline: 15 minutes, as the design's example (60 to 86400 s). */
 export const DEADLINE_SECONDS = 900;
 
-export function useCreateSwitchover(ns: string) {
+export function useCreateSwitchover(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (c: CreateSwitchover) =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/switchovers", {
-          params: { path: { ns }, header: createHeaders(c.key) },
+        api.POST("/api/v1/workspaces/{ws}/switchovers", {
+          params: { path: { ws }, header: createHeaders(c.key) },
           body: {
             planBytes: c.planBytes,
             planHash: c.planHash,
@@ -713,7 +713,7 @@ export function useCreateSwitchover(ns: string) {
           },
         }),
       ),
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("switchovers", ns) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("switchovers", ws) }),
   });
 }
 
@@ -730,51 +730,51 @@ export function mintNames(planHash: string, attempt: string): { key: string; app
 
 // --------------------------------------------------- approvals (R6's pages)
 
-const requestKey = (ns: string, name: string) => ["switchover-approval-requests", ns, name] as const;
+const requestKey = (ws: string, name: string) => ["switchover-approval-requests", ws, name] as const;
 
-async function readSwitchoverRequest(ns: string, name: string, signal?: AbortSignal): Promise<SwitchoverApprovalRequest> {
-  return (await call(() => api.GET("/api/v1/namespaces/{ns}/switchovers/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item;
+async function readSwitchoverRequest(ws: string, name: string, signal?: AbortSignal): Promise<SwitchoverApprovalRequest> {
+  return (await call(() => api.GET("/api/v1/workspaces/{ws}/switchovers/{name}/approval-request", { params: { path: { ws, name } }, signal }))).item;
 }
 
 /** A two-person switchover request, as the second person is shown it. */
-export function useSwitchoverApprovalRequest(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "approvalsRead");
+export function useSwitchoverApprovalRequest(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "approvalsRead");
   return useQuery({
-    queryKey: requestKey(ns, name),
+    queryKey: requestKey(ws, name),
     enabled: enabled && readable,
-    queryFn: ({ signal }) => readSwitchoverRequest(ns, name, signal),
+    queryFn: ({ signal }) => readSwitchoverRequest(ws, name, signal),
     retry: false,
   });
 }
 
 /** The requests of several waiting Switchovers, for Approvals and its navigation count (DUI-27). */
-export function useSwitchoverApprovalRequests(ns: string, names: string[], enabled = true) {
-  const readable = useCan(ns, "approvalsRead");
+export function useSwitchoverApprovalRequests(ws: string, names: string[], enabled = true) {
+  const readable = useCan(ws, "approvalsRead");
   return useQueries({
     queries: names.map((name) => ({
-      queryKey: requestKey(ns, name),
+      queryKey: requestKey(ws, name),
       enabled: enabled && readable,
-      queryFn: ({ signal }: { signal: AbortSignal }) => readSwitchoverRequest(ns, name, signal),
+      queryFn: ({ signal }: { signal: AbortSignal }) => readSwitchoverRequest(ws, name, signal),
       retry: false,
     })),
   });
 }
 
 /** The second person's click: names only the request they were shown. */
-export function useApproveSwitchover(ns: string, name: string) {
+export function useApproveSwitchover(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (confirmationSha256: string) =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/switchovers/{name}/console-approval", {
-          params: { path: { ns, name }, header: { Origin: window.location.origin } },
+        api.POST("/api/v1/workspaces/{ws}/switchovers/{name}/console-approval", {
+          params: { path: { ws, name }, header: { Origin: window.location.origin } },
           body: { confirmationSha256 },
         }),
       ),
     onSuccess: () => {
-      void client.invalidateQueries({ queryKey: requestKey(ns, name) });
-      void client.invalidateQueries({ queryKey: keys.list("switchovers", ns) });
-      void client.invalidateQueries({ queryKey: keys.list("approvals", ns) });
+      void client.invalidateQueries({ queryKey: requestKey(ws, name) });
+      void client.invalidateQueries({ queryKey: keys.list("switchovers", ws) });
+      void client.invalidateQueries({ queryKey: keys.list("approvals", ws) });
     },
   });
 }

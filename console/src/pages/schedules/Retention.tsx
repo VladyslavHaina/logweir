@@ -1,6 +1,6 @@
 // Retention for a schedule's destination. A schedule's own spec.retention no
 // longer reports; a RetentionPolicy that names the destination does. "Logweir
-// never deletes from your archive" is said only when the namespace's policies
+// never deletes from your archive" is said only when the workspace's policies
 // were read and none that deletes can reach this archive.
 import { Alert, Content, DescriptionList, Stack } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
@@ -82,7 +82,7 @@ export function RetentionCard({ schedule, policies, failed }: { schedule: Schedu
       {coverage.kind === "unread" && (
         <Content component="p" className="lw-subtle">
           {failed
-            ? "The retention policies of this namespace could not be read, so this page cannot say whether one deletes from this archive."
+            ? "The retention policies of this workspace could not be read, so this page cannot say whether one deletes from this archive."
             : "Reading the retention policies."}
         </Content>
       )}

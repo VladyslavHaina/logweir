@@ -178,7 +178,7 @@ export function PointStep({
         render={({ field }) =>
           matching.length === 0 ? (
             <Content component="p" className="lw-subtle lw-gap-top">
-              {points.length === 0 ? "No backup in this namespace is a recovery point yet." : "No recovery point matches that filter."}
+              {points.length === 0 ? "No backup in this workspace is a recovery point yet." : "No recovery point matches that filter."}
             </Content>
           ) : narrow ? (
             <div className="lw-list lw-list--rows lw-gap-top" role="radiogroup" aria-label="Recovery points">
@@ -269,7 +269,7 @@ export function PointStep({
             onToggle={(_e, open) => setOffersOpen(open)}
           >
             <Content component="p" className="lw-subtle">
-              Points a connected archive holds, whether or not a Backup in this namespace produced them: a restore from one is bound to
+              Points a connected archive holds, whether or not a Backup in this workspace produced them: a restore from one is bound to
               the point itself.
             </Content>
             {offersPending ? (
@@ -527,7 +527,7 @@ export function TargetStep({
   brokers,
   destinations,
   errors,
-  ns,
+  ws,
   ownersAsked = false,
 }: {
   control: Control<WizardValues>;
@@ -540,7 +540,7 @@ export function TargetStep({
   brokers: BrokerFact;
   destinations: { name: string; uid: string }[];
   errors: Errors;
-  ns: string;
+  ws: string;
   /** The readiness check's preview refused TopicOwnerNotChecked: ask for the owner statement. */
   ownersAsked?: boolean;
 }) {
@@ -558,7 +558,7 @@ export function TargetStep({
             {targets.length === 0 && (
               <Alert variant="warning" isInline title="No connection has the target role">
                 Add a connection with the target role first; a source cluster is never written to from here.{" "}
-                <Link to="/$ns/$section" params={{ ns, section: "connections" }}>Open Connections</Link>
+                <Link to="/$ws/$section" params={{ ws, section: "connections" }}>Open Connections</Link>
               </Alert>
             )}
             {targets.map((c) => (
@@ -1002,7 +1002,7 @@ export function ReviewStep({
 const APPROVE_COMMAND = "logweir drill approve --spec <file> --key <privkey> --approver <id> --ticket <id> --subject-kind Restore --out <file>";
 const COUNTERSIGN_COMMAND = "logweir drill countersign --document <approvalBytes> --confirmation <sidecarBytes> --key <privkey> --out approval.sig";
 
-/** The approval step under the namespace's EFFECTIVE policy, in the operator's three
+/** The approval step under the workspace's EFFECTIVE policy, in the operator's three
  *  modes. A policy that could not be read shows the out-of-band (strict) text. */
 function ApprovalBlock({ control, policy, errors }: { control: Control<WizardValues>; policy: ApprovalPolicy | null; errors: Errors }) {
   const route = approvalRoute(policy);
@@ -1021,10 +1021,10 @@ function ApprovalBlock({ control, policy, errors }: { control: Control<WizardVal
   switch (route) {
     case "confirm":
       return (
-        <Alert variant="info" isInline title={`${policy!.namespace} uses one-person confirmation`} id="approval-confirm">
+        <Alert variant="info" isInline title={`${policy!.workspace} uses one-person confirmation`} id="approval-confirm">
           Creating the restore is your confirmation: the console signs, as its attestation that you asked, a document naming exactly
           this restore and this plan hash, and the restore runs once the controller verifies it. No approver and no key are involved.
-          {policy!.basis === "freshInstall" ? " This installation started in confirm: every namespace without its own approval policy is confirmed in the console." : ""}
+          {policy!.basis === "freshInstall" ? " This installation started in confirm: every workspace without its own approval policy is confirmed in the console." : ""}
         </Alert>
       );
     case "confirm-unavailable":

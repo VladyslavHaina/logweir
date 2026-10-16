@@ -39,22 +39,24 @@ page. ESLint refuses `dangerouslySetInnerHTML`, browser storage,
 
 ## Routes
 
-Hash routes: every address after `#` is `/<namespace>/<page>`, so the service is
+Hash routes: every address after `#` is `/<workspace>/<page>`, so the service is
 asked only for files and the sign-in round trip (`next=/ui/#/...`) comes back to
-the same page. A visit with no namespace lands on the session's first one.
+the same page. A visit with no workspace lands on the session's first one. A
+workspace is a name in the install's `workspaces` list; the masthead offers a
+switcher only when the session holds roles in more than one.
 
 | route | page |
 |---|---|
-| `#/<ns>` | Overview |
-| `#/<ns>/backups`, `schedules`, `protection` | Protect; each has `/<name>` for one object |
-| `#/<ns>/restores`, `restores/<name>` | Restores and one restore's page |
-| `#/<ns>/restores/new?backup=&uid=`, `?catalog=&point=`, `?retryOf=` | the five-step wizard from a backup, a catalog point, or a failed restore (to a fresh target) |
-| `#/<ns>/restores/<name>/cutover`, `switchovers`, `switchovers/<name>` | theme A's switchover review, and the Switchovers |
-| `#/<ns>/approvals`, `approvals/<restore>?hash=&approval=`, `approvals/switchover/<name>` | Approvals, one restore's, one switchover's |
-| `#/<ns>/catalog`, `trust` | the Recovery catalog and Trust |
-| `#/<ns>/connections`, `destinations` | Settings; each has `/<name>` |
+| `#/<ws>` | Overview |
+| `#/<ws>/backups`, `schedules`, `protection` | Protect; each has `/<name>` for one object |
+| `#/<ws>/restores`, `restores/<name>` | Restores and one restore's page |
+| `#/<ws>/restores/new?backup=&uid=`, `?catalog=&point=`, `?retryOf=` | the five-step wizard from a backup, a catalog point, or a failed restore (to a fresh target) |
+| `#/<ws>/restores/<name>/cutover`, `switchovers`, `switchovers/<name>` | theme A's switchover review, and the Switchovers |
+| `#/<ws>/approvals`, `approvals/<restore>?hash=&approval=`, `approvals/switchover/<name>` | Approvals, one restore's, one switchover's |
+| `#/<ws>/catalog`, `trust` | the Recovery catalog and Trust |
+| `#/<ws>/connections`, `destinations` | Settings; each has `/<name>` |
 
-A page whose read the role lacks in the namespace says "Not available to you
+A page whose read the role lacks in the workspace says "Not available to you
 here" and sends no request; an address with no page says "This page does not
 exist".
 
@@ -65,12 +67,12 @@ five seconds, and renders one of four pages:
 
 | answer | what renders |
 |---|---|
-| a session document | the console, for the namespaces it grants |
+| a session document | the console, for the workspaces it grants |
 | `401` `unauthenticated` or `session_expired` | "Sign in to Logweir", linking to `/auth/login?next=<this address>` |
 | no answer, a 5xx or 429, a body that is not the API | "Can't reach the Logweir service", with what it got, and Retry |
-| a session with no namespace | "No namespace is granted to you", and Sign out |
+| a session with no workspace | "No workspace is granted to you", and Sign out |
 
-A namespace the session holds no role in says "You hold no role in `<ns>`".
+A workspace the session holds no role in says "You hold no role in `<ws>`".
 
 Once the console is up it stays up (`src/app/SessionClock.tsx`). The session is
 capped (`sessionMaxAgeSeconds`); about two minutes before the session's
@@ -157,7 +159,7 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
 | `src/api/session.tsx` | the session document under the gate: `useSessionDoc`, `useGrant`, `useCan` |
 | `src/api/stream.ts` | one run's event stream, written into the query cache |
 | `src/api/schema.d.ts` | generated from the schema; never edited by hand |
-| `src/app/` | the session gate, the shell (masthead, namespace selector, user menu, navigation with counts) and the Overview's numbers |
+| `src/app/` | the session gate, the shell (masthead, workspace switcher, shown only with more than one workspace, user menu, navigation with counts) and the Overview's numbers |
 | `src/lib/shell.ts` | `shellArg`: a value reaches a command an operator copies only shaped and single-quoted, or as a placeholder |
 | `src/router.tsx` | the hash routes; each page group adds its routes in one line |
 | `src/pages/<area>/`, `src/components/` | pages; shared pieces (`States.tsx`: loading, empty and error; `Status.tsx`: the one status style) |
@@ -168,10 +170,10 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
 
 ## Patterns
 
-- **Query keys:** `[kind, ns]` for a list and `[kind, ns, name]` for one object
-  (`keys` in `queries.ts`). After a write, invalidate `[kind, ns]`.
+- **Query keys:** `[kind, ws]` for a list and `[kind, ws, name]` for one object
+  (`keys` in `queries.ts`). After a write, invalidate `[kind, ws]`.
 - **Capabilities:** a hook whose read the session does not grant in the
-  namespace stays idle, and the page leaves that part out (`useCan`). The
+  workspace stays idle, and the page leaves that part out (`useCan`). The
   navigation hides an entry the same way.
 - **States:** `LoadingRows` while loading; `ErrorState` for an `ApiError`
   (headline by status, the server's message, status, code and request id, and

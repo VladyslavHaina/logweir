@@ -156,12 +156,12 @@ const BLANK: WizardValues = {
 const FOLLOW_DEADLINE_MS = 12 * 60_000;
 
 export function RestoreWizard() {
-  const { ns } = useParams({ from: "/$ns/restores/new" });
-  const search = useSearch({ from: "/$ns/restores/new" }) as RestoreSearch;
-  const caps = useCapabilities(ns);
-  const backups = useBackupList(ns);
-  const connections = useConnectionList(ns);
-  const policy = useApprovalPolicy(ns);
+  const { ws } = useParams({ from: "/$ws/restores/new" });
+  const search = useSearch({ from: "/$ws/restores/new" }) as RestoreSearch;
+  const caps = useCapabilities(ws);
+  const backups = useBackupList(ws);
+  const connections = useConnectionList(ws);
+  const policy = useApprovalPolicy(ws);
 
   const header = (
     <PageHeader
@@ -169,7 +169,7 @@ export function RestoreWizard() {
       description="Five steps. Nothing is created until the last one."
       breadcrumb={
         <Breadcrumb className="lw-breadcrumb">
-          <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
+          <BreadcrumbItem render={() => <Link to="/$ws/restores" params={{ ws }}>Restores</Link>} />
           <BreadcrumbItem isActive>New restore</BreadcrumbItem>
         </Breadcrumb>
       }
@@ -191,7 +191,7 @@ export function RestoreWizard() {
   if (caps && caps.restoreCreate === false) {
     return body(
       <Alert variant="info" isInline title="Your role here may read restores and not create them">
-        Ask an operator of {ns} to create the restore.
+        Ask an operator of {ws} to create the restore.
       </Alert>,
     );
   }
@@ -202,21 +202,21 @@ export function RestoreWizard() {
     <>
       {header}
       <PageSection isFilled>
-        <WizardBody key={`${ns}?${new URLSearchParams(search as Record<string, string>).toString()}`} ns={ns} search={search} backups={backups.data ?? []} connections={connections.data ?? []} policy={policy.data ?? null} canCheck={caps?.preflight !== false} />
+        <WizardBody key={`${ws}?${new URLSearchParams(search as Record<string, string>).toString()}`} ws={ws} search={search} backups={backups.data ?? []} connections={connections.data ?? []} policy={policy.data ?? null} canCheck={caps?.preflight !== false} />
       </PageSection>
     </>
   );
 }
 
 function WizardBody({
-  ns,
+  ws,
   search,
   backups,
   connections,
   policy,
   canCheck,
 }: {
-  ns: string;
+  ws: string;
   search: RestoreSearch;
   backups: import("../../api/restores").Backup[];
   connections: import("../../api/restores").Connection[];
@@ -224,7 +224,7 @@ function WizardBody({
   canCheck: boolean;
 }) {
   const navigate = useNavigate();
-  const create = useCreateRestore(ns);
+  const create = useCreateRestore(ws);
   const points = useMemo(() => recoveryPoints(backups), [backups]);
   const targets = connections.filter((c) => c.role === "target");
   const retryOf = search.retryOf ?? "";
@@ -241,8 +241,8 @@ function WizardBody({
         : pointKeyOf(points[0]);
   const routeRefusal = routed.state === "missing" || routed.state === "unusable" ? refusalSentence(routed) : "";
 
-  const offers = useQuery({ queryKey: ["restore-offers", ns], queryFn: ({ signal }) => readCatalogOffers(ns, signal), staleTime: 60_000 });
-  const destinations = useDestinationList(ns);
+  const offers = useQuery({ queryKey: ["restore-offers", ws], queryFn: ({ signal }) => readCatalogOffers(ws, signal), staleTime: 60_000 });
+  const destinations = useDestinationList(ws);
 
   // --------------------------------------------------------------- the form
   const ctxRef = useRef<{ ctx: WizardContext | null; problem: string | null }>({ ctx: null, problem: null });
@@ -260,7 +260,7 @@ function WizardBody({
         } else if (v.completeMaxRecords.trim() === "0") {
           issue.addIssue({ code: "custom", path: ["completeMaxRecords"], message: "A record bound is at least 1." });
         }
-        if (policy?.ticketRequired && !v.ticket.trim()) issue.addIssue({ code: "custom", path: ["ticket"], message: "A namespace under a governed policy requires a change ticket; it is signed into the request the approver sees." });
+        if (policy?.ticketRequired && !v.ticket.trim()) issue.addIssue({ code: "custom", path: ["ticket"], message: "A workspace under a governed policy requires a change ticket; it is signed into the request the approver sees." });
         const typed = typedTopicsProblem(policy, v, f.topics);
         if (typed) issue.addIssue({ code: "custom", path: ["typedNames"], message: typed });
       }),
@@ -274,13 +274,13 @@ function WizardBody({
   const chosenOffer = (offers.data?.offers ?? []).find((o) => offerKeyOf(o) === values.pointKey) ?? null;
   const catalogTarget = values.pointKey.startsWith("catalog/") ? values.pointKey.slice("catalog/".length) : "";
   const resolution = useQuery<Resolved>({
-    queryKey: ["restore-point", ns, values.pointKey],
+    queryKey: ["restore-point", ws, values.pointKey],
     enabled: values.pointKey !== "" && (values.pointKey.startsWith("catalog/") || !!chosenBackup),
     queryFn: ({ signal }) => {
-      if (chosenBackup) return resolveBackup(ns, chosenBackup, signal);
+      if (chosenBackup) return resolveBackup(ws, chosenBackup, signal);
       const slash = catalogTarget.indexOf("/");
       const catalog = chosenOffer?.catalog.name ?? catalogTarget.slice(0, slash);
-      return resolveCatalogPoint(ns, catalog, chosenOffer?.entry.pointId ?? catalogTarget.slice(slash + 1), signal);
+      return resolveCatalogPoint(ws, catalog, chosenOffer?.entry.pointId ?? catalogTarget.slice(slash + 1), signal);
     },
     staleTime: 30_000,
   });
@@ -311,11 +311,11 @@ function WizardBody({
 
   const connection = connections.find((c) => c.name === values.target && c.role === "target") ?? null;
   const discovery = useQuery({
-    queryKey: ["restore-target-discovery", ns, connection?.name ?? ""],
+    queryKey: ["restore-target-discovery", ws, connection?.name ?? ""],
     enabled: !!connection,
     queryFn: async ({ signal }) => {
       try {
-        return await readLatestDiscoveries(ns, connection!.name, signal);
+        return await readLatestDiscoveries(ws, connection!.name, signal);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         return { unread: error instanceof Error ? error.message : String(error) };
@@ -325,9 +325,9 @@ function WizardBody({
   const brokers = connection ? targetBrokerFact(discovery.data ?? null, connection) : BROKERS_NOT_READ;
   const evidenceName = point?.destinationName ? values.evidenceDestination || point.destinationName : "";
   const evidence = useQuery({
-    queryKey: ["destinations", ns, "item", evidenceName],
+    queryKey: ["destinations", ws, "item", evidenceName],
     enabled: !!evidenceName && evidenceName !== point?.destinationName,
-    queryFn: ({ signal }) => readDestination(ns, evidenceName, signal),
+    queryFn: ({ signal }) => readDestination(ws, evidenceName, signal),
   });
   const evidenceDestination = !evidenceName ? null : evidenceName === point?.destinationName ? (resolved?.destination ?? null) : (evidence.data ?? null);
 
@@ -370,7 +370,7 @@ function WizardBody({
     const tick = async () => {
       if (following.current !== run) return;
       try {
-        const result = await readPreflight(ns, id, hash);
+        const result = await readPreflight(ws, id, hash);
         if (following.current !== run) return;
         setReadiness((r) => ({ ...r, result, error: null }));
         if (result.terminal) return;
@@ -391,10 +391,10 @@ function WizardBody({
   const startCheck = async () => {
     if (!ctx || !current) return;
     attempt.current.n += 1;
-    const key = `logweir-console.restore-readiness.${ns}.${attempt.current.nonce}-${attempt.current.n}`;
+    const key = `logweir-console.restore-readiness.${ws}.${attempt.current.nonce}-${attempt.current.n}`;
     setReadiness((r) => ({ ...r, starting: true, error: null, stoppedAt: null }));
     try {
-      const result = await startPreflight(ns, readinessRequest(ctx, values, current), key);
+      const result = await startPreflight(ws, readinessRequest(ctx, values, current), key);
       const run = (following.current += 1);
       setReadiness({ result, boundHash: current.hash, boundKey, error: null, starting: false, stoppedAt: null });
       if (!result.terminal) follow(result.id, current.hash, Date.now(), run);
@@ -406,7 +406,7 @@ function WizardBody({
     const id = readiness.result?.id;
     if (!id) return;
     try {
-      await cancelPreflight(ns, id);
+      await cancelPreflight(ws, id);
       setReadiness((r) => ({ ...r, result: r.result ? { ...r.result, state: "cancelled", terminal: true } : r.result }));
       following.current += 1;
     } catch (error) {
@@ -420,7 +420,7 @@ function WizardBody({
   const checkRefusal = canCheck ? (movedUnder ?? readinessRefusal(readiness.result, readiness.boundHash, hash)) : null;
   // Theme A: the check's per-topic configuration preview, read once it is done.
   const tcChosen = values.topicConfiguration?.transition != null;
-  const tcDetails = usePreflightDetails(ns, tcChosen && readiness.result ? readiness.result : undefined, TOPIC_CONFIGURATION_CHECK);
+  const tcDetails = usePreflightDetails(ws, tcChosen && readiness.result ? readiness.result : undefined, TOPIC_CONFIGURATION_CHECK);
   // DUI-17: the preview's own refusal is the plan's, so it holds Next as a stale verdict does.
   const tcRefusal = tcChosen ? (topicPreviewLines(tcDetails.data ?? []).refusal ?? null) : null;
   // The owners are asked whenever the point's backup did not look for them, before any check.
@@ -453,7 +453,7 @@ function WizardBody({
     try {
       // The verdict on screen is a memory: read it again against the reviewed hash.
       if (canCheck && readiness.result) {
-        const fresh = await readPreflight(ns, readiness.result.id, reviewed.hash);
+        const fresh = await readPreflight(ws, readiness.result.id, reviewed.hash);
         setReadiness((r) => ({ ...r, result: fresh.stale || !r.result?.stale ? fresh : r.result }));
         const again = movedUnder ?? readinessRefusal(fresh, readiness.boundHash, reviewed.hash);
         if (again) throw new LocalRefusal(`Nothing was sent: ${again}`);
@@ -463,11 +463,11 @@ function WizardBody({
       }
       // The point's frozen destination, and the evidence destination, read again.
       if (ctx.point.destinationName) {
-        const live = await readDestination(ns, ctx.point.destinationName);
+        const live = await readDestination(ws, ctx.point.destinationName);
         const moved = frozenDestinationProblem(ctx.point, live);
         if (moved) throw new LocalRefusal(`${moved}. Nothing was sent; the reviewed plan is still here.`);
         if (evidenceDestination && evidenceDestination.name !== ctx.point.destinationName) {
-          const again = await readDestination(ns, evidenceDestination.name);
+          const again = await readDestination(ws, evidenceDestination.name);
           if (!again || again.uid !== evidenceDestination.uid || again.locationDigest !== evidenceDestination.locationDigest) {
             throw new LocalRefusal(`Evidence destination ${evidenceDestination.name} was deleted, recreated or moved since it was read. Nothing was sent.`);
           }
@@ -477,8 +477,8 @@ function WizardBody({
       const now = await preparePlanDocument(planFields(ctx, form.getValues()));
       if (now !== reviewed) throw new LocalRefusal(`The plan changed after it was displayed (the page showed ${reviewed.hash}, the values now hash to ${now.hash}). Review the plan shown now and submit again.`);
       const request = restoreBody(ctx, form.getValues(), fields, reviewed, policy);
-      const created = await create.mutateAsync({ body: request, key: restoreIdempotencyKey(ns, reviewed) });
-      void navigate({ to: "/$ns/restores/$name", params: { ns, name: created.item.name } });
+      const created = await create.mutateAsync({ body: request, key: restoreIdempotencyKey(ws, reviewed) });
+      void navigate({ to: "/$ws/restores/$name", params: { ws, name: created.item.name } });
     } catch (error) {
       const unmatched: string[] = [];
       if (error instanceof ApiError) {
@@ -505,7 +505,7 @@ function WizardBody({
       <Wizard
         navAriaLabel="Restore steps"
         isVisitRequired
-        onClose={() => void navigate({ to: "/$ns/restores", params: { ns } })}
+        onClose={() => void navigate({ to: "/$ws/restores", params: { ws } })}
         footer={
           <Footer
             validate={async (id) => (id === "point" ? !!point && !resolved?.destinationProblem && (await form.trigger(STEP_FIELDS(id))) : form.trigger(STEP_FIELDS(id)))}
@@ -513,7 +513,7 @@ function WizardBody({
             onCreate={() => void submit()}
             creating={submitting}
             createBlocked={!current || policyRefusal(policy) !== null}
-            onCancel={() => void navigate({ to: "/$ns/restores", params: { ns } })}
+            onCancel={() => void navigate({ to: "/$ws/restores", params: { ws } })}
             goTo={goTo}
             onWent={() => setGoTo(null)}
           />
@@ -558,7 +558,7 @@ function WizardBody({
               brokers={brokers}
               destinations={evidenceOptions(point, resolved?.destination ?? null, destinations.data ?? [])}
               errors={errors}
-              ns={ns}
+              ws={ws}
               ownersAsked={ownersAsked}
             />
           )}

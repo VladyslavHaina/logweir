@@ -130,7 +130,7 @@ export async function readSession(client: ApiClient = api, timeoutMs = SESSION_T
   }
 }
 
-/** Every page of a list, following `nextCursor`. A namespace larger than the budget is an
+/** Every page of a list, following `nextCursor`. A workspace larger than the budget is an
  *  error the page shows; a prefix is never presented as the whole. */
 export async function listAll<T>(
   what: string,
@@ -146,7 +146,7 @@ export async function listAll<T>(
   }
   throw noAnswer(
     "list_too_large",
-    `This namespace holds more than ${items.length} ${what}, more than the console reads in one list. It is not showing the first ${items.length} as if they were all.`,
+    `This workspace holds more than ${items.length} ${what}, more than the console reads in one list. It is not showing the first ${items.length} as if they were all.`,
   );
 }
 

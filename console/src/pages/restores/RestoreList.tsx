@@ -1,4 +1,4 @@
-// Every restore in the namespace, newest first: where it wrote, whether it verified
+// Every restore in the workspace, newest first: where it wrote, whether it verified
 // (green only by the restore badge rule), how much was verified, and a narrowed
 // restore said as partial. The old console's #/history (restore half) and #/operations.
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -32,19 +32,19 @@ export function restoreFacts(r: Restore, clone?: Clone): string {
 }
 
 export function Restores() {
-  const { ns } = useParams({ from: "/$ns/restores" });
+  const { ws } = useParams({ from: "/$ws/restores" });
   const navigate = useNavigate();
-  const restores = useRestoreList(ns);
-  const clones = useClones(ns, restores.data);
-  const caps = useCapabilities(ns);
+  const restores = useRestoreList(ws);
+  const clones = useClones(ws, restores.data);
+  const caps = useCapabilities(ws);
   const narrow = useNarrow();
   const mayCreate = caps?.restoreCreate !== false;
-  const start = () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} });
+  const start = () => void navigate({ to: "/$ws/restores/new", params: { ws }, search: {} });
   return (
     <>
       <PageHeader
         title="Restores"
-        description="Every restore in this namespace: where it wrote, whether it verified, and how much was compared."
+        description="Every restore in this workspace: where it wrote, whether it verified, and how much was compared."
         actions={
           mayCreate ? (
             <Button variant="primary" onClick={start}>
@@ -80,7 +80,7 @@ export function Restores() {
               label="Restores"
               items={restores.data.map((r) => ({
                 key: r.uid,
-                href: `#/${ns}/restores/${r.name}`,
+                href: `#/${ws}/restores/${r.name}`,
                 title: r.name,
                 meta: (
                   <>
@@ -105,7 +105,7 @@ export function Restores() {
                 {restores.data.map((r) => (
                   <Tr key={r.uid}>
                     <Td dataLabel="Name">
-                      <Link to="/$ns/restores/$name" params={{ ns, name: r.name }} className="lw-break">
+                      <Link to="/$ws/restores/$name" params={{ ws, name: r.name }} className="lw-break">
                         {r.name}
                       </Link>
                       <div className="lw-subtle lw-small">{restoreFacts(r, clones.get(r.name))}</div>

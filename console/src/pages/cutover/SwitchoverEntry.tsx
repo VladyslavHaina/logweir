@@ -10,17 +10,19 @@ import { groupSummary } from "./SwitchoverList";
 import { PhaseLabel } from "./status";
 
 export function SwitchoverEntry({
+  ws,
   restore: r,
   canCreate = true,
   source,
 }: {
+  ws: string;
   restore: Restore;
   canCreate?: boolean;
   /** The Backup its point came from, when known (DUI-42: `useSourceBackup`). */
   source?: { consumerGroups?: string[] | null } | null;
 }) {
   const navigate = useNavigate();
-  const list = useSwitchovers(r.namespace);
+  const list = useSwitchovers(ws);
   const refusal = cutoverRefusal(r, source);
   const mine = (list.data ?? []).filter((s) => s.restore.name === r.name && s.restore.uid === r.uid);
   return (
@@ -30,7 +32,7 @@ export function SwitchoverEntry({
           !refusal && canCreate
             ? {
                 actions: (
-                  <Button variant="secondary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns: r.namespace, name: r.name }, search: {} })}>
+                  <Button variant="secondary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ws/restores/$name/cutover", params: { ws, name: r.name }, search: {} })}>
                     Switch consumers over
                   </Button>
                 ),
@@ -55,7 +57,7 @@ export function SwitchoverEntry({
           <ul className="lw-plain-list lw-gap-top" aria-label="Switchovers of this restore">
             {mine.map((s) => (
               <li key={s.uid || s.name}>
-                <Link to="/$ns/switchovers/$name" params={{ ns: r.namespace, name: s.name }}>
+                <Link to="/$ws/switchovers/$name" params={{ ws, name: s.name }}>
                   {s.name}
                 </Link>{" "}
                 <PhaseLabel sw={s} /> <span className="lw-subtle lw-small">{groupSummary(s)}</span>

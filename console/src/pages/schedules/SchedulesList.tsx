@@ -1,4 +1,4 @@
-// Every schedule in the namespace: when each runs next, whether it is active,
+// Every schedule in the workspace: when each runs next, whether it is active,
 // and the three things you do to one (back up now, suspend or resume, edit).
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -24,8 +24,8 @@ function writtenTo(s: Schedule): string {
 }
 
 /** Suspend or resume one row; its refusal is reported above the table. */
-function useRowSuspension(ns: string, s: Schedule, onFailure: (f: Failure) => void) {
-  const m = useSetSuspension(ns, s.name);
+function useRowSuspension(ws: string, s: Schedule, onFailure: (f: Failure) => void) {
+  const m = useSetSuspension(ws, s.name);
   return {
     pending: m.isPending,
     run: () =>
@@ -38,20 +38,20 @@ function useRowSuspension(ns: string, s: Schedule, onFailure: (f: Failure) => vo
 
 type Failure = { name: string; error: unknown; verb: string };
 
-function Row({ ns, s, lastRun, onBackUp, onFailure }: { ns: string; s: Schedule; lastRun: string | undefined; onBackUp: (s: Schedule) => void; onFailure: (f: Failure) => void }) {
+function Row({ ws, s, lastRun, onBackUp, onFailure }: { ws: string; s: Schedule; lastRun: string | undefined; onBackUp: (s: Schedule) => void; onFailure: (f: Failure) => void }) {
   const navigate = useNavigate();
-  const grant = useGrant(ns);
-  const suspension = useRowSuspension(ns, s, onFailure);
+  const grant = useGrant(ws);
+  const suspension = useRowSuspension(ws, s, onFailure);
   const actions = [
-    { title: "View details", onClick: () => void navigate({ to: "/$ns/schedules/$name", params: { ns, name: s.name }, search: {} }) },
+    { title: "View details", onClick: () => void navigate({ to: "/$ws/schedules/$name", params: { ws, name: s.name }, search: {} }) },
     ...(grant?.manualBackupCreate ? [{ title: "Back up now", onClick: () => onBackUp(s) }] : []),
     ...(grant?.scheduleSetSuspension ? [{ title: s.suspended ? "Resume" : "Suspend", onClick: suspension.run, isDisabled: suspension.pending }] : []),
-    ...(grant?.scheduleCreate ? [{ title: "Edit policy", onClick: () => void navigate({ to: "/$ns/schedules/$name/edit", params: { ns, name: s.name } }) }] : []),
+    ...(grant?.scheduleCreate ? [{ title: "Edit policy", onClick: () => void navigate({ to: "/$ws/schedules/$name/edit", params: { ws, name: s.name } }) }] : []),
   ];
   return (
     <Tr>
       <Td dataLabel="Name" className="lw-name-cell">
-        <Link to="/$ns/schedules/$name" params={{ ns, name: s.name }} search={{}} className="lw-break">
+        <Link to="/$ws/schedules/$name" params={{ ws, name: s.name }} search={{}} className="lw-break">
           {s.name}
         </Link>
         <div className="lw-subtle lw-small">
@@ -78,16 +78,16 @@ function Row({ ns, s, lastRun, onBackUp, onFailure }: { ns: string; s: Schedule;
 }
 
 export function SchedulesList() {
-  const { ns } = useParams({ from: "/$ns/schedules" });
+  const { ws } = useParams({ from: "/$ws/schedules" });
   const navigate = useNavigate();
-  const schedules = useSchedules(ns);
+  const schedules = useSchedules(ws);
   // The runs, for each schedule's last run of either kind (DUI-31.2); one cache with Backups.
-  const backups = useBackups(ns);
-  const grant = useGrant(ns);
+  const backups = useBackups(ws);
+  const grant = useGrant(ws);
   const narrow = useNarrow();
   const [backUp, setBackUp] = useState<string | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
-  const create = () => void navigate({ to: "/$ns/schedules/new", params: { ns } });
+  const create = () => void navigate({ to: "/$ws/schedules/new", params: { ws } });
   const rows = [...(schedules.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
   // The modal reads the row as listed NOW, so a re-read after a refusal reaches it.
   const chosen = rows.find((s) => s.name === backUp);
@@ -141,7 +141,7 @@ export function SchedulesList() {
               label="Schedules"
               items={rows.map((s) => ({
                 key: s.name,
-                href: `#/${ns}/schedules/${s.name}`,
+                href: `#/${ws}/schedules/${s.name}`,
                 title: s.name,
                 meta: (
                   <>
@@ -172,14 +172,14 @@ export function SchedulesList() {
               </Thead>
               <Tbody>
                 {rows.map((s) => (
-                  <Row key={s.name} ns={ns} s={s} lastRun={lastRunAt(s, backups.data)} onBackUp={(x) => setBackUp(x.name)} onFailure={setFailure} />
+                  <Row key={s.name} ws={ws} s={s} lastRun={lastRunAt(s, backups.data)} onBackUp={(x) => setBackUp(x.name)} onFailure={setFailure} />
                 ))}
               </Tbody>
             </Table>
           )}
         </Card>
       </PageSection>
-      {chosen && <BackUpNow key={chosen.name} ns={ns} schedule={chosen} open onClose={() => setBackUp(null)} />}
+      {chosen && <BackUpNow key={chosen.name} ws={ws} schedule={chosen} open onClose={() => setBackUp(null)} />}
     </>
   );
 }

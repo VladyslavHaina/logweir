@@ -12,7 +12,7 @@ import type {
   Session,
 } from "../api/types";
 import { DAY, HOUR, MINUTE, NOW, iso, slot, slotName } from "./clock";
-import { APPROVAL_DEMO_GRANTS } from "./approvalNamespaces";
+import { APPROVAL_DEMO_GRANTS } from "./approvalWorkspaces";
 
 let counter = 0;
 export function requestId(): string {
@@ -68,7 +68,7 @@ const ALL: Capabilities = {
   trustPoliciesRead: true,
 };
 
-export const NAMESPACES = ["team-a", "team-b"] as const;
+export const WORKSPACES = ["team-a", "team-b"] as const;
 
 export const session: Session = {
   actor: {
@@ -82,7 +82,7 @@ export const session: Session = {
   capabilities: ALL,
   csrfToken: "prototype-only",
   expiresAt: iso(NOW + 8 * HOUR),
-  namespaces: [
+  workspaces: [
     { name: "team-a", roles: ["operator", "approver"], capabilities: ALL },
     { name: "team-b", roles: ["operator"], capabilities: ALL },
     ...APPROVAL_DEMO_GRANTS,

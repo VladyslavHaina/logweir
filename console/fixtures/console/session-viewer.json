@@ -36,7 +36,7 @@
     "trustPoliciesRead": false
   },
   "csrfToken": "t-0123456789abcdef",
-  "namespaces": [
+  "workspaces": [
     {
       "capabilities": {
         "approvalPacketRead": true,

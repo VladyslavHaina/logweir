@@ -122,7 +122,7 @@ vi.mock("../../mock/fetch", () => ({
     const body = net.answers.get(path);
     if (path === "/session") {
       const caps = { restoreCreate: true, operationsRead: true, restoresRead: true, backupsRead: true };
-      return new Response(JSON.stringify({ actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: caps, namespaces: [{ name: "t", roles: ["operator"], capabilities: caps }], requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: caps, workspaces: [{ name: "t", roles: ["operator"], capabilities: caps }], requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (body === undefined) return new Response(JSON.stringify({ status: 404, code: "not_found", title: "x", detail: `no ${path}`, requestId: "r" }), { status: 404, headers: { "content-type": "application/problem+json" } });
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
@@ -133,12 +133,12 @@ function showRestore(restore: Restore, operation?: OperationView, policy: unknow
   net.answers.clear();
   net.asked.length = 0;
   for (const [path, body] of Object.entries(extra)) net.answers.set(path, body);
-  net.answers.set(`/namespaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
-  if (operation) net.answers.set(`/namespaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
-  net.answers.set("/namespaces/t/approval-policy", { item: policy, requestId: "r" });
+  net.answers.set(`/workspaces/t/restores/${restore.name}`, { item: restore, requestId: "r" });
+  if (operation) net.answers.set(`/workspaces/t/operations/restore/${restore.name}`, { item: { ...operation, name: restore.name }, requestId: "r" });
+  net.answers.set("/workspaces/t/approval-policy", { item: policy, requestId: "r" });
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
-  const tree = root.addChildren([ns.addChildren([createRoute({ getParentRoute: () => ns, path: "restores/$name", component: RestoreDetail })])]);
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
+  const tree = root.addChildren([ws.addChildren([createRoute({ getParentRoute: () => ws, path: "restores/$name", component: RestoreDetail })])]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [`/t/restores/${restore.name}`] }) });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -228,8 +228,8 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     expect(screen.getAllByText("Last attempt at").length).toBeGreaterThan(0);
     expect(screen.queryByText("Verified at")).toBeNull();
     // The controller verifies: the page is still reading, and shows it.
-    net.answers.set(`/namespaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
-    net.answers.set(`/namespaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
+    net.answers.set(`/workspaces/t/restores/${verifiedRestore().name}`, { item: verifiedRestore(), requestId: "r" });
+    net.answers.set(`/workspaces/t/operations/restore/${verifiedRestore().name}`, { item: { ...O(subsetOperation), name: verifiedRestore().name }, requestId: "r" });
     await screen.findByText("Restored and verified");
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(screen.queryByText(VERDICT_PENDING_SENTENCE)).toBeNull();
@@ -243,8 +243,8 @@ describe("DUI-38: a finished restore whose verdict is still coming", () => {
     try {
       const name = pendingRestore().name;
       const asked = (path: string) => net.asked.filter((p) => p === path).length;
-      const item = `/namespaces/t/restores/${name}`;
-      const op = `/namespaces/t/operations/restore/${name}`;
+      const item = `/workspaces/t/restores/${name}`;
+      const op = `/workspaces/t/operations/restore/${name}`;
       showRestore(pendingRestore(), pendingOperation());
       await screen.findByText(VERDICT_PENDING_SENTENCE);
       // Following: both reads repeat.
@@ -295,7 +295,7 @@ describe("DUI-42: a restore of a point that captured no consumer group", () => {
   });
 
   it("offers no switchover and says there is nothing to switch over", async () => {
-    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source() });
+    showRestore(restore(), O(subsetOperation), null, { "/workspaces/t/backups": source() });
     await screen.findByText("Restored and verified");
     expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(NO_GROUPS_CAPTURED))).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
@@ -303,7 +303,7 @@ describe("DUI-42: a restore of a point that captured no consumer group", () => {
   });
 
   it("offers it when the point's backup recorded groups (the control)", async () => {
-    showRestore(restore(), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    showRestore(restore(), O(subsetOperation), null, { "/workspaces/t/backups": source(["orders-billing"]) });
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toContain(NO_GROUPS_CAPTURED);
     // An unknown source (no Backup carries the set id any more) refuses nothing: the review decides.
@@ -324,7 +324,7 @@ describe("DUI-50: a switchover is offered only when the scorecard binds a positi
   });
 
   it("a complete restore of a plan bound to the backup set only offers no switchover, and says why", async () => {
-    showRestore(restore({ bound: false }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing"]) });
+    showRestore(restore({ bound: false }), O(subsetOperation), null, { "/workspaces/t/backups": source(["orders-billing"]) });
     await screen.findByText("Restored and verified");
     expect(await screen.findByText((_c, el) => el?.tagName === "P" && (el.textContent ?? "").startsWith(POINT_UNBOUND_REFUSAL))).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Switch consumers over/ })).toBeNull();
@@ -332,7 +332,7 @@ describe("DUI-50: a switchover is offered only when the scorecard binds a positi
   });
 
   it("a bound point with groups still offers it (the control), naming the groups its scorecard maps", async () => {
-    showRestore(restore({ bound: true, groups: 2 }), O(subsetOperation), null, { "/namespaces/t/backups": source(["orders-billing", "orders-audit"]) });
+    showRestore(restore({ bound: true, groups: 2 }), O(subsetOperation), null, { "/workspaces/t/backups": source(["orders-billing", "orders-audit"]) });
     expect((await screen.findAllByRole("button", { name: /Switch consumers over/ })).length).toBeGreaterThan(0);
     expect(await screen.findByText(/its signed scorecard maps the positions of 2 consumer groups/)).toBeTruthy();
     expect(document.body.textContent).not.toContain(POINT_UNBOUND_REFUSAL);
@@ -455,13 +455,13 @@ describe("DUI-18: a restore waiting for its approval", () => {
   const policy = (over: Record<string, unknown>) => ({ namespace: "t", name: "p", mode: "ordinary", operatorMode: "confirm", legacy: false, basis: "binding", requireDistinctPrincipal: false, ordinaryConfirmationAvailable: true, consoleApprovalAvailable: false, ticketRequired: false, installationDigest: "sha256:00", ...over });
   const waiting = () => ({ ...O(subsetOperation), terminal: false, state: "pending" as const, verifiedSuccess: false, awaitingApproval: true });
 
-  it("in a confirm namespace says the controller is verifying the confirmation, never that an approver must sign", async () => {
+  it("in a confirm workspace says the controller is verifying the confirmation, never that an approver must sign", async () => {
     showRestore(R(subsetRestore), waiting(), policy({}));
     expect(await screen.findByText("The controller is verifying your confirmation")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/out of band|An approver who is not you/);
   });
 
-  it("in a strict namespace still asks for the approver's countersignature (the control)", async () => {
+  it("in a strict workspace still asks for the approver's countersignature (the control)", async () => {
     showRestore(R(subsetRestore), waiting(), policy({ mode: "governed", operatorMode: "strict" }));
     expect(await screen.findByText(/countersigns the console's confirmation with their own key/)).toBeTruthy();
     expect(screen.getByText("Waiting for an approval")).toBeTruthy();

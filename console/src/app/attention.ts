@@ -77,12 +77,12 @@ export function unreachableConsequence(role: string): string {
 }
 
 /** Where a policy's attention item leads: its failed run, the runs that did not verify, or the policy. */
-export function failedRunsLink(ns: string, p: Pick<ProtectionPolicy, "consecutiveFailedRuns" | "lastAttempt">): { to: string; action: string } {
-  if ((p.consecutiveFailedRuns ?? 0) === 0) return { to: `/${ns}/protection`, action: "Open protection" };
+export function failedRunsLink(ws: string, p: Pick<ProtectionPolicy, "consecutiveFailedRuns" | "lastAttempt">): { to: string; action: string } {
+  if ((p.consecutiveFailedRuns ?? 0) === 0) return { to: `/${ws}/protection`, action: "Open protection" };
   const last = p.lastAttempt?.backupRef?.name;
   return last
-    ? { to: `/${ns}/backups/${encodeURIComponent(last)}`, action: "Open the last failed run" }
-    : { to: `/${ns}/backups?filter=unverified`, action: "See the runs that did not verify" };
+    ? { to: `/${ws}/backups/${encodeURIComponent(last)}`, action: "Open the last failed run" }
+    : { to: `/${ws}/backups?filter=unverified`, action: "See the runs that did not verify" };
 }
 
 /**
@@ -102,7 +102,7 @@ export function unreachableWords(c: Connection, now = Date.now()): string {
 }
 
 export function attentionItems(
-  ns: string,
+  ws: string,
   policies: ProtectionPolicy[],
   backups: Backup[],
   connections: Connection[],
@@ -115,7 +115,7 @@ export function attentionItems(
       tone: "danger",
       title: `${c.name} is unreachable`,
       detail: `${unreachableWords(c, now)} ${unreachableConsequence(c.role)}`,
-      to: `/${ns}/connections/${c.name}`,
+      to: `/${ws}/connections/${c.name}`,
       action: "Open the connection",
     });
   }
@@ -128,7 +128,7 @@ export function attentionItems(
       title: `${p.name} ${health.says}`,
       detail: policyDetail(p, now),
       // DUI-31.3: the policy's own last run when it names one, else the runs that did not verify.
-      ...failedRunsLink(ns, p),
+      ...failedRunsLink(ws, p),
     });
   }
   const retried = failedLastDay(backups, now).filter((b) =>
@@ -140,7 +140,7 @@ export function attentionItems(
       tone: "warning",
       title: `${retried.length} backup ${retried.length === 1 ? "run" : "runs"} failed and succeeded on retry`,
       detail: `${retried.map((b) => b.name).join(", ")}: no point is missing, but the deadline may be too tight.`,
-      to: `/${ns}/backups/${retried[0]!.name}`,
+      to: `/${ws}/backups/${retried[0]!.name}`,
       action: "Open the failed run",
     });
   }
@@ -175,22 +175,22 @@ export type NavCount = { n: number; tone: "danger" | "warning" | "brand"; text: 
 
 /** Whether the session may read everything "needs attention" is worked out from. A partial
  *  answer would say "nothing needs you" about what the role cannot see. */
-export function useAttentionReadable(ns: string): boolean {
-  return useCan(ns, "protection") && useCan(ns, "connectionsRead") && useCan(ns, "backupsRead");
+export function useAttentionReadable(ws: string): boolean {
+  return useCan(ws, "protection") && useCan(ws, "connectionsRead") && useCan(ws, "backupsRead");
 }
 
 /** The navigation's counts: needs attention (Overview) and failed backups in 24 hours (Backups),
  *  from the same queries the Overview reads, and the requests waiting for this session's
  *  approval (Approvals, from the Approvals page's own reads). */
-export function useNavCounts(ns: string): Record<string, NavCount | undefined> {
-  const backups = useBackups(ns);
-  const protection = useProtection(ns);
-  const connections = useConnections(ns);
-  const readable = useAttentionReadable(ns);
+export function useNavCounts(ws: string): Record<string, NavCount | undefined> {
+  const backups = useBackups(ws);
+  const protection = useProtection(ws);
+  const connections = useConnections(ws);
+  const readable = useAttentionReadable(ws);
   const ready = readable && protection.data && connections.data && backups.data;
-  const attention = ready ? attentionItems(ns, protection.data!, backups.data!, connections.data!) : [];
+  const attention = ready ? attentionItems(ws, protection.data!, backups.data!, connections.data!) : [];
   const missed = backups.data ? failedLastDay(backups.data) : [];
-  const approvals = useApprovalsNavCount(ns);
+  const approvals = useApprovalsNavCount(ws);
   return {
     "": attention.length
       ? {

@@ -261,15 +261,15 @@ function Preview({ control, onReady }: { control: Control<PolicyValues>; onReady
   );
 }
 
-function TopicPicker({ ns, control, source, onAdd }: { ns: string; control: Control<PolicyValues>; source: string; onAdd: (topic: string) => void }) {
-  const found = useDiscoveredTopics(ns, source);
+function TopicPicker({ ws, control, source, onAdd }: { ws: string; control: Control<PolicyValues>; source: string; onAdd: (topic: string) => void }) {
+  const found = useDiscoveredTopics(ws, source);
   const typed = list(useWatch({ control, name: "topics" }));
   if (!source || found.isPending) return null;
   if (found.isError || !found.data?.discovery) {
     return (
       <Content component="p" className="lw-subtle lw-small">
         {found.data?.failed ? "The newest topic discovery of this connection failed, so no names are offered. " : "No topic discovery has run for this connection, so no names are offered. "}
-        Type them, or discover topics on the <a href={`#/${ns}/connections`}>Connections</a> page.
+        Type them, or discover topics on the <a href={`#/${ws}/connections`}>Connections</a> page.
       </Content>
     );
   }
@@ -304,7 +304,7 @@ function TopicPicker({ ns, control, source, onAdd }: { ns: string; control: Cont
 }
 
 function destinationText(d: DestinationSummary): string {
-  return `${d.name}${d.default ? " (namespace default)" : ""} · ${d.canonicalUrl}`;
+  return `${d.name}${d.default ? " (workspace default)" : ""} · ${d.canonicalUrl}`;
 }
 
 type Pin = { name: string; uid: string };
@@ -313,7 +313,7 @@ type Pin = { name: string; uid: string };
 function identityChanged(field: keyof PolicyValues, kind: string, pin: Pin | undefined, fresh: { name: string; uid: string }[] | undefined): [keyof PolicyValues, string] | null {
   if (!pin || !fresh) return null;
   const now = fresh.find((x) => x.name === pin.name);
-  if (!now) return [field, `The ${kind} ${pin.name} is not in this namespace any more. Nothing was sent; choose another.`];
+  if (!now) return [field, `The ${kind} ${pin.name} is not in this workspace any more. Nothing was sent; choose another.`];
   if (now.uid !== pin.uid) {
     return [field, `The ${kind} ${pin.name} was deleted and created again: a different object answers to the name now. Nothing was sent; check it, then submit again to use it.`];
   }
@@ -321,7 +321,7 @@ function identityChanged(field: keyof PolicyValues, kind: string, pin: Pin | und
 }
 
 export interface ScheduleFormProps {
-  ns: string;
+  ws: string;
   initial: PolicyValues;
   /** The saved schedule, when this form edits one. */
   saved?: Schedule;
@@ -334,15 +334,15 @@ export interface ScheduleFormProps {
   onCancel: () => void;
 }
 
-export function ScheduleForm({ ns, initial, saved, submitText, pending, error, status, onSubmit, onCancel }: ScheduleFormProps) {
+export function ScheduleForm({ ws, initial, saved, submitText, pending, error, status, onSubmit, onCancel }: ScheduleFormProps) {
   const editing = saved !== undefined;
   const { control, handleSubmit, setValue, setError, getValues } = useForm<PolicyValues>({
     resolver: zodResolver(policySchema),
     defaultValues: initial,
     mode: "onTouched",
   });
-  const connections = useConnections(ns);
-  const destinations = useDestinations(ns);
+  const connections = useConnections(ws);
+  const destinations = useDestinations(ws);
   const values = useWatch({ control }) as PolicyValues;
   const [canonical, setCanonical] = useState<string | null>(null);
   const [previewErrors, setPreviewErrors] = useState<Partial<Record<keyof PolicyValues, string>>>({});
@@ -438,7 +438,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
               connections.isPending
                 ? "Loading the connections"
                 : sources.length === 0
-                  ? "No source connection in this namespace yet: add one on the Connections page."
+                  ? "No source connection in this workspace yet: add one on the Connections page."
                   : "Each run reads from this cluster. It cannot be changed afterwards."
             }
             options={[
@@ -469,7 +469,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
           <>
             <TextField control={control} name="topics" label="Topic names" placeholder="orders, payments" help="Comma separated. Names, never patterns." required />
             <TopicPicker
-              ns={ns}
+              ws={ws}
               control={control}
               source={values.source}
               onAdd={(t) => setValue("topics", [...list(getValues("topics")), t].join(", "), { shouldValidate: true })}
@@ -590,7 +590,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
               error={fieldState.error?.message}
               help={
                 dests.length === 0 && !destinations.isPending
-                  ? "No saved destination in this namespace: add one on the Destinations page, or write to an archive URL."
+                  ? "No saved destination in this workspace: add one on the Destinations page, or write to an archive URL."
                   : "The bucket and credential are set once on the destination; each run uses what it has when the run starts."
               }
             >
@@ -710,7 +710,7 @@ export function ScheduleForm({ ns, initial, saved, submitText, pending, error, s
       {!editing && (
         <FormSection title="Readiness" titleElement="h2">
           <Readiness
-            ns={ns}
+            ws={ws}
             request={readiness}
             groupsSelected={groupList(values.consumerGroups ?? "").length > 0}
             why={

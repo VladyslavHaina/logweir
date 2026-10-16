@@ -1,7 +1,7 @@
 // Theme A's cutover from a verified restore (PROD-04.2 §1 steps 5 and 6, §9 screens 3
 // and 5): review how each captured consumer group's position maps onto the restored
 // topics and what the target group holds now (the Switchover preflight), confirm the
-// plan under the namespace's approval mode, then follow the Switchover the controller
+// plan under the workspace's approval mode, then follow the Switchover the controller
 // runs. The preflight's word decides what is offered; nothing changes on the target
 // until the Switchover's Job runs, and that Job repeats every check.
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -251,26 +251,26 @@ function Review({
 
 // ------------------------------------------------------------------ confirm
 
-function modeSentence(ns: string, p: ApprovalPolicy | undefined): { text: string; blocked?: string } {
-  if (!p) return { text: "The namespace's approval mode could not be read; the service applies it anyway." };
+function modeSentence(ws: string, p: ApprovalPolicy | undefined): { text: string; blocked?: string } {
+  if (!p) return { text: "The workspace's approval mode could not be read; the service applies it anyway." };
   switch (p.operatorMode) {
     case "confirm":
       return p.ordinaryConfirmationAvailable
-        ? { text: `${ns} uses one-person confirmation: confirming here approves the switchover.` }
-        : { text: `${ns} uses one-person confirmation.`, blocked: "This console cannot confirm here yet: its confirmation key is not configured, so the request would be refused and nothing created." };
+        ? { text: `${ws} uses one-person confirmation: confirming here approves the switchover.` }
+        : { text: `${ws} uses one-person confirmation.`, blocked: "This console cannot confirm here yet: its confirmation key is not configured, so the request would be refused and nothing created." };
     case "two-person":
       return p.consoleApprovalAvailable
-        ? { text: `${ns} needs a second person: an approver sees every group and position below in Approvals, and nothing runs until they approve.` }
-        : { text: `${ns} needs a second person.`, blocked: "This console cannot take a second person's approval here (it is the administrator console, or its key is missing)." };
+        ? { text: `${ws} needs a second person: an approver sees every group and position below in Approvals, and nothing runs until they approve.` }
+        : { text: `${ws} needs a second person.`, blocked: "This console cannot take a second person's approval here (it is the administrator console, or its key is missing)." };
     default:
       return p.legacy
-        ? { text: `${ns} has no approval policy: an approver runs logweir drill approve --subject-kind Switchover over the plan and uploads both files in Approvals.` }
-        : { text: `${ns} needs a personal-key approval: an approver countersigns the console's request with logweir drill countersign and uploads the signature in Approvals.` };
+        ? { text: `${ws} has no approval policy: an approver runs logweir drill approve --subject-kind Switchover over the plan and uploads both files in Approvals.` }
+        : { text: `${ws} needs a personal-key approval: an approver countersigns the console's request with logweir drill countersign and uploads the signature in Approvals.` };
   }
 }
 
 function Confirm({
-  ns,
+  ws,
   restore,
   pf,
   chosen,
@@ -278,7 +278,7 @@ function Confirm({
   attempt,
   onBack,
 }: {
-  ns: string;
+  ws: string;
   restore: Restore;
   pf: Preflight;
   chosen: ReviewGroup[];
@@ -287,8 +287,8 @@ function Confirm({
   onBack: () => void;
 }) {
   const navigate = useNavigate();
-  const policy = useApprovalPolicy(ns);
-  const create = useCreateSwitchover(ns);
+  const policy = useApprovalPolicy(ws);
+  const create = useCreateSwitchover(ws);
   const digests = evidenceDigests(pf);
   const target = restore.target.clusterRef.name;
   const doc = useMemo(
@@ -300,13 +300,13 @@ function Confirm({
   const ready = "bytes" in doc && hash.startsWith("sha256:");
   const names = ready ? mintNames(hash, attempt) : null;
   const p = policy.data;
-  const mode = modeSentence(ns, p);
+  const mode = modeSentence(ws, p);
   const ticketShown = !p?.legacy;
   const schema = useMemo(
     () =>
       z.object({
         ticket: p?.ticketRequired
-          ? z.string().trim().min(1, "This namespace's policy requires a change ticket.").max(128, "At most 128 characters.").regex(/^[\x20-\x7e]*$/, "Printable characters only.")
+          ? z.string().trim().min(1, "This workspace's policy requires a change ticket.").max(128, "At most 128 characters.").regex(/^[\x20-\x7e]*$/, "Printable characters only.")
           : z.string().trim().max(128, "At most 128 characters.").regex(/^[\x20-\x7e]*$/, "Printable characters only."),
         stopped: z.literal(true, { error: "Confirm that these groups' consumers stay stopped." }),
       }),
@@ -334,7 +334,7 @@ function Confirm({
       key: names.key,
       ...(ticketShown && values.ticket.trim() ? { ticket: values.ticket.trim() } : {}),
     }).catch(() => null);
-    if (res) void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name: restore.name }, search: { switchover: res.item.name }, replace: true });
+    if (res) void navigate({ to: "/$ws/restores/$name/cutover", params: { ws, name: restore.name }, search: { switchover: res.item.name }, replace: true });
   });
   const confirmWord = p?.operatorMode === "confirm" ? `Switch over ${plural(chosen.length, "group")}` : `Request a switchover of ${plural(chosen.length, "group")}`;
 
@@ -531,9 +531,9 @@ function Confirm({
 // --------------------------------------------------------------- switched over
 
 /** The Switchover after the click: held for approval, running, then each group's outcome. */
-export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: string; name: string; restore?: Restore; onPage?: boolean }) {
-  const sw = useSwitchover(ns, name);
-  const policy = useApprovalPolicy(ns);
+export function SwitchoverResult({ ws, name, restore, onPage = false }: { ws: string; name: string; restore?: Restore; onPage?: boolean }) {
+  const sw = useSwitchover(ws, name);
+  const policy = useApprovalPolicy(ws);
   if (sw.isPending) return <LoadingRows rows={4} />;
   if (sw.isError) return <ErrorState error={sw.error} onRetry={() => void sw.refetch()} />;
   const s = sw.data;
@@ -550,7 +550,7 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
           ) : (
             <Flex alignItems={{ default: "alignItemsCenter" }} gap={{ default: "gapSm" }}>
               <CardTitle component="h2">
-                Switchover <Link to="/$ns/switchovers/$name" params={{ ns, name: s.name }}>{s.name}</Link>
+                Switchover <Link to="/$ws/switchovers/$name" params={{ ws, name: s.name }}>{s.name}</Link>
               </CardTitle>
               <PhaseLabel sw={s} />
             </Flex>
@@ -564,11 +564,11 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
                 : "An approver signs it with their personal key and uploads the signature in Approvals. Nothing runs before that."}{" "}
               {policy.data?.operatorMode === "two-person" ? (
                 // DUI-27: its own approval page, which the second person opens from Approvals too.
-                <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: s.name }}>
+                <Link to="/$ws/approvals/switchover/$name" params={{ ws, name: s.name }}>
                   Open its approval
                 </Link>
               ) : (
-                <Link to="/$ns/approvals" params={{ ns }}>
+                <Link to="/$ws/approvals" params={{ ws }}>
                   Approvals
                 </Link>
               )}
@@ -642,21 +642,21 @@ export function SwitchoverResult({ ns, name, restore, onPage = false }: { ns: st
 /** The route's page. Leaving the third step for a new review ("Review again") mounts the
  *  flow afresh, so no earlier review, choice or step carries over. */
 export function Cutover() {
-  const search = useSearch({ from: "/$ns/restores/$name/cutover" });
+  const search = useSearch({ from: "/$ws/restores/$name/cutover" });
   return <CutoverFlow key={search.switchover ? `sw:${search.switchover}` : "review"} />;
 }
 
 function CutoverFlow() {
-  const { ns, name } = useParams({ from: "/$ns/restores/$name/cutover" });
-  const search = useSearch({ from: "/$ns/restores/$name/cutover" });
+  const { ws, name } = useParams({ from: "/$ws/restores/$name/cutover" });
+  const search = useSearch({ from: "/$ws/restores/$name/cutover" });
   const navigate = useNavigate();
   // Read again on every visit (DUI-28): a copy cached while the run was going would refuse
   // a restore that has since succeeded.
-  const restore = useRestore(ns, name, { fresh: true });
+  const restore = useRestore(ws, name, { fresh: true });
   // DUI-30: a review is a write (POST preflights), and so is a switchover. A role that may
   // not create a restore here starts neither and is offered neither.
-  const canWrite = useCan(ns, "restoreCreate");
-  const start = useStartReview(ns);
+  const canWrite = useCan(ws, "restoreCreate");
+  const start = useStartReview(ws);
   const [reviewId, setReviewId] = useState<string>();
   const [rounds, setRounds] = useState(0);
   const [step, setStep] = useState<Step>("review");
@@ -664,12 +664,12 @@ function CutoverFlow() {
   // group the operator unticked stays unticked; one offered only since is added.
   const [choice, setChoice] = useState<{ selected: Set<string>; seen: Set<string> } | null>(null);
   const started = useRef(false);
-  const pf = usePreflight(ns, reviewId);
-  const details = usePreflightDetails(ns, pf.data);
+  const pf = usePreflight(ws, reviewId);
+  const details = usePreflightDetails(ws, pf.data);
   const switchoverName = search.switchover;
-  const sw = useSwitchover(ns, switchoverName);
+  const sw = useSwitchover(ws, switchoverName);
   const r = restore.isFetchedAfterMount ? restore.data : undefined;
-  const source = useSourceBackup(ns, r?.backupSetRef);
+  const source = useSourceBackup(ws, r?.backupSetRef);
   const refusal = r ? cutoverRefusal(r, source) : null;
 
   const beginReview = () => {
@@ -708,12 +708,12 @@ function CutoverFlow() {
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/restores" params={{ ns }}>Restores</Link>} />
-      <BreadcrumbItem render={() => <Link to="/$ns/restores/$name" params={{ ns, name }}>{name}</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/restores" params={{ ws }}>Restores</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/restores/$name" params={{ ws, name }}>{name}</Link>} />
       {switchoverName ? (
         <>
           {/* DUI-28: the way back to a new review of this restore. */}
-          <BreadcrumbItem render={() => <Link to="/$ns/restores/$name/cutover" params={{ ns, name }} search={{}}>Switch consumers over</Link>} />
+          <BreadcrumbItem render={() => <Link to="/$ws/restores/$name/cutover" params={{ ws, name }} search={{}}>Switch consumers over</Link>} />
           <BreadcrumbItem isActive>{switchoverName}</BreadcrumbItem>
         </>
       ) : (
@@ -741,12 +741,12 @@ function CutoverFlow() {
           <Steps step="done" sw={sw.data} />
         </PageSection>
         <PageSection>
-          <SwitchoverResult ns={ns} name={switchoverName} restore={r} />
+          <SwitchoverResult ws={ws} name={switchoverName} restore={r} />
           {/* DUI-28: after any outcome, a Succeeded one included, a new review is one click. */}
           {sw.data && isTerminal(sw.data) && !refusal && canWrite && (
             <Flex className="lw-gap-top" gap={{ default: "gapMd" }}>
               <FlexItem>
-                <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name/cutover", params: { ns, name }, search: {} })}>
+                <Button variant="secondary" onClick={() => void navigate({ to: "/$ws/restores/$name/cutover", params: { ws, name }, search: {} })}>
                   Review again
                 </Button>
               </FlexItem>
@@ -766,7 +766,7 @@ function CutoverFlow() {
             <Empty
               title={refusal.title}
               actions={
-                <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns, name } })}>
+                <Button variant="secondary" onClick={() => void navigate({ to: "/$ws/restores/$name", params: { ws, name } })}>
                   Back to the restore
                 </Button>
               }
@@ -789,12 +789,12 @@ function CutoverFlow() {
               title="Your role does not switch consumers over"
               icon={LockIcon}
               actions={
-                <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/$name", params: { ns, name } })}>
+                <Button variant="secondary" onClick={() => void navigate({ to: "/$ws/restores/$name", params: { ws, name } })}>
                   Back to the restore
                 </Button>
               }
             >
-              Your sign-in reads restores and switchovers in {ns}. Reviewing the positions and switching consumers over is for a role that
+              Your sign-in reads restores and switchovers in {ws}. Reviewing the positions and switching consumers over is for a role that
               may create restores here, such as operator. Nothing was sent.
             </Empty>
           </Card>
@@ -896,7 +896,7 @@ function CutoverFlow() {
           onContinue={() => setStep("confirm")}
         />
       ) : (
-        <Confirm ns={ns} restore={r} pf={pf.data!} chosen={chosen} left={left} attempt={`r${rounds}-${pf.data!.id}`} onBack={() => setStep("review")} />
+        <Confirm ws={ws} restore={r} pf={pf.data!} chosen={chosen} left={left} attempt={`r${rounds}-${pf.data!.id}`} onBack={() => setStep("review")} />
       )}
     </>
   );

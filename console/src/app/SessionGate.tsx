@@ -1,9 +1,9 @@
 // The session gate: GET /api/v1/session once at boot, then one of four pages
 // (console/README.md, "How the page decides its state"):
-//   a session document          -> the console, for the namespaces it grants;
+//   a session document          -> the console, for the workspaces it grants;
 //   401 unauthenticated/expired -> "Sign in", handing over to /auth/login and back to this route;
 //   anything else               -> "Can't reach the Logweir service", with what it got and Retry;
-//   a session with no namespace -> what the actor holds (nothing) and Sign out.
+//   a session with no workspace -> what the actor holds (nothing) and Sign out.
 // Once the console is up it stays up: a session that ends later is SessionClock's
 // dialog over the page, never a sign-in page in its place (DUI-4).
 import type { ReactNode } from "react";
@@ -96,12 +96,12 @@ export function Unavailable({ error, onRetry }: { error: unknown; onRetry: () =>
   );
 }
 
-export function NoNamespace({ session }: { session: Session }) {
+export function NoWorkspace({ session }: { session: Session }) {
   const subject = shortSubject(session.actor.subject);
   const name = session.actor.displayName || subject;
   return (
     <FullPage>
-      <EmptyState titleText="No namespace is granted to you" headingLevel="h1" icon={UserIcon} variant="sm">
+      <EmptyState titleText="No workspace is granted to you" headingLevel="h1" icon={UserIcon} variant="sm">
         <EmptyStateBody>
           You are signed in as <strong className="lw-break">{name}</strong>
           {name !== subject && (
@@ -110,7 +110,7 @@ export function NoNamespace({ session }: { session: Session }) {
               ({subject})
             </span>
           )}
-          , but your groups hold no Logweir role in any namespace. An administrator grants roles in the console's role bindings.
+          , but your groups hold no Logweir role in any workspace. An administrator grants roles in the console's role bindings.
         </EmptyStateBody>
         {session.authenticationMode === "oidc" && (
           <EmptyStateFooter>
@@ -141,7 +141,7 @@ export function SessionGate({ children }: { children: (session: Session) => Reac
       </FullPage>
     );
   }
-  if (session.namespaces.length === 0) return <NoNamespace session={session} />;
+  if (session.workspaces.length === 0) return <NoWorkspace session={session} />;
   // A later read that failed keeps the document it had: the page stays, and the clock
   // says whether the service answered "sign in".
   const ended = query.isError && query.error instanceof ApiError && query.error.signedOut;

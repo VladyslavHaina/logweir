@@ -130,16 +130,16 @@ describe("Test connection", () => {
   });
 
   it("is not offered for a connection the controller refused, and prints the controller's own reason", () => {
-    withClient(<ConnectionCheck ns="team-a" c={conn("ConnectionConfigInvalid")} mayStart readable />);
+    withClient(<ConnectionCheck ws="team-a" c={conn("ConnectionConfigInvalid")} mayStart readable />);
     expect((screen.getByRole("button", { name: "Test connection" }) as HTMLButtonElement).disabled).toBe(true);
     expect(text()).toContain("ConnectionConfigInvalid");
     expect(text()).toContain("the saved settings contradict each other");
   });
 
   it("tells a viewer it may read checks and not start one", () => {
-    withClient(<ConnectionCheck ns="team-a" c={conn("")} mayStart={false} readable />);
+    withClient(<ConnectionCheck ws="team-a" c={conn("")} mayStart={false} readable />);
     expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
-    expect(text()).toContain("may read connection checks in this namespace and not start one");
+    expect(text()).toContain("may read connection checks in this workspace and not start one");
   });
 
   it("sends one reference and nothing it does not ask about, then follows the check it made", async () => {
@@ -149,7 +149,7 @@ describe("Test connection", () => {
       bodies.push(init.body);
       return post(path, init as never);
     }) as never);
-    withClient(<ConnectionCheck ns="team-a" c={{ ...conn(""), name: "orders-prod" }} mayStart readable />);
+    withClient(<ConnectionCheck ws="team-a" c={{ ...conn(""), name: "orders-prod" }} mayStart readable />);
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     // While the request is in flight a second click is not offered.
     await waitFor(() => expect((screen.getByRole("button", { name: /Test connection/ }) as HTMLButtonElement).disabled).toBe(true));
@@ -201,7 +201,7 @@ describe("FX-46: the probe's reason and what the endpoint is usable for", () => 
     const asked: string[] = [];
     vi.spyOn(api, "GET").mockImplementation(((path: string, init: { params: { path: { id?: string } } }) => {
       asked.push(`${path} ${init.params.path.id ?? ""}`);
-      if (path === "/api/v1/namespaces/{ns}/preflights/{id}" && init.params.path.id === "pf-recorded") return Promise.resolve(answer({ item: redpanda(), requestId: "r" }));
+      if (path === "/api/v1/workspaces/{ws}/preflights/{id}" && init.params.path.id === "pf-recorded") return Promise.resolve(answer({ item: redpanda(), requestId: "r" }));
       return Promise.reject(new Error(`unexpected ${path}`));
     }) as never);
     const c: Connection = {
@@ -209,9 +209,9 @@ describe("FX-46: the probe's reason and what the endpoint is usable for", () => 
       reachability: { state: "reachable", reason: "Reachable" },
       lastTest: { preflightId: "pf-recorded", state: "ready", stale: false, truncated: false },
     };
-    withClient(<ConnectionCheck ns="team-a" c={c} mayStart readable />);
+    withClient(<ConnectionCheck ws="team-a" c={c} mayStart readable />);
     await screen.findByRole("heading", { name: "Usable as a source, not as a target" });
-    expect(asked).toEqual(["/api/v1/namespaces/{ns}/preflights/{id} pf-recorded"]);
+    expect(asked).toEqual(["/api/v1/workspaces/{ws}/preflights/{id} pf-recorded"]);
     expect(text()).toContain("Last connectivity check");
   });
 });
@@ -223,7 +223,7 @@ describe("topic discovery", () => {
       if (path.endsWith("/topics")) return Promise.resolve(answer(fixture("topics-page.json")));
       return Promise.reject(new Error(`unexpected ${path}`));
     }) as never);
-    withClient(<Discovery ns="team-a" name="source" mayStart readable />);
+    withClient(<Discovery ws="team-a" name="source" mayStart readable />);
     await screen.findByText("Last successful inventory");
     expect(screen.getByText("Latest attempt")).toBeTruthy();
     expect(text()).toContain("BrokerUnreachable");
@@ -241,12 +241,12 @@ describe("topic discovery", () => {
     let slots = { latestAttempt: attested, lastSuccessful: attested };
     vi.spyOn(api, "GET").mockImplementation(((path: string) =>
       Promise.resolve(answer(path.endsWith("/topics") ? { items: [], page: { limit: 25 }, scan: { chunksScanned: 1, complete: true }, requestId: "r" } : slots))) as never);
-    withClient(<Discovery ns="team-a" name="source" mayStart readable />);
+    withClient(<Discovery ws="team-a" name="source" mayStart readable />);
     await screen.findByText(/also the last successful inventory/);
     expect(text()).toContain("attested by platform-team@example.com at 2026-09-01T00:00:00Z; not verified by Logweir");
     cleanup();
     slots = { latestAttempt: empty, lastSuccessful: empty };
-    withClient(<Discovery ns="team-a" name="source" mayStart readable />);
+    withClient(<Discovery ws="team-a" name="source" mayStart readable />);
     await screen.findByText(/this is not proof that the cluster is empty/);
     await waitFor(() => expect(text()).toContain("This is the end of the stored result."));
   });

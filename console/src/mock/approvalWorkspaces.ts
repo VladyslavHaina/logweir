@@ -1,8 +1,8 @@
-// Three demo namespaces, one per approval mode the default team-a (confirm) does
+// Three demo workspaces, one per approval mode the default team-a (confirm) does
 // not show: two-person (payments), strict (ledger) and unbound (sandbox). The
 // session lists them (data.ts), and mock/approvals.ts serves their restores and
 // approvals. No imports beyond types, so data.ts can read this without a cycle.
-import type { Capabilities, NamespaceGrant } from "../api/types";
+import type { Capabilities, WorkspaceGrant } from "../api/types";
 
 const NONE: Capabilities = {
   approvalPacketRead: false,
@@ -62,7 +62,7 @@ const OPERATOR_APPROVER: Capabilities = {
   topicDiscovery: true,
 };
 
-export const APPROVAL_DEMO_GRANTS: NamespaceGrant[] = [
+export const APPROVAL_DEMO_GRANTS: WorkspaceGrant[] = [
   { name: "payments", roles: ["operator", "approver"], capabilities: OPERATOR_APPROVER },
   { name: "ledger", roles: ["approver"], capabilities: APPROVER },
   { name: "sandbox", roles: ["approver"], capabilities: APPROVER },
