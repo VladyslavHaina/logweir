@@ -3,10 +3,10 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.7.0.json`](../../schemas/logweir-catalog-point-1.7.0.json),
+[`schemas/logweir-catalog-point-1.8.0.json`](../../schemas/logweir-catalog-point-1.8.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
-drift apart silently. Every older schema, `-1.0.0.json` to `-1.6.0.json`, is
+drift apart silently. Every older schema, `-1.0.0.json` to `-1.7.0.json`, is
 frozen beside it and never regenerated; [Versions](#versions) says which
 records each describes.
 
@@ -129,7 +129,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; a record is written with the newest minor whose fields it carries, `1.1.0` to `1.7.0`: see [Versions](#versions). |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; a record is written with the newest minor whose fields it carries, `1.1.0` to `1.8.0`: see [Versions](#versions). |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -167,6 +167,7 @@ all of them wanted:
 | `topics[].identity` | object, **optional** (1.6.0) | The backup receipt's [`generations`](backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-160) entry for the topic, COPIED: `topic_id` (before the engine) and `topic_id_after`, each Kafka's text or `null` with its reason, and `topic_id_source`. It is what tells a topic deleted and recreated under the same name — a NEW generation, whose offsets mean other records — from the same topic. Receipt-derived: a record whose copy its receipt does not back is a `RecordMismatch` (rule 3). ABSENT means UNKNOWN — every record before 1.5.0 — and is never read as "the same generation". |
 | `owner_detection` | string[], **optional** (1.3.0) | The backup receipt's [`owner_detection`](backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130), COPIED: where the run looked for declarative owners (`declared`, `kafkaTopicResources`). EMPTY means it looked nowhere, so a topic without an `owner` has its owner NOT CHECKED — never "applied through the admin API". Receipt-derived (rule 3). ABSENT means NOT RECORDED — every record before 1.3.0. |
 | `consumer_positions` | object, **optional** (1.7.0) | The receipt's [`consumer_positions`](backup-receipt.md#consumer_positions--consumer-position-evidence-format-170), SUMMARISED and BOUND: `sha256` (the digest of the receipt block's deterministic JSON), `observed_from` and `observed_to` (when the positions were read, before the engine: the snapshot's freshness against `capture.started_at`), `listing`, and per selected group (`groups[]`, id order) its `group_id`, `outcome`, `reason`, `group_type`, `active` and, for a captured group, `positions` counted — `related` (within the archive or at its end), `not_related`, `never_committed`, `beyond_end`, `failed`, `not_observed` (the receipt's own `counts`). Receipt-derived: `reader::cross_check` recomputes the summary from the verified receipt, digest first, and a record whose summary the receipt does not back is a `RecordMismatch` (rule 3). The receipt block carries the positions document's SHA-256, so the digest binds the positions too: two backups whose positions differ in ONE position, with the same counts, have different digests, and a record carrying the other's is refused (`catalog::one_position_moved_is_another_digest_and_a_record_carrying_it_is_refused`). ABSENT: the backup selected no group, or the record predates 1.7.0 — never "no positions". The positions themselves are in the positions document the receipt binds; the catalog reads neither, so its size never depends on partitions. |
+| `schema_registry` | object, **optional** (1.8.0) | The receipt's [`schema_registry`](backup-receipt.md#schema_registry--the-source-registrys-snapshot-format-190), SUMMARISED: `captured`, `subjects`, `versions` and `incomplete_reason` (the receipt's `reason`, `unresolvedReferences` or `idsNotInSnapshot`; absent when complete). Never the snapshot itself. Receipt-derived: `reader::cross_check` recomputes the summary from the verified receipt, and a record whose summary the receipt does not back is a `RecordMismatch` (rule 3; `catalog::a_1_8_0_record_summarises_the_receipts_schema_registry`). ABSENT: the source connection names no registry, or the record predates 1.8.0 — read as "registry not captured", never as captured. |
 | `source.cluster_id` | string | Read from the broker at admission and carried by the receipt — never from a spec. |
 | `source.bootstrap_servers` | string[] | Addressing. |
 | `source.auth_mode` | string | The receipt's `source.auth.mode`, copied: `plaintext` or `scramSha512`, and from 1.4.0 also `scramSha256`, `plain` or `mtls` — the receipt's versioned closed set. |
@@ -228,15 +229,15 @@ and "which shard is it in" are one number.
    schema pins the major with a pattern (`^1\.[0-9]+\.[0-9]+$`) as well, so a
    schema-only validator refuses a `9.9.9` document too.
 2. **Unknown fields are ignored inside major 1.** A minor bump adds optional
-   fields and a 1.0.0 reader must still read a 1.1.0 to 1.7.0 record.
+   fields and a 1.0.0 reader must still read a 1.1.0 to 1.8.0 record.
 3. **Absent optional fields mean UNKNOWN — never zero.** See below.
 4. **Everything except the receipt-derived facts is informational.** The
    receipt's signature is the verification root. `backup_id`, `run_id`,
    `covered`, `capture` and `archive.manifest_key`/`manifest_sha256` are
    recomputed from the verified receipt, and a record whose copies disagree is
    reported as a mismatch (availability `Conflict`) rather than believed.
-   Every per-topic copy and `owner_detection` (1.1.0, 1.3.0, 1.5.0, 1.6.0,
-   1.7.0) is receipt-derived too, **one way**: a record may carry LESS than its
+   Every per-topic copy, `owner_detection` and `schema_registry` (1.1.0, 1.3.0,
+   1.5.0, 1.6.0, 1.7.0, 1.8.0) is receipt-derived too, **one way**: a record may carry LESS than its
    receipt (an older writer copies nothing) but never a value the receipt does
    not back — `captured` beside a `captureDenied` receipt, any coverage beside
    a 1.0.0 receipt, an override added, an owner dropped, a class changed, an
@@ -330,7 +331,7 @@ none of them.
 * **Refusal is per entry, not per catalog.** A `v1` reader meeting a major-2
   record marks that entry and keeps going.
 * **A minor bump adds optional fields only.** Unknown fields inside major 1 are
-  ignored, so a 1.0.0 reader reads a 1.7.0 record. No verifier evaluates a
+  ignored, so a 1.0.0 reader reads a 1.8.0 record. No verifier evaluates a
   catalog record's invariants beyond its topic IDs (above), so an older reader
   still reads every minor; the receipt it names is what an older verifier may
   refuse. A record backfilled from an older receipt keeps the format it would
@@ -363,6 +364,7 @@ The day-sharded index entry did not change with any of these: it stays
 | 1.5.0 | PROD-03.0 | `topics[].schema_dependency` | a record from a receipt that carries the block. The view lists each topic's verdict, the dependent sides and their schema ids (`PointView.topics[].schemaDependency`) for an `Available` point only |
 | 1.6.0 | PROD-01.4a | `topics[].identity` | a record from a receipt that carries `generations`: every record this build writes is at least 1.6.0. The view and the product API do not show the IDs yet |
 | 1.7.0 | PROD-04.1 | `consumer_positions`, the summary bound by the receipt block's digest | a record whose receipt carries the block (a backup that selected consumer groups). The view lists the snapshot's freshness and, per group (at most 32, else counted), its outcome and position counts; the product API publishes it as `PointView.consumerPositions`, with `observedBeforeRecoveryPointMs`. A catalog synced by an older runner lists no summary |
+| 1.8.0 | PROD-03.1 | `schema_registry`, the receipt block's summary | a record whose receipt carries the block (a backup whose source connection names a registry, captured or not). The view and the product API show it as `PointView.schemaRegistry`, and the console as "Captured: N subjects, M versions" or "Not captured" with the reason |
 
 Readers built before FX-7 that know the `catalog-point` payload type accept a
 1.2.0 record (measured with a `logweir` at `b8b9263f` and scripts 1.14.0 and
@@ -370,6 +372,15 @@ Readers built before FX-7 that know the `catalog-point` payload type accept a
 at all. A catalog synced by a runner before
 PROD-05.1 lists no topics for a point (the console then says the source's
 layout is not published).
+
+A reader built before 1.8.0 reads a 1.8.0 record and ignores the block:
+measured on 2026-10-16 with `v0.4.1`'s readers (`verify_scorecard.py` 1.34.0
+and the `logweir` of runner image `sha-4bb185d5`, `drill verify --payload-type
+catalog-point`) over a signed 1.8.0 record built as
+`catalog::a_1_8_0_record_summarises_the_receipts_schema_registry` builds it, both
+`VALID`, exit 0, with no registry line. On every build,
+`catalog::an_unknown_field_inside_major_1_is_ignored` holds the rule it rests
+on (rule 2): it fails if `CatalogPoint` gains `deny_unknown_fields`.
 
 ## The operator commands
 
