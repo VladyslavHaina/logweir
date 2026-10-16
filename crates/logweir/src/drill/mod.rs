@@ -2724,7 +2724,7 @@ fn execute_with_validated_approval(
                 cluster_id: admitted.target_cluster_id.clone(),
                 topics: creation.topics.clone(),
             };
-            match reconcile::write(&c.store, &record) {
+            match reconcile::write(&c.store, &record, signer) {
                 Ok(key) => targets_written(run_id, key),
                 Err(e) => {
                     phase9_teardown::after_failure(

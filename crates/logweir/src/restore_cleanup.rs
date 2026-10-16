@@ -245,7 +245,7 @@ pub fn mapped_target_names(spec: &DrillSpec) -> Vec<String> {
 }
 
 /// The evidence keyring's public keys.
-fn keyring(path: &std::path::Path) -> Result<Vec<VerifyingKey>, DrillError> {
+pub(crate) fn keyring(path: &std::path::Path) -> Result<Vec<VerifyingKey>, DrillError> {
     let bytes = std::fs::read(path).map_err(|e| {
         DrillError::Operational(format!("evidence keyring {}: {e}", path.display()))
     })?;

@@ -50,6 +50,12 @@ pub fn targets_record_key(run_id: &str) -> String {
     format!("logweir/drills/{run_id}.targets.json")
 }
 
+/// Its detached DSSE sidecar, `logweir/drills/<run_id>.targets.sig`.
+#[must_use]
+pub fn targets_sidecar_key(run_id: &str) -> String {
+    format!("logweir/drills/{run_id}.targets.sig")
+}
+
 /// **The targets record**: what a run created, written before its engine
 /// starts. Internal working state, read only by the reconcile; the signed
 /// scorecard is the evidence.
@@ -65,22 +71,80 @@ pub struct TargetsRecord {
     pub topics: Vec<logweir_core::target_creation::CreatedTopic>,
 }
 
-/// Put `record` create-only at its key; the key on success.
+/// **Sign and put `record`**, both create-only: the record at its key, then
+/// its detached sidecar ([`targets_sidecar_key`], payload type
+/// `PAYLOAD_TYPE_TARGETS_RECORD`) under the run's own signer. The key on
+/// success.
 ///
 /// # Errors
 ///
-/// [`DrillError::Operational`] when it cannot be serialised or put: the run
-/// then starts no engine.
-pub fn write(store: &Store, record: &TargetsRecord) -> Result<String, DrillError> {
+/// [`DrillError::Operational`] when it cannot be serialised, signed or put:
+/// the run then starts no engine.
+pub fn write(
+    store: &Store,
+    record: &TargetsRecord,
+    signer: &crate::signer::ValidatedSigner,
+) -> Result<String, DrillError> {
     let key = targets_record_key(&record.run_id);
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| DrillError::Operational(format!("targets record: {e}")))?;
-    store.put_create_only(&key, &bytes).map_err(|e| {
+    let failed = |what: String| {
         DrillError::Operational(format!(
-            "the targets record {key} could not be written ({e}); no engine was started"
+            "the targets record {key} could not be {what}; no engine was started"
         ))
-    })?;
+    };
+    let bytes = serde_json::to_vec(record).map_err(|e| failed(format!("serialised ({e})")))?;
+    let sidecar = signer
+        .sign(logweir_evidence::PAYLOAD_TYPE_TARGETS_RECORD, &bytes)
+        .map_err(|e| failed(format!("signed ({e})")))?;
+    let sidecar = serde_json::to_vec(&sidecar).map_err(|e| failed(format!("signed ({e})")))?;
+    store
+        .put_create_only(&key, &bytes)
+        .map_err(|e| failed(format!("written ({e})")))?;
+    store
+        .put_create_only(&targets_sidecar_key(&record.run_id), &sidecar)
+        .map_err(|e| failed(format!("signed in the store ({e})")))?;
     Ok(key)
+}
+
+/// **The record, only once its signature verifies** under one of `trusted`.
+/// A missing sidecar, one that does not parse, or a signature that does not
+/// cover these exact bytes is a refusal: nothing is verified and nothing is
+/// deleted.
+///
+/// # Errors
+///
+/// [`DrillError::Guard`] as above, or for a record that does not parse.
+pub fn open(
+    key: &str,
+    bytes: &[u8],
+    sidecar: Option<&[u8]>,
+    trusted: &[logweir_evidence::keys::VerifyingKey],
+) -> Result<TargetsRecord, DrillError> {
+    let refuse = |why: String| -> DrillError {
+        GuardRefusal(format!(
+            "{why}; nothing was verified and nothing will be deleted"
+        ))
+        .into()
+    };
+    let Some(sidecar) = sidecar else {
+        return Err(refuse(format!("{key} has no signature beside it")));
+    };
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(sidecar)
+        .map_err(|e| refuse(format!("{key}'s signature is not a DSSE sidecar ({e})")))?;
+    let verified = trusted.iter().any(|k| {
+        logweir_evidence::verify::verify_detached(
+            k,
+            logweir_evidence::PAYLOAD_TYPE_TARGETS_RECORD,
+            bytes,
+            &sidecar,
+        )
+        .is_ok()
+    });
+    if !verified {
+        return Err(refuse(format!(
+            "{key}'s signature does not verify under the signing key or the evidence keyring"
+        )));
+    }
+    serde_json::from_slice(bytes).map_err(|e| refuse(format!("{key} does not parse ({e})")))
 }
 
 /// The topics a reconcile verifies: the recorded ones that are still the run's.
@@ -151,8 +215,21 @@ pub fn kept(
             record.run_id, record.cluster_id
         )));
     }
+    // Only names this plan maps, whatever the record says.
+    let prefix = logweir_core::spec::target_topic_prefix(spec);
+    let mapped: BTreeMap<String, String> = spec
+        .source
+        .topics
+        .iter()
+        .map(|s| (format!("{prefix}{s}"), s.clone()))
+        .collect();
+    let (ours, foreign): (Vec<_>, Vec<_>) = record
+        .topics
+        .iter()
+        .cloned()
+        .partition(|t| mapped.contains_key(&t.name));
     let recorded = TargetCreation {
-        topics: record.topics.clone(),
+        topics: ours,
         lineage_headers: logweir_core::target_creation::LINEAGE_HEADERS_KEPT.to_string(),
         teardown_after_seconds: None,
     };
@@ -162,7 +239,16 @@ pub fn kept(
             "{topic}: {why}; the reconcile is tried again"
         )));
     }
-    let mut left_out: Vec<(String, String)> = plan.skipped.clone();
+    let mut left_out: Vec<(String, String)> = foreign
+        .iter()
+        .map(|t| {
+            (
+                t.name.clone(),
+                "not one of the plan's mapped target names".to_string(),
+            )
+        })
+        .collect();
+    left_out.extend(plan.skipped.iter().cloned());
     left_out.extend(
         plan.already_absent
             .iter()
@@ -181,13 +267,10 @@ pub fn kept(
                 .join("; ")
         )));
     }
-    let prefix = logweir_core::spec::target_topic_prefix(spec);
-    let mapping: BTreeMap<String, String> = spec
-        .source
-        .topics
+    let mapping: BTreeMap<String, String> = mapped
         .iter()
-        .map(|s| (s.clone(), format!("{prefix}{s}")))
-        .filter(|(_, t)| plan.delete.contains(t))
+        .filter(|(t, _)| plan.delete.contains(t))
+        .map(|(t, s)| (s.clone(), t.clone()))
         .collect();
     Ok(Ok(Kept {
         run_id: record.run_id.clone(),
@@ -329,8 +412,12 @@ pub(super) fn execute(
             "run {interrupted} wrote no targets record ({record_key}), so it created no topic"
         )));
     };
-    let record: TargetsRecord = serde_json::from_slice(&bytes)
-        .map_err(|e| GuardRefusal(format!("{record_key} does not parse ({e})")))?;
+    let sidecar = read_optional(&read, &targets_sidecar_key(&interrupted), caps::SIDECAR)?;
+    let mut trusted = vec![prepared.signer.verifying_key()];
+    if let Some(path) = &args.evidence_keys {
+        trusted.extend(crate::restore_cleanup::keyring(path)?);
+    }
+    let record = open(&record_key, &bytes, sidecar.as_deref(), &trusted)?;
     if record.run_id != interrupted || record.plan_hash != plan_hash {
         return Err(GuardRefusal(format!(
             "{record_key} records run {} over plan {}, not run {interrupted} over this plan \
@@ -531,6 +618,74 @@ mod tests {
         .into_iter()
         .collect();
         assert!(kept(&spec("r-"), &record(), "C", &unread).is_err());
+    }
+
+    fn sealed(record: &TargetsRecord) -> (Vec<u8>, Vec<u8>, logweir_evidence::keys::SigningKey) {
+        let key = logweir_evidence::keys::SigningKey::generate_ed25519();
+        let bytes = serde_json::to_vec(record).unwrap();
+        let sidecar = logweir_evidence::sign::sign_detached(
+            &key,
+            logweir_evidence::PAYLOAD_TYPE_TARGETS_RECORD,
+            &bytes,
+        )
+        .unwrap();
+        (bytes, serde_json::to_vec(&sidecar).unwrap(), key)
+    }
+
+    /// **The record is read only under its signature.** The genuine record
+    /// verifies; the same record with one topic name changed, a record with
+    /// no sidecar, and one signed by another key are refused (exit 3:
+    /// nothing verified, so no reconcile scorecard exists and Clean up,
+    /// which needs one, deletes nothing). KILLS: reading the record before
+    /// or without its signature.
+    #[test]
+    fn the_targets_record_is_read_only_under_its_signature() {
+        let r = record();
+        let (bytes, sidecar, key) = sealed(&r);
+        let trusted = [key.verifying_key()];
+        let k = targets_record_key("R1");
+        assert_eq!(open(&k, &bytes, Some(&sidecar), &trusted).unwrap(), r);
+
+        let mut edited = r.clone();
+        edited.topics[1].name = "payments".to_string();
+        let edited = serde_json::to_vec(&edited).unwrap();
+        let refused = open(&k, &edited, Some(&sidecar), &trusted).unwrap_err();
+        assert!(matches!(refused, DrillError::Guard(_)), "{refused}");
+        assert!(refused.to_string().contains("does not verify"), "{refused}");
+
+        let unsigned = open(&k, &bytes, None, &trusted).unwrap_err();
+        assert!(matches!(unsigned, DrillError::Guard(_)), "{unsigned}");
+        assert!(unsigned.to_string().contains("no signature"), "{unsigned}");
+
+        let other = [logweir_evidence::keys::SigningKey::generate_ed25519().verifying_key()];
+        assert!(matches!(
+            open(&k, &bytes, Some(&sidecar), &other).unwrap_err(),
+            DrillError::Guard(_)
+        ));
+    }
+
+    /// A recorded name this plan does not map is never kept, whatever its
+    /// ID: it is left out and named. KILLS: trusting the record's names.
+    #[test]
+    fn a_recorded_name_outside_the_plans_mapping_is_never_kept() {
+        let mut r = record();
+        r.topics[1].name = "payments".to_string();
+        r.topics[1].topic_id = Some("id-payments".to_string());
+        let current: BTreeMap<String, CurrentId> = [
+            ("r-orders".to_string(), CurrentId::Id("id-r-orders".into())),
+            ("payments".to_string(), CurrentId::Id("id-payments".into())),
+        ]
+        .into_iter()
+        .collect();
+        let kept = kept(&spec("r-"), &r, "C", &current)
+            .unwrap()
+            .expect("one kept");
+        assert_eq!(kept.creation.topics.len(), 1);
+        assert_eq!(kept.creation.topics[0].name, "r-orders");
+        assert!(kept
+            .left_out
+            .iter()
+            .any(|(t, why)| t == "payments" && why.contains("mapped")));
     }
 
     /// The record round-trips, and its key is the run's.
