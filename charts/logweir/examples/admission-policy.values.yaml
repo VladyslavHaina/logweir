@@ -16,10 +16,10 @@ admissionPolicy:
   extraPrincipals:
     - system:serviceaccount:team-a:logweir-api
 checks:
-  maxActivePerNamespace: 4
+  maxActivePerWorkspace: 4
   maxActiveTotal: 20
   maxActiveDiscoveriesPerConnection: 1
-  maxEvidenceFetchActivePerNamespace: 4
+  maxEvidenceFetchActivePerWorkspace: 4
   discovery:
     freshSeconds: 900
     retentionSeconds: 86400
@@ -27,7 +27,7 @@ checks:
     hardMaxTopics: 50000
     visibilityAttestations:
       - id: att-orders-prod
-        namespace: team-a
+        namespace: logweir-system     # the release namespace
         kafkaCluster: source
         clusterId: M29I2S7FQPyHBEX12Vx7XA
         principal: User:backup

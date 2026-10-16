@@ -22,6 +22,28 @@ deployment.yaml used to refuse it.)
 {{- if hasKey .Values "ui" -}}
 {{- fail "ui.* is withdrawn (PROD-17.1, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image are gone. Remove the ui block from your values file and use the console, api.console.* (docs/install.md §5e)." -}}
 {{- end -}}
+{{- /*
+OD-23 (PROD-19.1): an install is one namespace, with workspaces inside it. The
+values that named other namespaces are removed, and the per-namespace ones are
+renamed per workspace; each is refused by name, with where it went.
+*/ -}}
+{{- $removed := dict
+      "kubernetes.namespace" "remove it: the install is the release namespace (helm -n)"
+      "kubernetes.connectionsNamespace" "remove it: kafka.enabled's KafkaClusters and logweir-s3 land in the release namespace, in the first workspace"
+      "controller.watchNamespaces" "remove it: the controller watches the release namespace only"
+      "identity.authorizedRunnerNamespaces" "remove it: every runner Job runs in the release namespace, which holds the signer"
+      "api.namespaces" "remove it: the console serves the release namespace and the workspaces in `workspaces`"
+      "approvalPolicy.namespaces" "it is renamed approvalPolicy.workspaces: {<workspace>: <policy>}"
+      "checks.maxActivePerNamespace" "it is renamed checks.maxActivePerWorkspace"
+      "checks.maxEvidenceFetchActivePerNamespace" "it is renamed checks.maxEvidenceFetchActivePerWorkspace"
+      "runs.maxManualBackupsActivePerNamespace" "it is renamed runs.maxManualBackupsActivePerWorkspace"
+      "runs.maxManualRestoresActivePerNamespace" "it is renamed runs.maxManualRestoresActivePerWorkspace" -}}
+{{- range $path := keys $removed | sortAlpha -}}
+{{- $parts := splitList "." $path -}}
+{{- if hasKey (index $.Values (first $parts) | default dict) (last $parts) -}}
+{{- fail (printf "%s is removed (OD-23: one namespace per install, workspaces inside it): %s. charts/logweir/README.md, \"Withdrawn values\"." $path (index $removed $path)) -}}
+{{- end -}}
+{{- end -}}
 {{- if hasKey .Values.kafka "markerTopic" -}}
 {{- fail "kafka.markerTopic is not read by this chart; set kafka.target.markerTopic instead (rc.2 accepted and ignored it). Remove kafka.markerTopic from your values file, or on helm upgrade --reuse-values pass --set kafka.markerTopic=null" -}}
 {{- end -}}
@@ -29,7 +51,7 @@ deployment.yaml used to refuse it.)
 {{- if .Values.api.console.enabled -}}
 {{- $c := .Values.api.console -}}
 {{- if not .Values.api.enabled -}}
-{{- fail "api.console.enabled requires api.enabled: the console runs AS the principal `api.enabled` renders (its ServiceAccount, its two ClusterRoles and its per-namespace RoleBindings). A pod without them holds no grant on any Logweir kind and every route would 403. Set api.enabled=true." -}}
+{{- fail "api.console.enabled requires api.enabled: the console runs AS the principal `api.enabled` renders (its ServiceAccount, its Role and its two ClusterRoles). A pod without them holds no grant on any Logweir kind and every route would 403. Set api.enabled=true." -}}
 {{- end -}}
 {{- if not $c.image -}}
 {{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the console it serves at /ui/." -}}
@@ -79,20 +101,7 @@ deployment.yaml used to refuse it.)
 {{- fail "api.console.roles.revision is empty. It is the provenance of every authorization decision in the audit log; a role table with no revision is a decision nobody can trace to the values file that made it." -}}
 {{- end -}}
 {{- if not $c.roles.bindings -}}
-{{- fail "api.console.roles.bindings is empty. Shared mode has no default namespace and no implicit grant: with no binding every authenticated user is authorized for nothing, which is a console that installs and serves 403." -}}
-{{- end -}}
-{{- /*
-Shared mode is never rendered inside the controller's Job-create authority. The
-console's keys live in the release namespace, and a Job the controller creates
-there could mount them; so shared mode needs a scoped controller
-(`controller.watchNamespaces`) whose list leaves the release namespace out.
-*/ -}}
-{{- $watch := .Values.controller.watchNamespaces | default list -}}
-{{- if not $watch -}}
-{{- fail (printf "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5). The console's session and cursor keys live in the release namespace %q, and with the default cluster-wide ClusterRoleBinding the controller may create a Job there that mounts them — the signing-oracle residual O1 extended to the console's keys, which D0 says must not be declared secure. List the namespaces Backups and Restores run in; the controller then holds Job-create authority there and nowhere else. charts/logweir/README.md §controller.watchNamespaces has the migration." .Release.Namespace) -}}
-{{- end -}}
-{{- if has .Release.Namespace $watch -}}
-{{- fail (printf "controller.watchNamespaces includes the release namespace %q, which holds the shared console's keys (api.console.keySecret). The controller may create Jobs in every listed namespace, so this list would put the keys back inside its Job-create authority (D0 stage 5). Run Backups and Restores in other namespaces and remove %q from the list." .Release.Namespace .Release.Namespace) -}}
+{{- fail "api.console.roles.bindings is empty. Shared mode has no default workspace and no implicit grant: with no binding every authenticated user is authorized for nothing, which is a console that installs and serves 403." -}}
 {{- end -}}
 {{- $proxySvc := $c.trustedProxyService | default dict -}}
 {{- if or (and $proxySvc.name (not $proxySvc.namespace)) (and $proxySvc.namespace (not $proxySvc.name)) -}}
@@ -145,16 +154,15 @@ there could mount them; so shared mode needs a scoped controller
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- $granted := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- range $b := $c.roles.bindings -}}
-{{- if not (has $b.namespace $granted) -}}
-{{- fail (printf "api.console.roles.bindings names namespace %q, which is not one the console is bound in (%s). The RoleBindings come from api.namespaces and kubernetes.namespace; a product binding for a namespace the ServiceAccount cannot read is a role that grants a 403." $b.namespace (join ", " $granted)) -}}
+{{- if hasKey $b "namespace" -}}
+{{- fail (printf "api.console.roles.bindings for role %q names a namespace; it is renamed workspace (OD-23): {role, workspace, groups, subjects}, and the workspace must be in `workspaces`." (toString $b.role)) -}}
+{{- end -}}
+{{- if not (has ($b.workspace | default "") $.Values.workspaces) -}}
+{{- fail (printf "api.console.roles.bindings names workspace %q, which is not in workspaces (%s). A binding for a workspace the install does not have grants nothing; add the workspace or fix the name." (toString ($b.workspace | default "")) (join ", " $.Values.workspaces)) -}}
 {{- end -}}
 {{- if or (contains "*" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) (contains "?" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) -}}
-{{- fail (printf "api.console.roles.bindings for role %q in namespace %q contains `*` or `?`. Bindings are EXACT strings: there is no regex, no wildcard and no email-domain inference, and a `*` is refused by name rather than silently matching nothing." $b.role $b.namespace) -}}
-{{- end -}}
-{{- if not (has $b.namespace $watch) -}}
-{{- fail (printf "api.console.roles.bindings names namespace %q, which is not in controller.watchNamespaces (%s). The console would create Backups, Restores and checks there that no controller reconciles. Add it to controller.watchNamespaces, or remove the binding." $b.namespace (join ", " $watch)) -}}
+{{- fail (printf "api.console.roles.bindings for role %q in workspace %q contains `*` or `?`. Bindings are EXACT strings: there is no regex, no wildcard and no email-domain inference, and a `*` is refused by name rather than silently matching nothing." $b.role $b.workspace) -}}
 {{- end -}}
 {{- end -}}
 {{- if $c.ingress.enabled -}}
@@ -181,19 +189,17 @@ every sign-in through the ingress shares one rate-limit budget.
 {{- fail (printf "api.console.mode is %q. The two modes are `localAdmin` (a loopback listener reached with kubectl port-forward, one configured administrator, no identity provider) and `shared` (SSO: OIDC, an encrypted session cookie, exact role bindings and TLS). There is no default: a file that forgets to say which it wants is refused rather than read as the more permissive one." $c.mode) -}}
 {{- end -}}
 {{- /*
-A namespace the console serves that is bound to an approval policy needs the
-console's ConsoleConfirmation key (both modes sign with it); `logweir-api`
-refuses to start without it.
+A workspace bound to an approval policy needs the console's ConsoleConfirmation
+key (both modes sign with it); `logweir-api` refuses to start without it.
 */ -}}
-{{- $served := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- $consoleKeySecret := include "logweir.consoleKey.secret" . -}}
-{{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
-{{- if and (has $ns $served) (not $consoleKeySecret) -}}
-{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or use a chart whose bootstrap image generates the key, or unbind the namespace." $ns $policy) -}}
+{{- range $ws, $policy := (.Values.approvalPolicy.workspaces | default dict) -}}
+{{- if not $consoleKeySecret -}}
+{{- fail (printf "approvalPolicy.workspaces binds %s to policy %q and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the release namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or use a chart whose bootstrap image generates the key, or unbind the workspace." $ws $policy) -}}
 {{- end -}}
 {{- end -}}
 {{- if and (eq (.Values.approvalPolicy.default | default "") "confirm") (not $consoleKeySecret) -}}
-{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Every unbound namespace would be created and then never authorisable; name the key's Secret, or use a chart whose bootstrap image generates the key." -}}
+{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Every unbound workspace's restore would be created and then never authorisable; name the key's Secret, or use a chart whose bootstrap image generates the key." -}}
 {{- end -}}
 {{- range $peer := ($c.networkPolicy.oidcPeers | default list) -}}
 {{- if or (not $peer.namespace) (not $peer.podLabels) (lt (int $peer.port) 1) -}}
@@ -206,16 +212,11 @@ refuses to start without it.
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- /* Connection objects land where a scoped controller reads them. */ -}}
-{{- if .Values.minio.enabled -}}
-{{- include "logweir.validate.connectionsNamespace" . -}}
-{{- end -}}
 {{- /* kafka.enabled: the operator's own clusters, source then target. */ -}}
 {{- if .Values.kafka.enabled -}}
 {{- if .Values.demoKafka.enabled }}
 {{- fail "kafka.enabled and demoKafka.enabled are both true. demoKafka brings its own two throwaway brokers and their own KafkaCluster objects (scripts/helm-demo.sh creates them); kafka: points Logweir at a cluster you already run. Turn one off — demoKafka.enabled: false to use your own cluster, kafka.enabled: false to walk the demo." }}
 {{- end }}
-{{- include "logweir.validate.connectionsNamespace" . -}}
 {{- include "logweir.validate.kafkaCluster" .Values.kafka -}}
 {{- with .Values.kafka.target -}}
 {{- if .bootstrapServers -}}
@@ -230,13 +231,13 @@ refuses to start without it.
 {{- end }}
 {{- /*
 The installation policy. `Policy::validate` requires maxActiveTotal >=
-maxActivePerNamespace, a rule between two siblings JSON Schema draft-07 cannot
+maxActivePerWorkspace, a rule between two siblings JSON Schema draft-07 cannot
 state; a document the controller refuses fails closed and silently.
 */ -}}
-{{- $maxNs := int .Values.checks.maxActivePerNamespace -}}
+{{- $maxWs := int .Values.checks.maxActivePerWorkspace -}}
 {{- $maxTotal := int .Values.checks.maxActiveTotal -}}
-{{- if lt $maxTotal $maxNs -}}
-{{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxNs) -}}
+{{- if lt $maxTotal $maxWs -}}
+{{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerWorkspace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxWs) -}}
 {{- end -}}
 {{- /* The installation signing identity and its hook. */ -}}
 {{- if .Values.identity.enabled }}
@@ -271,9 +272,6 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- if and (include "logweir.identity.freshTrust" .) (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}
 {{- fail (printf "identity.installationTrust needs Helm 3.19.0 or newer (this is %s): the fresh install's TrustPolicy grant is an install-only hook, and Helm before 3.19 keeps it bound when the identity hook fails, leaving a standing cluster-wide `create trustpolicies`. Install with Helm 3.19+ or 4.x, or set identity.installationTrust.enabled=false (the install then starts strict, and you trust the console key yourself; docs/install.md §5f)." .Capabilities.HelmVersion.Version) }}
 {{- end }}
-{{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
-{{- if eq $namespace $.Release.Namespace }}{{ fail "identity.authorizedRunnerNamespaces must not repeat the release namespace; it is always authorized" }}{{ end }}
-{{- end }}
 {{- $singleton := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" "logweir-identity-singleton" }}
 {{- if $singleton }}
 {{- $owner := $singleton.metadata.annotations | default dict }}
@@ -288,24 +286,19 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- if .Values.notify }}
 {{- fail "notify.* is withdrawn (release notes, item 74): Logweir no longer delivers ProtectionPolicy alerts, so no key under notify configures anything. Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
 {{- end }}
-{{- range $ns := (.Values.controller.watchNamespaces | default list) }}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) }}
-{{- fail (printf "controller.watchNamespaces names %q, which is not a namespace name (a DNS label). The controller refuses the same list at startup rather than leave a namespace silently unreconciled." $ns) }}
-{{- end }}
-{{- end }}
 {{- /* The approval policy: the binary's refusals, made earlier. */ -}}
 {{- if include "logweir.approvalPolicy.configured" . -}}
 {{- $p := .Values.approvalPolicy -}}
 {{- $names := list -}}
 {{- if $p.default -}}
 {{- if eq $p.default "two-person" -}}
-{{- fail "approvalPolicy.default is two-person, which is not a default: two-person approval in the console is set per namespace. Declare a policy with mode: two-person in approvalPolicy.policies and bind each namespace to it in approvalPolicy.namespaces. approvalPolicy.default is confirm, strict, or empty (a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1)." -}}
+{{- fail "approvalPolicy.default is two-person, which is not a default: two-person approval in the console is set per workspace. Declare a policy with mode: two-person in approvalPolicy.policies and bind each workspace to it in approvalPolicy.workspaces. approvalPolicy.default is confirm, strict, or empty (a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1)." -}}
 {{- end -}}
 {{- if not (has $p.default (list "confirm" "strict")) -}}
 {{- fail (printf "approvalPolicy.default is %q; it is `confirm`, `strict`, or empty (the fresh-install marker decides)." $p.default) -}}
 {{- end -}}
 {{- if and (eq $p.default "confirm") (not $p.allowOrdinaryConfirmation) -}}
-{{- fail "approvalPolicy.default is confirm (one-person confirmation for every unbound namespace) but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0) and is never enabled by one field alone: set the floor too. An older install opting in also needs the console key on the TrustPolicy that governs those namespaces (docs/install.md §5f)." -}}
+{{- fail "approvalPolicy.default is confirm (one-person confirmation for every unbound workspace) but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0) and is never enabled by one field alone: set the floor too. An older install opting in also needs the console key on the TrustPolicy that governs the release namespace (docs/install.md §5f)." -}}
 {{- end -}}
 {{- end -}}
 {{- range $i, $policy := ($p.policies | default list) -}}
@@ -313,7 +306,7 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- fail (printf "approvalPolicy.policies[%d].name %q must be a DNS label." $i ($policy.name | default "")) -}}
 {{- end -}}
 {{- if has $policy.name (list "legacy-governed-v1" "default-confirm-v1") -}}
-{{- fail (printf "approvalPolicy.policies names %q, which is reserved for the policy an unbound namespace resolves to. Leave the namespace unbound instead." $policy.name) -}}
+{{- fail (printf "approvalPolicy.policies names %q, which is reserved for the policy an unbound workspace resolves to. Leave the workspace unbound instead." $policy.name) -}}
 {{- end -}}
 {{- if has $policy.name $names -}}
 {{- fail (printf "approvalPolicy.policies declares %q twice." $policy.name) -}}
@@ -358,15 +351,12 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- if gt (len ($p.policies | default list)) 64 -}}
 {{- fail "approvalPolicy.policies declares more than 64 policies." -}}
 {{- end -}}
-{{- if gt (len ($p.namespaces | default dict)) 256 -}}
-{{- fail "approvalPolicy.namespaces declares more than 256 bindings." -}}
-{{- end -}}
-{{- range $ns, $policy := ($p.namespaces | default dict) -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) -}}
-{{- fail (printf "approvalPolicy.namespaces.%s is not a namespace name (a DNS label)." $ns) -}}
+{{- range $ws, $policy := ($p.workspaces | default dict) -}}
+{{- if not (has $ws $.Values.workspaces) -}}
+{{- fail (printf "approvalPolicy.workspaces.%s binds a workspace that is not in workspaces (%s)." $ws (join ", " $.Values.workspaces)) -}}
 {{- end -}}
 {{- if not (has $policy $names) -}}
-{{- fail (printf "approvalPolicy.namespaces.%s names policy %q, which approvalPolicy.policies does not declare." $ns $policy) -}}
+{{- fail (printf "approvalPolicy.workspaces.%s names policy %q, which approvalPolicy.policies does not declare." $ws $policy) -}}
 {{- end -}}
 {{- end -}}
 {{- /*
@@ -390,19 +380,6 @@ formed, there are just not two identities to tell apart).
 {{- fail (printf "admissionPolicy.consoleServiceAccountName is %q, but api.enabled renders the console ServiceAccount %q in namespace %q. The policy's ONLY effect is its matchConditions subject list, so a name that is not the account this chart creates fences NOBODY: the install succeeds, the policy reads as enabled, and the console's `create` on Secrets — which RBAC cannot narrow by shape — has no bound at all. Set admissionPolicy.consoleServiceAccountName to %q, or add it to admissionPolicy.extraPrincipals if you meant to fence a different console as well." $name $rendered .Release.Namespace $rendered) -}}
 {{- end -}}
 {{- end }}
-{{- end -}}
-
-{{- /*
-`kafka.enabled` and `minio.enabled` render their connection objects into
-`kubernetes.connectionsNamespace`; a scoped controller must watch it, or no
-Backup could ever use them.
-*/ -}}
-{{- define "logweir.validate.connectionsNamespace" -}}
-{{- $ns := .Values.kubernetes.connectionsNamespace | default .Release.Namespace -}}
-{{- $watch := .Values.controller.watchNamespaces | default list -}}
-{{- if and $watch (not (has $ns $watch)) -}}
-{{- fail (printf "kafka.enabled / minio.enabled render their connection objects (KafkaClusters, the logweir-s3 archive credential) into namespace %q, which controller.watchNamespaces (%s) does not include: the controller would never read them and no Backup could use them. Set kubernetes.connectionsNamespace to a watched namespace (the one Backups run in)." $ns (join ", " $watch)) -}}
-{{- end -}}
 {{- end -}}
 
 {{- /*

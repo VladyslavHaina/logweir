@@ -49,16 +49,13 @@
 # CNI, this policy BLOCKS OIDC discovery and the console starts NotReady. That
 # is the honest failure and not a reason to widen the rule to 0.0.0.0/0.
 # ---------------------------------------------------------------------------
-# D0 STAGE 5: THE CONTROLLER IS SCOPED AWAY FROM THE CONSOLE'S KEYS
+# ONE NAMESPACE, TWO WORKSPACES (OD-23)
 # ---------------------------------------------------------------------------
-# The keys above live in the RELEASE namespace. `controller.watchNamespaces`
-# replaces the controller's cluster-wide binding with one RoleBinding per
-# execution namespace, so the controller can create Jobs — which can mount any
-# Secret in their namespace — in team-a and team-b and NOT in the release
-# namespace. Shared mode refuses to render without this list, and refuses a list
-# that includes the release namespace. Each execution namespace still needs the
-# runner ServiceAccount and the signing identity (docs/install.md step 4,
-# `identity.authorizedRunnerNamespaces`).
+# Everything, the keys above included, lives in the release namespace. The
+# workspaces team-a and team-b group its objects; each binding below names one.
+# Whoever may create Pods, Jobs or Secret-naming Logweir objects in this
+# namespace holds every key (residual O1, docs/kubernetes.md *Workspaces*), so
+# people use the console and only administrators get `kubectl` write access.
 #
 # `requireTrustedProxy` makes the console refuse (421) every request whose
 # socket peer is not a trusted proxy, or that the proxy did not mark HTTPS.
@@ -81,13 +78,9 @@
 # corporate PKI): the ConfigMap holds that CA's PUBLIC certificate under
 # `ca.crt`, and the console trusts it IN ADDITION to the system roots (chart
 # gap G1). Drop it for an issuer with a publicly trusted certificate.
-controller:
-  watchNamespaces: [team-a, team-b]
-kubernetes:
-  namespace: team-a
+workspaces: [team-a, team-b]
 api:
   enabled: true
-  namespaces: [team-a, team-b]
   console:
     enabled: true
     mode: shared
@@ -113,16 +106,16 @@ api:
       revision: "2026-09-21.1"
       bindings:
         - role: viewer
-          namespace: team-a
+          workspace: team-a
           groups: ["logweir-team-a-viewers"]
         - role: operator
-          namespace: team-a
+          workspace: team-a
           groups: ["logweir-team-a-operators"]
         - role: approver
-          namespace: team-a
+          workspace: team-a
           groups: ["logweir-team-a-approvers"]
         - role: administrator
-          namespace: team-b
+          workspace: team-b
           groups: ["logweir-platform-admins"]
     ingress:
       enabled: true

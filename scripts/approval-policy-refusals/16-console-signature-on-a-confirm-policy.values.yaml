@@ -3,4 +3,4 @@ approvalPolicy:
   allowOrdinaryConfirmation: true
   policies:
     - {name: pair, mode: confirm, approverSignature: Console}
-  namespaces: {}
+  workspaces: {}

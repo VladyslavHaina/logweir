@@ -4,7 +4,7 @@
   "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_validate.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "checks", "runs", "engine", "evidence", "admissionPolicy", "retention", "api"],
+  "required": ["workspaces", "controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "checks", "runs", "engine", "evidence", "admissionPolicy", "retention", "api"],
   "definitions": {
     "nodeSelector": {
       "type": "object",
@@ -87,13 +87,15 @@
     "checks": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field the template reads is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). ONE OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace`. `templates/_validate.tpl` refuses it with a named `fail` at render time, which is the same moment and the same audience. `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` are WITHDRAWN (FX-10): accepted so an older values file still installs, read by nothing.",
-      "required": ["maxActivePerNamespace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerNamespace", "discovery", "preflight"],
+      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field the template reads is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). ONE OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerWorkspace`. `templates/_validate.tpl` refuses it with a named `fail` at render time, which is the same moment and the same audience. `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` are WITHDRAWN (FX-10): accepted so an older values file still installs, read by nothing.",
+      "required": ["maxActivePerWorkspace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerWorkspace", "discovery", "preflight"],
       "properties": {
-        "maxActivePerNamespace": { "type": "integer", "minimum": 1 },
+        "maxActivePerWorkspace": { "type": "integer", "minimum": 1 },
         "maxActiveTotal": { "type": "integer", "minimum": 1 },
         "maxActiveDiscoveriesPerConnection": { "type": "integer", "minimum": 1 },
-        "maxEvidenceFetchActivePerNamespace": { "type": "integer", "minimum": 1 },
+        "maxEvidenceFetchActivePerWorkspace": { "type": "integer", "minimum": 1 },
+        "maxActivePerNamespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
+        "maxEvidenceFetchActivePerNamespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "discovery": {
           "type": "object",
           "additionalProperties": false,
@@ -124,11 +126,13 @@
     "runs": {
       "type": "object",
       "additionalProperties": false,
-      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one namespace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
-      "required": ["maxManualBackupsActivePerNamespace", "maxManualRestoresActivePerNamespace"],
+      "description": "P10: the manual-run pool ceilings of the installation policy, rendered into the `weirkeeper-policy` ConfigMap's `runs` block. How many MANUAL runs (\"Back up now\", a manual Restore) one workspace may have ACTIVE at once; the rest wait `phase: Queued` with nothing created and start in creation order as slots free. Scheduled, catch-up and retry Backups are neither counted nor queued. Both fields are REQUIRED for the reason `checks` gives: `weirkeeper::check::policy` parses the block with `deny_unknown_fields` and no per-field default, and refuses a zero.",
+      "required": ["maxManualBackupsActivePerWorkspace", "maxManualRestoresActivePerWorkspace"],
       "properties": {
-        "maxManualBackupsActivePerNamespace": { "type": "integer", "minimum": 1 },
-        "maxManualRestoresActivePerNamespace": { "type": "integer", "minimum": 1 }
+        "maxManualBackupsActivePerWorkspace": { "type": "integer", "minimum": 1 },
+        "maxManualRestoresActivePerWorkspace": { "type": "integer", "minimum": 1 },
+        "maxManualBackupsActivePerNamespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
+        "maxManualRestoresActivePerNamespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." }
       }
     },
     "engine": {
@@ -186,7 +190,7 @@
     "identity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "bootstrapImage", "bootstrapImagePullPolicy", "allowMutableBootstrapImageForDevelopment", "bootstrapFeatures", "publicConfigMapName", "authorizedRunnerNamespaces", "kubernetesApiCIDRs", "externalSecret", "installationTrust", "resources"],
+      "required": ["enabled", "bootstrapImage", "bootstrapImagePullPolicy", "allowMutableBootstrapImageForDevelopment", "bootstrapFeatures", "publicConfigMapName", "kubernetesApiCIDRs", "externalSecret", "installationTrust", "resources"],
       "allOf": [
         {
           "if": {
@@ -240,11 +244,7 @@
             }
           }
         },
-        "authorizedRunnerNamespaces": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" }
-        },
+        "authorizedRunnerNamespaces": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "kubernetesApiCIDRs": {
           "type": "array",
           "uniqueItems": true,
@@ -266,16 +266,21 @@
       "type": "string",
       "description": "A LABEL — `logweir.dev/environment` on every object this chart renders. It switches nothing else; a key that silently did something would be worse than no key."
     },
+    "workspaces": {
+      "type": "array",
+      "description": "OD-23 (PROD-19.1). The install is the release namespace; a workspace groups its objects, by the label logweir.dev/workspace, with its own console role bindings and approval mode. 1 to 256 unique DNS labels; rendered as LOGWEIR_WORKSPACES on the controller and `workspaces:` in the console's configuration. The first labels the chart's own KafkaClusters and logweir-s3.",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "type": "string", "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
+    },
     "kubernetes": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Node placement for every pod the chart renders, and the one namespace name the chart cannot derive. `namespace` does NOT move the install — `helm -n` / `--namespace` does that, and Release.Namespace is what every object carries; it only supplies `ui.namespaces` when that is empty.",
+      "description": "Node placement for every pod the chart renders. `helm -n` decides the install's one namespace.",
       "properties": {
-        "namespace": { "type": "string" },
-        "connectionsNamespace": {
-          "type": "string",
-          "description": "Chart gap G3: where `kafka.enabled`'s KafkaClusters and `minio.enabled`'s `logweir-s3` Secret are rendered. Empty is the release namespace. With `controller.watchNamespaces` set, the render fails unless this namespace is watched: a connection the controller cannot see is one no Backup can use."
-        },
+        "namespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
+        "connectionsNamespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
         "tolerations": { "$ref": "#/definitions/tolerations" },
         "affinity": { "$ref": "#/definitions/affinity" }
@@ -315,12 +320,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "watchNamespaces": {
-          "type": "array",
-          "description": "D0 stage 5: the execution namespaces the controller watches and creates Jobs in. Empty is every namespace through the cluster-wide ClusterRoleBinding, the behaviour of every earlier release. A list renders one RoleBinding per namespace instead, a ClusterRole for the two cluster-scoped trust kinds only, and LOGWEIR_WATCH_NAMESPACES on the controller. Shared console mode requires a list that excludes the release namespace, where the console's keys live.",
-          "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
-        },
+        "watchNamespaces": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "logLevel": { "type": "string", "minLength": 1 },
         "failFastSeconds": { "$ref": "#/definitions/secondsOrBuildDefault" },
         "jobTtlSeconds": { "$ref": "#/definitions/secondsOrBuildDefault" },
@@ -446,13 +446,13 @@
     "approvalPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["allowOrdinaryConfirmation", "policies", "namespaces", "confirmationKeySecret"],
-      "description": "PLAT-19.2. The installation's approval policies and namespace bindings (decision D0), rendered once into an immutable, content-addressed ConfigMap mounted into BOTH the weirkeeper controller (LOGWEIR_APPROVAL_POLICY_FILE) and the console (approvalPolicyFile), so both consume the same digest. Empty: every namespace resolves to legacy-governed-v1, today's governed approval. An Ordinary policy is refused unless allowOrdinaryConfirmation is true; a Governed policy always requires a distinct approver principal. A served namespace bound to a policy needs confirmationKeySecret: a Secret with key `confirmation.key`, the console's ConsoleConfirmation PKCS#8 private key, whose public half must be on the namespace's TrustPolicy.",
+      "required": ["allowOrdinaryConfirmation", "policies", "workspaces", "confirmationKeySecret"],
+      "description": "PLAT-19.2. The installation's approval policies and workspace bindings (decision D0), rendered once into an immutable, content-addressed ConfigMap mounted into BOTH the weirkeeper controller (LOGWEIR_APPROVAL_POLICY_FILE) and the console (approvalPolicyFile), so both consume the same digest. Empty: every workspace resolves to legacy-governed-v1, today's governed approval. An Ordinary policy is refused unless allowOrdinaryConfirmation is true; a Governed policy always requires a distinct approver principal. A workspace bound to a policy needs the console key: confirmationKeySecret, a Secret with key `confirmation.key` (the console's ConsoleConfirmation PKCS#8 private key, whose public half must be on the release namespace's TrustPolicy), or the identity hook's managed key.",
       "properties": {
         "default": {
           "type": "string",
           "enum": ["", "confirm", "strict", "two-person"],
-          "description": "PROD-16.1. What an UNBOUND namespace resolves to: empty is the fresh-install marker (confirm on a fresh install with a console, legacy-governed-v1 on an upgraded one); confirm is one-person confirmation in the console and needs allowOrdinaryConfirmation; strict is legacy-governed-v1 whatever the marker says. two-person is not a default (PROD-16.2 sets it per namespace, through a policy) and is refused by the template, by name. Rendered as defaultMode only when set, which an older binary refuses at start (fail closed)."
+          "description": "PROD-16.1. What an UNBOUND workspace resolves to: empty is the fresh-install marker (confirm on a fresh install with a console, legacy-governed-v1 on an upgraded one); confirm is one-person confirmation in the console and needs allowOrdinaryConfirmation; strict is legacy-governed-v1 whatever the marker says. two-person is not a default (PROD-16.2 sets it per workspace, through a policy) and is refused by the template, by name. Rendered as defaultMode only when set, which an older binary refuses at start (fail closed)."
         },
         "allowOrdinaryConfirmation": { "type": "boolean" },
         "policies": {
@@ -475,12 +475,12 @@
             }
           }
         },
-        "namespaces": {
+        "workspaces": {
           "type": "object",
-          "maxProperties": 256,
-          "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+          "description": "{<workspace>: <policy name>}. Every key must be in `workspaces` (refused at render otherwise).",
           "additionalProperties": { "type": "string" }
         },
+        "namespaces": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "confirmationKeySecret": { "type": "string" }
       }
     },
@@ -488,13 +488,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["enabled", "console"],
-      "description": "D3 §9 / PLAT-17.1. `enabled` renders the console/API principal — the ServiceAccount, its two ClusterRoles and one RoleBinding per configured namespace — and starts nothing; `console.enabled` additionally runs the logweir-console image as that principal. Two switches, because D0's rollout has a real state in which the identity exists and is reviewable with `kubectl auth can-i` while no pod runs. `admissionPolicy.consoleServiceAccountName` must name the account `enabled` renders.",
+      "description": "D3 §9 / PLAT-17.1. `enabled` renders the console/API principal — the ServiceAccount, its Role and RoleBinding in the release namespace and its two ClusterRoles — and starts nothing; `console.enabled` additionally runs the logweir-console image as that principal. Two switches, because D0's rollout has a real state in which the identity exists and is reviewable with `kubectl auth can-i` while no pod runs. `admissionPolicy.consoleServiceAccountName` must name the account `enabled` renders.",
       "properties": {
         "enabled": { "type": "boolean" },
-        "namespaces": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
+        "namespaces": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
         "console": {
           "type": "object",
           "additionalProperties": false,
@@ -611,10 +608,11 @@
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["role", "namespace"],
+                    "required": ["role"],
                     "properties": {
                       "role": { "type": "string", "enum": ["viewer", "operator", "approver", "administrator"] },
-                      "namespace": { "type": "string", "minLength": 1 },
+                      "workspace": { "type": "string", "minLength": 1, "description": "Must be in `workspaces`; refused at render, by name, when absent or unlisted." },
+                      "namespace": { "description": "WITHDRAWN (OD-23, PROD-19.1): one namespace per install, workspaces inside it. Accepted here only so templates/_validate.tpl can refuse it by name, saying where it went." },
                       "groups": { "type": "array", "items": { "type": "string", "minLength": 1 } },
                       "subjects": { "type": "array", "items": { "type": "string", "minLength": 1 } }
                     }

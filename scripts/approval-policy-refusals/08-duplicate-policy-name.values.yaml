@@ -3,4 +3,4 @@ approvalPolicy:
   policies:
     - {name: prod, mode: Governed}
     - {name: prod, mode: Governed}
-  namespaces: {}
+  workspaces: {}

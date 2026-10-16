@@ -8,7 +8,7 @@
 # waits for a SECOND person: someone with the approver role, who is not the
 # requester, signs in to this console and clicks Approve. Nobody handles a
 # key. `team-b` is bound to a `strict` policy beside it, which still needs a
-# personal GovernedApproval key: the two modes are per namespace.
+# personal GovernedApproval key: the two modes are per workspace.
 #
 # WHAT IS RENDERED. The policy document says `mode: Governed` and
 # `approverSignature: Console` (the internal names). That setting is inside the
@@ -18,7 +18,7 @@
 # WHAT IT NEEDS BESIDE THE SHARED CONSOLE'S OWN SECRETS:
 #
 # 1. The console's confirmation key Secret (`confirmationKeySecret`), with its
-#    PUBLIC half on the TrustPolicy governing `team-a` under the single usage
+#    PUBLIC half on the TrustPolicy governing the release namespace under the single usage
 #    ConsoleConfirmation. A fresh install with the managed key has both
 #    already (docs/install.md section 5f).
 # 2. An approver binding (`api.console.roles.bindings`, role `approver`) for
@@ -30,14 +30,10 @@
 #
 # THE RESIDUAL (SECURITY.md): in the console modes, whoever controls the
 # console pod, its confirmation-key Secret or the identity provider can
-# approve alone. `strict` is for namespaces that cannot accept that.
-controller:
-  watchNamespaces: [team-a, team-b]
-kubernetes:
-  namespace: team-a
+# approve alone. `strict` is for workspaces that cannot accept that.
+workspaces: [team-a, team-b]
 api:
   enabled: true
-  namespaces: [team-a, team-b]
   console:
     enabled: true
     mode: shared
@@ -53,13 +49,13 @@ api:
       revision: "2026-10-10.1"
       bindings:
         - role: operator
-          namespace: team-a
+          workspace: team-a
           groups: ["logweir-team-a-operators"]
         - role: approver
-          namespace: team-a
+          workspace: team-a
           groups: ["logweir-team-a-approvers"]
         - role: approver
-          namespace: team-b
+          workspace: team-b
           groups: ["logweir-team-b-approvers"]
 approvalPolicy:
   policies:
@@ -69,7 +65,7 @@ approvalPolicy:
     - name: prod-strict
       mode: strict
       maxAgeSeconds: 86400
-  namespaces:
+  workspaces:
     team-a: prod-two-person
     team-b: prod-strict
   confirmationKeySecret: logweir-console-confirmation

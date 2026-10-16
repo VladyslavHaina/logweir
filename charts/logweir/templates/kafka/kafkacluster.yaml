@@ -2,8 +2,8 @@
 `kafka.enabled`: the operator's own clusters, as `KafkaCluster` objects the
 controller reconciles and probes. The flat values (`bootstrapServers`,
 `security.*`, `username`, `secretRef`) map onto the CRD's `auth` in
-`_helpers.tpl`; the refusals are in `_validate.tpl`. The objects land in
-`kubernetes.connectionsNamespace`. The README says what the Secret must hold;
+`_helpers.tpl`; the refusals are in `_validate.tpl`. The objects land in the
+release namespace, in the first workspace. The README says what the Secret must hold;
 Logweir never reads it into a status, a log line or a rendered document.
 */ -}}
 {{- if .Values.kafka.enabled }}
@@ -12,9 +12,10 @@ apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:
   name: {{ $source.name | default "source" }}
-  namespace: {{ include "logweir.connectionsNamespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
+    {{- include "logweir.workspaceLabel" . | nindent 4 }}
     app.kubernetes.io/component: kafka
     logweir.dev/kafka-role: source
 spec:
@@ -36,9 +37,10 @@ apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:
   name: {{ .name | default "target" }}
-  namespace: {{ include "logweir.connectionsNamespace" $ }}
+  namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "logweir.labels" $ | nindent 4 }}
+    {{- include "logweir.workspaceLabel" $ | nindent 4 }}
     app.kubernetes.io/component: kafka
     logweir.dev/kafka-role: target
 spec:

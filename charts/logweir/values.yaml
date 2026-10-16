@@ -3,11 +3,13 @@
 
 # --------------------------------------------------------------- identity
 environment: ""                 # a label on every object; switches nothing
+# The install is ONE namespace (`-n`). Workspaces group its objects (label
+# logweir.dev/workspace); 1 to 256 unique DNS labels. The first labels the
+# chart's own KafkaClusters and logweir-s3.
+workspaces: [default]
 
 # ------------- placement, for every pod rendered (runner Jobs: pull secrets yes, placement no)
 kubernetes:
-  namespace: ""                 # feeds api.namespaces; `-n` decides the install
-  connectionsNamespace: ""      # kafka.enabled's KafkaClusters + minio's logweir-s3; "" = release ns. Must be watched
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -30,7 +32,6 @@ identity:
   bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
     consoleKey: true            # console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust
-  authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
   kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only
   externalSecret:
     name: ""                    # explicit adoption: pre-existing Secret in the release namespace
@@ -48,8 +49,6 @@ controller:
   logLevel: info                # RUST_LOG; below info the per-object lines are lost
   failFastSeconds: ""           # patience for a stuck run. "" = 300s; 0 = never; floor 60
   jobTtlSeconds: ""             # how long a finished Job is kept. "" = 604800s; floor 3600
-  watchNamespaces: []           # [] = every namespace (ClusterRoleBinding). A list = RoleBindings
-                                # there only; required by api.console.mode=shared, release namespace excluded
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
@@ -59,10 +58,10 @@ controller:
 
 # ---- the installation policy: the `weirkeeper-policy` ConfigMap, writable by administrators only
 checks:
-  maxActivePerNamespace: 4      # check Jobs running at once in one namespace
+  maxActivePerWorkspace: 4      # check Jobs running at once in one workspace
   maxActiveTotal: 20            # and across the whole installation
   maxActiveDiscoveriesPerConnection: 1
-  maxEvidenceFetchActivePerNamespace: 4  # a separate pool: verification is never starved
+  maxEvidenceFetchActivePerWorkspace: 4  # a separate pool: verification is never starved
   discovery:
     freshSeconds: 900           # past this an inventory reads stale, never wrong
     retentionSeconds: 86400     # a terminal TopicDiscovery is collected after this
@@ -73,7 +72,7 @@ checks:
   preflight:
     retentionSeconds: 3600      # a terminal Preflight is collected after this
     # defaultTimeoutSeconds: WITHDRAWN, accepted and ignored; README, "Withdrawn values"
-runs: { maxManualBackupsActivePerNamespace: 4, maxManualRestoresActivePerNamespace: 2 }  # manual runs active per namespace; the rest wait Queued
+runs: { maxManualBackupsActivePerWorkspace: 4, maxManualRestoresActivePerWorkspace: 2 }  # manual runs active per workspace; the rest wait Queued
 engine:
   allowUnverifiedCustomCa: false  # a destination CA the archive engine cannot verify
 evidence:
@@ -158,16 +157,15 @@ retention:
 
 # ---- approvalPolicy: confirm (one click) | two-person (second person, shared console) | strict (personal key)
 approvalPolicy:
-  default: ""                       # unbound: "" = confirm if fresh with a console, else strict | confirm | strict
+  default: ""                       # unbound workspaces: "" = confirm if fresh with a console, else strict | confirm | strict
   allowOrdinaryConfirmation: false  # the floor: confirm (Ordinary) policies and default: confirm need it
   policies: []                      # [{name, mode: confirm|two-person|strict, maxAgeSeconds, requireDistinctPrincipal}]; two-person needs api.console.mode=shared; Ordinary|Governed are older aliases
-  namespaces: {}                    # {<namespace>: <policy name>}; an explicit binding always wins
+  workspaces: {}                    # {<workspace>: <policy name>}; an explicit binding always wins
   confirmationKeySecret: ""         # "" = the hook's key with identity.bootstrapFeatures.consoleKey, else none
 
 # ---- api.enabled: the console/API principal (ServiceAccount + roles); api.console.enabled runs the pod
 api:
   enabled: false
-  namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
   # ---- api.console: the logweir-console workload. localAdmin: loopback + port-forward; shared: SSO
   console:
     enabled: false              # needs api.enabled
@@ -185,7 +183,7 @@ api:
     trustedProxyService: { namespace: "", name: "" }  # shared: the ingress controller's Service; its serving pods
     requireTrustedProxy: false  # shared: refuse (421) any request not from those proxies over HTTPS
     trustedProxy: ""            # shared + ingress.enabled: one of the two above is REQUIRED, or `none` to opt out deliberately (no per-peer cap)
-    rateLimits: { manualBackupsPerMinute: 10, manualRestoresPerMinute: 5 }  # starts per person, per namespace, per minute; then 429
+    rateLimits: { manualBackupsPerMinute: 10, manualRestoresPerMinute: 5 }  # starts per person, per workspace, per minute; then 429
     hostAliases: []             # [{ip, hostnames}]: e.g. the issuer's public name -> the in-cluster ingress
     oidc:
       issuer: ""                # EXACT, as the discovery document states it
@@ -197,7 +195,7 @@ api:
       displayNameClaim: ""      # empty: no name read; e.g. `name` (self-asserted at most providers)
     roles:
       revision: ""              # shared: recorded in every audit line
-      bindings: []              # [{role, namespace, groups, subjects}] — EXACT strings
+      bindings: []              # [{role, workspace, groups, subjects}] — EXACT strings
     ingress:
       enabled: false            # shared only; refused in localAdmin mode
       className: ""

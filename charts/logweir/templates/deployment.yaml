@@ -64,23 +64,21 @@ spec:
             # is where `templates/policy.yaml` renders `weirkeeper-policy`.
             - name: LOGWEIR_POLICY_CONFIGMAP
               value: ""
+            # The one namespace the controller watches, and the workspaces in it.
             - name: LOGWEIR_INSTALLATION_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: LOGWEIR_WORKSPACES
+              value: {{ join "," .Values.workspaces | quote }}
             {{- /*
             Each rendered only when configured. `""` is the controller's own
             default, not zero: `failFastSeconds: 0` is FAIL_FAST_NEVER, so
             `ne (toString …) ""` keeps a configured zero while an unset value
             renders nothing. The floors (60, 3600) are the controller's; it
             clamps a value up and logs it, which beats failing an upgrade over
-            a typo. `LOGWEIR_WATCH_NAMESPACES` must be exactly the list
-            `controller-scope.yaml` binds.
+            a typo.
             */ -}}
-            {{- with .Values.controller.watchNamespaces }}
-            - name: LOGWEIR_WATCH_NAMESPACES
-              value: {{ join "," . | quote }}
-            {{- end }}
             {{- /* PROD-05.1a: exactly the namespaces `strimzi-topics.yaml` grants. */ -}}
             {{- if and (.Values.strimzi).readKafkaTopics (.Values.strimzi).namespaces }}
             - name: LOGWEIR_STRIMZI_NAMESPACES
@@ -95,7 +93,7 @@ spec:
               value: {{ .Values.controller.jobTtlSeconds | toString | quote }}
             {{- end }}
             {{- /* The approval-policy ConfigMap the console mounts too; absent means
-            every namespace on `legacy-governed-v1`. */ -}}
+            every workspace on `legacy-governed-v1`. */ -}}
             {{- if include "logweir.approvalPolicy.configured" . }}
             - name: LOGWEIR_APPROVAL_POLICY_FILE
               value: {{ include "logweir.approvalPolicy.file" . | quote }}

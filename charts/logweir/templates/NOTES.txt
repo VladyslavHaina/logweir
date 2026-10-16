@@ -4,20 +4,22 @@ INSTALLED (the control plane):
   * the thirteen CustomResourceDefinitions under logweir.dev/v1alpha1 —
     installed ONCE from crds/ and never upgraded by Helm; the README says how
     to upgrade them by hand (`kubectl apply --server-side --force-conflicts`)
-  * ServiceAccount, ClusterRole and ClusterRoleBinding "weirkeeper"
+  * ServiceAccount, Role and RoleBinding "weirkeeper" in this namespace, the
+    one it watches and runs Jobs in; ClusterRole "weirkeeper-cluster-scope"
+    for the two cluster-scoped trust kinds
   * Deployment "weirkeeper", image {{ .Values.controllerImage }}
     (imagePullPolicy {{ .Values.imagePullPolicy }}); every runner Job it creates
     will use {{ .Values.runnerImage }} with imagePullPolicy
     {{ .Values.runnerImagePullPolicy }}
-  * NetworkPolicies and ServiceAccount "logweir-runner" in this namespace and
-    every identity.authorizedRunnerNamespaces entry; short-lived distribution
-    hooks copy the SAME installation signer into those namespaces
-  * ClusterRoles logweir-viewer, logweir-operator, logweir-approver — UNBOUND;
-    who may act in which namespace is your decision:
-      kubectl create rolebinding logweir-approver --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
+  * workspaces: {{ join ", " .Values.workspaces }}. Every Logweir object carries
+    the label logweir.dev/workspace naming one of them
+  * NetworkPolicies and ServiceAccount "logweir-runner" in this namespace
+  * Role logweir-viewer (reads every workspace, no Secret) and ClusterRole
+    logweir-trust-admin — UNBOUND. People use the console; for kubectl:
+      kubectl create rolebinding logweir-viewer --role=logweir-viewer --user=<someone> -n {{ .Release.Namespace }}
 
 OPTIONAL COMPONENTS:
-  * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in namespace {{ include "logweir.connectionsNamespace" . }} (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
+  * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in workspace {{ first .Values.workspaces }} (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
   * demoKafka.enabled={{ .Values.demoKafka.enabled }}{{ if .Values.demoKafka.enabled }} — brokers {{ .Release.Name }}-kafka-source and {{ .Release.Name }}-kafka-target on 9092 (PLAINTEXT; the demo's transport, not a recommendation), orders and payments seeded on the source, logweir.scratch on the target{{ else }} — off{{ end }}
   * api.console.enabled={{ .Values.api.console.enabled }}{{ if .Values.api.console.enabled }} — the product console "{{ .Release.Name }}-api", mode {{ .Values.api.console.mode }}{{ if and .Values.api.console.ingress.enabled .Values.api.console.ingress.host }}, at https://{{ .Values.api.console.ingress.host }}/ (sign in at /auth/login){{ end }}{{ else }} — off{{ end }}
 {{- if and .Values.api.console.enabled (eq .Values.api.console.mode "localAdmin") }}
@@ -31,11 +33,10 @@ THE CONSOLE (localAdmin), reached through the API server:
 {{- if .Values.identity.enabled }}
 BEFORE ANY CUSTOM RESOURCE — wait for the retained installation signer hook,
 then put its PUBLIC key (ConfigMap {{ .Values.identity.publicConfigMapName }}) on
-the TrustPolicy that governs each runner namespace (docs/keys.md; the
-cluster-scoped TrustRoster "default" is the deprecated fallback), and provision
-the approver and workload credentials. Additional runner namespaces must
-already exist and be declared in identity.authorizedRunnerNamespaces:
-docs/install.md. Then `just check-secrets <namespace>`.
+the TrustPolicy that governs this namespace (docs/keys.md; the cluster-scoped
+TrustRoster "default" is the deprecated fallback), and provision the approver
+and workload credentials: docs/install.md. Then
+`just check-secrets {{ .Release.Namespace }}`.
 {{- else }}
 IDENTITY BOOTSTRAP IS DISABLED. Provision the existing
 `logweir-signing-key/signing.pem` and matching public trust material before any

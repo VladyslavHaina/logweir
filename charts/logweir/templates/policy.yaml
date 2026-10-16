@@ -2,8 +2,8 @@
 The installation policy ConfigMap, read by `weirkeeper::check::policy`.
 
 It is in the release namespace because write access to it is what makes a
-visibility attestation an administrator's statement: a namespace operator
-(`logweir-operator` names no `configmaps`) cannot write it. Every value comes
+visibility attestation an administrator's statement: the console cannot
+write a ConfigMap, and only a namespace administrator can. Every value comes
 from `values.yaml` and none is a secret.
 
 The parser uses `deny_unknown_fields` and range checks, and a document it
@@ -47,10 +47,10 @@ numbers to the parser's constants.
 {{- $policy := dict
       "version" 1
       "checks" (dict
-        "maxActivePerNamespace" (.Values.checks.maxActivePerNamespace | int)
+        "maxActivePerWorkspace" (.Values.checks.maxActivePerWorkspace | int)
         "maxActiveTotal" (.Values.checks.maxActiveTotal | int)
         "maxActiveDiscoveriesPerConnection" (.Values.checks.maxActiveDiscoveriesPerConnection | int)
-        "maxEvidenceFetchActivePerNamespace" (.Values.checks.maxEvidenceFetchActivePerNamespace | int))
+        "maxEvidenceFetchActivePerWorkspace" (.Values.checks.maxEvidenceFetchActivePerWorkspace | int))
       "discovery" $discovery
       "preflight" (dict
         "defaultTimeoutSeconds" 120
@@ -64,12 +64,12 @@ numbers to the parser's constants.
 document for an unknown block, so a default install must not carry it. A
 non-default value rolls back with the chart, never with the image alone.
 */ -}}
-{{- $runsBackups := int .Values.runs.maxManualBackupsActivePerNamespace -}}
-{{- $runsRestores := int .Values.runs.maxManualRestoresActivePerNamespace -}}
+{{- $runsBackups := int .Values.runs.maxManualBackupsActivePerWorkspace -}}
+{{- $runsRestores := int .Values.runs.maxManualRestoresActivePerWorkspace -}}
 {{- if or (ne $runsBackups 4) (ne $runsRestores 2) -}}
 {{- $_ := set $policy "runs" (dict
-      "maxManualBackupsActivePerNamespace" $runsBackups
-      "maxManualRestoresActivePerNamespace" $runsRestores) -}}
+      "maxManualBackupsActivePerWorkspace" $runsBackups
+      "maxManualRestoresActivePerWorkspace" $runsRestores) -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
