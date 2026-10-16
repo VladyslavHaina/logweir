@@ -1,0 +1,417 @@
+Reason: PROD-00.3d (C5), a restore re-sends a batch whose acknowledgement was lost and the broker appends it twice; produce as one idempotent producer whose per-partition sequence advances only when acknowledged; oracle: the produce unit tests in this patch and record_semantics' lost-acknowledgement row on the faultproxy profile (EN-2)
+
+diff --git a/crates/kafka-backup-core/src/kafka/client.rs b/crates/kafka-backup-core/src/kafka/client.rs
+index b5a0b73..30c7515 100644
+--- a/crates/kafka-backup-core/src/kafka/client.rs
++++ b/crates/kafka-backup-core/src/kafka/client.rs
+@@ -643,6 +643,7 @@ impl KafkaClient {
+             ApiKey::DescribeAcls => 1,
+             ApiKey::CreateAcls => 1,
+             ApiKey::DeleteAcls => 1,
++            ApiKey::InitProducerId => 1,
+             _ => 0,
+         }
+     }
+@@ -686,7 +687,29 @@ impl KafkaClient {
+         acks: i16,
+         timeout_ms: i32,
+     ) -> Result<ProduceResponse> {
+-        super::produce::produce(self, topic, partition, records, acks, timeout_ms).await
++        super::produce::produce(self, topic, partition, records, acks, timeout_ms, None).await
++    }
++
++    /// Produce records as one idempotent producer's (Logweir patch 0005).
++    pub async fn produce_idempotent(
++        &self,
++        topic: &str,
++        partition: i32,
++        records: Vec<crate::manifest::BackupRecord>,
++        acks: i16,
++        timeout_ms: i32,
++        producer: super::produce::ProducerIdentity,
++    ) -> Result<ProduceResponse> {
++        super::produce::produce(
++            self,
++            topic,
++            partition,
++            records,
++            acks,
++            timeout_ms,
++            Some(producer),
++        )
++        .await
+     }
+ 
+     /// Create topics in the Kafka cluster
+diff --git a/crates/kafka-backup-core/src/kafka/partition_router.rs b/crates/kafka-backup-core/src/kafka/partition_router.rs
+index b1a2710..f4fd908 100644
+--- a/crates/kafka-backup-core/src/kafka/partition_router.rs
++++ b/crates/kafka-backup-core/src/kafka/partition_router.rs
+@@ -51,6 +51,10 @@ pub struct PartitionLeaderRouter {
+ 
+     /// Bootstrap client for metadata operations
+     bootstrap_client: Arc<KafkaClient>,
++
++    /// The one idempotent producer every `produce` writes as (Logweir patch
++    /// 0005), created by the first produce.
++    idempotent: tokio::sync::OnceCell<super::produce::IdempotentProducer>,
+ }
+ 
+ impl PartitionLeaderRouter {
+@@ -73,6 +77,7 @@ impl PartitionLeaderRouter {
+             connections: Arc::new(RwLock::new(HashMap::new())),
+             connection_index: AtomicUsize::new(0),
+             bootstrap_client,
++            idempotent: tokio::sync::OnceCell::new(),
+         };
+ 
+         // Fetch initial metadata
+@@ -577,12 +582,23 @@ impl PartitionLeaderRouter {
+         let mut connection_attempts = 0;
+         let mut leader_attempts = 0;
+ 
++        // Idempotent (Logweir patch 0005): every retry below re-sends this
++        // identity, and the sequence advances only once it is acknowledged.
++        let producer = self
++            .idempotent
++            .get_or_try_init(|| super::produce::init_idempotent_producer(&self.bootstrap_client))
++            .await?;
++        let identity = producer.identity(topic, partition);
++
+         loop {
+             match self
+-                .produce_internal(topic, partition, &records, acks, timeout_ms)
++                .produce_internal(topic, partition, &records, acks, timeout_ms, identity)
+                 .await
+             {
+-                Ok(response) => return Ok(response),
++                Ok(response) => {
++                    producer.acknowledged(topic, partition, records.len());
++                    return Ok(response);
++                }
+                 Err(RoutedError { error, .. })
+                     if is_not_leader_error(&error) && leader_attempts < MAX_LEADER_RETRIES =>
+                 {
+@@ -633,10 +649,18 @@ impl PartitionLeaderRouter {
+         records: &[BackupRecord],
+         acks: i16,
+         timeout_ms: i32,
++        identity: super::produce::ProducerIdentity,
+     ) -> std::result::Result<ProduceResponse, RoutedError> {
+         let (leader_id, client) = self.route(topic, partition).await?;
+         client
+-            .produce(topic, partition, records.to_vec(), acks, timeout_ms)
++            .produce_idempotent(
++                topic,
++                partition,
++                records.to_vec(),
++                acks,
++                timeout_ms,
++                identity,
++            )
+             .await
+             .map_err(|error| RoutedError::at(leader_id, error))
+     }
+diff --git a/crates/kafka-backup-core/src/kafka/produce.rs b/crates/kafka-backup-core/src/kafka/produce.rs
+index 081da95..a07beea 100644
+--- a/crates/kafka-backup-core/src/kafka/produce.rs
++++ b/crates/kafka-backup-core/src/kafka/produce.rs
+@@ -3,7 +3,8 @@
+ use bytes::{Bytes, BytesMut};
+ use indexmap::IndexMap;
+ use kafka_protocol::messages::{
+-    ApiKey, ProduceRequest, ProduceResponse as KafkaProduceResponse, TopicName,
++    ApiKey, InitProducerIdRequest, InitProducerIdResponse, ProduceRequest,
++    ProduceResponse as KafkaProduceResponse, ProducerId, TopicName,
+ };
+ use kafka_protocol::protocol::StrBytes;
+ use kafka_protocol::records::{
+@@ -75,8 +76,107 @@ fn split_by_timestamp(records: Vec<BackupRecord>) -> Vec<Vec<BackupRecord>> {
+     batches
+ }
+ 
+-/// Convert BackupRecords to kafka-protocol Records.
+-fn build_kafka_records(records: Vec<BackupRecord>) -> Vec<Record> {
++/// The identity one produced batch carries when it is idempotent (Logweir
++/// patch 0005, PROD-00.3d): the restore's producer id and epoch, and the
++/// partition's next sequence number.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ProducerIdentity {
++    pub producer_id: i64,
++    pub producer_epoch: i16,
++    pub base_sequence: i32,
++}
++
++/// The sequence number `n` records after `base`: Kafka's sequence wraps from
++/// `i32::MAX` to 0.
++pub fn sequence_after(base: i32, n: usize) -> i32 {
++    ((i64::from(base) + n as i64) % (i64::from(i32::MAX) + 1)) as i32
++}
++
++/// One idempotent producer for a restore (Logweir patch 0005, PROD-00.3d): one
++/// `InitProducerId` without a transactional id, and per partition the next
++/// sequence number, which advances only when a produce is acknowledged. A
++/// re-send therefore carries the sequence it carried before, and the broker
++/// discards it as a duplicate instead of appending a second copy. The restore
++/// writes each partition from one task at a time, so one request per partition
++/// is in flight.
++#[derive(Debug)]
++pub struct IdempotentProducer {
++    producer_id: i64,
++    producer_epoch: i16,
++    next_sequence: std::sync::Mutex<std::collections::HashMap<(String, i32), i32>>,
++}
++
++impl IdempotentProducer {
++    pub fn new(producer_id: i64, producer_epoch: i16) -> Self {
++        Self {
++            producer_id,
++            producer_epoch,
++            next_sequence: Default::default(),
++        }
++    }
++
++    /// The identity of the next batch for `topic`/`partition`.
++    pub fn identity(&self, topic: &str, partition: i32) -> ProducerIdentity {
++        let next = self.next_sequence.lock().expect("sequence lock");
++        ProducerIdentity {
++            producer_id: self.producer_id,
++            producer_epoch: self.producer_epoch,
++            base_sequence: next
++                .get(&(topic.to_string(), partition))
++                .copied()
++                .unwrap_or(0),
++        }
++    }
++
++    /// `records` records were acknowledged on `topic`/`partition`.
++    pub fn acknowledged(&self, topic: &str, partition: i32, records: usize) {
++        let mut next = self.next_sequence.lock().expect("sequence lock");
++        let seq = next.entry((topic.to_string(), partition)).or_insert(0);
++        *seq = sequence_after(*seq, records);
++    }
++}
++
++/// `InitProducerId` without a transactional id: any broker answers it.
++/// Retried a few times, as a fresh cluster can answer that it is not ready.
++pub async fn init_idempotent_producer(client: &KafkaClient) -> Result<IdempotentProducer> {
++    const ATTEMPTS: u32 = 5;
++    let mut attempt = 0;
++    loop {
++        attempt += 1;
++        let request = InitProducerIdRequest::default()
++            .with_transactional_id(None)
++            .with_transaction_timeout_ms(i32::MAX)
++            .with_producer_id(ProducerId(-1))
++            .with_producer_epoch(-1);
++        let response: InitProducerIdResponse =
++            client.send_request(ApiKey::InitProducerId, request).await?;
++        if response.error_code == 0 {
++            debug!(
++                "idempotent producer id {} epoch {}",
++                response.producer_id.0, response.producer_epoch
++            );
++            return Ok(IdempotentProducer::new(
++                response.producer_id.0,
++                response.producer_epoch,
++            ));
++        }
++        if attempt >= ATTEMPTS {
++            return Err(KafkaError::BrokerError {
++                code: response.error_code,
++                message: format!("InitProducerId failed: code {}", response.error_code),
++            }
++            .into());
++        }
++        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
++    }
++}
++
++/// Convert BackupRecords to kafka-protocol Records, as one idempotent batch
++/// when `producer` is set.
++fn build_kafka_records(
++    records: Vec<BackupRecord>,
++    producer: Option<ProducerIdentity>,
++) -> Vec<Record> {
+     records
+         .into_iter()
+         .enumerate()
+@@ -96,11 +196,15 @@ fn build_kafka_records(records: Vec<BackupRecord>) -> Vec<Record> {
+                 // on tombstone/abort-marker batches, never on produced records.
+                 delete_horizon: false,
+                 partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
+-                producer_id: NO_PRODUCER_ID,
+-                producer_epoch: NO_PRODUCER_EPOCH,
++                producer_id: producer.map_or(NO_PRODUCER_ID, |p| p.producer_id),
++                producer_epoch: producer.map_or(NO_PRODUCER_EPOCH, |p| p.producer_epoch),
+                 timestamp_type: TimestampType::Creation,
+                 offset: i as i64,
+-                sequence: i as i32, // Must match offset so all records land in a single batch
++                // offset - sequence is constant, so all records land in a
++                // single batch whose base sequence is the producer's.
++                sequence: producer
++                    .map_or(0, |p| p.base_sequence)
++                    .wrapping_add(i as i32),
+                 timestamp: r.timestamp,
+                 key: r.key.map(Bytes::from),
+                 value: r.value.map(Bytes::from),
+@@ -115,6 +219,10 @@ fn build_kafka_records(records: Vec<BackupRecord>) -> Vec<Record> {
+ /// Records spanning more than ~24.8 days of timestamps are automatically
+ /// split into sub-batches sent as separate produce requests (record batch v2
+ /// stores timestamp deltas as i32).
++///
++/// With `producer` every sub-batch is idempotent: the first carries its base
++/// sequence and each next one continues it, so re-sending the whole call
++/// re-sends every sub-batch with the sequence it had.
+ pub async fn produce(
+     client: &KafkaClient,
+     topic: &str,
+@@ -122,6 +230,7 @@ pub async fn produce(
+     records: Vec<BackupRecord>,
+     acks: i16,
+     timeout_ms: i32,
++    producer: Option<ProducerIdentity>,
+ ) -> Result<ProduceResponse> {
+     if records.is_empty() {
+         return Ok(ProduceResponse {
+@@ -151,7 +260,11 @@ pub async fn produce(
+ 
+     for sub_batch in sub_batches {
+         let sub_batch_len = sub_batch.len();
+-        let kafka_records = build_kafka_records(sub_batch);
++        let identity = producer.map(|p| ProducerIdentity {
++            base_sequence: sequence_after(p.base_sequence, total_produced),
++            ..p
++        });
++        let kafka_records = build_kafka_records(sub_batch, identity);
+ 
+         let options = RecordEncodeOptions {
+             version: 2,
+@@ -280,7 +393,7 @@ mod tests {
+             },
+         ];
+ 
+-        let records = build_kafka_records(vec![record]);
++        let records = build_kafka_records(vec![record], None);
+         let headers = &records[0].headers;
+ 
+         assert_eq!(headers.len(), 3);
+@@ -298,6 +411,82 @@ mod tests {
+         );
+     }
+ 
++    // Logweir patch 0005 (PROD-00.3d, C5): idempotent produce.
++
++    fn encode(records: &[Record]) -> Bytes {
++        let mut buf = BytesMut::new();
++        RecordBatchEncoder::encode(
++            &mut buf,
++            records.iter(),
++            &RecordEncodeOptions {
++                version: 2,
++                compression: Compression::None,
++            },
++        )
++        .unwrap();
++        buf.freeze()
++    }
++
++    #[test]
++    fn an_idempotent_batch_carries_the_producer_and_its_sequence() {
++        use kafka_protocol::records::RecordBatchDecoder;
++        let identity = ProducerIdentity {
++            producer_id: 42,
++            producer_epoch: 3,
++            base_sequence: 10,
++        };
++        let records: Vec<BackupRecord> = (0..5).map(|i| make_record(1_000 + i)).collect();
++        let mut bytes = encode(&build_kafka_records(records, Some(identity)));
++        let info = RecordBatchDecoder::decode_batch_info(&mut bytes).unwrap();
++        assert_eq!(info.len(), 1, "one batch");
++        assert_eq!(
++            (
++                info[0].producer_id,
++                info[0].producer_epoch,
++                info[0].base_sequence,
++                info[0].record_count
++            ),
++            (42, 3, 10, 5)
++        );
++        assert!(!info[0].transactional);
++    }
++
++    /// A re-send is the same bytes: the broker sees the sequence it already
++    /// appended and discards the copy.
++    #[test]
++    fn a_resend_before_the_acknowledgement_is_the_same_batch() {
++        let producer = IdempotentProducer::new(42, 3);
++        let records: Vec<BackupRecord> = (0..3).map(|i| make_record(1_000 + i)).collect();
++        let first = encode(&build_kafka_records(
++            records.clone(),
++            Some(producer.identity("t", 0)),
++        ));
++        let resend = encode(&build_kafka_records(
++            records.clone(),
++            Some(producer.identity("t", 0)),
++        ));
++        assert_eq!(first, resend);
++        producer.acknowledged("t", 0, 3);
++        let next = encode(&build_kafka_records(
++            records,
++            Some(producer.identity("t", 0)),
++        ));
++        assert_ne!(first, next);
++    }
++
++    #[test]
++    fn the_sequence_advances_per_partition_only_when_acknowledged() {
++        let producer = IdempotentProducer::new(42, 3);
++        assert_eq!(producer.identity("t", 0).base_sequence, 0);
++        producer.acknowledged("t", 0, 1000);
++        producer.acknowledged("t", 0, 7);
++        assert_eq!(producer.identity("t", 0).base_sequence, 1007);
++        assert_eq!(producer.identity("t", 1).base_sequence, 0);
++        assert_eq!(producer.identity("u", 0).base_sequence, 0);
++        assert_eq!(sequence_after(i32::MAX, 1), 0);
++        assert_eq!(sequence_after(i32::MAX - 1, 3), 1);
++    }
++
+     #[test]
+     fn test_split_by_timestamp_single_batch() {
+         let records: Vec<BackupRecord> =
+@@ -346,7 +535,7 @@ mod tests {
+             .map(|i| make_record(1_700_000_000_000 + i * 1000))
+             .collect();
+ 
+-        let kafka_records = build_kafka_records(records);
++        let kafka_records = build_kafka_records(records, None);
+ 
+         let options = RecordEncodeOptions {
+             version: 2,
+@@ -380,7 +569,7 @@ mod tests {
+ 
+         let mut all_encoded = BytesMut::new();
+         for sub_batch in sub_batches {
+-            let kafka_records = build_kafka_records(sub_batch);
++            let kafka_records = build_kafka_records(sub_batch, None);
+             let options = RecordEncodeOptions {
+                 version: 2,
+                 compression: Compression::None,
+@@ -404,7 +593,7 @@ mod tests {
+             .map(|i| make_record(1_700_000_000_000 + i * 100))
+             .collect();
+ 
+-        let kafka_records = build_kafka_records(records);
++        let kafka_records = build_kafka_records(records, None);
+ 
+         let options = RecordEncodeOptions {
+             version: 2,
+@@ -463,7 +652,7 @@ mod tests {
+         use kafka_protocol::records::{RecordBatchDecoder, RecordBatchEncoder};
+ 
+         let now = 1_787_086_231_121i64;
+-        let kafka_records = build_kafka_records(vec![make_record(0), make_record(now)]);
++        let kafka_records = build_kafka_records(vec![make_record(0), make_record(now)], None);
+         let options = RecordEncodeOptions {
+             version: 2,
+             compression: Compression::None,
