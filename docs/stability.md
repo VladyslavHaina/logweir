@@ -180,6 +180,34 @@ is still pre-release, so they move only the pre-release number, from
   formats and the `logweir` CLI's flags and exit codes are covered by the
   promises above; internal crate APIs may change in any release before 1.0.
 
+## One namespace per install (OD-23): a fresh install, not an upgrade
+
+0.5.0 installs into ONE namespace and groups its objects by `workspaces`
+([kubernetes.md, *Workspaces*](kubernetes.md#workspaces)). This is a breaking
+change, made pre-1.0 and with no in-place upgrade from 0.4.x: install afresh,
+keep the bucket, import trust and connect a catalog in each workspace
+([install.md](install.md#upgrade-crds-before-upgrading-the-controller)).
+
+- **Chart:** `kubernetes.namespace`, `kubernetes.connectionsNamespace`,
+  `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces` and
+  `api.namespaces` are removed; `approvalPolicy.namespaces`,
+  `api.console.roles.bindings[].namespace` and the four `…PerNamespace` caps
+  are renamed per workspace. Each is refused at render by name. The
+  `kubectl` write roles `logweir-operator`, `logweir-approver` and
+  `logweir-retention-admin` are gone.
+- **Controller:** `LOGWEIR_WATCH_NAMESPACES` is gone; `LOGWEIR_WORKSPACES` is
+  required. An object without a listed `logweir.dev/workspace` label is
+  `WorkspaceUnknown`; a reference into another workspace is `WorkspaceMismatch`.
+  The installation policy's caps are `…PerWorkspace`, and the approval-policy
+  document binds `workspaces:`.
+- **API:** `/api/v1/namespaces/{ns}/…` is `/api/v1/workspaces/{ws}/…`, with a
+  new OpenAPI pre-release ([api.md](api.md)).
+- **Signed formats:** the authorization document gains `subject.workspace`, one
+  MINOR step: an older reader refuses the unknown field (the safer verdict), and
+  this build refuses a document without it. Scorecards, receipts, catalog
+  points, switchover records and the bucket layout are unchanged, so every
+  archive made under the old layout stays readable, verifiable and importable.
+
 ## Mixed versions
 
 A controller and its runner image are one rollout: `helm upgrade` of the
@@ -721,8 +749,8 @@ the timings measured at them are one machine's and are **not** budgets.
 | Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
 | API list page | 200 objects | follow `nextCursor` |
 | Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
-| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per namespace (`runs.*`); scheduled runs not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([manual runs](kubernetes.md#concurrency-and-manual-runs)) |
-| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per namespace per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
+| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per workspace (`runs.*`); scheduled runs not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([manual runs](kubernetes.md#concurrency-and-manual-runs)) |
+| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per person, per workspace, per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
 
 **What was measured.** Offline and in process (2026-09-23, release builds on
 an Apple M4), with harnesses that re-run:
@@ -841,7 +869,7 @@ it: it turns the controller's authority to CREATE A JOB into a deletion
 capability **in the namespace that holds the retention credential**, the same
 residual class as the signing oracle. The hard boundary is that credential's own
 scope — the policy's prefix, never `logweir/`. Arming it takes four things held
-by different places: `logweir-retention-admin` setting `mode: Enforce`, the
+by different places: an installation administrator setting `mode: Enforce` with `kubectl` (the console cannot write a `RetentionPolicy`), the
 `logweir-retention` ServiceAccount (chart value `retention.enabled`, no
 Kubernetes verb), the prefix-scoped credential, and an administrator's approval
 of the current `planSha256` ([enforcing](kubernetes.md#enforcing)).
@@ -947,13 +975,14 @@ data-plane client; `--approver-key-ids` pins which approver key ids a run
 accepts, refusing anything else with exit 3 before phase 0 dials; and
 `subject_kind` is inside the signed bytes so an approval cannot be retargeted
 at another kind of object. **None of that is a claim about a cluster-admin.**
-Anyone holding `create pods` in the runner's namespace can mount the signing
-Secret and sign whatever they like with no Logweir crate involved
+Anyone holding `create pods` in the install's namespace can mount the signing
+Secret (and, since OD-23 puts them in the same namespace, the console's keys)
+and sign whatever they like with no Logweir crate involved
 (`scripts/check-one-signer.sh`'s header says the same), and anyone who can
 create pods or replace the Job template can replace the execution contract
-wholesale. The boundary this product draws is between *namespace users* and
-*the operator's own trust roster*, not between an adopter and their own cluster
-administrator.
+wholesale. The boundary this product draws is between *console users*, whom workspaces
+separate, and *the operator's own trust roster*, not between an adopter and
+the administrators of its namespace or cluster.
 
 **The Kubernetes client pair, and the toolchain it was resolved against.**
 `crates/weirkeeper` is built against **`kube 0.99.0`** (`default-features =
@@ -983,7 +1012,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 4 | **`OsoCliEngine::validation_run`** | Not implemented: the engine's own validation run is never executed (v1 removed phase 7's unused call, release-notes item 74), and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` is withdrawn and ignored; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md#retention); [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
-| 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
+| 7 | **Multi-tenancy beyond namespace RBAC** | One install serves one team (OD-11). Its workspaces separate console users, approval modes and run pools, and are invisible to Kubernetes RBAC: whoever can write the namespace writes every workspace. There is no tenant object and no per-workspace quota. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
 | 9 | **A Helm chart — delivered** | The chart is the install. `just chart-check` verifies rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
 | 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |

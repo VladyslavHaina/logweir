@@ -1951,10 +1951,8 @@ fn install_docs_name_all_operator_managed_secrets() {
         );
     }
     assert!(
-        docs.contains("short-lived bootstrap Job")
-            && docs.contains("identity.authorizedRunnerNamespaces")
-            && docs.contains("(the low-level path)"),
-        "managed signer bootstrap/distribution and low-level provisioning must be distinct"
+        docs.contains("short-lived bootstrap Job") && docs.contains("(the low-level path)"),
+        "managed signer bootstrap and low-level provisioning must be distinct"
     );
     assert!(
         docs.contains("logweir-approval-bundle") && docs.contains("legacy"),

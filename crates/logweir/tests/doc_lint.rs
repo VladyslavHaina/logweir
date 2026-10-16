@@ -1236,16 +1236,15 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "the independent approver recipe remains explicit"
     );
 
-    // The managed and low-level paths are deliberately distinct: Helm owns
-    // declared runner namespaces; identity-off installs apply the base account.
+    // OD-23: the chart renders the runner account in the release namespace,
+    // where every Job runs; only the low-level path applies it by hand.
     assert!(
         install.contains("config/samples/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
     );
     assert!(
-        install.contains("identity.authorizedRunnerNamespaces")
-            && install.contains("For the low-level path, apply it once per namespace"),
-        "docs/install.md must distinguish Helm-managed authorized namespaces from the low-level manual account path"
+        install.contains("in the release namespace, where every runner Job runs"),
+        "docs/install.md must say the runner account lives in the release namespace"
     );
 
     assert!(
@@ -1274,8 +1273,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
          (PROD-14.1) and state exact API CIDR/port requirements"
     );
     assert!(
-        install.contains("Only the bootstrap/distributor **processes and their projected API tokens** are\nshort-lived")
-            && install.contains("ordinary persistent release resources")
+        install.contains(
+            "Only the bootstrap **process and its projected API token** are\nshort-lived"
+        ) && install.contains("ordinary persistent release resources")
             && install.contains("does not automatically revoke these RBAC grants"),
         "identity docs must distinguish short-lived processes/tokens from persistent scoped RBAC"
     );
@@ -1287,10 +1287,8 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "rollback docs must describe the Helm 3/4-safe creation-hook retention boundary"
     );
     assert!(
-        install.contains("one Logweir\ninstallation identity per cluster")
-            && install.contains("different signer")
-            && install.contains("Never mint a per-namespace signer"),
-        "the singleton and same-identity namespace contract must be actionable"
+        install.contains("one Logweir\ninstallation identity per cluster"),
+        "the singleton contract must be actionable"
     );
     assert!(
         install.contains("apply --server-side --force-conflicts -f charts/logweir/crds/")

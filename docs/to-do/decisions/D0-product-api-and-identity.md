@@ -434,3 +434,7 @@ explicit docker-desktop kubeconfig/context" keeps its meaning for the laptop mod
 in-cluster shape is covered by the render refusals (no mode, a Service in administrator
 mode, shared mode without TLS or with an ingress host that differs from `publicBaseUrl`)
 and by the live `auth can-i` matrix recorded under PLAT-17.1.
+
+## Amendment (2026-10-16, PROD-19.1, owner decision OD-23): one namespace per install
+
+Stage 5 (the shared console only beside a controller scoped away from the release namespace, `controller.watchNamespaces`) is withdrawn. An install is one namespace with workspaces inside it; the console's keys share it with the controller's Jobs, a Secret a Logweir object names is mounted only when it carries the referrer's `logweir.dev/workspace` label, and residual O1 is restated in `SECURITY.md` and `docs/kubernetes.md` (*Workspaces*). Read "namespace" in this record's role and approval tables as "workspace". The design is [PROD-19.1](PROD-19.1-workspaces.md).

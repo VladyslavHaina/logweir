@@ -26,6 +26,7 @@ metadata:
   name: source
   labels:
     app.kubernetes.io/name: logweir
+    logweir.dev/workspace: default   # required: the workspace this object belongs to
 spec:
   role: source
   bootstrapServers:
