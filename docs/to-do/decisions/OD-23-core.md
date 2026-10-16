@@ -2,7 +2,7 @@
 
 - Rows: **PROD-03.1**, **PROD-03.2** (Schema Registry), **PROD-00.3a**, **00.3d**, **00.3e**, **00.3h** (engine), **PROD-07.2** (interruption), in the [product-expansion tracker](../product-expansion.md). Owner decisions: OD-23 (only what is required, the simplest form that works; OD-2 #2 narrowed), OD-3 (engine patch folder), OD-7 (format steps), OD-15 (built together, tested once), OD-11 (less code).
 - Date: 2026-10-16. Base: main `56f4436d`. Branch `claude/od23-core-design`. A design record: it ships no product code.
-- Companion record: `decisions/PROD-19.1-workspaces.md` (one namespace per install, workspaces inside it; written beside this one, so not linked until both land). Every object named here lives in the release namespace and belongs to one workspace, by that record's rules (§5).
+- Companion record: [PROD-19.1](PROD-19.1-workspaces.md) (one namespace per install, workspaces inside it). Every object named here lives in the release namespace and belongs to one workspace, by that record's rules (§5).
 - Citations are `file:line` at the base commit; `E:` is the vendored engine source (`third_party/kafka-backup-v0.23.3.tar.gz`, `crates/kafka-backup-core/src/`).
 
 ## 0. Decisions in one page
@@ -207,6 +207,8 @@ Shared files, distinct hunks: `spec.rs` (B1 `RestoreSpecBlock`, B2 `TargetSpec`/
 8. In `prd`, the `dev` connections are not listed and cannot be chosen (PROD-19.1's row, run here because the registry rides on the connection).
 
 ## 8. Open points for the owner
+
+**Decided 2026-10-16 by the owner: all five as recommended.**
 
 1. **Registries that cannot keep IDs are refused** (Karapace 6.2.3, Apicurio 3.0.9's Confluent API, and any registry without IMPORT mode, §1.1). ID mapping with byte rewriting (c) would serve them at the cost of a second reconciliation model. *Recommendation:* accept the refusal now; (c) comes back only on a real need.
 2. **The registry is set when the connection is created.** Connections are immutable (`crates/weirkeeper/src/crds/kafka_cluster.rs:339`), so adding a registry to an existing connection means a new connection. *Recommendation:* accept; a fresh install (OD-23) starts with it.

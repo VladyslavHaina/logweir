@@ -2,7 +2,7 @@
 
 - Row: PROD-19.1 (impl, Tier A), [product-expansion tracker](../product-expansion.md). Owner decisions: OD-23 (2026-10-16: one namespace per install, workspaces inside it, "do not over engineer it, needs to work"), OD-11 (one team per install, less code), OD-8 (approval modes), OD-7 (signed formats: MINOR only to the safer side).
 - Date: 2026-10-16. Branch `claude/od23-ws-design`, at `56f4436d`. Design record only; it amends [D0](D0-product-api-and-identity.md) (stage 5 is withdrawn, §5) and [PROD-16.2](PROD-16.2-console-approval.md) (the approval names the workspace, §4).
-- Written beside `OD-23-core.md` (Schema Registry, engine rows, PROD-07.2). §10 says what each record needs from the other.
+- Written beside [OD-23-core](OD-23-core.md) (Schema Registry, engine rows, PROD-07.2). §10 says what each record needs from the other.
 
 ## 1. The model
 
@@ -257,6 +257,8 @@ What PROD-19.1 needs from od23-core:
 What od23-core can assume: every object lives in the release namespace and belongs to exactly one workspace, and nothing in the bucket layout changes.
 
 ## 11. Open points for the owner
+
+**Decided 2026-10-16 by the owner: all three as recommended, (a), (a) and (b).**
 
 | # | Question | Options | Recommendation |
 | --- | --- | --- | --- |
