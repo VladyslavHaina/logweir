@@ -793,3 +793,24 @@ fn every_unknown_answer_refuses_before_any_write() {
     ));
     run(&mut target, &[4]).expect("a subject that does not exist yet inherits");
 }
+
+/// A referenced subject comes WHOLE: every version, not only the one the
+/// reference names. KILLS: a closure that follows references version by
+/// version only.
+#[test]
+fn a_referenced_subject_is_imported_whole() {
+    let mut snap = snapshot();
+    snap.versions.push(v(
+        "customer",
+        2,
+        12,
+        r#"{"type":"record","name":"Customer","v":2}"#,
+        &[],
+        false,
+    ));
+    let got: Vec<(String, u32)> = closure(&snap, &BTreeSet::from([5]))
+        .iter()
+        .map(|v| (v.subject.clone(), v.version))
+        .collect();
+    assert!(got.contains(&("customer".to_string(), 2)), "{got:?}");
+}
