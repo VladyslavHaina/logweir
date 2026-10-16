@@ -226,3 +226,8 @@ Shared files, distinct hunks: `spec.rs` (B1 `RestoreSpecBlock`, B2 `TargetSpec`/
 ## 10. What was run
 
 The prototype of §1.1 only: containers `od23c-*` on the network `od23core-proto` (no compose slot, no cluster, no PoC), images pulled with the anonymous Docker config; all removed by name afterwards (`docker rm -f` of the nine recorded names, `docker network rm`). Engine and `kafka-protocol` facts are read from source (the vendored tarball extracted under the scratchpad, and `~/.cargo/registry/src/*/kafka-protocol-0.18.0`).
+
+Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
+
+Apache Kafka® and Kafka® are registered trademarks of the Apache Software
+Foundation. Logweir is not affiliated with or endorsed by the ASF.
