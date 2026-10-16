@@ -6638,14 +6638,14 @@
         ]
       },
       "CaBundleRequest": {
-        "description": "A CA bundle in a `ConfigMap` in this workspace. A `ConfigMap` and never a Secret: a CA certificate is public material.",
+        "description": "A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate is public material.",
         "type": "object",
         "required": [
           "configMapName"
         ],
         "properties": {
           "configMapName": {
-            "description": "The `ConfigMap` name, in this workspace.",
+            "description": "The `ConfigMap` name.",
             "type": "string"
           },
           "key": {
@@ -10218,7 +10218,7 @@
         }
       },
       "ObjectKeyRefRequest": {
-        "description": "One key of a ConfigMap in this workspace.",
+        "description": "One key of a ConfigMap in the installation's namespace. ConfigMaps are not held to a workspace: name only a public CA bundle.",
         "type": "object",
         "required": [
           "key",
@@ -10230,7 +10230,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The object's name, in the same workspace.",
+            "description": "The ConfigMap's name.",
             "type": "string"
           }
         },

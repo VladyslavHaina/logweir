@@ -106,8 +106,11 @@ the images are per install.
 - **The label is required.** The console writes it from the workspace in the
   address and never lets a body choose it. A `kubectl apply` must set it, to a
   name in the list: an object without it, or with a name not listed, gets
-  `WorkspaceUnknown` and nothing runs. List one workspace with `kubectl get
-  backups -l logweir.dev/workspace=prd`, or all with `-L logweir.dev/workspace`.
+  `WorkspaceUnknown` and nothing runs. A run that had already finished keeps
+  its phase and conditions (nothing more runs for it), so a workspace dropped
+  from the list and put back finds its Backups and Restores as they were. List
+  one workspace with `kubectl get backups -l logweir.dev/workspace=prd`, or
+  all with `-L logweir.dev/workspace`.
 - **References never cross workspaces.** A `Backup`, `Restore`, schedule,
   catalog or policy whose `…Ref` names an object of another workspace gets
   `WorkspaceMismatch`, terminal, with no Job; an approval signed for one
@@ -121,7 +124,8 @@ the images are per install.
 - **A credential Secret carries the label too.** The controller mounts a Secret
   a Logweir object names (`auth.secretRef`, a destination's grants, a retention
   credential) only when the Secret's `logweir.dev/workspace` equals the
-  referrer's. The console labels the Secrets it writes; one you create with
+  referrer's. The console labels the Secrets it writes, and names an existing
+  one only as an inline archive's `credentialRef`; one you create with
   `kubectl` needs the label of the workspace whose objects name it (see
   [config/samples/secrets.yaml](../config/samples/secrets.yaml)). The install's
   key Secrets (`logweir-signing-key`, the console's keys, the OIDC client
@@ -920,8 +924,12 @@ endpoint they control and have Logweir present it there.
   store exists and refuses `CredentialBindingMismatch`: exit 3 for a run,
   `retention-refusal=CredentialBindingMismatch` for retention, a check code for a
   `Preflight`, the `Reachable` reason on a `KafkaCluster`.
-- **The console** never names an existing Secret: it takes the credential once,
-  creates a Secret owned by and bound to the object, and never reads it back.
+- **The console**, for a connection or a destination, never names an existing
+  Secret: it takes the credential once, creates a Secret owned by and bound to
+  the object, and never reads it back. Only an inline archive's `credentialRef`
+  (a schedule's, an ad-hoc backup's, a restore's without a destination, a
+  catalog's or a preflight's `legacyArchive`) names an existing Secret; the
+  workspace label rule and the location binding hold it.
 - **With `kubectl`**, create the object, read its binding and write it into the
   Secret:
 
@@ -3271,7 +3279,8 @@ through `pods/log`, and writes `status.evidence.receiptKey` and `sidecarKey`.
 never guessed from the backup id.
 
 - `pods/log` is a subresource; `get` on `pods` does not cover it. The controller
-  reads no Secret's data (only a named Secret's labels), holds no verb on
+  reads no Secret's data (only a named Secret's labels; its `get` on `secrets`
+  could, as RBAC has no metadata-only grant), holds no verb on
   `pods/exec` or `pods/attach`, and writes every
   status with a merge `PATCH` preconditioned on `metadata.resourceVersion` (a
   `409` means another writer won; the next pass reads it).

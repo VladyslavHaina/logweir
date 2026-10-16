@@ -178,11 +178,12 @@ pub enum ConnectionAuthMode {
     Mtls,
 }
 
-/// One key of a ConfigMap in this workspace.
+/// One key of a ConfigMap in the installation's namespace. ConfigMaps are not
+/// held to a workspace: name only a public CA bundle.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ObjectKeyRefRequest {
-    /// The object's name, in the same workspace.
+    /// The ConfigMap's name.
     pub name: String,
     /// The data key.
     pub key: String,
@@ -2059,12 +2060,13 @@ pub struct StorageRequest {
     pub addressing: AddressingDto,
 }
 
-/// A CA bundle in a `ConfigMap` in this workspace. A `ConfigMap` and never a
-/// Secret: a CA certificate is public material.
+/// A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are
+/// not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate
+/// is public material.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaBundleRequest {
-    /// The `ConfigMap` name, in this workspace.
+    /// The `ConfigMap` name.
     pub config_map_name: String,
     /// The data key holding the PEM bundle. Absent means `ca.crt`.
     #[serde(default)]

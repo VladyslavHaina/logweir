@@ -1526,9 +1526,9 @@ export interface components {
         };
         /** @description Why the `Backup` verdict join of one point page is incomplete. */
         BackupVerdictsIncomplete: "Truncated" | "Unavailable";
-        /** @description A CA bundle in a `ConfigMap` in this workspace. A `ConfigMap` and never a Secret: a CA certificate is public material. */
+        /** @description A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate is public material. */
         CaBundleRequest: {
-            /** @description The `ConfigMap` name, in this workspace. */
+            /** @description The `ConfigMap` name. */
             configMapName: string;
             /**
              * @description The data key holding the PEM bundle. Absent means `ca.crt`.
@@ -3244,11 +3244,11 @@ export interface components {
             /** @description The same instant in the schedule's zone, offset included — `2026-10-25T02:30:00+02:00`. The offset is what distinguishes the two occurrences of a repeated hour. */
             localTime: string;
         };
-        /** @description One key of a ConfigMap in this workspace. */
+        /** @description One key of a ConfigMap in the installation's namespace. ConfigMaps are not held to a workspace: name only a public CA bundle. */
         ObjectKeyRefRequest: {
             /** @description The data key. */
             key: string;
-            /** @description The object's name, in the same workspace. */
+            /** @description The ConfigMap's name. */
             name: string;
         };
         /** @description What "protected" means here. */
