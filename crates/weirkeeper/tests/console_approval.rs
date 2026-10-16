@@ -77,19 +77,19 @@ impl Fixture {
             .to_string()
     }
 
-    /// The installation document with the namespace bound to `policy`.
+    /// The installation document with the workspace bound to `policy`.
     fn bind(&self, policy: &str) -> ApprovalPolicySet {
         ApprovalPolicySet::parse(&format!(
-            "{}namespaces:\n  {}: {policy}\n",
+            "{}workspaces:\n  {}: {policy}\n",
             self.text("policyDocument"),
-            self.text("namespace")
+            self.text("workspace")
         ))
         .expect("the fixture's policy document validates")
     }
 
     fn policy(&self, name: &str) -> ApprovalPolicy {
         self.bind(name)
-            .resolve(&self.text("namespace"))
+            .resolve(&self.text("workspace"))
             .bound()
             .cloned()
             .expect("bound")
@@ -111,6 +111,7 @@ impl Fixture {
         ExpectedSubject {
             kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
             namespace: self.text("namespace"),
+            workspace: self.text("workspace"),
             name: self.text("restore"),
             uid: self.text("restoreUid"),
             plan_hash: logweir_core::ids::sha256_prefixed(self.text(plan).as_bytes()),
@@ -244,13 +245,13 @@ fn the_fixture_names_the_policies_this_build_computes_and_holds_no_private_key()
     assert!(f.document("strict-request").contains(&f.strict().digest()));
     assert!(f
         .document("approved")
-        .starts_with("{\"formatVersion\":\"2.2.0\","));
+        .starts_with("{\"formatVersion\":\"2.3.0\","));
     assert!(f
         .document("request")
-        .starts_with("{\"formatVersion\":\"2.0.0\","));
+        .starts_with("{\"formatVersion\":\"2.3.0\","));
     assert!(f
         .document("original-name-request")
-        .starts_with("{\"formatVersion\":\"2.1.0\","));
+        .starts_with("{\"formatVersion\":\"2.3.0\","));
 }
 
 // The Approval verdict
@@ -463,6 +464,10 @@ fn the_approval_verdict_binds_the_restore_its_uid_its_plan_and_the_policy() {
             "AuthorizationSubjectMismatch",
         ),
         (
+            "approved-for-another-workspace",
+            "AuthorizationSubjectMismatch",
+        ),
+        (
             "approved-for-another-restore",
             "AuthorizationSubjectMismatch",
         ),
@@ -605,7 +610,8 @@ fn restore(f: &Fixture, plan: &str, original_name: bool) -> Restore {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
         "metadata": {"name": f.text("restore"), "namespace": f.text("namespace"),
-                     "uid": f.text("restoreUid"), "generation": 1, "resourceVersion": "4071"},
+                     "uid": f.text("restoreUid"), "generation": 1, "resourceVersion": "4071",
+                     "labels": {"logweir.dev/workspace": f.text("workspace")}},
         "spec": spec
     }))
     .expect("a Restore")
@@ -616,7 +622,8 @@ fn cluster(f: &Fixture) -> KafkaCluster {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
         "metadata": {"name": "scratch", "namespace": f.text("namespace"),
-                     "uid": "cccccccc-0000-4000-8000-0000000162cc"},
+                     "uid": "cccccccc-0000-4000-8000-0000000162cc",
+                     "labels": {"logweir.dev/workspace": f.text("workspace")}},
         "spec": {"bootstrapServers": ["scratch-0:9092"],
                  "auth": {"mode": "plaintext", "tls": false},
                  "role": "scratch", "markerTopic": "logweir.scratch"},
@@ -640,7 +647,8 @@ fn approval_object(
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
         "metadata": {"name": "a1", "namespace": f.text("namespace"),
-                     "uid": "aaaaaaaa-0000-4000-8000-00000000162a"},
+                     "uid": "aaaaaaaa-0000-4000-8000-00000000162a",
+                     "labels": {"logweir.dev/workspace": f.text("workspace")}},
         "spec": {
             "subjectRef": {"kind": "Restore", "name": f.text("restore")},
             "planHash": logweir_core::ids::sha256_prefixed(f.text(plan).as_bytes()),
@@ -1034,8 +1042,8 @@ fn the_controller_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
     }
     // An installation document that says so is refused where it is read.
     for document in [
-        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
-        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nworkspaces:\n  team-a: p\n",
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nworkspaces:\n  team-a: p\n",
     ] {
         let refused = weirkeeper::approval_policy::configured_policy(
             Ok("/etc/logweir/approval-policy.yaml".to_string()),

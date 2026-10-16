@@ -363,7 +363,7 @@ spec:
                         nullable: true
                         type: integer
                       jobRef:
-                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
+                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerWorkspace`.
                         nullable: true
                         properties:
                           name:
@@ -704,7 +704,7 @@ spec:
                     nullable: true
                     type: string
                   limit:
-                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
+                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerWorkspace` (a `Backup`) or `runs.maxManualRestoresActivePerWorkspace` (a `Restore`) when the run was queued.'
                     format: int64
                     type: integer
                 required:

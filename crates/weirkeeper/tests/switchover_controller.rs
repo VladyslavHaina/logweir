@@ -30,6 +30,8 @@ use std::sync::Mutex;
 use tower::service_fn;
 
 const NS: &str = "logweir-t20";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const SW: &str = "sw1";
 const SW_UID: &str = "5a5a5a5a-0000-4000-8000-00000000005a";
 const RESTORE: &str = "r1";
@@ -116,7 +118,7 @@ fn plan_bytes() -> String {
 fn switchover(status: Value) -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
-        "metadata": {"name": SW, "namespace": NS, "uid": SW_UID, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": SW, "namespace": NS, "uid": SW_UID, "generation": 1,
                      "resourceVersion": "100", "creationTimestamp": "2026-09-09T12:59:00Z"},
         "spec": {"planBytes": plan_bytes(), "approvalRef": {"name": APPROVAL},
                  "restoreRef": {"name": RESTORE, "uid": RESTORE_UID}, "deadlineSeconds": 600},
@@ -127,7 +129,7 @@ fn switchover(status: Value) -> Value {
 fn restore() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": RESTORE, "namespace": NS, "uid": RESTORE_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": RESTORE, "namespace": NS, "uid": RESTORE_UID},
         "spec": {"planBytes": RESTORE_PLAN, "approvalRef": {"name": "r1-approval"},
                  "sourceArchive": {"url": "s3://kafka-backups/drill-demo"}, "backupSetRef": "b1",
                  "pointInTime": "2026-09-07T14:05:00Z",
@@ -143,7 +145,7 @@ fn restore() -> Value {
 fn approval() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
-        "metadata": {"name": APPROVAL, "namespace": NS, "uid": "approval-uid-1",
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": APPROVAL, "namespace": NS, "uid": "approval-uid-1",
                      "creationTimestamp": "2026-09-09T12:59:30Z"},
         "spec": {"subjectRef": {"kind": "Switchover", "name": SW},
                  "planHash": logweir_core::ids::sha256_prefixed(plan_bytes().as_bytes()),
@@ -158,7 +160,7 @@ fn approval() -> Value {
 fn cluster() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "scratch", "namespace": NS, "uid": "cluster-uid"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "scratch", "namespace": NS, "uid": "cluster-uid"},
         "spec": {"bootstrapServers": ["scratch-0.logweir-t20:9092"],
                  "auth": {"mode": "plaintext", "tls": false},
                  "role": "scratch", "markerTopic": "logweir.scratch"},

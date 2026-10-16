@@ -1297,10 +1297,14 @@ async fn start(
     let binding = binding_of(&resolved, &policy_digest);
 
     // STEP 3. The concurrency ceilings, counted from Jobs.
-    let existing = limits::check_jobs(&ctx.client)
+    let existing = limits::check_jobs(&ctx.client, namespace)
         .await
         .map_err(ReconcileError::Api)?;
-    let counts = limits::count(&existing, namespace, resolved.uid.as_deref());
+    let counts = limits::count(
+        &existing,
+        crate::workspace::label_of(discovery).unwrap_or_default(),
+        resolved.uid.as_deref(),
+    );
     if let limits::Admission::Queued(code) = limits::admit(
         &counts,
         &load.policy().checks,
@@ -1316,7 +1320,7 @@ async fn start(
                 "this installation is at a check concurrency ceiling ({} active in this \
                  namespace, {} in total, {} against this connection); the observation is queued \
                  and retried",
-                counts.namespace, counts.total, counts.per_connection
+                counts.workspace, counts.total, counts.per_connection
             ),
             now,
             TopicDiscoveryStatus {
@@ -1334,7 +1338,7 @@ async fn start(
     // STEP 4. The plan, then the Job. In that order, because a Job whose plan
     // `ConfigMap` does not exist sits in `ContainerCreating` until its deadline
     // and reports nothing useful.
-    let owner = owner_of(&discovery.name_any(), uid);
+    let owner = owner_of(discovery, uid);
     let document = plan_document(
         discovery,
         &resolved,
@@ -1764,7 +1768,7 @@ async fn commit(
         )
         .await;
     }
-    let owner = owner_of(&discovery.name_any(), uid);
+    let owner = owner_of(discovery, uid);
     let objects: Vec<ConfigMap> = split
         .iter()
         .map(|c| chunks::build_chunk(job_name, namespace, &owner, c, split.len()))
@@ -1962,14 +1966,8 @@ async fn terminal(
 /// drifts from the CRD leaves the garbage collector unable to resolve the
 /// owner, and the cascade silently does not happen.
 #[must_use]
-pub fn owner_of(name: &str, uid: &str) -> RunnerOwner {
-    use kube::Resource as _;
-    RunnerOwner {
-        api_version: TopicDiscovery::api_version(&()).to_string(),
-        kind: TopicDiscovery::kind(&()).to_string(),
-        name: name.to_string(),
-        uid: uid.to_string(),
-    }
+pub fn owner_of(discovery: &TopicDiscovery, uid: &str) -> RunnerOwner {
+    RunnerOwner::of(discovery, uid)
 }
 
 /// The runner container's start instant, from the pod this Job owns.
@@ -2046,6 +2044,11 @@ async fn reconcile(
     discovery: Arc<TopicDiscovery>,
     ctx: Arc<DiscoveryContext>,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, discovery.as_ref()).await? {
+        return Ok(action);
+    }
     let outcome = reconcile_discovery(&discovery, &ctx).await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
         outcome.requeue_seconds,
@@ -2105,29 +2108,17 @@ pub fn controller(
     runner_image: crate::job::RunnerImage,
     policy_ref: Option<(String, String)>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: the whole cluster unless
-    // `LOGWEIR_WATCH_NAMESPACES` names namespaces, and then an `Api::namespaced`
-    // watch each, the only shape the scoped chart's RoleBindings permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            runner_image.clone(),
-            policy_ref.clone(),
-            namespace,
-        )
-    })
+    controller_in(client.clone(), runner_image.clone(), policy_ref.clone())
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
     policy_ref: Option<(String, String)>,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<TopicDiscovery> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<TopicDiscovery> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(DiscoveryContext {
         client,
         runner_image,
@@ -2140,5 +2131,13 @@ fn controller_in(
             .run(reconcile, error_policy, ctx)
             .for_each(|_| std::future::ready(()))
             .await;
+    }
+}
+/// The objects a TopicDiscovery names, for the workspace gate (PROD-19.1).
+impl crate::workspace::Referrer for TopicDiscovery {
+    fn referents(&self) -> Vec<crate::workspace::Referent> {
+        vec![crate::workspace::Referent::Cluster(
+            crate::workspace::local(&self.spec.request.connection_ref),
+        )]
     }
 }

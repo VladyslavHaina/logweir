@@ -36,6 +36,8 @@ use weirkeeper::crds::trust_policy::{
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 
 const NS: &str = "logweir-p192";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const NAME: &str = "rst-policy-1";
 const UID: &str = "5c2e7b91-0000-4000-8000-00000000192a";
 const APPROVAL: &str = "a1";
@@ -95,12 +97,12 @@ fn now() -> DateTime<Utc> {
 }
 
 fn bind(policy: &str) -> ApprovalPolicySet {
-    ApprovalPolicySet::parse(&format!("{POLICY_DOC}namespaces:\n  {NS}: {policy}\n"))
+    ApprovalPolicySet::parse(&format!("{POLICY_DOC}workspaces:\n  {WS}: {policy}\n"))
         .expect("valid")
 }
 
 fn effective(policy: &str) -> EffectivePolicy {
-    bind(policy).resolve(NS)
+    bind(policy).resolve(WS)
 }
 
 fn plan_hash() -> String {
@@ -111,7 +113,7 @@ fn restore() -> Restore {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
-        "metadata": {"name": NAME, "namespace": NS, "uid": UID, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": NAME, "namespace": NS, "uid": UID, "generation": 1,
                      "resourceVersion": "4071"},
         "spec": {
             "planBytes": PLAN_BYTES,
@@ -131,7 +133,7 @@ fn cluster() -> KafkaCluster {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
-        "metadata": {"name": "scratch", "namespace": NS, "uid": "cccccccc-0000-4000-8000-0000000192cc"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "scratch", "namespace": NS, "uid": "cccccccc-0000-4000-8000-0000000192cc"},
         "spec": {"bootstrapServers": ["scratch-0.logweir-p192:9092"],
                  "auth": {"mode": "plaintext", "tls": false},
                  "role": "scratch", "markerTopic": "logweir.scratch"},
@@ -151,6 +153,7 @@ fn document(policy: &str, mode: ApprovalMode) -> RestoreAuthorization {
             api_version: "logweir.dev/v1alpha1".into(),
             kind: "Restore".into(),
             namespace: NS.into(),
+            workspace: WS.into(),
             name: NAME.into(),
             uid: UID.into(),
         },
@@ -183,7 +186,7 @@ fn v2_approval(doc: &RestoreAuthorization, provenance_policy: &str, matched: &st
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
-        "metadata": {"name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
         "spec": {
             "subjectRef": {"kind": "Restore", "name": NAME},
             "planHash": plan_hash(),
@@ -233,7 +236,7 @@ fn v1_approval() -> Approval {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
-        "metadata": {"name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
         "spec": {
             "subjectRef": {"kind": "Restore", "name": NAME},
             "planHash": plan_hash(),
@@ -341,14 +344,14 @@ fn an_ordinary_confirmation_never_admits_a_governed_namespace() {
 #[test]
 fn a_policy_changed_since_verification_admits_nothing() {
     let edited = ApprovalPolicySet::parse(&format!(
-        "{}namespaces:\n  {NS}: team-ordinary\n",
+        "{}workspaces:\n  {WS}: team-ordinary\n",
         POLICY_DOC.replace(
             "mode: Ordinary\n",
             "mode: Ordinary\n    maxAgeSeconds: 901\n"
         )
     ))
     .expect("valid")
-    .resolve(NS);
+    .resolve(WS);
     let admission = admit_with_policy(
         &restore(),
         parse_plan(&restore()).ok().as_ref(),
@@ -1088,7 +1091,7 @@ fn original_approval(
         mode,
         matched,
         typed,
-        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT,
+        RESTORE_AUTHORIZATION_FORMAT_VERSION,
     )
 }
 
@@ -1104,7 +1107,8 @@ fn original_approval_at(
     doc.subject.name = ORIGINAL_NAME.into();
     doc.subject.uid = ORIGINAL_UID.into();
     doc.plan_hash = sha256_prefixed(original_plan().as_bytes());
-    // The subject and the typed names are document format 2.1.0.
+    // The subject and the typed names are defined from format 2.1.0; this
+    // build writes 2.3.0.
     doc.format_version = format_version.into();
     doc.approval_subject = Some("originalName".into());
     doc.original_name_confirmation =
@@ -1200,7 +1204,13 @@ fn the_original_name_subject_under_format_2_0_0_is_refused_at_admission() {
         // CONTROL: the same document at its own version is admitted.
         assert_eq!(
             admit_original(
-                &original_approval_at(policy, mode, key, typed, "2.1.0"),
+                &original_approval_at(
+                    policy,
+                    mode,
+                    key,
+                    typed,
+                    RESTORE_AUTHORIZATION_FORMAT_VERSION
+                ),
                 policy
             ),
             RestoreAdmission::Ok,
@@ -1235,4 +1245,91 @@ fn a_governed_namespace_still_needs_the_second_person_for_an_original_name_resto
         ),
         RestoreAdmission::Ok
     );
+}
+
+// PROD-19.1: workspaces at Restore admission
+
+/// **A Restore runs under its OWN workspace, with an Approval of the same
+/// workspace whose signed document names it.**
+///
+/// * CONTROL: the `dev` confirmation admits the `dev` Restore.
+/// * An Approval labelled `prd` for the `dev` Restore: `ApprovalSubjectMismatch`
+///   naming both workspaces, terminal.
+/// * The Restore relabelled `prd` with an Approval relabelled `prd`: the signed
+///   document names `dev` (`AuthorizationSubjectMismatch`), so admission
+///   refuses it `ApprovalSubjectMismatch`, terminal.
+#[test]
+fn admission_holds_the_approval_and_its_document_to_the_restores_workspace() {
+    assert_eq!(
+        admit_under(&ordinary_approval(), "team-ordinary"),
+        RestoreAdmission::Ok
+    );
+    let in_prd = |labels: &mut Option<std::collections::BTreeMap<String, String>>| {
+        *labels = Some([(weirkeeper::workspace::LABEL.to_string(), "prd".to_string())].into());
+    };
+    let mut prd_approval = ordinary_approval();
+    in_prd(&mut prd_approval.metadata.labels);
+    let refused = admit_under(&prd_approval, "team-ordinary");
+    assert_eq!(refused.reason(), "ApprovalSubjectMismatch", "{refused:?}");
+    assert!(refused.is_terminal());
+    assert!(
+        format!("{refused}").contains("Approval `a1` is in workspace `prd`"),
+        "{refused}"
+    );
+
+    let mut prd_restore = restore();
+    in_prd(&mut prd_restore.metadata.labels);
+    let bound = bind("team-ordinary").resolve("prd");
+    // `prd` is unbound in this document: bind it to the same policy, so only
+    // the signed workspace differs.
+    let bound = match bound.bound() {
+        Some(_) => bound,
+        None => {
+            ApprovalPolicySet::parse(&format!("{POLICY_DOC}workspaces:\n  prd: team-ordinary\n"))
+                .expect("valid")
+                .resolve("prd")
+        }
+    };
+    let refused = admit_with_policy(
+        &prd_restore,
+        parse_plan(&prd_restore).ok().as_ref(),
+        Some(&prd_approval),
+        Some(&cluster()),
+        Some(&PolicyAdmission {
+            policy: &bound,
+            now: now(),
+        }),
+    );
+    assert_eq!(refused.reason(), "ApprovalSubjectMismatch", "{refused:?}");
+    assert!(refused.is_terminal());
+    assert!(
+        format!("{refused}").contains("names workspace dev"),
+        "{refused}"
+    );
+}
+
+/// **An unlabelled Restore resolves to nothing**: the reconcile refuses it
+/// `WorkspaceUnknown` before any binding is read, and creates nothing.
+#[tokio::test]
+async fn an_unlabelled_restore_is_refused_and_creates_nothing() {
+    let mut unlabelled = restore();
+    unlabelled.metadata.labels = None;
+    let approval = ordinary_approval();
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes(&approval));
+    let outcome = reconcile_restore_with_policy(
+        &unlabelled,
+        &client,
+        &unobserved_scorecard,
+        &weirkeeper::verification::unverified_evidence,
+        now(),
+        &weirkeeper::job::RunnerImage::default(),
+        &bind("team-ordinary"),
+    )
+    .await
+    .expect("an outcome");
+    assert_eq!(outcome.terminal_state.as_deref(), Some("WorkspaceUnknown"));
+    assert!(!outcome.created);
+    let bodies = bodies.lock().expect("recorder").clone();
+    assert!(posts(&bodies, "/configmaps").is_empty());
+    assert!(posts(&bodies, "/jobs").is_empty());
 }

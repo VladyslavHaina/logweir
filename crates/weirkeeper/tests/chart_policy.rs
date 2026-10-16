@@ -239,10 +239,10 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
     // Every field `validate()` bounds at >= 1 is bounded at >= 1 here too.
     let checks = &schema["properties"]["checks"]["properties"];
     for field in [
-        "maxActivePerNamespace",
+        "maxActivePerWorkspace",
         "maxActiveTotal",
         "maxActiveDiscoveriesPerConnection",
-        "maxEvidenceFetchActivePerNamespace",
+        "maxEvidenceFetchActivePerWorkspace",
     ] {
         assert_eq!(
             checks[field]["minimum"].as_u64(),
@@ -261,8 +261,8 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
     // schema must, and both are required (a half block is a refused document).
     let runs = &schema["properties"]["runs"];
     for field in [
-        "maxManualBackupsActivePerNamespace",
-        "maxManualRestoresActivePerNamespace",
+        "maxManualBackupsActivePerWorkspace",
+        "maxManualRestoresActivePerWorkspace",
     ] {
         assert_eq!(
             runs["properties"][field]["minimum"].as_u64(),
@@ -278,8 +278,8 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
         let mut zero: serde_json::Value = serde_json::json!({
             "version": 1,
             "runs": {
-                "maxManualBackupsActivePerNamespace": 4,
-                "maxManualRestoresActivePerNamespace": 2
+                "maxManualBackupsActivePerWorkspace": 4,
+                "maxManualRestoresActivePerWorkspace": 2
             }
         });
         zero["runs"][field] = serde_json::json!(0);
@@ -308,10 +308,10 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
         serde_json::json!({
             "version": 1,
             "checks": {
-                "maxActivePerNamespace": n(1, 4),
+                "maxActivePerWorkspace": n(1, 4),
                 "maxActiveTotal": n(1, 1_000_000),
                 "maxActiveDiscoveriesPerConnection": n(1, 1_000_000),
-                "maxEvidenceFetchActivePerNamespace": n(1, 1_000_000)
+                "maxEvidenceFetchActivePerWorkspace": n(1, 1_000_000)
             },
             "discovery": {
                 "freshSeconds": n(1, 1_000_000),
@@ -331,8 +331,8 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
             "legacyArchiveAddressing": {"endpoint": "", "region": "",
                                         "allowHttp": false, "virtualHostedStyle": false},
             "runs": {
-                "maxManualBackupsActivePerNamespace": n(1, 1_000_000),
-                "maxManualRestoresActivePerNamespace": n(1, 1_000_000)
+                "maxManualBackupsActivePerWorkspace": n(1, 1_000_000),
+                "maxManualRestoresActivePerWorkspace": n(1, 1_000_000)
             }
         })
     };
@@ -370,10 +370,10 @@ fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
 
     let mut inverted_pool = base.clone();
     inverted_pool["checks"]["maxActiveTotal"] = serde_json::json!(1);
-    inverted_pool["checks"]["maxActivePerNamespace"] = serde_json::json!(4);
+    inverted_pool["checks"]["maxActivePerWorkspace"] = serde_json::json!(4);
     assert!(
         policy::parse(inverted_pool.to_string().as_bytes()).is_err(),
-        "`maxActiveTotal` below `maxActivePerNamespace` must be refused; \
+        "`maxActiveTotal` below `maxActivePerWorkspace` must be refused; \
          templates/_validate.tpl fails the render for it"
     );
 
@@ -405,7 +405,7 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
         "templates/policy.yaml renders; its refusal is in templates/_validate.tpl"
     );
     let code = read("charts/logweir/templates/_validate.tpl");
-    let needle = "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace";
+    let needle = "checks.maxActiveTotal (%d) must be at least checks.maxActivePerWorkspace";
     assert_eq!(
         code.matches(needle).count(),
         1,
@@ -448,19 +448,19 @@ fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
     )
     .expect("YAML");
     assert_eq!(
-        values["runs"]["maxManualBackupsActivePerNamespace"].as_u64(),
-        Some(u64::from(defaults.max_manual_backups_active_per_namespace))
+        values["runs"]["maxManualBackupsActivePerWorkspace"].as_u64(),
+        Some(u64::from(defaults.max_manual_backups_active_per_workspace))
     );
     assert_eq!(
-        values["runs"]["maxManualRestoresActivePerNamespace"].as_u64(),
-        Some(u64::from(defaults.max_manual_restores_active_per_namespace))
+        values["runs"]["maxManualRestoresActivePerWorkspace"].as_u64(),
+        Some(u64::from(defaults.max_manual_restores_active_per_workspace))
     );
     let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
         .expect("the template");
     let guard = format!(
         "(ne $runsBackups {}) (ne $runsRestores {})",
-        defaults.max_manual_backups_active_per_namespace,
-        defaults.max_manual_restores_active_per_namespace
+        defaults.max_manual_backups_active_per_workspace,
+        defaults.max_manual_restores_active_per_workspace
     );
     assert!(
         template.contains(&guard),
@@ -705,12 +705,12 @@ struct Followed {
 /// from, every field the parser keeps, and every place a controller reads one.
 const FOLLOWED: &[Followed] = &[
     Followed {
-        value: "checks.maxActivePerNamespace",
-        field: "checks.maxActivePerNamespace",
-        access: &[".max_active_per_namespace"],
+        value: "checks.maxActivePerWorkspace",
+        field: "checks.maxActivePerWorkspace",
+        access: &[".max_active_per_workspace"],
         sites: Ok(&[Site {
             file: "check/limits.rs",
-            needle: "counts.namespace >= policy.max_active_per_namespace",
+            needle: "counts.namespace >= policy.max_active_per_workspace",
             proof: Ok((
                 "topic_discovery_controller.rs",
                 "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
@@ -741,14 +741,14 @@ const FOLLOWED: &[Followed] = &[
         }]),
     },
     Followed {
-        value: "checks.maxEvidenceFetchActivePerNamespace",
-        field: "checks.maxEvidenceFetchActivePerNamespace",
-        access: &[".max_evidence_fetch_active_per_namespace"],
+        value: "checks.maxEvidenceFetchActivePerWorkspace",
+        field: "checks.maxEvidenceFetchActivePerWorkspace",
+        access: &[".max_evidence_fetch_active_per_workspace"],
         sites: Ok(&[
             Site {
                 file: "check/limits.rs",
                 needle:
-                    "counts.evidence_namespace >= policy.max_evidence_fetch_active_per_namespace",
+                    "counts.evidence_namespace >= policy.max_evidence_fetch_active_per_workspace",
                 proof: Ok((
                     "check_framework.rs",
                     "every_check_ceiling_is_the_policys_own_at_a_non_default_value",
@@ -756,7 +756,7 @@ const FOLLOWED: &[Followed] = &[
             },
             Site {
                 file: "evidence_fetch.rs",
-                needle: "inputs.checks.max_evidence_fetch_active_per_namespace, inputs.attempt",
+                needle: "inputs.checks.max_evidence_fetch_active_per_workspace, inputs.attempt",
                 proof: Ok((
                     "configured_values.rs",
                     "the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its_caller",
@@ -892,12 +892,12 @@ const FOLLOWED: &[Followed] = &[
         }]),
     },
     Followed {
-        value: "runs.maxManualBackupsActivePerNamespace",
-        field: "runs.maxManualBackupsActivePerNamespace",
-        access: &[".max_manual_backups_active_per_namespace"],
+        value: "runs.maxManualBackupsActivePerWorkspace",
+        field: "runs.maxManualBackupsActivePerWorkspace",
+        access: &[".max_manual_backups_active_per_workspace"],
         sites: Ok(&[Site {
             file: "run_pool.rs",
-            needle: "PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace",
+            needle: "PoolKind::Backup => policy.runs.max_manual_backups_active_per_workspace",
             proof: Ok((
                 "configured_values.rs",
                 "the_installation_policys_manual_backup_ceiling_admits_the_sixth_run",
@@ -905,12 +905,12 @@ const FOLLOWED: &[Followed] = &[
         }]),
     },
     Followed {
-        value: "runs.maxManualRestoresActivePerNamespace",
-        field: "runs.maxManualRestoresActivePerNamespace",
-        access: &[".max_manual_restores_active_per_namespace"],
+        value: "runs.maxManualRestoresActivePerWorkspace",
+        field: "runs.maxManualRestoresActivePerWorkspace",
+        access: &[".max_manual_restores_active_per_workspace"],
         sites: Ok(&[Site {
             file: "run_pool.rs",
-            needle: "PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace",
+            needle: "PoolKind::Restore => policy.runs.max_manual_restores_active_per_workspace",
             proof: Ok((
                 "configured_values.rs",
                 "the_installation_policys_manual_restore_ceiling_admits_the_third_restore",
@@ -1022,8 +1022,8 @@ const FOLLOWED: &[Followed] = &[
 /// 2. `examples/tuned.values.yaml` sets every one OFF its default;
 /// 3. its committed render, through the REAL `check::policy::parse`, carries
 ///    each at that value in its own field (a swap of two values with equal
-///    defaults, `maxActivePerNamespace` and
-///    `maxEvidenceFetchActivePerNamespace` both 4, fails here, where the
+///    defaults, `maxActivePerWorkspace` and
+///    `maxEvidenceFetchActivePerWorkspace` both 4, fails here, where the
 ///    default renders could not tell);
 /// 4. EVERY place a controller reads the field is a listed site, and every
 ///    listed site is such a place: each site's needle occurs exactly once in

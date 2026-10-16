@@ -1379,6 +1379,7 @@ fn owner(restore: &Restore) -> crate::job::RunnerOwner {
         kind: Restore::kind(&()).to_string(),
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),
+        workspace: crate::workspace::label_of(restore).map(str::to_string),
     }
 }
 

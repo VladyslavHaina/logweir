@@ -3073,7 +3073,11 @@ async fn a_foreign_owner_plan_config_map_is_never_adopted() {
     });
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
     routes.push(Route {
         method: "POST",
@@ -3134,7 +3138,11 @@ async fn a_plan_refusal_after_the_pending_write_is_stored() {
     });
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(Route {
         method: "POST",
         path_suffix: "/configmaps",
@@ -4898,6 +4906,7 @@ fn the_check_pod_mirrors_the_execution_pod() {
         kind: "Preflight".to_string(),
         name: "pf-1".to_string(),
         uid: PF_UID.to_string(),
+        workspace: None,
     };
     let shape = weirkeeper::controllers::preflight::build_job_shape(
         &inputs,
@@ -5482,6 +5491,7 @@ fn rendered_backup_shape(rich: bool) -> weirkeeper::controllers::preflight::JobS
             kind: "Preflight".to_string(),
             name: "pf-1".to_string(),
             uid: PF_UID.to_string(),
+            workspace: None,
         },
         &weirkeeper::job::RunnerImage::default(),
     )
@@ -5522,6 +5532,7 @@ fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
             kind: "Preflight".to_string(),
             name: "pf-1".to_string(),
             uid: PF_UID.to_string(),
+            workspace: None,
         },
         &weirkeeper::job::RunnerImage::default(),
     )
@@ -5647,6 +5658,7 @@ fn owner() -> weirkeeper::job::RunnerOwner {
         kind: "Preflight".to_string(),
         name: "pf-1".to_string(),
         uid: PF_UID.to_string(),
+        workspace: None,
     }
 }
 
@@ -6494,7 +6506,11 @@ async fn a_destination_access_preflight_renders_the_evidence_write_principal_end
             object.to_string()
         }),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -7017,7 +7033,11 @@ async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
             rich_destination("primary").to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8052,7 +8072,11 @@ async fn a_legacy_point_readiness_check_creates_the_restore_jobs_own_read() {
     let mut routes = legacy_referent_routes();
     routes.extend([
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8438,7 +8462,11 @@ async fn a_preflights_own_budget_reaches_its_plan_and_its_job_deadline() {
             separated_destination("primary", evidence_secret_grant(), true).to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8495,7 +8523,11 @@ async fn a_preflights_own_skip_list_reaches_its_plan() {
     let job = job_name(CheckPlanKind::OperationReadiness);
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
     routes.push(route("POST", "/configmaps", echo("ConfigMap", "plan")));
     routes.push(route("POST", "/jobs", echo("Job", &job)));
@@ -9110,7 +9142,11 @@ async fn fx20c_a_thief_access_preflight_carries_its_grant_binding_end_to_end() {
             thief_destination().to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),

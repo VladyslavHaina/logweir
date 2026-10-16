@@ -270,7 +270,7 @@ evidence:
             r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "Restore",
-  "metadata": {{ "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 2,
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 2,
                   "resourceVersion": "4071" }},
   "spec": {{
     "planBytes": {plan},
@@ -312,7 +312,7 @@ evidence:
             r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "Approval",
-  "metadata": {{ "name": "{APPROVAL}", "namespace": "{NS}", "uid": "aaaaaaaa-0000-4000-8000-00000000000a" }},
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "{APPROVAL}", "namespace": "{NS}", "uid": "aaaaaaaa-0000-4000-8000-00000000000a" }},
   "spec": {{
     "subjectRef": {{ "kind": "Restore", "name": "{NAME}" }},
     "planHash": "{plan_hash}",
@@ -334,7 +334,7 @@ evidence:
             r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "KafkaCluster",
-  "metadata": {{ "name": "scratch", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "scratch", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
   "spec": {{
     "bootstrapServers": ["scratch-0.logweir-t20:9092"],
     "auth": {{ "mode": "plaintext", "tls": false }},
@@ -490,7 +490,7 @@ mod backup_fixture {
             r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "Backup",
-  "metadata": {{
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}},
     "name": "{NAME}",
     "namespace": "{NS}",
     "uid": "{UID}",
@@ -517,7 +517,7 @@ mod backup_fixture {
             r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "KafkaCluster",
-  "metadata": {{ "name": "prod", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "prod", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
   "spec": {{
     "bootstrapServers": ["broker-0.prod:9093", "broker-1.prod:9093"],
     "auth": {{ "mode": "scramSha512", "username": "logweir", "secretRef": {{ "name": "prod-sasl" }}, "tls": true }},

@@ -35,6 +35,7 @@ fn spec() -> RunnerJobSpec {
             kind: "Restore".to_string(),
             name: "logweir-restore-incident-4471".to_string(),
             uid: "4f1c8a5e-0000-4000-8000-0000000000a1".to_string(),
+            workspace: None,
         },
         args: ["restore", "run", "--spec", "/plan/restore.yaml"]
             .map(str::to_string)

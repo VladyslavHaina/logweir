@@ -38,36 +38,38 @@ use weirkeeper::crds::trust_policy::{
 use weirkeeper::testing::{mock_client_recording, Route};
 
 const NS: &str = "logweir-t16";
+/// The workspace every object, document and binding below is in.
+const WS: &str = "dev";
 const PLAN_BYTES: &str = "apiVersion: logweir.dev/v1alpha1\nkind: RestorePlan\ntopics:\n  - orders\nwindow_start: 2026-09-01T00:00:00Z\nwindow_end: 2026-09-02T00:00:00Z\n";
 const PLAN_HASH: &str = "sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091";
 const RESTORE_UID: &str = "restore-uid-1";
 
-const CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEATMlQktU/lSpsDha1ZlgAW5JtnXqOLAQgQAZI8IFBlRI=\n-----END PUBLIC KEY-----\n";
-const CONSOLE_KEY_ID: &str = "85551a95543b7e54ffd8a7ce17560f6f850c993b7a35e5ab23987f04c946ebd8";
-const BOB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEALdRlkK//9cPdrQEiKldQ80TZ6nvN/KwbaBVFyG2Xjq0=\n-----END PUBLIC KEY-----\n";
-const BOB_KEY_ID: &str = "74dd2b54804995b672352b96d7d3ab2a96704a5d0d0aa8abed0b8bae5d87d6af";
-const ALICE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwLTK/p5eg/WiGxgKGAlztjerEHGiFR8Fbd/6WSYv4BI=\n-----END PUBLIC KEY-----\n";
-const ALICE_KEY_ID: &str = "ce550e00f743e956380078ce7dfc27c9a8e19602c467725d051792ce260fc37b";
+const CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIZXcK3c1b60X4uojqT0oo/quFyOeMU7SsJScibvJt2k=\n-----END PUBLIC KEY-----\n";
+const CONSOLE_KEY_ID: &str = "04883eec3b0c3135e603aefb086b2de2cb7e5490fcc799beb3b7a9f0a612a8ec";
+const BOB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEATqccNtKuf3b9fkuWQ0QO/oHglkkeKx3TrLHnQlruyc0=\n-----END PUBLIC KEY-----\n";
+const BOB_KEY_ID: &str = "bbd9ef2ffed89d7c9290bc0a6913ac895ab197261d28c0f7fb76dc357c70b8d5";
+const ALICE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA1yDNwLsLZWgzQXMi9kZYv5G1zwBnUbZp/iATKw3aXiE=\n-----END PUBLIC KEY-----\n";
+const ALICE_KEY_ID: &str = "e721a376958c56cbc8aaccd7a37720ffda076ed50719007ce0df222a926dd99a";
 
-const ORDINARY_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
+const ORDINARY_DOC: &str = r#"{"formatVersion":"2.3.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","workspace":"dev","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
 const ORDINARY_CONSOLE_SIG: &str =
-    "GBZ9x6CrkCziVApvX5wZYpFqh9RFr61WATjPOIZ3LIxUpK6n5z9F3I+l2/iz1BOu+9FuSz+gGp6cCSkLBYejAA==";
+    "FFvHej1gw8cQOTmQHKIbOpZLd4FzcgYFiABbqXtW+NZJgOuROzEU8m1DqfmBGWa25iGKSFp0hUJQmzXT6RTMCg==";
 const ORDINARY_BOB_SIG: &str =
-    "yPutrFQGtzyTBp6nXQK4xrG8jxA9aobEYtNmVRxRj4U4JU6wXksNd1WYndXA29FarAZKQMVUn+i6On6a6l2dAg==";
-const GOVERNED_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z","ticket":"CHG-4711"}"#;
+    "aYakMK60WDBjWzYGENXWlhpoHwb5DHmfKQl0m4J0e1Ulbv0M+9Te/Px4VKU6CVd51P+8IsK9Y2L+GNevGeTsBQ==";
+const GOVERNED_DOC: &str = r#"{"formatVersion":"2.3.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","workspace":"dev","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z","ticket":"CHG-4711"}"#;
 const GOVERNED_CONSOLE_SIG: &str =
-    "ZC1ZnoTGVQsyl4dHbnDCvMnFzR5MDembbSuHSADoJUwfsv+KclBg9/rWSOJ7Nlp0A/GdQW72IsdXe906EILjBQ==";
+    "pGseygzES4dhR97C/Y/iisakD/u1UltkKYSskWxPWPDzDQhA89TKwtVM1hzap86GOsl+hM3ToKVaMm3zVduyAA==";
 const GOVERNED_BOB_SIG: &str =
-    "K+NjfkRjij4qCgxJrtwFso3SxSsulxUCMXA8oAIVw0ZdTibbkXBc1ptlwRBoVt0Gm02soIvrW8gsxgsPsr//Cw==";
+    "dBzy13NFgNbDHkt7TzIexOri2voZOLUiyfH4uglHJZkEcHVEftpBlZnFFj3Yg3ejLKdmLi1qt7Nz1jzBpG/2CA==";
 const GOVERNED_ALICE_SIG: &str =
-    "iP/fjpY83nqZbA3Ev+iEOJe1hR/V6GzpDUDXwM6WMzUUqFfm+JLe+VVhNT5C4ep7V58YevfYsvONAQAyB4JVCA==";
+    "eSZ38PMv+nqAgnmGmOqLjJm53Fq0OT0unCqGq5pKusp6XI4PwQLQ2vPC5nNkjJ0Lh++NWK48RKMJDu+2LjbTDA==";
 /// The governed document WITHOUT a change ticket, signed by the console and
 /// bob: D0 requires a ticket under Governed, so it never verifies.
-const GOVERNED_NO_TICKET_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z"}"#;
+const GOVERNED_NO_TICKET_DOC: &str = r#"{"formatVersion":"2.3.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","workspace":"dev","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z"}"#;
 const GOVERNED_NO_TICKET_CONSOLE_SIG: &str =
-    "Ps2BhsZsi204f15hN5SNe31B5dTUU5glSSHPvxJ9ciGqzn9U+2ALeil6dcPxlU6F0lcP5ItLAx7phH+KEUQ9Dg==";
+    "oaxG1LOxIVHwWW6O1or12mwj+35jCdWuhbcFGg2eUnjcOyTzjMZZbdTzC57c0GEZxvVLXxvq4mjUMJPLswt2Dg==";
 const GOVERNED_NO_TICKET_BOB_SIG: &str =
-    "NQGZ4cQe6X4lDslOqflTDgIGfj6N7bWJEEyKgHWbT1auqM9eUrsD9g/eAraZQ6vmGvy8ot3gMQ19RxhdkvirBA==";
+    "YsekMTR5wgbY0LXMojnY3GFea82MOc53Az/6uIVyD/p+oVTKsP02d4aCZERePX/awjqp6reeXNVMqO1OgtKjAA==";
 
 /// The two v1 constants from `approval_controller.rs`: a genuine v1 approval
 /// by a `GovernedApproval` key, for the rows that present one under a binding.
@@ -103,12 +105,12 @@ fn now() -> DateTime<Utc> {
 }
 
 fn bind(policy: &str) -> ApprovalPolicySet {
-    ApprovalPolicySet::parse(&format!("{POLICY_DOC}namespaces:\n  {NS}: {policy}\n"))
+    ApprovalPolicySet::parse(&format!("{POLICY_DOC}workspaces:\n  {WS}: {policy}\n"))
         .expect("the fixture document validates")
 }
 
 fn policy(name: &str) -> ApprovalPolicy {
-    bind(name).resolve(NS).bound().cloned().expect("bound")
+    bind(name).resolve(WS).bound().cloned().expect("bound")
 }
 
 fn key(key_id: &str, pem: &str, usage: SpecUsage, principal: &str) -> SpecKey {
@@ -191,6 +193,7 @@ fn expected() -> ExpectedSubject {
     ExpectedSubject {
         kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace: NS.to_string(),
+        workspace: WS.to_string(),
         name: "r1".to_string(),
         uid: RESTORE_UID.to_string(),
         plan_hash: PLAN_HASH.to_string(),
@@ -659,11 +662,11 @@ fn an_ordinary_confirmation_in_a_governed_namespace_is_refused() {
 #[test]
 fn an_edited_policy_invalidates_documents_issued_under_the_old_one() {
     let edited = ApprovalPolicySet::parse(&format!(
-        "{}namespaces:\n  {NS}: team-ordinary\n",
+        "{}workspaces:\n  {WS}: team-ordinary\n",
         POLICY_DOC.replace("maxAgeSeconds: 900", "maxAgeSeconds: 901")
     ))
     .expect("valid");
-    let edited = edited.resolve(NS).bound().cloned().expect("bound");
+    let edited = edited.resolve(WS).bound().cloned().expect("bound");
     assert_eq!(edited.mode, ApprovalMode::Ordinary);
     let refused = approval::evaluate_authorization_v2(
         ORDINARY_DOC.as_bytes(),
@@ -705,6 +708,7 @@ fn approval_object(doc: &str, sidecar_bytes: &str) -> Approval {
             name: Some("a1".to_string()),
             namespace: Some(NS.to_string()),
             uid: Some(APPROVAL_UID.to_string()),
+            labels: Some([(weirkeeper::workspace::LABEL.to_string(), WS.to_string())].into()),
             creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(at(
                 "2026-09-09T12:55:30Z",
             ))),
@@ -729,7 +733,8 @@ fn restore_body() -> String {
     let plan = PLAN_BYTES.replace('\n', "\\n");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore",
-             "metadata":{{"name":"r1","namespace":"{NS}","uid":"{RESTORE_UID}"}},
+             "metadata":{{"name":"r1","namespace":"{NS}","uid":"{RESTORE_UID}",
+                          "labels":{{"logweir.dev/workspace":"{WS}"}}}},
              "spec":{{"planBytes":"{plan}","approvalRef":{{"name":"a1"}},
                       "sourceArchive":{{"url":"s3://archive/logweir"}},
                       "backupSetRef":"bk-1","pointInTime":"2026-09-02T00:00:00Z",
@@ -1323,15 +1328,15 @@ async fn f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding(
 // `sw1`, signed OUT OF TREE (like every signature in this file) by a throwaway
 // console key whose private half existed only in one Python process.
 
-const SW_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwyqzp8JnkBieEE+pt0xiQ7A6ChsFGZSOF/76JevFGLw=\n-----END PUBLIC KEY-----\n";
-const SW_CONSOLE_KEY_ID: &str = "df85a30a947cad52737d3caf024bb70560f1601979c12653cba1f0a3195a2b3a";
+const SW_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAabI9+8QP1IMvQKKrTwBT6SRLTXYgPkswOtn3eIrnWy4=\n-----END PUBLIC KEY-----\n";
+const SW_CONSOLE_KEY_ID: &str = "4ba511c82af47f50de68e9d3d14e23866d44adc9869a6bacf16e5c2d6353f1fc";
 const SW_PLAN_BYTES: &str = "format_version: 1.0.0\ngroups: []\n";
 const SW_PLAN_HASH: &str =
     "sha256:92815250faf085e1ad1affc5b43fbd918b5c4620e4783165fdaeee08a26c4ec1";
 const SW_UID: &str = "switchover-uid-1";
-const SW_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Switchover","namespace":"logweir-t16","name":"sw1","uid":"switchover-uid-1"},"planHash":"sha256:92815250faf085e1ad1affc5b43fbd918b5c4620e4783165fdaeee08a26c4ec1","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
+const SW_DOC: &str = r#"{"formatVersion":"2.3.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Switchover","namespace":"logweir-t16","workspace":"dev","name":"sw1","uid":"switchover-uid-1"},"planHash":"sha256:92815250faf085e1ad1affc5b43fbd918b5c4620e4783165fdaeee08a26c4ec1","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
 const SW_CONSOLE_SIG: &str =
-    "toFaoqI/g6jwC3zTC9FDZUxS6wTHkd+1LhHfL1t881EVshN9iOSj97zBD9xCsRiZuL1zdjgrkm1Dkjzgc2BQAQ==";
+    "4Am/ufztNX1uV6Tos5Fq9r3j9JEnZJ4jvQjh3ORxcuygTLbtiCfpafB4TRSO9SHJxf33QLD6+lGtMwm2wvvcDg==";
 
 fn sw_console() -> SpecKey {
     key(
@@ -1360,7 +1365,8 @@ fn sw_approval() -> Approval {
 fn switchover_body_of(uid: &str, status: serde_json::Value) -> String {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
-        "metadata": {"name": "sw1", "namespace": NS, "uid": uid},
+        "metadata": {"name": "sw1", "namespace": NS, "uid": uid,
+                     "labels": {"logweir.dev/workspace": WS}},
         "spec": {
             "planBytes": SW_PLAN_BYTES, "approvalRef": {"name": "a1"},
             "restoreRef": {"name": "r1", "uid": RESTORE_UID}, "deadlineSeconds": 600
@@ -2321,15 +2327,15 @@ async fn a_compromise_recorded_on_another_policy_reaches_a_consumed_record() {
 
 /// A second throwaway console key (out of tree, as above): the one a fresh
 /// install's identity hook generated. Only the public half is here.
-const FRESH_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAdt8QWZnc1BhjblUIQQuFcRWp68erPX9LV/hnz7YH+Fs=\n-----END PUBLIC KEY-----\n";
+const FRESH_CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcbm+JLupiSPDY8hRQPXZnH5hsF7m3NqzIsBDKG8AKOU=\n-----END PUBLIC KEY-----\n";
 const FRESH_CONSOLE_KEY_ID: &str =
-    "3eb8b1879357fa22413cfe29a44189afef27e2e446d9783ef768a36d8c3cfb8d";
+    "7b5d42baa3a36c7606159702a4031a9af33687aa41d3b297f559c7e3ad592b56";
 /// The localAdmin console's one-click confirmation of an UNBOUND namespace on
 /// a fresh install: policy `default-confirm-v1`, requester the local
 /// administrator.
-const DEFAULT_CONFIRM_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"urn:logweir:local-admin","subject":"admin"},"policy":{"name":"default-confirm-v1","digest":"sha256:2f9f510607e57e08eec6e5169480d22389665c3822fa5d97751ef1b29b6d9e39"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
+const DEFAULT_CONFIRM_DOC: &str = r#"{"formatVersion":"2.3.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","workspace":"dev","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"urn:logweir:local-admin","subject":"admin"},"policy":{"name":"default-confirm-v1","digest":"sha256:2f9f510607e57e08eec6e5169480d22389665c3822fa5d97751ef1b29b6d9e39"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
 const DEFAULT_CONFIRM_SIG: &str =
-    "x4EaXcWLyj/zlvBlDPLGjMrPZdIsv1NJy9z0oXZGR1OOWHX6e4GwMd6kG/CgvtOt+FDIJtx95t2r28pT/6q4DA==";
+    "stHuZEpm/NaYaxypxXoDekEmzXMsNtOcnPUueYjz+CITb1CKkIg8i80KTHJ8mbdVOh+fsfNrXaaag9FhGOvaDA==";
 
 fn fresh_console() -> SpecKey {
     key(
@@ -2419,4 +2425,91 @@ async fn the_fresh_console_key_must_be_trusted_for_confirmation() {
         .await
         .expect("a verdict");
     assert!(!outcome.is_verified(), "{outcome:?}");
+}
+
+// PROD-19.1: workspaces at the Approval controller
+
+/// The decision with the Restore `r1` labelled `restore_ws` (`None`: no label).
+async fn decide_in(
+    approval: &Approval,
+    policies: &ApprovalPolicySet,
+    restore_ws: Option<&str>,
+) -> ApprovalOutcome {
+    let label = |ws: &str| format!(r#""labels":{{"logweir.dev/workspace":"{ws}"}}"#);
+    let body = match restore_ws {
+        Some(ws) => restore_body().replace(&label(WS), &label(ws)),
+        None => restore_body().replace(&label(WS), r#""labels":{}"#),
+    };
+    let table: Vec<Route> = routes(vec![console(), bob(), v1_approver()])
+        .into_iter()
+        .map(|mut route| {
+            if route.path_suffix == "/restores/r1" {
+                route.body = body.clone();
+            }
+            route
+        })
+        .collect();
+    let (client, _recorder) = mock_client_recording(table);
+    approval::decide_with_policy_at(approval, &client, policies, now())
+        .await
+        .expect("a verdict")
+}
+
+/// **An approval is judged in its SUBJECT's workspace, and never another.**
+/// `dev` is one-person and `prd` is two-person, under one installation
+/// document.
+///
+/// * CONTROL: the `dev` confirmation of the `dev` restore verifies under
+///   `dev`'s binding.
+/// * The same Approval naming a `prd` restore: `WorkspaceMismatch`, nothing
+///   judged; `dev`'s mode never reaches `prd`.
+/// * An unlabelled Approval: `WorkspaceUnknown`, never "whatever `""`
+///   resolves to".
+/// * The Approval relabelled `prd` (its subject still `dev`): `WorkspaceMismatch`
+///   — relabelling the Approval does not change the mode applied.
+/// * Both relabelled `prd`: the signed document still names `dev`, so it is
+///   `AuthorizationSubjectMismatch`.
+#[tokio::test]
+async fn an_approval_is_judged_in_its_subjects_workspace_and_never_another() {
+    let policies = ApprovalPolicySet::parse(&format!(
+        "{POLICY_DOC}workspaces:\n  {WS}: team-ordinary\n  prd: prod-governed\n"
+    ))
+    .expect("the document validates");
+    let sig = sidecar(V2_PAYLOAD, &[(CONSOLE_KEY_ID, ORDINARY_CONSOLE_SIG)]);
+    let dev = approval_object(ORDINARY_DOC, &sig);
+    let outcome = decide_in(&dev, &policies, Some(WS)).await;
+    assert!(outcome.is_verified(), "CONTROL: {outcome:?}");
+
+    let outcome = decide_in(&dev, &policies, Some("prd")).await;
+    assert_eq!(outcome_reason(&outcome), "WorkspaceMismatch", "{outcome:?}");
+    assert!(
+        outcome
+            .message()
+            .contains("Restore `r1` is in workspace `prd`; this Approval is in workspace `dev`"),
+        "{}",
+        outcome.message()
+    );
+
+    let mut unlabelled = dev.clone();
+    unlabelled.metadata.labels = None;
+    let outcome = decide_in(&unlabelled, &policies, Some(WS)).await;
+    assert_eq!(outcome_reason(&outcome), "WorkspaceUnknown", "{outcome:?}");
+
+    let mut relabelled = dev.clone();
+    relabelled.metadata.labels =
+        Some([(weirkeeper::workspace::LABEL.to_string(), "prd".to_string())].into());
+    let outcome = decide_in(&relabelled, &policies, Some(WS)).await;
+    assert_eq!(outcome_reason(&outcome), "WorkspaceMismatch", "{outcome:?}");
+
+    let outcome = decide_in(&relabelled, &policies, Some("prd")).await;
+    assert_eq!(
+        outcome_reason(&outcome),
+        "AuthorizationSubjectMismatch",
+        "{outcome:?}"
+    );
+    assert!(
+        outcome.message().contains("names workspace dev"),
+        "{}",
+        outcome.message()
+    );
 }

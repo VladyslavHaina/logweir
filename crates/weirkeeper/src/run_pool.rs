@@ -1,5 +1,5 @@
 //! The manual-run pool: how many "Back up now" and manual-restore runner Jobs
-//! one namespace may have active at once, and the order the rest wait in.
+//! one workspace may have active at once, and the order the rest wait in.
 //!
 //! Manual runs stay outside a schedule's `concurrencyPolicy` on purpose (D1
 //! §8.3: "Back up now" must work while the nightly run is going), and nothing
@@ -11,7 +11,7 @@
 //! # The rule, in one sentence
 //!
 //! A manual run about to create its first object is admitted when the runs of
-//! its kind holding a slot in its namespace (by their own status,
+//! its kind holding a slot in its workspace (by their own status,
 //! [`Standing::Occupying`], plus this process's not-yet-reflected admissions,
 //! [`Reservations`]) plus the older runs still waiting are below the ceiling;
 //! otherwise it is queued and nothing is created for it.
@@ -85,9 +85,9 @@ use crate::crds::restore::Restore;
 use crate::crds::Condition;
 
 /// The installation-policy field a `Backup` is queued behind.
-pub const BACKUP_LIMIT_FIELD: &str = "runs.maxManualBackupsActivePerNamespace";
+pub const BACKUP_LIMIT_FIELD: &str = "runs.maxManualBackupsActivePerWorkspace";
 /// The installation-policy field a `Restore` is queued behind.
-pub const RESTORE_LIMIT_FIELD: &str = "runs.maxManualRestoresActivePerNamespace";
+pub const RESTORE_LIMIT_FIELD: &str = "runs.maxManualRestoresActivePerWorkspace";
 
 /// `phase: Refused`, terminal as everywhere else in the controller.
 pub const PHASE_REFUSED: &str = "Refused";
@@ -110,7 +110,7 @@ pub enum PoolKind {
     Restore,
 }
 
-/// Where one run stands, as far as its namespace's pool is concerned.
+/// Where one run stands, as far as its workspace's pool is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// Holds a slot: admitted, and its Job exists or is being created.
@@ -155,7 +155,7 @@ impl QueueKey {
 pub enum Decision {
     /// Create what the run needs, now. The candidate is RESERVED.
     Admit {
-        /// Runs of this kind holding a slot in the namespace (by status or by
+        /// Runs of this kind holding a slot in the workspace (by status or by
         /// reservation), not counting the candidate.
         active: u32,
         /// Older runs still waiting.
@@ -165,7 +165,7 @@ pub enum Decision {
     },
     /// Create nothing; record `phase: Queued` and look again later.
     Queued {
-        /// Runs of this kind holding a slot in the namespace.
+        /// Runs of this kind holding a slot in the workspace.
         active: u32,
         /// Older runs still waiting.
         ahead: u32,
@@ -244,7 +244,7 @@ fn standing_of_phase(phase: Option<&str>) -> Standing {
     }
 }
 
-/// Where one `Backup` stands in its namespace's manual-backup pool.
+/// Where one `Backup` stands in its workspace's manual-backup pool.
 #[must_use]
 pub fn backup_standing(backup: &Backup) -> Standing {
     if !is_manual_backup(backup) {
@@ -266,7 +266,7 @@ pub fn backup_standing(backup: &Backup) -> Standing {
     standing_of_phase(phase)
 }
 
-/// Where one `Restore` stands in its namespace's manual-restore pool.
+/// Where one `Restore` stands in its workspace's manual-restore pool.
 #[must_use]
 pub fn restore_standing(restore: &Restore) -> Standing {
     if !is_manual_restore(restore) {
@@ -315,7 +315,7 @@ pub fn restore_gated(restore: &Restore) -> bool {
 #[derive(Clone, Debug)]
 struct Reservation {
     kind: PoolKind,
-    namespace: String,
+    workspace: String,
     at: DateTime<Utc>,
 }
 
@@ -335,7 +335,7 @@ impl Reservations {
     }
 
     /// The ONE registry the running controller uses, shared by the `Backup`
-    /// and `Restore` reconcilers and by every per-namespace copy of each.
+    /// and `Restore` reconcilers.
     #[must_use]
     pub fn global() -> &'static Reservations {
         static GLOBAL: std::sync::OnceLock<Reservations> = std::sync::OnceLock::new();
@@ -388,15 +388,18 @@ impl Reservations {
             .iter()
             .filter_map(|p| p.meta().uid.as_deref().map(|u| (u, p.as_ref())))
             .collect();
-        let namespace = candidate.meta().namespace.clone().unwrap_or_default();
+        // The pool is the workspace (PROD-19.1 §3): two restores in `dev` do
+        // not queue one in `prd`.
+        let workspace = crate::workspace::label_of(candidate)
+            .unwrap_or_default()
+            .to_string();
         // Forget what the snapshot has caught up with, in this kind and
-        // namespace only (a scoped controller runs one store per namespace),
-        // and, everywhere, whatever is older than the TTL.
+        // workspace only, and, everywhere, whatever is older than the TTL.
         held.retain(|uid, r| {
             if (now - r.at).num_seconds() > RESERVATION_TTL_SECONDS {
                 return false;
             }
-            if r.kind != kind || r.namespace != namespace {
+            if r.kind != kind || r.workspace != workspace {
                 return true;
             }
             match by_uid.get(uid.as_str()) {
@@ -413,12 +416,14 @@ impl Reservations {
         for peer in &peers {
             let meta = peer.meta();
             let peer_uid = meta.uid.as_deref().unwrap_or_default();
-            if meta.namespace.as_deref().unwrap_or_default() != namespace || peer_uid == uid {
+            if crate::workspace::label_of(peer.as_ref()).unwrap_or_default() != workspace
+                || peer_uid == uid
+            {
                 continue;
             }
             let reserved = held
                 .get(peer_uid)
-                .is_some_and(|r| r.kind == kind && r.namespace == namespace);
+                .is_some_and(|r| r.kind == kind && r.workspace == workspace);
             match standing(peer) {
                 Standing::Occupying => active = active.saturating_add(1),
                 Standing::Finished => {}
@@ -437,7 +442,7 @@ impl Reservations {
                 uid,
                 Reservation {
                     kind,
-                    namespace,
+                    workspace,
                     at: now,
                 },
             );
@@ -467,19 +472,21 @@ impl Reservations {
         let Ok(held) = self.held.lock() else {
             return 0;
         };
-        let namespace = candidate.meta().namespace.as_deref().unwrap_or_default();
+        let workspace = crate::workspace::label_of(candidate).unwrap_or_default();
         let uid = candidate.meta().uid.as_deref().unwrap_or_default();
         let key = QueueKey::of(candidate);
         let mut n = 0_u32;
         for peer in peers {
             let meta = peer.meta();
             let peer_uid = meta.uid.as_deref().unwrap_or_default();
-            if meta.namespace.as_deref().unwrap_or_default() != namespace || peer_uid == uid {
+            if crate::workspace::label_of(peer.as_ref()).unwrap_or_default() != workspace
+                || peer_uid == uid
+            {
                 continue;
             }
             let reserved = held
                 .get(peer_uid)
-                .is_some_and(|r| r.kind == kind && r.namespace == namespace);
+                .is_some_and(|r| r.kind == kind && r.workspace == workspace);
             let counts = match standing(peer) {
                 Standing::Occupying => true,
                 Standing::Finished => false,
@@ -537,8 +544,8 @@ where
 #[must_use]
 pub fn ceiling(kind: PoolKind, policy: &crate::check::policy::Policy) -> u32 {
     match kind {
-        PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace,
-        PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace,
+        PoolKind::Backup => policy.runs.max_manual_backups_active_per_workspace,
+        PoolKind::Restore => policy.runs.max_manual_restores_active_per_workspace,
     }
 }
 
@@ -581,9 +588,9 @@ pub fn was_queued(phase: Option<&str>, has_queue: bool, admitted_reason: Option<
 /// the count or the position, which move every time a run finishes and would
 /// cost a status write per queued run per finished run.
 #[must_use]
-pub fn queued_message(kind: &str, namespace: &str, limit: u32, field: &str) -> String {
+pub fn queued_message(kind: &str, workspace: &str, limit: u32, field: &str) -> String {
     format!(
-        "this manual {kind} is queued: namespace {namespace} already has {limit} manual \
+        "this manual {kind} is queued: workspace {workspace} already has {limit} manual \
          {kind}(s) active or ahead of it in line, the ceiling `{field}` in the installation \
          policy sets. Nothing has been created for it yet — no plan, no Job, no execution claim \
          — and it starts in creation order when a slot frees"
@@ -592,9 +599,9 @@ pub fn queued_message(kind: &str, namespace: &str, limit: u32, field: &str) -> S
 
 /// The `Admitted=True` message the admission record carries.
 #[must_use]
-pub fn admitted_message(kind: &str, namespace: &str, limit: u32, field: &str) -> String {
+pub fn admitted_message(kind: &str, workspace: &str, limit: u32, field: &str) -> String {
     format!(
-        "admitted to namespace {namespace}'s manual {kind} pool (`{field}` = {limit}); this run \
+        "admitted to workspace {workspace}'s manual {kind} pool (`{field}` = {limit}); this run \
          holds a slot from now until it finishes"
     )
 }

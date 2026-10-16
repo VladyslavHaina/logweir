@@ -44,6 +44,8 @@ use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Recorder, 
 // Fixtures
 
 const NS: &str = "logweir-d2-w8";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const NAME: &str = "td-orders";
 /// The subject UID. The Job name below is `sha256(this)`'s first 20 hex
 /// characters, and `the_job_name_is_a_pure_function_of_this_objects_uid` holds
@@ -99,7 +101,7 @@ fn discovery(status: Value, extra_request: Value) -> TopicDiscovery {
     }
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "TopicDiscovery",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": NAME, "namespace": NS, "uid": UID,
             "generation": 1, "resourceVersion": "4242",
             "creationTimestamp": "2026-09-16T11:58:00Z"
@@ -138,7 +140,7 @@ fn running() -> TopicDiscovery {
 fn cluster_body() -> String {
     serde_json::to_string(&json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": "source", "namespace": NS, "uid": CLUSTER_UID, "generation": 1,
             "resourceVersion": "7", "creationTimestamp": "2026-09-16T10:00:00Z"
         },
@@ -649,7 +651,7 @@ async fn a_missing_connection_is_terminal_and_says_the_request_cannot_be_repoint
 async fn a_connection_the_resolver_refuses_is_terminal_with_connection_invalid() {
     let broken = serde_json::to_string(&json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "source", "namespace": NS, "uid": CLUSTER_UID,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "source", "namespace": NS, "uid": CLUSTER_UID,
                      "generation": 1, "resourceVersion": "7"},
         // SCRAM with no secretRef: the credential cannot be rendered.
         "spec": {"bootstrapServers": ["kafka-source:9092"], "role": "source",
@@ -849,8 +851,8 @@ fn active_run_discovery() -> Value {
     })
 }
 
-/// An ACTIVE interactive check in this namespace that names no connection: it
-/// spends the namespace and installation pools and nothing else.
+/// An ACTIVE interactive check in this workspace that names no connection: it
+/// spends the workspace and installation pools and nothing else.
 fn active_interactive_check() -> Value {
     json!({
         "apiVersion": "batch/v1", "kind": "Job",
@@ -860,7 +862,8 @@ fn active_interactive_check() -> Value {
             "creationTimestamp": "2026-09-16T11:58:00Z",
             "labels": {
                 "app.kubernetes.io/component": "check",
-                "logweir.dev/check-kind": "operationReadiness"
+                "logweir.dev/check-kind": "operationReadiness",
+                "logweir.dev/workspace": WS
             }
         },
         "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
@@ -885,16 +888,16 @@ fn planned_max_topics(bodies: &BodyRecorder) -> u32 {
 
 /// **The installation policy's check ceilings and topic ceiling reach discovery
 /// admission and the plan, at the chart's tuned values**
-/// (`maxActiveDiscoveriesPerConnection: 3`, `maxActivePerNamespace: 1`,
+/// (`maxActiveDiscoveriesPerConnection: 3`, `maxActivePerWorkspace: 1`,
 /// `hardMaxTopics: 100`).
 ///
 /// * Beside ONE active discovery of this connection, a request is ADMITTED
 ///   (three may run) and its plan is cut at 100 topics, although it asked for
 ///   20 000. CONTROL: the same objects under the compiled-in defaults
 ///   (`1` per connection) are QUEUED.
-/// * Beside ONE active interactive check in this namespace, a request is
+/// * Beside ONE active interactive check in this workspace, a request is
 ///   QUEUED, `ConcurrencyLimited`, with nothing created. CONTROL: under the
-///   defaults (`4` per namespace) it is admitted.
+///   defaults (`4` per workspace) it is admitted.
 ///
 /// MUTANTS: pass `&ChecksPolicy::default()` to `limits::admit` at
 /// `controllers/topic_discovery.rs`, or
@@ -1766,7 +1769,7 @@ fn listed(
     }
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "TopicDiscovery",
-        "metadata": {"name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
         "spec": {"request": {"connectionRef": {"name": "source"}, "maxTopics": 20000,
                              "timeoutSeconds": 60}},
         "status": status
@@ -2143,7 +2146,7 @@ async fn a_running_pass_never_writes_a_result_and_never_writes_a_chunk() {
 async fn a_re_run_projects_the_secret_the_connection_resolves_to_now() {
     let rotated = serde_json::to_string(&json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "source", "namespace": NS, "uid": CLUSTER_UID,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "source", "namespace": NS, "uid": CLUSTER_UID,
                      "generation": 4, "resourceVersion": "9"},
         "spec": {"bootstrapServers": ["kafka-source:9092"], "role": "source",
                  "auth": {"mode": "scramSha512", "username": "backup-v2", "tls": false,

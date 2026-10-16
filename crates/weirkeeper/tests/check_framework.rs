@@ -74,6 +74,7 @@ fn owner() -> RunnerOwner {
         kind: "TopicDiscovery".to_string(),
         name: "orders-discovery".to_string(),
         uid: SUBJECT_UID.to_string(),
+        workspace: None,
     }
 }
 
@@ -1100,8 +1101,8 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
 // The policy ConfigMap
 
 const GOOD_POLICY: &str = r#"{"version":1,
- "checks":{"maxActivePerNamespace":4,"maxActiveTotal":20,
-           "maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerNamespace":4},
+ "checks":{"maxActivePerWorkspace":4,"maxActiveTotal":20,
+           "maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerWorkspace":4},
  "discovery":{"freshSeconds":900,"retentionSeconds":86400,"keepPerConnection":5,
               "defaultMaxTopics":20000,"hardMaxTopics":50000,
               "visibilityAttestations":[
@@ -1156,7 +1157,7 @@ async fn an_absent_policy_is_the_documented_defaults_and_is_ready() {
     assert!(matches!(load, policy::PolicyLoad::Defaulted(_)));
     assert_eq!(load.code(), CheckCode::PolicyLoaded);
     let p = load.policy();
-    assert_eq!(p.checks.max_active_per_namespace, 4);
+    assert_eq!(p.checks.max_active_per_workspace, 4);
     assert_eq!(p.checks.max_active_total, 20);
     assert_eq!(p.discovery.hard_max_topics, 50_000);
     assert_eq!(p.discovery.keep_per_connection, 5);
@@ -1238,8 +1239,8 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
             "a version this build does not understand",
         ),
         (
-            r#"{"version":1,"checks":{"maxActivePerNamespace":0,"maxActiveTotal":20,
-                "maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerNamespace":4}}"#,
+            r#"{"version":1,"checks":{"maxActivePerWorkspace":0,"maxActiveTotal":20,
+                "maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerWorkspace":4}}"#,
             "a limit of zero would queue every check forever",
         ),
         (
@@ -1268,7 +1269,7 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
             "`{why}` did not fail closed"
         );
         // The limits still have their defaults, so checks keep running.
-        assert_eq!(p.checks.max_active_per_namespace, 4, "{why}");
+        assert_eq!(p.checks.max_active_per_workspace, 4, "{why}");
     }
 
     // A ConfigMap that exists with the WRONG KEY is malformed, not absent: an
@@ -1435,15 +1436,15 @@ fn the_withdrawn_fields_are_accepted_at_any_u32_or_absent_and_read_by_nothing() 
 fn the_default_policy_serialises_exactly_as_before_the_withdrawal() {
     let expected = concat!(
         r#"{"version":1,"#,
-        r#""checks":{"maxActivePerNamespace":4,"maxActiveTotal":20,"#,
-        r#""maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerNamespace":4},"#,
+        r#""checks":{"maxActivePerWorkspace":4,"maxActiveTotal":20,"#,
+        r#""maxActiveDiscoveriesPerConnection":1,"maxEvidenceFetchActivePerWorkspace":4},"#,
         r#""discovery":{"freshSeconds":900,"retentionSeconds":86400,"keepPerConnection":5,"#,
         r#""defaultMaxTopics":20000,"hardMaxTopics":50000,"visibilityAttestations":[]},"#,
         r#""preflight":{"defaultTimeoutSeconds":120,"retentionSeconds":3600},"#,
         r#""engine":{"allowUnverifiedCustomCa":false},"#,
         r#""evidence":{"controllerIdentityLocations":[]},"#,
         r#""legacyArchiveAddressing":{"endpoint":"","region":"","allowHttp":false,"virtualHostedStyle":false},"#,
-        r#""runs":{"maxManualBackupsActivePerNamespace":4,"maxManualRestoresActivePerNamespace":2}}"#,
+        r#""runs":{"maxManualBackupsActivePerWorkspace":4,"maxManualRestoresActivePerWorkspace":2}}"#,
     );
     let actual = serde_json::to_string(&policy::Policy::defaults()).expect("serialises");
     assert_eq!(actual, expected);
@@ -2049,8 +2050,11 @@ async fn every_chunk_is_written_before_the_caller_can_commit() {
 
 // Concurrency limits
 
-fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished: bool) -> Job {
+/// A check Job in `workspace` (its `logweir.dev/workspace` label; every Job
+/// lives in the one install namespace).
+fn labelled_job(workspace: &str, kind: &str, connection: Option<&str>, finished: bool) -> Job {
     let mut labels = serde_json::Map::new();
+    labels.insert("logweir.dev/workspace".to_string(), json!(workspace));
     labels.insert("app.kubernetes.io/component".to_string(), json!("check"));
     labels.insert("logweir.dev/check-kind".to_string(), json!(kind));
     if let Some(c) = connection {
@@ -2064,8 +2068,8 @@ fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished:
     };
     serde_json::from_value(json!({
         "apiVersion":"batch/v1","kind":"Job",
-        "metadata":{"name":format!("lwc-{kind}-{namespace}-{finished}"),
-                    "namespace":namespace,"labels":Value::Object(labels)},
+        "metadata":{"name":format!("lwc-{kind}-{workspace}-{finished}"),
+                    "namespace":NS,"labels":Value::Object(labels)},
         "spec":{"template":{"spec":{"containers":[],"restartPolicy":"Never"}}},
         "status":status
     }))
@@ -2109,9 +2113,9 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
         Some(CONNECTION_UID),
     );
     assert_eq!(counts.per_connection, 1, "it spends the broker's budget");
-    assert_eq!(counts.namespace, 0, "and not the namespace pool");
+    assert_eq!(counts.workspace, 0, "and not the namespace pool");
     assert_eq!(counts.total, 0, "and not the installation pool");
-    assert_eq!(counts.evidence_namespace, 0);
+    assert_eq!(counts.evidence_workspace, 0);
     assert_eq!(
         limits::admit(
             &counts,
@@ -2141,7 +2145,7 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
     );
 
     // AND THE INTERACTIVE ADMISSION STILL IGNORES THEM. Four run discoveries in
-    // this namespace (more than `maxActivePerNamespace`) admit an interactive
+    // this namespace (more than `maxActivePerWorkspace`) admit an interactive
     // check against another connection, because they spend neither pool.
     let crowd: Vec<Job> = (0..4)
         .map(|i| {
@@ -2170,7 +2174,7 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
     let interactive = labelled_job(NS, "operationReadiness", Some(CONNECTION_UID), false);
     let counts = limits::count(&[interactive], NS, Some(CONNECTION_UID));
     assert_eq!(
-        (counts.namespace, counts.total, counts.per_connection),
+        (counts.workspace, counts.total, counts.per_connection),
         (1, 1, 0)
     );
 }
@@ -2191,7 +2195,7 @@ fn limits_queues_over_namespace_cap() {
 
     // Under the cap: admitted.
     let counts = limits::count(&active(3), NS, None);
-    assert_eq!(counts.namespace, 3);
+    assert_eq!(counts.workspace, 3);
     assert_eq!(counts.total, 3);
     assert_eq!(
         limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness),
@@ -2212,18 +2216,19 @@ fn limits_queues_over_namespace_cap() {
     jobs.push(labelled_job(NS, "operationReadiness", None, true));
     jobs.push(labelled_job(NS, "operationReadiness", None, true));
     let counts = limits::count(&jobs, NS, None);
-    assert_eq!(counts.namespace, 3, "two finished Jobs hold nothing");
+    assert_eq!(counts.workspace, 3, "two finished Jobs hold nothing");
     assert!(limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
 
-    // ANOTHER NAMESPACE spends the total pool but not this namespace's.
+    // ANOTHER WORKSPACE spends the total pool but not this workspace's: two
+    // checks in `dev` never queue `prd`'s (PROD-19.1 §3).
     let mut jobs = active(2);
     jobs.extend((0..5).map(|i| {
-        let mut j = labelled_job("other-ns", "operationReadiness", None, false);
+        let mut j = labelled_job("prd", "operationReadiness", None, false);
         j.metadata.name = Some(format!("lwc-rd-other-{i}"));
         j
     }));
     let counts = limits::count(&jobs, NS, None);
-    assert_eq!(counts.namespace, 2);
+    assert_eq!(counts.workspace, 2);
     assert_eq!(counts.total, 7);
     assert!(limits::admit(&counts, &policy, CheckPlanKind::OperationReadiness).is_admitted());
     // …until the TOTAL cap bites.
@@ -2247,26 +2252,26 @@ fn limits_queues_over_namespace_cap() {
 ///
 /// | ceiling | default | here | counts | default says | here |
 /// |---|---|---|---|---|---|
-/// | `maxActivePerNamespace` | 4 | 2 | 2 in the namespace | admit | queue |
+/// | `maxActivePerWorkspace` | 4 | 2 | 2 in the namespace | admit | queue |
 /// | `maxActiveDiscoveriesPerConnection` | 1 | 3 | 1 on the connection | queue | admit |
-/// | `maxEvidenceFetchActivePerNamespace` | 4 | 1 | 1 fetch | admit | queue |
+/// | `maxEvidenceFetchActivePerWorkspace` | 4 | 1 | 1 fetch | admit | queue |
 /// | `maxActiveTotal` | 20 | 25 | 20 in total | queue | admit |
 #[test]
 fn every_check_ceiling_is_the_policys_own_at_a_non_default_value() {
     let defaults = policy::ChecksPolicy::default();
     let counts =
-        |namespace: u32, total: u32, per_connection: u32, evidence: u32| limits::ActiveCounts {
-            namespace,
+        |workspace: u32, total: u32, per_connection: u32, evidence: u32| limits::ActiveCounts {
+            workspace,
             total,
             per_connection,
-            evidence_namespace: evidence,
+            evidence_workspace: evidence,
         };
     let queued = limits::Admission::Queued(CheckCode::ConcurrencyLimited);
 
-    // maxActivePerNamespace: 2.
+    // maxActivePerWorkspace: 2.
     let two_here = counts(2, 2, 0, 0);
     let tight_ns = policy::ChecksPolicy {
-        max_active_per_namespace: 2,
+        max_active_per_workspace: 2,
         ..defaults
     };
     assert!(limits::admit(&two_here, &defaults, CheckPlanKind::OperationReadiness).is_admitted());
@@ -2292,10 +2297,10 @@ fn every_check_ceiling_is_the_policys_own_at_a_non_default_value() {
     )
     .is_admitted());
 
-    // maxEvidenceFetchActivePerNamespace: 1.
+    // maxEvidenceFetchActivePerWorkspace: 1.
     let one_fetch = counts(0, 0, 0, 1);
     let tight_evidence = policy::ChecksPolicy {
-        max_evidence_fetch_active_per_namespace: 1,
+        max_evidence_fetch_active_per_workspace: 1,
         ..defaults
     };
     assert!(limits::admit(&one_fetch, &defaults, CheckPlanKind::EvidenceFetch).is_admitted());
@@ -2380,8 +2385,8 @@ fn one_discovery_per_connection_and_a_separate_evidence_pool() {
         })
         .collect();
     let counts = limits::count(&busy, NS, None);
-    assert_eq!(counts.namespace, 4);
-    assert_eq!(counts.evidence_namespace, 0);
+    assert_eq!(counts.workspace, 4);
+    assert_eq!(counts.evidence_workspace, 0);
     assert_eq!(
         limits::admit(&counts, &policy, CheckPlanKind::TopicInventory),
         limits::Admission::Queued(CheckCode::ConcurrencyLimited)
@@ -2400,9 +2405,9 @@ fn one_discovery_per_connection_and_a_separate_evidence_pool() {
         })
         .collect();
     let counts = limits::count(&evidence, NS, None);
-    assert_eq!(counts.namespace, 0);
+    assert_eq!(counts.workspace, 0);
     assert_eq!(counts.total, 0);
-    assert_eq!(counts.evidence_namespace, 4);
+    assert_eq!(counts.evidence_workspace, 4);
     assert!(limits::admit(&counts, &policy, CheckPlanKind::TopicInventory).is_admitted());
     assert_eq!(
         limits::admit(&counts, &policy, CheckPlanKind::EvidenceFetch),
@@ -2423,10 +2428,10 @@ fn the_active_count_selects_only_check_jobs_and_a_job_this_build_cannot_name_sti
     // for a ceiling.
     let unknown = labelled_job(NS, "somethingNew", None, false);
     let counts = limits::count(&[unknown], NS, Some(CONNECTION_UID));
-    assert_eq!(counts.namespace, 1);
+    assert_eq!(counts.workspace, 1);
     assert_eq!(counts.total, 1);
     assert_eq!(counts.per_connection, 0);
-    assert_eq!(counts.evidence_namespace, 0);
+    assert_eq!(counts.evidence_workspace, 0);
 
     assert!(limits::is_active(&labelled_job(
         NS,
@@ -2455,7 +2460,7 @@ async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
         .unwrap(),
     }];
     let (client, recorder, _) = mock_client_recording_bodies(routes);
-    let jobs = limits::check_jobs(&client).await.expect("listed");
+    let jobs = limits::check_jobs(&client, NS).await.expect("listed");
     assert_eq!(jobs.len(), 1);
     let seen = recorder.lock().unwrap();
     assert_eq!(
@@ -2490,8 +2495,10 @@ async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
         "the console pool's own membership is unchanged"
     );
     assert!(
-        !seen[0].uri.contains("/namespaces/"),
-        "the total pool is installation-wide: {}",
+        seen[0]
+            .uri
+            .starts_with(&format!("/apis/batch/v1/namespaces/{NS}/jobs")),
+        "the total pool is the install's one namespace: {}",
         seen[0].uri
     );
 }

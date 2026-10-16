@@ -154,8 +154,6 @@ pub struct InstallationTrustArgs {
 pub enum Invocation {
     /// `identity bootstrap`.
     Bootstrap(BootstrapArgs),
-    /// `identity distribute`.
-    Distribute(DistributeArgs),
 }
 
 impl From<crate::cli::IdentityCmd> for Invocation {
@@ -197,27 +195,8 @@ impl From<crate::cli::IdentityCmd> for Invocation {
                 }),
                 revoke_trust_binding,
             }),
-            crate::cli::IdentityCmd::Distribute {
-                source_namespace,
-                target_namespace,
-                secret_name,
-                secret_key,
-            } => Self::Distribute(DistributeArgs {
-                source_namespace,
-                target_namespace,
-                secret_name,
-                secret_key,
-            }),
         }
     }
-}
-
-#[derive(Debug)]
-pub struct DistributeArgs {
-    pub source_namespace: String,
-    pub target_namespace: String,
-    pub secret_name: String,
-    pub secret_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,20 +668,6 @@ fn bootstrap_steps(
     })
 }
 
-pub fn run_distribution(args: &DistributeArgs) -> ExitCode {
-    match KubernetesStore::for_distribution(args).and_then(|mut store| distribute(&mut store, args))
-    {
-        Ok(outcome) => {
-            print_outcome("identity-distributed", &outcome);
-            ExitCode::Ok
-        }
-        Err(error) => {
-            eprintln!("identity distribution failed: {error}");
-            ExitCode::Operational
-        }
-    }
-}
-
 fn print_outcome(prefix: &str, outcome: &Outcome) {
     print!(
         "{prefix} key-id={} source={}",
@@ -713,106 +678,6 @@ fn print_outcome(prefix: &str, outcome: &Outcome) {
         print!(" contention-http={status}");
     }
     println!();
-}
-
-trait DistributionStore {
-    fn source_private(&mut self) -> Result<PrivateRecord, String>;
-    fn target_private(&mut self) -> Result<PrivateRecord, String>;
-    fn initialize_target(
-        &mut self,
-        expected_resource_version: &str,
-        has_annotations: bool,
-        key: &str,
-        pem: &str,
-    ) -> Result<InitializeResult, String>;
-}
-
-fn distribute(
-    store: &mut impl DistributionStore,
-    args: &DistributeArgs,
-) -> Result<Outcome, String> {
-    let source = store.source_private()?;
-    let source_pem = source.pem.as_deref().ok_or_else(|| {
-        format!(
-            "source signing Secret {}/{} is not established; let the primary identity bootstrap finish before distribution",
-            args.source_namespace, args.secret_name
-        )
-    })?;
-    let source_key = parse_private(source_pem, "source installation signing Secret")?;
-    let source_material = public_material(&source_key)?;
-    let target = store.target_private()?;
-
-    if let Some(target_pem) = target.pem.as_deref() {
-        let target_key = parse_private(target_pem, "target runner signing Secret")?;
-        let target_material = public_material(&target_key)?;
-        if target_material.key_id != source_material.key_id {
-            return Err(format!(
-                "target namespace {} already contains a different signer {}; restore the installation signer {} there—distribution never overwrites an established identity",
-                args.target_namespace, target_material.key_id, source_material.key_id
-            ));
-        }
-        return Ok(Outcome {
-            key_id: source_material.key_id,
-            origin: Origin::Existing,
-        });
-    }
-    if target.has_any_data || target.state.as_deref() == Some(ESTABLISHED) {
-        return Err(format!(
-            "target namespace {} has an incomplete retained signing Secret; restore the installation identity there before retrying",
-            args.target_namespace
-        ));
-    }
-
-    match store.initialize_target(
-        &target.resource_version,
-        target.has_annotations,
-        &args.secret_key,
-        source_pem,
-    )? {
-        InitializeResult::Written => Ok(Outcome {
-            key_id: source_material.key_id,
-            origin: Origin::Adopted,
-        }),
-        InitializeResult::Contended(status) => {
-            let winner = store
-                .target_private()
-                .map_err(|error| contention_error(status, error))?;
-            if winner.state.as_deref() != Some(ESTABLISHED) {
-                return Err(contention_error(
-                    status,
-                    format!(
-                        "target signing Secret in namespace {} did not contain an established concurrent winner",
-                        args.target_namespace
-                    ),
-                ));
-            }
-            let winner_pem = winner.pem.as_deref().ok_or_else(|| {
-                contention_error(
-                    status,
-                    format!(
-                        "target signing Secret in namespace {} still contains no key",
-                        args.target_namespace
-                    ),
-                )
-            })?;
-            let winner_key = parse_private(winner_pem, "concurrent target runner signer")
-                .map_err(|error| contention_error(status, error))?;
-            let winner_material = public_material(&winner_key)?;
-            if winner_material.key_id != source_material.key_id {
-                return Err(contention_error(
-                    status,
-                    format!(
-                        "target namespace {} concurrently established a different signer {}; refusing to replace it with installation identity {}",
-                        args.target_namespace, winner_material.key_id, source_material.key_id
-                    ),
-                ));
-            }
-            Ok(Outcome {
-                key_id: source_material.key_id,
-                origin: Origin::ConcurrentWinner(status),
-            })
-        }
-    }
 }
 
 fn bootstrap(store: &mut impl IdentityStore, args: &BootstrapArgs) -> Result<Outcome, String> {
@@ -1496,7 +1361,6 @@ struct KubernetesStore {
     base_url: String,
     token: String,
     namespace: String,
-    source_namespace: Option<String>,
     secret_name: String,
     secret_key: String,
     public_configmap_name: String,
@@ -1523,7 +1387,6 @@ impl KubernetesStore {
             base_url,
             token,
             namespace: args.namespace.clone(),
-            source_namespace: None,
             secret_name: args.secret_name.clone(),
             secret_key: args.secret_key.clone(),
             public_configmap_name: args.public_configmap_name.clone(),
@@ -1580,27 +1443,6 @@ impl KubernetesStore {
             format!("https://{host}:{port}"),
             token.trim().to_string(),
         ))
-    }
-
-    fn for_distribution(args: &DistributeArgs) -> Result<Self, String> {
-        validate_name("source namespace", &args.source_namespace)?;
-        validate_name("target namespace", &args.target_namespace)?;
-        validate_name("Secret", &args.secret_name)?;
-        validate_data_key("Secret data key", &args.secret_key)?;
-        let bootstrap_args = BootstrapArgs {
-            namespace: args.target_namespace.clone(),
-            secret_name: args.secret_name.clone(),
-            secret_key: args.secret_key.clone(),
-            public_configmap_name: "unused-by-distribution".to_string(),
-            external_secret: None,
-            mark_fresh_install_confirm: false,
-            console: None,
-            installation_trust: None,
-            revoke_trust_binding: None,
-        };
-        let mut store = Self::in_cluster(&bootstrap_args)?;
-        store.source_namespace = Some(args.source_namespace.clone());
-        Ok(store)
     }
 
     fn object(&self, kind: &str, name: &str) -> Result<Value, String> {
@@ -1914,44 +1756,6 @@ fn delete_binding(
 fn revoke_in_cluster(name: &str) -> Result<Revocation, String> {
     let (agent, base_url, token) = KubernetesStore::connect()?;
     delete_binding(&agent, &base_url, &token, name)
-}
-
-impl DistributionStore for KubernetesStore {
-    fn source_private(&mut self) -> Result<PrivateRecord, String> {
-        let namespace = self.source_namespace.as_deref().ok_or_else(|| {
-            "identity distribution source namespace is not configured".to_string()
-        })?;
-        let object = self
-            .object_in(namespace, "secrets", &self.secret_name)
-            .map_err(|error| {
-                format!(
-                    "source signing Secret {}/{} is unavailable: {error}",
-                    namespace, self.secret_name
-                )
-            })?;
-        private_record(&object, &self.secret_name, &self.secret_key)
-    }
-
-    fn target_private(&mut self) -> Result<PrivateRecord, String> {
-        self.managed_private().map_err(|error| {
-            format!(
-                "target signing Secret {}/{} is unavailable: {error}; ensure the authorized namespace exists and Helm can create its prerequisites",
-                self.namespace, self.secret_name
-            )
-        })
-    }
-
-    fn initialize_target(
-        &mut self,
-        expected_resource_version: &str,
-        has_annotations: bool,
-        key: &str,
-        pem: &str,
-    ) -> Result<InitializeResult, String> {
-        let patch =
-            private_initialization_patch(expected_resource_version, has_annotations, key, pem, &[]);
-        self.patch("secrets", &self.secret_name, &patch)
-    }
 }
 
 /// The JSON-patch operations that add `annotations`: one `add` of the whole
@@ -2525,84 +2329,12 @@ mod tests {
         key.to_pkcs8_pem().unwrap()
     }
 
-    struct MemoryDistributionStore {
-        source: PrivateRecord,
-        target: PrivateRecord,
-        concurrent_target: Option<String>,
-    }
-
-    impl DistributionStore for MemoryDistributionStore {
-        fn source_private(&mut self) -> Result<PrivateRecord, String> {
-            Ok(self.source.clone())
-        }
-
-        fn target_private(&mut self) -> Result<PrivateRecord, String> {
-            Ok(self.target.clone())
-        }
-
-        fn initialize_target(
-            &mut self,
-            expected_resource_version: &str,
-            _has_annotations: bool,
-            _key: &str,
-            pem: &str,
-        ) -> Result<InitializeResult, String> {
-            if let Some(winner) = self.concurrent_target.take() {
-                self.target.pem = Some(winner);
-                self.target.has_any_data = true;
-                self.target.state = Some(ESTABLISHED.into());
-                self.target.resource_version = "2".into();
-                return Ok(InitializeResult::Contended(422));
-            }
-            if expected_resource_version != self.target.resource_version {
-                return Ok(InitializeResult::Contended(409));
-            }
-            self.target.pem = Some(pem.to_string());
-            self.target.has_any_data = true;
-            self.target.state = Some(ESTABLISHED.into());
-            self.target.resource_version = "2".into();
-            Ok(InitializeResult::Written)
-        }
-    }
-
-    fn distribution_store(source_key: &SigningKey) -> MemoryDistributionStore {
-        MemoryDistributionStore {
-            source: PrivateRecord {
-                resource_version: "8".into(),
-                state: Some(ESTABLISHED.into()),
-                pem: Some(pem(source_key)),
-                has_any_data: true,
-                has_annotations: true,
-                created_at: None,
-            },
-            target: PrivateRecord {
-                resource_version: "1".into(),
-                state: None,
-                pem: None,
-                has_any_data: false,
-                has_annotations: false,
-                created_at: None,
-            },
-            concurrent_target: None,
-        }
-    }
-
-    fn distribution_args() -> DistributeArgs {
-        DistributeArgs {
-            source_namespace: "logweir-system".into(),
-            target_namespace: "recoveries".into(),
-            secret_name: "logweir-signing-key".into(),
-            secret_key: "signing.pem".into(),
-        }
-    }
-
     fn store_for_http(base_url: String) -> KubernetesStore {
         KubernetesStore {
             agent: kubernetes_agent(None),
             base_url,
             token: "test-token".into(),
             namespace: "logweir-system".into(),
-            source_namespace: None,
             secret_name: "logweir-signing-key".into(),
             secret_key: "signing.pem".into(),
             public_configmap_name: "logweir-signing-trust".into(),
@@ -2916,41 +2648,6 @@ mod tests {
             );
         }
         assert!(validate_name("namespace", &"a".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn distribution_copies_the_same_identity_and_refuses_namespace_fragmentation() {
-        let installation = SigningKey::generate_p256();
-        let expected_pem = pem(&installation);
-        let expected_id = installation.key_id();
-        let mut store = distribution_store(&installation);
-
-        let outcome = distribute(&mut store, &distribution_args()).unwrap();
-        assert_eq!(outcome.origin, Origin::Adopted);
-        assert_eq!(outcome.key_id, expected_id);
-        assert_eq!(store.target.pem.as_deref(), Some(expected_pem.as_str()));
-
-        store.target.pem = Some(pem(&SigningKey::generate_p256()));
-        let error = distribute(&mut store, &distribution_args()).unwrap_err();
-        assert!(error.contains("different signer"), "{error}");
-        assert!(error.contains("never overwrites"), "{error}");
-    }
-
-    #[test]
-    fn distribution_accepts_only_the_same_concurrent_winner() {
-        let installation = SigningKey::generate_ed25519();
-        let expected_id = installation.key_id();
-        let mut same = distribution_store(&installation);
-        same.concurrent_target = Some(pem(&installation));
-        let outcome = distribute(&mut same, &distribution_args()).unwrap();
-        assert_eq!(outcome.origin, Origin::ConcurrentWinner(422));
-        assert_eq!(outcome.key_id, expected_id);
-
-        let mut different = distribution_store(&installation);
-        different.concurrent_target = Some(pem(&SigningKey::generate_ed25519()));
-        let error = distribute(&mut different, &distribution_args()).unwrap_err();
-        assert!(error.contains("concurrently established a different signer"));
-        assert!(error.contains("HTTP 422"), "{error}");
     }
 
     #[test]
@@ -3971,7 +3668,6 @@ mod tests {
         };
         match Invocation::from(cmd) {
             Invocation::Bootstrap(args) => args,
-            Invocation::Distribute(_) => panic!("the hook runs `identity bootstrap`"),
         }
     }
 

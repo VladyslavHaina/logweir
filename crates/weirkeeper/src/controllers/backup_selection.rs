@@ -443,6 +443,7 @@ pub fn owner_of(backup: &Backup, uid: &str) -> RunnerOwner {
         kind: Backup::kind(&()).to_string(),
         name: backup.name_any(),
         uid: uid.to_string(),
+        workspace: crate::workspace::label_of(backup).map(str::to_string),
     }
 }
 
@@ -502,7 +503,10 @@ pub fn build_discovery_job(
     runner.name = job_name.to_string();
     let mut job = crate::job::build(&runner);
     let labels = labels(&spec.owner.uid, spec.connection_uid.as_deref());
-    job.metadata.labels = Some(labels.clone());
+    job.metadata
+        .labels
+        .get_or_insert_with(Default::default)
+        .extend(labels.clone());
     job.metadata.annotations = Some(std::collections::BTreeMap::from([(
         SOURCE_SHA256_ANNOTATION.to_string(),
         source_sha256.to_string(),

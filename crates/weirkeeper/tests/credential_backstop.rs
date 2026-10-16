@@ -21,6 +21,7 @@ fn spec(from_secret: Vec<EnvFromSecret>, literal: Vec<(String, String)>) -> Runn
             kind: "Backup".to_string(),
             name: "b".to_string(),
             uid: "u".to_string(),
+            workspace: None,
         },
         args: vec!["backup".to_string()],
         deadline_seconds: 60,

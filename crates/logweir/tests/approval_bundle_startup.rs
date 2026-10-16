@@ -100,6 +100,7 @@ fn contract(bundle: &ApprovalBundleBytes) -> ExecutionContract {
         subject_kind: "Restore".to_string(),
         subject_name: "restore-a".to_string(),
         subject_namespace: "tenant-a".to_string(),
+        subject_workspace: "dev".to_string(),
         subject_uid: "restore-uid-a".to_string(),
         approval_name: "approval-a".to_string(),
         approval_uid: "approval-uid-a".to_string(),
@@ -134,6 +135,10 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         (
             wire::SUBJECT_NAMESPACE_ENV,
             contract.subject_namespace.clone(),
+        ),
+        (
+            wire::SUBJECT_WORKSPACE_ENV,
+            contract.subject_workspace.clone(),
         ),
         (wire::SUBJECT_UID_ENV, contract.subject_uid.clone()),
         (wire::APPROVAL_NAME_ENV, contract.approval_name.clone()),

@@ -179,6 +179,7 @@ fn good_sidecar() -> String {
 fn approval_object(approval_bytes: &str, sidecar_bytes: &str, kind: SubjectKind) -> Approval {
     Approval {
         metadata: ObjectMeta {
+            labels: Some([(weirkeeper::workspace::LABEL.to_string(), "dev".to_string())].into()),
             name: Some("a1".to_string()),
             namespace: Some(NS.to_string()),
             generation: Some(1),
@@ -232,7 +233,7 @@ fn restore_body(plan_bytes: &str, status_plan_hash: &str) -> String {
     let plan = plan_bytes.replace('\n', "\\n");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore",
-             "metadata":{{"name":"r1","namespace":"{NS}","uid":"restore-uid-1"}},
+             "metadata":{{"labels":{{"logweir.dev/workspace":"dev"}},"name":"r1","namespace":"{NS}","uid":"restore-uid-1"}},
              "spec":{{"planBytes":"{plan}","approvalRef":{{"name":"a1"}},
                       "sourceArchive":{{"url":"s3://archive/logweir"}},
                       "backupSetRef":"bk-1","pointInTime":"2026-09-02T00:00:00Z",
@@ -247,7 +248,7 @@ fn restore_body(plan_bytes: &str, status_plan_hash: &str) -> String {
 fn backup_body() -> String {
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Backup",
-             "metadata":{{"name":"b1","namespace":"{NS}"}},
+             "metadata":{{"labels":{{"logweir.dev/workspace":"dev"}},"name":"b1","namespace":"{NS}"}},
              "spec":{{"sourceRef":{{"name":"prod"}},"topics":["orders"],
                       "archive":{{"url":"s3://archive/logweir"}},
                       "triggeredBy":"manual","deadlineSeconds":900}}}}"#
@@ -260,7 +261,7 @@ fn patched_approval_body() -> String {
     let side = good_sidecar().replace('"', "\\\"");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Approval",
-             "metadata":{{"name":"a1","namespace":"{NS}"}},
+             "metadata":{{"labels":{{"logweir.dev/workspace":"dev"}},"name":"a1","namespace":"{NS}"}},
              "spec":{{"subjectRef":{{"kind":"Restore","name":"r1"}},"planHash":"{PLAN_HASH}",
                       "approvalBytes":"{doc}","sidecarBytes":"{side}"}},
              "status":{{"verified":true}}}}"#

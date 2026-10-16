@@ -12399,8 +12399,8 @@ mod evidence_fetch_job {
         assert!(last["evidence"]["observation"].is_null());
     }
 
-    /// **THE SLOT IS RESPECTED.** With `maxEvidenceFetchActivePerNamespace`
-    /// (4) evidence Jobs active in the namespace, nothing is created; the run
+    /// **THE SLOT IS RESPECTED.** With `maxEvidenceFetchActivePerWorkspace`
+    /// (4) evidence Jobs active in the workspace, nothing is created; the run
     /// is `Pending` saying so, with no `jobRef`, and the next pass tries again.
     ///
     /// KILLS: dropping `limits::admit`; counting another namespace's Jobs.
@@ -12410,6 +12410,8 @@ mod evidence_fetch_job {
             .map(|i| {
                 let mut j = ev_job(&format!("lwc-ev-other{i}"), None, "someone-else");
                 j["metadata"]["namespace"] = json!(NS);
+                // The pool is the workspace's (PROD-19.1 §3).
+                j["metadata"]["labels"]["logweir.dev/workspace"] = json!("dev");
                 j
             })
             .collect();
@@ -12420,12 +12422,13 @@ mod evidence_fetch_job {
             secret_backed_destination(),
         );
         routes.extend(evidence_routes(1, None, active, vec![], String::new()));
-        let bodies = run(
-            &frozen_destination_backed_backup("dest-b"),
-            routes,
-            utc(2026, 11, 9, 3, 20),
-        )
-        .await;
+        let mut backup = frozen_destination_backed_backup("dest-b");
+        backup
+            .metadata
+            .labels
+            .get_or_insert_with(Default::default)
+            .insert(weirkeeper::workspace::LABEL.to_string(), "dev".to_string());
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 20)).await;
         assert!(posts(&bodies, "/jobs").is_empty(), "no Job over the limit");
         assert!(
             posts(&bodies, "/configmaps").is_empty(),
@@ -12436,7 +12439,7 @@ mod evidence_fetch_job {
         assert!(last["evidence"]["verification"]["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("maxEvidenceFetchActivePerNamespace"));
+            .contains("maxEvidenceFetchActivePerWorkspace"));
         assert!(last["evidence"]["observation"]["jobRef"].is_null());
 
         // …and the same four Jobs in ANOTHER namespace do not count.

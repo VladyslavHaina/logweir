@@ -90,17 +90,17 @@ pub fn is_active(job: &Job) -> bool {
 /// What one count found.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActiveCounts {
-    /// Active check Jobs in the candidate's namespace, excluding evidence
+    /// Active check Jobs in the candidate's workspace, excluding evidence
     /// fetches.
-    pub namespace: u32,
+    pub workspace: u32,
     /// Active check Jobs across the installation, excluding evidence fetches.
     pub total: u32,
     /// Active `topicInventory` Jobs against the candidate's connection UID.
     pub per_connection: u32,
-    /// Active `evidenceFetch` Jobs in the candidate's namespace: a separate
+    /// Active `evidenceFetch` Jobs in the candidate's workspace: a separate
     /// pool, so verification cannot be starved by interactive checks
     /// (D2 §4.3).
-    pub evidence_namespace: u32,
+    pub evidence_workspace: u32,
 }
 
 /// Count the active check Jobs relevant to one candidate — **pure**.
@@ -108,7 +108,7 @@ pub struct ActiveCounts {
 /// `connection_uid` is `None` for a kind that has no connection, and then
 /// `per_connection` stays zero: the per-connection cap is a discovery rule.
 #[must_use]
-pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> ActiveCounts {
+pub fn count(jobs: &[Job], workspace: &str, connection_uid: Option<&str>) -> ActiveCounts {
     let mut counts = ActiveCounts::default();
     for job in jobs.iter().filter(|j| is_active(j)) {
         let labels = job.labels();
@@ -141,18 +141,21 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
             .map(String::as_str)
             .and_then(|s| CheckPlanKind::ALL.iter().copied().find(|k| k.as_str() == s));
         let is_evidence = kind == Some(CheckPlanKind::EvidenceFetch);
-        let same_namespace = job.namespace().as_deref() == Some(namespace);
+        // By the Job's workspace label (PROD-19.1 §3): two checks running in
+        // `dev` must not queue `prd`'s.
+        let same_workspace =
+            labels.get(crate::workspace::LABEL).map(String::as_str) == Some(workspace);
 
         if is_evidence {
-            if same_namespace {
-                counts.evidence_namespace += 1;
+            if same_workspace {
+                counts.evidence_workspace += 1;
             }
             // An evidence fetch spends only its own pool.
             continue;
         }
         counts.total += 1;
-        if same_namespace {
-            counts.namespace += 1;
+        if same_workspace {
+            counts.workspace += 1;
         }
         if kind == Some(CheckPlanKind::TopicInventory) {
             if let Some(uid) = connection_uid {
@@ -198,13 +201,13 @@ pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) 
         // The separate pool, and only that pool: making an evidence fetch
         // compete with interactive discovery is how verification stops
         // happening on a busy installation.
-        return if counts.evidence_namespace >= policy.max_evidence_fetch_active_per_namespace {
+        return if counts.evidence_workspace >= policy.max_evidence_fetch_active_per_workspace {
             Admission::Queued(CheckCode::ConcurrencyLimited)
         } else {
             Admission::Admit
         };
     }
-    if counts.namespace >= policy.max_active_per_namespace
+    if counts.workspace >= policy.max_active_per_workspace
         || counts.total >= policy.max_active_total
     {
         return Admission::Queued(CheckCode::ConcurrencyLimited);
@@ -219,16 +222,18 @@ pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) 
 
 /// Every check Job in the installation, active or not.
 ///
-/// Every namespace this controller acts in (`crate::scope`: the whole cluster
-/// by default, one list per execution namespace when scoped) with the
-/// component label. The installation-wide ceiling counts the Jobs this
+/// The install's one namespace (the candidate's own), with the component
+/// label. The installation-wide ceiling counts the Jobs this
 /// controller could have created. The "active" filter is [`is_active`]'s, in
 /// memory, because a Job's conditions are not a field selector.
 ///
 /// # Errors
 ///
 /// [`kube::Error`] from the `list`.
-pub async fn check_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> {
-    crate::scope::list_everywhere::<Job>(client, &ListParams::default().labels(&active_selector()))
-        .await
+pub async fn check_jobs(client: &kube::Client, namespace: &str) -> Result<Vec<Job>, kube::Error> {
+    let jobs: kube::Api<Job> = kube::Api::namespaced(client.clone(), namespace);
+    Ok(jobs
+        .list(&ListParams::default().labels(&active_selector()))
+        .await?
+        .items)
 }

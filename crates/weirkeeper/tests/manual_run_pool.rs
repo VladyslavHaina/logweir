@@ -1,8 +1,8 @@
 //! The manual-run pool: "Back up now" (and a manual restore) does not turn N
 //! accepted requests into N simultaneous runner pods. A hundred at once took
 //! a single-node install past its 110-pod limit and its object store into
-//! `503 SlowDown`. At most `runs.maxManualBackupsActivePerNamespace` manual
-//! runs of a namespace hold a runner slot; the rest wait `Queued` with NOTHING
+//! `503 SlowDown`. At most `runs.maxManualBackupsActivePerWorkspace` manual
+//! runs of a workspace hold a runner slot; the rest wait `Queued` with NOTHING
 //! created, and start in arrival order as slots free.
 //!
 //! The watch cache lags the controller's own writes, so passes deciding in the
@@ -43,7 +43,10 @@ use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
 const NS: &str = "lw-p10";
-const OTHER_NS: &str = "lw-p10-other";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
+/// Another workspace of the same install: its runs are another pool.
+const OTHER_WS: &str = "prd";
 const CLUSTER_UID: &str = "7a2b9c1d-0000-4000-8000-0000000000c1";
 const SCHEDULE_UID: &str = "9c4d2e6f-0000-4000-8000-0000000000d1";
 
@@ -59,15 +62,15 @@ fn now() -> DateTime<Utc> {
     utc(16, 30, 0)
 }
 
-/// A MANUAL `Backup` as the API creates one ("Back up now"), in `namespace`,
+/// A MANUAL `Backup` as the API creates one ("Back up now"), in `workspace`,
 /// created at `created` by the API server's clock.
-fn manual_in(namespace: &str, name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
+fn manual_in(workspace: &str, name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Backup",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": workspace},
             "name": name,
-            "namespace": namespace,
+            "namespace": NS,
             "uid": uid,
             "generation": 1,
             "resourceVersion": "100",
@@ -86,7 +89,7 @@ fn manual_in(namespace: &str, name: &str, uid: &str, created: DateTime<Utc>) -> 
 }
 
 fn manual(name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
-    manual_in(NS, name, uid, created)
+    manual_in(WS, name, uid, created)
 }
 
 /// `n` runs created within the same second, whose NAMES DESCEND while their
@@ -109,7 +112,7 @@ fn scheduled(created: DateTime<Utc>) -> Backup {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Backup",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": "logweir-backup-nightly-20260924-020000",
             "namespace": NS,
             "uid": "5c4d2e6f-0000-4000-8000-00000000005c",
@@ -178,7 +181,7 @@ fn cluster() -> KafkaCluster {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
-        "metadata": {"name": "prod", "namespace": NS, "uid": CLUSTER_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "prod", "namespace": NS, "uid": CLUSTER_UID},
         "spec": {
             "bootstrapServers": ["broker-0.prod:9093"],
             "auth": {"mode": "scramSha512", "username": "logweir", "secretRef": {"name": "prod-sasl"}, "tls": true},
@@ -217,7 +220,7 @@ fn create_routes(b: &Backup) -> Vec<Route> {
             status: 200,
             body: json!({
                 "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupSchedule",
-                "metadata": {"name": "nightly", "namespace": NS, "uid": SCHEDULE_UID, "generation": 1},
+                "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "nightly", "namespace": NS, "uid": SCHEDULE_UID, "generation": 1},
                 "spec": {"schedule": "0 2 * * *", "sourceRef": {"name": "prod"},
                          "topics": ["orders", "payments"],
                          "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}}}
@@ -442,15 +445,15 @@ fn after_a_restart_an_admitted_run_is_counted_from_its_own_record() {
 
 /// **A reservation ends when the watch catches up, when its run finishes or
 /// is deleted, or when it is too old, and only in its own kind and
-/// namespace.**
+/// workspace.**
 ///
 /// KILLS: a reservation that is never released (a slot leaks); one that is
-/// released by another namespace's snapshot, where its run is simply absent.
+/// released by another workspace's snapshot, where its run is simply absent.
 #[test]
 fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
     let runs = burst(2);
     let other = manual_in(
-        OTHER_NS,
+        OTHER_WS,
         "logweir-manual-else",
         "e0000000-0000-4000-8000-000000000001",
         utc(16, 0, 0),
@@ -468,7 +471,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
         )
         .is_admitted());
     assert_eq!(r.len(), 2);
-    // ANOTHER NAMESPACE'S SNAPSHOT DOES NOT RELEASE THIS ONE: `runs[0]` is not
+    // ANOTHER WORKSPACE'S SNAPSHOT DOES NOT RELEASE THIS ONE: `runs[0]` is not
     // in it, and that is "not in this store", not "deleted".
     let _ = r.decide(
         PoolKind::Backup,
@@ -481,7 +484,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
     assert_eq!(
         r.len(),
         2,
-        "a snapshot of another namespace releases nothing there"
+        "a snapshot of another workspace releases nothing there"
     );
     // THE WATCH CATCHES UP: `runs[0]`'s admission record is visible.
     let caught_up = vec![admitted_record(&runs[0]), runs[1].clone()];
@@ -527,7 +530,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
 fn held_restore(name: &str, uid: &str) -> Restore {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": name, "namespace": NS, "uid": uid,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": name, "namespace": NS, "uid": uid,
                      "creationTimestamp": utc(16, 0, 0).to_rfc3339()},
         "spec": {
             "planBytes": "x", "approvalRef": {"name": "a1"},
@@ -739,7 +742,7 @@ fn what_holds_a_slot_what_waits_and_what_is_outside() {
     let restore = |authorization: Option<Value>, status: Option<Value>| -> Restore {
         let mut v = json!({
             "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-            "metadata": {"name": "r1", "namespace": NS, "uid": "u-r1"},
+            "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "r1", "namespace": NS, "uid": "u-r1"},
             "spec": {
                 "planBytes": "x", "approvalRef": {"name": "a1"},
                 "sourceArchive": {"url": "s3://kafka-backups/logweir"},
@@ -870,10 +873,10 @@ fn only_an_unfrozen_manual_run_that_holds_no_slot_is_gated() {
     );
 }
 
-/// **Other namespaces, scheduled runs and finished runs do not spend the
-/// pool.**
+/// **Other workspaces, scheduled runs and finished runs do not spend the
+/// pool** (PROD-19.1 §3: four `prd` runs never queue a `dev` one).
 #[test]
-fn other_namespaces_scheduled_and_finished_runs_do_not_count() {
+fn other_workspaces_scheduled_and_finished_runs_do_not_count() {
     let candidate = manual(
         "logweir-manual-cand",
         "c1000000-0000-4000-8000-000000000001",
@@ -882,7 +885,7 @@ fn other_namespaces_scheduled_and_finished_runs_do_not_count() {
     let mut peers = vec![candidate.clone()];
     for i in 0..4 {
         peers.push(running(&manual_in(
-            OTHER_NS,
+            OTHER_WS,
             &format!("logweir-manual-else{i}"),
             &format!("e0000000-0000-4000-8000-00000000000{i}"),
             utc(15, 0, 0),
@@ -952,7 +955,7 @@ fn a_store_that_has_not_synced_is_not_a_snapshot() {
 // The rule, through the reconciler
 
 /// **N+1 manual Backups make N Jobs and one queued run** (N = 4, the default
-/// `runs.maxManualBackupsActivePerNamespace`, read from the installation
+/// `runs.maxManualBackupsActivePerWorkspace`, read from the installation
 /// policy because the row passes no ceiling of its own).
 ///
 /// Five runs created in one second, EVERY pass over the same snapshot (a
@@ -1011,7 +1014,7 @@ async fn n_plus_one_manual_backups_make_n_jobs_and_one_queued_run() {
         admitted["message"]
             .as_str()
             .unwrap()
-            .contains("runs.maxManualBackupsActivePerNamespace"),
+            .contains("runs.maxManualBackupsActivePerWorkspace"),
         "the message names the ceiling's field: {admitted}"
     );
 }
@@ -1221,25 +1224,75 @@ fn the_ceiling_is_the_policy_runs_block_and_absent_is_the_defaults() {
     let older = policy::parse(br#"{"version": 1}"#).expect("an older document parses");
     assert_eq!(
         (
-            older.runs.max_manual_backups_active_per_namespace,
-            older.runs.max_manual_restores_active_per_namespace
+            older.runs.max_manual_backups_active_per_workspace,
+            older.runs.max_manual_restores_active_per_workspace
         ),
         (4, 2)
     );
     let newer = policy::parse(
-        br#"{"version": 1, "runs": {"maxManualBackupsActivePerNamespace": 7, "maxManualRestoresActivePerNamespace": 3}}"#,
+        br#"{"version": 1, "runs": {"maxManualBackupsActivePerWorkspace": 7, "maxManualRestoresActivePerWorkspace": 3}}"#,
     )
     .expect("parses");
     assert_eq!(
         (
-            newer.runs.max_manual_backups_active_per_namespace,
-            newer.runs.max_manual_restores_active_per_namespace
+            newer.runs.max_manual_backups_active_per_workspace,
+            newer.runs.max_manual_restores_active_per_workspace
         ),
         (7, 3)
     );
     assert!(
-        policy::parse(br#"{"version": 1, "runs": {"maxManualBackupsActivePerNamespace": 7}}"#)
+        policy::parse(br#"{"version": 1, "runs": {"maxManualBackupsActivePerWorkspace": 7}}"#)
             .is_err(),
         "a half-written runs block is refused"
+    );
+}
+
+/// **C7: the manual-restore pool is per workspace** (PROD-19.1 §3). With
+/// ceiling two and two `dev` restores admitted, a third `dev` restore is
+/// `Queued` while a `prd` restore is admitted beside them: two restores in
+/// `dev` never queue `prd`'s during an incident.
+///
+/// KILLS: keying the pool by namespace (every workspace shares the install's
+/// one namespace, so the `prd` restore would queue).
+#[test]
+fn a_prd_restore_is_admitted_while_dev_is_full() {
+    let r = Reservations::new();
+    let mut restores: Vec<Restore> = (1..=3)
+        .map(|i| held_restore(&format!("dev-{i}"), &format!("u-dev-{i}")))
+        .collect();
+    let mut prd = held_restore("prd-1", "u-prd-1");
+    prd.metadata.labels = Some(
+        [(
+            weirkeeper::workspace::LABEL.to_string(),
+            OTHER_WS.to_string(),
+        )]
+        .into(),
+    );
+    restores.push(prd);
+    let snapshot = || Some(restores.iter().cloned().map(Arc::new).collect::<Vec<_>>());
+    let decide_restore = |i: usize| {
+        r.decide(
+            PoolKind::Restore,
+            &restores[i],
+            &snapshot,
+            2,
+            restore_standing,
+            now(),
+        )
+    };
+    assert!(decide_restore(0).is_admitted());
+    assert!(decide_restore(1).is_admitted());
+    assert_eq!(
+        decide_restore(2),
+        Decision::Queued {
+            active: 2,
+            ahead: 0,
+            limit: 2
+        },
+        "the third dev restore waits"
+    );
+    assert!(
+        decide_restore(3).is_admitted(),
+        "the prd restore runs beside a full dev pool"
     );
 }

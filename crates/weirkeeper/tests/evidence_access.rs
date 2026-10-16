@@ -24,6 +24,8 @@ use weirkeeper::destination::{
 use weirkeeper::job::EnvFromSecret;
 
 const NS: &str = "logweir-poc";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const UID: &str = "7a1e0000-0000-4000-8000-0000000000d1";
 
 /// The PoC's shape: the writer may write the archive and only PUT the
@@ -32,7 +34,7 @@ const UID: &str = "7a1e0000-0000-4000-8000-0000000000d1";
 fn poc_destination(evidence_read: Value) -> BackupDestination {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "poc", "namespace": NS, "uid": UID, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "poc", "namespace": NS, "uid": UID, "generation": 1,
                      "resourceVersion": "1"},
         "spec": {
             "storage": {"provider": "S3", "bucket": "kafka-backups", "prefix": "poc",
@@ -341,7 +343,7 @@ fn switchover_fixture() -> (
 ) {
     let restore: weirkeeper::crds::restore::Restore = serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": "incident", "namespace": NS, "uid": "r-uid"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "incident", "namespace": NS, "uid": "r-uid"},
         "spec": {"planBytes": PLAN, "approvalRef": {"name": "a"},
                  "sourceArchive": {"url": "s3://kafka-backups/poc",
                                    "secretRef": {"name": "inline-s3"}},
@@ -354,7 +356,7 @@ fn switchover_fixture() -> (
     let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(PLAN).expect("a plan");
     let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster = serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "target", "namespace": NS, "uid": "c-uid"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "target", "namespace": NS, "uid": "c-uid"},
         "spec": {"bootstrapServers": ["kafka-target:9092"],
                  "auth": {"mode": "plaintext", "tls": false}, "role": "target"},
         "status": {"reachable": true, "clusterId": "MkU3OEVBNTcwNTJENDM2Qk"}
@@ -362,7 +364,7 @@ fn switchover_fixture() -> (
     .expect("a KafkaCluster");
     let sw: weirkeeper::crds::switchover::Switchover = serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
-        "metadata": {"name": "sw", "namespace": NS, "uid": "s-uid"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "sw", "namespace": NS, "uid": "s-uid"},
         "spec": {"planBytes": "p", "approvalRef": {"name": "a"},
                  "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 600}
     }))

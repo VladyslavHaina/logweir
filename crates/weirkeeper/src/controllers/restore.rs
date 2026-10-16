@@ -879,6 +879,9 @@ pub fn admit_with_policy(
         Some("the API response name differs from spec.approvalRef".to_string())
     } else if approval_namespace != restore_namespace {
         Some("the Approval is from a different namespace".to_string())
+    } else if let Err(refusal) = crate::workspace::same(restore, approval) {
+        // PROD-19.1: an Approval of another workspace, or of none.
+        Some(refusal.to_string())
     } else if subject.kind != crate::crds::approval::SubjectKind::Restore {
         Some(format!("spec.subjectRef.kind is {}", subject.kind))
     } else if subject.name != restore_name {
@@ -2361,6 +2364,7 @@ pub fn runner_job_spec_with_policy(
             kind: Restore::kind(&()).to_string(),
             name,
             uid,
+            workspace: crate::workspace::label_of(restore).map(str::to_string),
         },
         args: {
             let mut argv = runner_argv(restore, plan, approver_key_ids);
@@ -3680,6 +3684,7 @@ fn restore_owner(restore: &Restore) -> Option<RunnerOwner> {
         kind: Restore::kind(&()).to_string(),
         name: restore.name_any(),
         uid: restore.uid()?,
+        workspace: crate::workspace::label_of(restore).map(str::to_string),
     })
 }
 
@@ -3788,6 +3793,7 @@ async fn evidence_fetch_pass(
     let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
         client,
         namespace,
+        workspace: crate::workspace::label_of(restore).unwrap_or_default(),
         owner: &owner,
         attempt,
         request: &request,
@@ -4571,7 +4577,6 @@ pub fn queued_status_patch(
     authorization_expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Value {
-    let namespace = restore.namespace().unwrap_or_default();
     let deadline = match authorization_expires_at {
         Some(at) => format!(
             ". Its approval expires at {}: the queue does not extend an approval's maximum age, \
@@ -4592,7 +4597,7 @@ pub fn queued_status_patch(
                 "{}{deadline}",
                 crate::run_pool::queued_message(
                     "Restore",
-                    &namespace,
+                    crate::workspace::label_of(restore).unwrap_or_default(),
                     limit,
                     crate::run_pool::RESTORE_LIMIT_FIELD,
                 )
@@ -4622,7 +4627,6 @@ pub fn queued_status_patch(
 /// after every restart.
 #[must_use]
 pub fn admitted_status_patch(restore: &Restore, limit: u32, now: DateTime<Utc>) -> Value {
-    let namespace = restore.namespace().unwrap_or_default();
     let conditions = crate::conditions::upsert_conditions(
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
@@ -4632,7 +4636,7 @@ pub fn admitted_status_patch(restore: &Restore, limit: u32, now: DateTime<Utc>) 
             REASON_ADMITTED,
             &crate::run_pool::admitted_message(
                 "Restore",
-                &namespace,
+                crate::workspace::label_of(restore).unwrap_or_default(),
                 limit,
                 crate::run_pool::RESTORE_LIMIT_FIELD,
             ),
@@ -6390,10 +6394,13 @@ async fn reconcile_restore_inner(
     let namespace = restore
         .namespace()
         .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
-    // What this workspace is bound to now, resolved once per pass for
-    // admission, the bundle, the argv and the environment alike.
-    let effective_policy =
-        policies.resolve(crate::workspace::label_of(restore).unwrap_or_default());
+    // What this Restore's workspace is bound to now, resolved once per pass
+    // for admission, the bundle, the argv and the environment alike. An
+    // absent or unlisted label resolves to nothing: it is refused.
+    let workspace = crate::workspace::installed()
+        .of(restore)
+        .map_err(|refusal| RestoreError::Refused(refusal.reason(), refusal.to_string()))?;
+    let effective_policy = policies.resolve(workspace.as_str());
     // The Job is named after the CR, verbatim.
     let job_name = name.clone();
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
@@ -7564,6 +7571,11 @@ async fn reconcile_with_trust(
     approval_policies: crate::approval_policy::PolicySource,
     objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, restore.as_ref()).await? {
+        return Ok(action);
+    }
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*restore).ok();
         let status = value.as_ref().and_then(|v| v.get("status"));
@@ -7665,40 +7677,30 @@ pub async fn controller(
     runner_image: job::RunnerImage,
     approval_policies: crate::approval_policy::PolicySource,
 ) {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    //
     // The `TrustPolicy` store is built once and shared by every copy: the kind
     // is cluster-scoped, so a reflector per namespace would be N identical
     // cluster-wide watches.
     let policies = crate::trust::spawn_policy_reflector(&client);
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            archive.clone(),
-            runner_image.clone(),
-            policies.clone(),
-            approval_policies.clone(),
-            namespace,
-        )
-    })
+    controller_in(
+        client.clone(),
+        archive.clone(),
+        runner_image.clone(),
+        policies.clone(),
+        approval_policies.clone(),
+    )
     .await;
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
     shared: crate::trust::SharedPolicies,
     approval_policies: crate::approval_policy::PolicySource,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Restore> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<Restore> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let client_for_watch = client.clone();
     let ctx = Arc::new(Context {
         client,

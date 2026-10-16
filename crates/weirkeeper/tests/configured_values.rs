@@ -58,6 +58,8 @@ use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
 const NS: &str = "team-a";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const RELEASE_NS: &str = "logweir-system";
 const CLUSTER_UID: &str = "7a2b9c1d-0000-4000-8000-0000000000c1";
 const PF_UID: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
@@ -265,7 +267,7 @@ fn now_pf() -> DateTime<Utc> {
 fn terminal_preflight() -> Preflight {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
-        "metadata": {"name": "pf-1", "namespace": NS, "uid": PF_UID,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "pf-1", "namespace": NS, "uid": PF_UID,
                      "generation": 1, "resourceVersion": "100"},
         "spec": {"request": backup_request()},
         "status": {
@@ -280,7 +282,7 @@ fn terminal_preflight() -> Preflight {
 fn listed_preflight(name: &str, uid: &str, basis: DateTime<Utc>) -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
-        "metadata": {"name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
         "spec": {"request": backup_request()},
         "status": {
             "phase": "Completed", "reason": "Valid",
@@ -312,7 +314,7 @@ fn preflight_routes(document: String, delete: bool) -> Vec<Route> {
             status: 200,
             body: json!({
                 "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
-                "metadata": {"name": "pf-1", "namespace": NS, "uid": PF_UID, "resourceVersion": "101"},
+                "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "pf-1", "namespace": NS, "uid": PF_UID, "resourceVersion": "101"},
                 "spec": {"request": backup_request()}
             })
             .to_string(),
@@ -375,7 +377,7 @@ async fn the_installation_policys_preflight_window_reaches_the_preflight_collect
 fn cluster() -> KafkaCluster {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "prod", "namespace": NS, "uid": CLUSTER_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "prod", "namespace": NS, "uid": CLUSTER_UID},
         "spec": {
             "bootstrapServers": ["broker-0.prod:9093"],
             "auth": {"mode": "scramSha512", "username": "logweir",
@@ -391,7 +393,7 @@ fn cluster() -> KafkaCluster {
 fn manual(name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": name, "namespace": NS, "uid": uid,
             "generation": 1, "resourceVersion": "100",
             "creationTimestamp": created.to_rfc3339()
@@ -503,7 +505,7 @@ async fn pooled_pass(
     seen
 }
 
-/// **`runs.maxManualBackupsActivePerNamespace` reaches the manual-run gate:
+/// **`runs.maxManualBackupsActivePerWorkspace` reaches the manual-run gate:
 /// environment, `ConfigMap`, ceiling, queue.**
 ///
 /// Five manual `Backup`s are running and a sixth arrives. The chart's tuned
@@ -554,7 +556,7 @@ async fn the_installation_policys_manual_backup_ceiling_admits_the_sixth_run() {
     assert_eq!(statuses[0]["queue"], json!({"limit": 4}));
 }
 
-/// **`runs.maxManualRestoresActivePerNamespace` is the ceiling the restore
+/// **`runs.maxManualRestoresActivePerWorkspace` is the ceiling the restore
 /// gate applies.**
 ///
 /// The mapping both gates share (`run_pool::ceiling`): the tuned document's
@@ -601,7 +603,7 @@ fn the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies()
     }
 }
 
-// runs.maxManualRestoresActivePerNamespace, end to end
+// runs.maxManualRestoresActivePerWorkspace, end to end
 
 const RESTORE_PLAN: &str = "\
 source:
@@ -643,7 +645,7 @@ const APPROVER_KEY_ID: &str =
 fn manual_restore(name: &str, uid: &str, minute: u32, status: Value) -> Restore {
     let mut value = json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": name, "namespace": NS, "uid": uid, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": name, "namespace": NS, "uid": uid, "generation": 1,
                      "resourceVersion": "7", "creationTimestamp": utc(11, minute, 0).to_rfc3339()},
         "spec": {
             "planBytes": RESTORE_PLAN,
@@ -669,7 +671,7 @@ fn restore_approval(restore: &Restore) -> Approval {
     let hash = logweir_core::ids::sha256_prefixed(RESTORE_PLAN.as_bytes());
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
-        "metadata": {"name": "a1", "namespace": NS, "uid": "aaaaaaaa-0000-4000-8000-0000000000f1"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "a1", "namespace": NS, "uid": "aaaaaaaa-0000-4000-8000-0000000000f1"},
         "spec": {
             "subjectRef": {"kind": "Restore", "name": name},
             "planHash": hash,
@@ -747,7 +749,7 @@ fn restore_routes(restore: &Restore, document: String, now: DateTime<Utc>) -> Ve
             status: 200,
             body: json!({
                 "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-                "metadata": {"name": "scratch", "namespace": NS,
+                "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "scratch", "namespace": NS,
                              "uid": "cccccccc-0000-4000-8000-0000000000f1"},
                 "spec": {"bootstrapServers": ["scratch-0.team-a:9092"],
                          "auth": {"mode": "plaintext", "tls": false},
@@ -839,7 +841,7 @@ async fn pooled_restore_pass(
     seen
 }
 
-/// **`runs.maxManualRestoresActivePerNamespace` reaches the restore gate:
+/// **`runs.maxManualRestoresActivePerWorkspace` reaches the restore gate:
 /// environment, `ConfigMap`, ceiling, admission.**
 ///
 /// Two manual `Restore`s are running and an approved third arrives. The
@@ -891,7 +893,7 @@ async fn the_installation_policys_manual_restore_ceiling_admits_the_third_restor
         admitted["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("maxManualRestoresActivePerNamespace` = 8"),
+            .contains("maxManualRestoresActivePerWorkspace` = 8"),
         "{admitted}"
     );
 
@@ -905,7 +907,7 @@ async fn the_installation_policys_manual_restore_ceiling_admits_the_third_restor
     assert_eq!(statuses[0]["queue"]["limit"], 2);
 }
 
-// checks.maxEvidenceFetchActivePerNamespace, from the caller
+// checks.maxEvidenceFetchActivePerWorkspace, from the caller
 
 const BACKUP_UID: &str = "00000000-0000-4000-8000-0000000000e1";
 
@@ -914,7 +916,7 @@ const BACKUP_UID: &str = "00000000-0000-4000-8000-0000000000e1";
 fn fetch_destination() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "dest-f", "namespace": NS,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "dest-f", "namespace": NS,
                      "uid": "cafe0003-0000-4000-8000-0000000000f3",
                      "generation": 1, "resourceVersion": "11"},
         "spec": {
@@ -945,7 +947,8 @@ fn active_fetches(n: u32) -> String {
                     "name": format!("lwc-ev-other{i}"), "namespace": NS,
                     "uid": format!("eeeeeeee-0000-4000-8000-00000000000{i}"),
                     "labels": {"app.kubernetes.io/component": "check",
-                               "logweir.dev/check-kind": "evidenceFetch"}
+                               "logweir.dev/check-kind": "evidenceFetch",
+                               "logweir.dev/workspace": WS}
                 },
                 "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
                 "status": {"active": 1}
@@ -1017,6 +1020,7 @@ async fn fetch_step(document: String, now: DateTime<Utc>, active: u32) -> (Step,
         kind: "Backup".to_string(),
         name: "logweir-manual-ev".to_string(),
         uid: BACKUP_UID.to_string(),
+        workspace: Some(WS.to_string()),
     };
     let request = evidence_fetch::Request {
         payload_key: "logweir/receipts/ev.json".to_string(),
@@ -1026,6 +1030,7 @@ async fn fetch_step(document: String, now: DateTime<Utc>, active: u32) -> (Step,
     let step = evidence_fetch::advance(&evidence_fetch::Inputs {
         client: &client,
         namespace: NS,
+        workspace: WS,
         owner: &owner,
         attempt: 1,
         request: &request,
@@ -1042,11 +1047,11 @@ async fn fetch_step(document: String, now: DateTime<Utc>, active: u32) -> (Step,
     (step, seen)
 }
 
-/// **`checks.maxEvidenceFetchActivePerNamespace` reaches the evidence-fetch
+/// **`checks.maxEvidenceFetchActivePerWorkspace` reaches the evidence-fetch
 /// pool FROM ITS CALLER**: the policy `evidence_source_for` loads is the one
 /// `advance` admits by.
 ///
-/// Four evidence-fetch Jobs run in the namespace. The tuned document's pool is
+/// Four evidence-fetch Jobs run in the workspace. The tuned document's pool is
 /// five, so a fifth is created; beside five it waits, naming `= 5`. CONTROL:
 /// served the default document (four), the pass beside four waits, naming
 /// `= 4`, and creates nothing. `limits::admit` is driven at a non-default
@@ -1071,7 +1076,7 @@ async fn the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its
     let (step, seen) = fetch_step(policy_json("tuned"), utc(18, 30, 0), 5).await;
     let detail = queued(step);
     assert!(
-        detail.contains("maxEvidenceFetchActivePerNamespace = 5"),
+        detail.contains("maxEvidenceFetchActivePerWorkspace = 5"),
         "{detail}"
     );
     assert_eq!(posts(&seen, "/jobs") + posts(&seen, "/configmaps"), 0);
@@ -1080,7 +1085,7 @@ async fn the_installation_policys_evidence_fetch_pool_reaches_the_fetch_from_its
     let (step, seen) = fetch_step(policy_json("default"), utc(19, 0, 0), 4).await;
     let detail = queued(step);
     assert!(
-        detail.contains("maxEvidenceFetchActivePerNamespace = 4"),
+        detail.contains("maxEvidenceFetchActivePerWorkspace = 4"),
         "{detail}"
     );
     assert_eq!(posts(&seen, "/jobs") + posts(&seen, "/configmaps"), 0);
@@ -1168,7 +1173,7 @@ const CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMAaqAQIDBAUG\n-----END CERTIF
 fn destination_with_ca() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "dest-a", "namespace": NS, "uid": DEST_A_UID,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "dest-a", "namespace": NS, "uid": DEST_A_UID,
                      "generation": 3, "resourceVersion": "1001"},
         "spec": {
             "storage": {
@@ -1248,7 +1253,7 @@ async fn admit_with(document: String, now: DateTime<Utc>) -> Result<DestinationA
 fn destination_backed_restore() -> Restore {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": "restore-ca", "namespace": NS,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "restore-ca", "namespace": NS,
                      "uid": "cafe0002-0000-4000-8000-0000000000a2",
                      "generation": 1, "resourceVersion": "1"},
         "spec": {

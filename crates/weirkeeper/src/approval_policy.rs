@@ -244,7 +244,7 @@ pub async fn poll_marker(
                 configmap = %format!("{namespace}/{name}"),
                 refusal = refusal.as_str(),
                 "a fresh-install marker is present and NOT honoured: unbound \
-                 namespaces stay legacy-governed-v1"
+                 workspaces stay legacy-governed-v1"
             ),
             MarkerRead::Unchanged => {}
             MarkerRead::Failed(error) => tracing::warn!(
@@ -458,9 +458,9 @@ mod tests {
     }
 
     #[test]
-    fn a_good_document_binds_its_namespaces() {
+    fn a_good_document_binds_its_workspaces() {
         let set = configured_policy(Ok("/p.yaml".into()), |_| {
-            Ok("allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nnamespaces:\n  team-a: o\n".into())
+            Ok("allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nworkspaces:\n  team-a: o\n".into())
         })
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(set.resolve("team-a").mode(), ApprovalMode::Ordinary);
