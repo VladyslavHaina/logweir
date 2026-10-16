@@ -18,9 +18,10 @@
 // so the object below is the custom resource; the console sends the same plan bytes to
 // `POST .../restores`.
 //
-// `--fields <path>` (default `<out>/plan-fields.json`) is `{ns, archiveUrl,
+// `--fields <path>` (default `<out>/plan-fields.json`) is `{workspace, archiveUrl,
 // archiveSecretName, targetClusterName, deadlineSeconds, fields}`, where `fields` is what
-// console/fixtures/plan-fields.json holds. It reaches no network.
+// console/fixtures/plan-fields.json holds and `workspace` is the Restore's
+// `logweir.dev/workspace` label (the API writes it from the path). It reaches no network.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -47,6 +48,7 @@ try {
 } catch (error) {
   usage(`could not read the wizard state at ${fieldsPath}: ${error.message}`);
 }
+if (!state.workspace) usage(`${fieldsPath} names no workspace`);
 
 // The bytes are rendered ONCE and every later value is a function of exactly those bytes:
 // the sha256 the approver signs and the one the controller recomputes are the same number
@@ -58,7 +60,7 @@ const target = state.fields.target ?? {};
 const restore = {
   apiVersion: "logweir.dev/v1alpha1",
   kind: "Restore",
-  metadata: { name: names.restoreName },
+  metadata: { name: names.restoreName, labels: { "logweir.dev/workspace": state.workspace } },
   spec: {
     planBytes: bytes,
     approvalRef: { name: names.approvalName },

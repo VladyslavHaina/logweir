@@ -759,14 +759,15 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
 
 
 # Task 35: THE CHART, WALKED END TO END ON A REAL CLUSTER. The release must be
-# installed first with all three optional components on (the README's
-# five-minute path); the walk then mints the keypairs, creates the five
-# Secrets, probes two KafkaClusters, fires a BackupSchedule, restores from its
-# Backup with an approval minted on the host, verifies the scorecard with both
-# readers, fetches the in-cluster UI through a port-forward and tears
-# everything down. Parameterised by LOGWEIR_KUBE_CONTEXT (default
-# docker-desktop), LOGWEIR_HELM_RELEASE (logweir) and LOGWEIR_HELM_NAMESPACE
-# (logweir-system). `.github/workflows/helm-demo.yml` runs the same script on
+# installed first with all three optional components on and two workspaces
+# (examples/demo.values.yaml); the walk then works in the release namespace,
+# workspace default: it binds the chart's archive credential, probes two
+# KafkaClusters, fires a BackupSchedule, sees a Backup in workspace other
+# refused, restores from the Backup with an approval minted on the host,
+# verifies the scorecard with both readers, fetches the console through a
+# port-forward and tears everything down. Parameterised by
+# LOGWEIR_KUBE_CONTEXT (default docker-desktop), LOGWEIR_HELM_RELEASE (logweir)
+# and LOGWEIR_HELM_NAMESPACE (logweir-system). `.github/workflows/helm-demo.yml` runs the same script on
 # a kind cluster. Outside `just gate` — it needs a cluster — and in
 # docs/gates.md's stack/cluster table.
 helm-demo:
