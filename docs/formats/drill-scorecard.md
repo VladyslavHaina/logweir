@@ -3,12 +3,12 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.4.0.json`](../../schemas/logweir-drill-scorecard-2.4.0.json)
+[`schemas/logweir-drill-scorecard-2.5.0.json`](../../schemas/logweir-drill-scorecard-2.5.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.12.0.json`](../../schemas/logweir-drill-scorecard-1.12.0.json)
+[`schemas/logweir-drill-scorecard-1.13.0.json`](../../schemas/logweir-drill-scorecard-1.13.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.11.0.json` and `-2.0.0.json` to `-2.3.0.json`,
+schema file, `-1.0.0.json` to `-1.12.0.json` and `-2.0.0.json` to `-2.4.0.json`,
 is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
@@ -88,6 +88,7 @@ chose.
 | 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
 | 1.11.0, 2.3.0 | A verifier older than 1.32.0 and an older `logweir drill verify` accept it and ignore the block; readers before 1.27.0 refuse a 2.3.0 document by its major. An older runner ignores the plan block, creates its topics as before and claims nothing | Documents stay valid |
 | 1.12.0, 2.4.0 | Accepts it, ignores the block and prints no `mapping:` line; `verify_scorecard.py` before 1.33.0 and an older `logweir drill verify` have no `--positions-mapping` | An older `logweir` writes no mapping (a `Switchover` over such a restore is refused `NoPositionsMapping`); documents stay valid |
+| 1.13.0, 2.5.0 | Accepts it, ignores the block and prints no `schemas:` line: measured on 2026-10-16 with `v0.4.1`'s readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`) over three signed documents shaped as the parity gate's accepted SC cases (1.13.0 imported, 2.5.0 imported, 1.13.0 `not_imported`), each `VALID`, exit 0. On every build, `scorecard_golden.rs::a_block_a_later_minor_adds_inside_target_is_ignored` holds the rule it rests on (it fails if `TargetInfo` gains `deny_unknown_fields`). Readers before 1.27.0 refuse a 2.5.0 document by its major. For the line use script 1.35.0 or a `logweir` from PROD-03.2 on | Documents stay valid. 0.5.0 has no in-place rollback ([release-notes.md](../release-notes.md) item 137) |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -104,6 +105,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
 | 1.11.0, 2.3.0 | `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`, `FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`, `TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; `topic_configuration_1_11_*.json`, `topic_configuration_under_format_1_10_0.json` |
 | 1.12.0, 2.4.0 | `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING`, `FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`, `POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the `format_version` of every `positions_mapping_*.json` case in `positions-mapping-index.json` (the parity script reads them) |
+| 1.13.0, 2.5.0 | `scorecard::FORMAT_VERSION_WITH_SCHEMAS`, `FORMAT_VERSION_SUBSET_WITH_SCHEMAS`, `SCHEMAS_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_SCHEMAS_SINCE_MINOR` and `..._OF_MAJOR_2`; the parity script's `SCORECARD_SCHEMAS_VERSION` and `SCORECARD_SUBSET_SCHEMAS_VERSION` |
 
 ---
 

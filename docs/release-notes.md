@@ -29,7 +29,7 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135 and 136. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144 and 145. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
@@ -37,7 +37,11 @@ landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
 is below. Items 102 to 129 landed after the `v0.3.0` tag and are in the
 `v0.4.0` release, whose record is below. Items 130 to 136 landed after the
-`v0.4.0` tag and are in the `v0.4.1` release, whose record is below.
+`v0.4.0` tag and are in the `v0.4.1` release, whose record is below. Items
+137 to 145 landed after the `v0.4.1` tag and are in the `v0.5.0` release, not
+yet tagged: OD-23's one namespace per install with workspaces inside it, the
+Schema Registry, engine build 5 and an honest interrupted restore. `v0.5.0` is
+a fresh install, never an upgrade in place (item 137).
 
 ### Candidate record
 
@@ -3528,9 +3532,166 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 **Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15): `scripts/check-image-api.sh` on the console image (`sha256:9742206e…`) passes: `/ui` holds this tree's `console/dist` byte for byte and nothing else. Live, the served `index.html`, script and stylesheet equal the build's, and the pages used show no console error or warning. Dependabot's #50, #52, #53 and #55 are closed.
 **Rollback:** an older console image carries the older versions; nothing is stored.
 
+#### 137. One namespace per install, workspaces inside it; 0.4.x is not upgraded in place (PROD-19.1) — required action
+
+**Changed.** An install is one Helm release in one namespace. Its objects, credential Secrets, signing and console keys, runner Jobs, the controller and the console all live there, and the controller watches that namespace only. Inside it, the chart's new `workspaces` list (default `[default]`; 1 to 256 unique DNS labels) names the workspaces that group the objects (item 138).
+- **Removed, each refused at render by name:** `kubernetes.namespace`, `kubernetes.connectionsNamespace`, `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces` (with the whole signer-copy distribution and `logweir identity distribute`) and `api.namespaces`.
+- **Renamed, each refused under its old name:** `approvalPolicy.namespaces` → `approvalPolicy.workspaces`; `api.console.roles.bindings[].namespace` → `.workspace`; `checks.maxActivePerNamespace`, `checks.maxEvidenceFetchActivePerNamespace`, `runs.maxManualBackupsActivePerNamespace` and `runs.maxManualRestoresActivePerNamespace` → `…PerWorkspace`, with the same defaults. The installation approval document binds `workspaces:`.
+- **The controller** runs one watch per kind under `Role/weirkeeper` in the release namespace, plus `weirkeeper-cluster-scope` for the cluster-scoped trust kinds; `ClusterRoleBinding/weirkeeper` is gone. `LOGWEIR_INSTALLATION_NAMESPACE` and `LOGWEIR_WORKSPACES` are required (a missing or malformed value refuses to start), and `LOGWEIR_WATCH_NAMESPACES` is removed. Its Role gains `get` on `secrets` (item 139).
+- **The console** runs under `Role/<release>-api` in the release namespace, which gains `patch` on `restores` for item 144's annotations. Its configuration names `namespace:` and `workspaces:`.
+- **The `kubectl` roles:** `logweir-viewer` is a Role that reads the namespaced kinds of every workspace and no Secret (it no longer reads trust policies); `logweir-trust-admin` stays. `logweir-operator`, `logweir-approver` and `logweir-retention-admin` are deleted: people use the console, and `kubectl` writes belong to installation administrators (item 139).
+
+**Do:** install afresh; there is no `helm upgrade` from 0.4.x ([install.md](install.md#upgrade-crds-before-upgrading-the-controller), [kubernetes.md](kubernetes.md#upgrade)):
+1. Export trust as in [*Recover onto a clean installation with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit) and keep the bucket.
+2. Let runs finish, and let every TTL clone settle (item 91): after the uninstall nothing reconciles the old namespaces.
+3. `helm uninstall` the old release (one install per cluster).
+4. Apply this release's CRDs (`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`): `helm uninstall` leaves the old ones, and `helm install` does not replace a CRD that exists, so without this step items 142 and 144's fields are pruned.
+5. Install 0.5.0 into one namespace with `workspaces`, the renamed values and none of the removed ones.
+6. Import trust; then, in each workspace, add connections, destinations and schedules, and connect a catalog to list the old points (item 145: nothing in the bucket names a namespace).
+7. Delete the old namespaces when done.
+
+**Scope:** `chart_lint_one_namespace_per_install` (every namespaced object of every render is in the release namespace, except the two opt-in Roles: Strimzi's and the trusted proxy's), `chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned`, `manifest_lint::the_shipped_roles_are_exactly_as_specified` (the three write roles absent from every render), `check-chart.sh` (each of the ten removed or renamed values refused by name, with a control), `weirkeeper/tests/one_namespace.rs` (no `Api::all` on a namespaced kind; every controller watches the install namespace), `linkage::weirkeeper_refuses_to_start_without_its_namespace_and_workspaces`, `cli_exit_codes` (`identity distribute` is gone) and `deploy/poc/validate.sh` (one namespace, four workspaces).
+[UNVERIFIED — no cluster has installed this chart yet; the batch's one fresh PoC install, namespace `logweir` with workspaces `dev`, `tst`, `stg` and `prd`, runs it.]
+**Rollback:** none in place, in either direction: a 0.4.x chart's schema refuses `workspaces`, and a 0.4.x reader refuses every approval this release signs (item 140). Go back by the same seven steps with the older chart; archives and evidence written by this release stay readable (item 145).
+
+#### 138. Workspaces: one label on every object, references never cross, and roles, approval mode, pools and rate limits per workspace (PROD-19.1)
+
+**Changed.** A workspace is a name in `workspaces` and the label `logweir.dev/workspace` on every Logweir object, runner Job and console-written Secret ([kubernetes.md, *Workspaces*](kubernetes.md#workspaces)).
+- **The label is required.** The console writes it from the workspace in the address; a label sent in a body is overwritten. An object without it, or with a name not in the list, is `WorkspaceUnknown`, terminal, and nothing runs. A run already finished keeps its phase and conditions, so a workspace dropped from the list and put back finds its Backups and Restores as they were. Objects the controller makes (a schedule's Backups, every Job) carry their parent's label.
+- **References never cross.** Every `…Ref` must name an object of the same workspace, and the rule follows each referent to the end: a `Preflight` or `Switchover` of a `dev` `Restore` whose connection, destination or credential is in `prd` is refused itself. A refusal is `WorkspaceMismatch`, terminal, with no Job, and its message names both workspaces. A TTL clone being deleted is held to the same rule: it keeps its finalizer and says why. `prd` data reaches `stg` for a drill through a `stg` destination with a read-only grant on `prd`'s bucket.
+- **The API** lists one workspace by label selector, answers another workspace's object `404 not_found`, and a workspace the person holds no role in `403 workspace_forbidden` (or `404` where unbound workspaces are hidden). A create or edit naming a connection, destination, schedule, catalog, restore or approval that another workspace holds is `422` on that field ("no `<kind>` named `<x>` in workspace `<ws>`"); a referent that exists nowhere is admitted, as before, and the controller refuses it. Names are unique per install: a destination or catalog name another workspace holds is `409` "in use in this installation". A schedule suspension or edit, a destination rotation, a check cancel and a restore's cancel or clean-up read the object through its workspace first, so a borrowed `resourceVersion` reaches nothing; a stored check result or catalog page is served only to the object that owns it.
+- **Per workspace:** console role bindings (`roles.bindings[].workspace`; the viewer, operator, approver and administrator matrix is unchanged, and `localAdmin` is administrator of every workspace); the approval mode (`approvalPolicy.workspaces: {prd: two-person}`; an unbound workspace takes `approvalPolicy.default`); the manual backup, manual restore and check pools (`…PerWorkspace`, so two `dev` restores never queue a `prd` one); and the console's rate limits, event-stream slots, idempotency keys and list cursors, counted per person per workspace.
+- **Per install:** trust (an administrator of any workspace sees the trust policies that govern the namespace), the signing identity, the console keys, `approvalPolicy.policies` and `default`, `checks.maxActiveTotal`, the archive settings and the images.
+- **The console** addresses `#/<workspace>/…`; a visit with none opens the first workspace you hold a role in. The workspace switcher replaces the namespace picker, appears only to a person with roles in more than one workspace, and lists only those.
+
+**Do:** set `workspaces` and bind each workspace's roles and approval mode. Add a workspace with a longer list in a `helm upgrade`; remove one only when it holds no objects; a workspace cannot be renamed (make a new one and connect a catalog). With `kubectl`, label everything you create (`kubectl get backups -l logweir.dev/workspace=prd`, or `-L logweir.dev/workspace` for all).
+**Scope:** `weirkeeper/tests/workspace_gate.rs` (unlabelled and unlisted objects, every spec reference per kind, the transitive `Preflight` and `Switchover` refusals, a deleting `Restore`, a finished run kept, labels on schedule-made Backups and Jobs, each with a same-workspace control; mutants on the follow, the deletion hold and the finished-run guard killed), `manual_run_pool.rs::a_prd_restore_is_admitted_while_dev_is_full`, `logweir-api/tests/workspaces.rs` (lists across pages, the 404, the per-path 422 table, the 409, the borrowed `resourceVersion` on every patch, the owner-bound result document; with controls and three mutants), the renamed `role_matrix` and `pagination` rows, and the console's switcher rows in `SessionGate.test.tsx` (two mutants).
+[UNVERIFIED — no live install has run the workspace boundary; the batch's fresh PoC install runs record rows P2 to P9 by clicks and `kubectl`.]
+**Rollback:** with item 137.
+
+#### 139. A credential Secret carries its workspace's label; whoever can read Secrets, create Pods or Jobs, or name a Secret in the namespace is an administrator (PROD-19.1) — required action
+
+**Changed.** The controller mounts a Secret that a Logweir object names (directly, or through its connection or destination: `auth.secretRef`, a client certificate, a Secret-held `tlsCa`, item 142's registry `secretRef`, a destination's grants, an inline archive's `secretRef`, a retention credential) only when the Secret's `logweir.dev/workspace` equals the referrer's. Otherwise the object is `WorkspaceMismatch` ("Secret `x` is in no workspace", or names both workspaces), with no Job. The console labels the Secrets it writes. The install's key Secrets (`logweir-signing-key`, the console's keys, the OIDC client secret) carry no workspace label, so no object can name them. The chart's demo `logweir-s3` carries the first workspace's label, and the chart's notes warn never to bind it, MinIO's root pair, in an install with more than one workspace. To read the label, the controller's Role gains `get` on `secrets`; RBAC has no metadata-only grant, so that grant could read data, and the controller's only Secret call is a metadata read.
+**The residual, restated** ([kubernetes.md](kubernetes.md#workspaces), [SECURITY.md](../SECURITY.md)): Kubernetes RBAC stops at the namespace and cannot see workspaces. **Whoever can read Secrets, create Pods or Jobs, or create a Logweir object that names a Secret (a `KafkaCluster`, `BackupDestination` or `RetentionPolicy`) in the release namespace holds Logweir's keys**: with the signing key or the console's keys they can sign evidence and forge any approval mode, `prd`'s two-person rule included. Such a person is an administrator of every workspace. A Secret named before it exists is admitted at the gate, and a Secret created later under that name would be mounted; only such a `kubectl` writer can do that.
+**Do:**
+- Label every credential Secret you create with `kubectl` with the workspace of the objects that name it (`logweir.dev/workspace: <ws>`, as [config/samples/secrets.yaml](../config/samples/secrets.yaml) shows), beside its `logweir-binding` (items 33 and 38).
+- Give people the console. Hand out `logweir-viewer` for `kubectl` reads, and `kubectl` write access to the release namespace only to the people you would make administrators of every workspace.
+- In an install with more than one workspace, give each workspace its own archive credentials, never the demo `logweir-s3`.
+
+**Scope:** `workspace_gate.rs` (a credential in another workspace and in none, a destination naming `logweir-signing-key` refused, the registry Secret refused through its connection and a Backup, each with a control; the Secret check skipped is killed), `chart_lint_no_key_secret_carries_a_workspace_label`, `manifest_lint::weirkeeper_reads_secret_metadata_only` (exactly `get secrets`, and only `get_metadata_opt` on an `Api<Secret>`), `linkage::the_controller_never_reads_a_secret`.
+[UNVERIFIED — no live controller has refused a Secret by its label yet; the batch's fresh PoC install applies a destination naming `logweir-signing-key` and reads the controller's `can-i` answers.]
+**Rollback:** with item 137.
+
+#### 140. An approval names its workspace: the authorization document is 2.3.0 (PROD-19.1) — required action
+
+**Changed.** The authorization document v2 gains `subject.workspace` (format 2.3.0; [approval-documents.md](formats/approval-documents.md)), and `subject.namespace` always holds the release namespace. The console writes the workspace into every request and approval, and the approver sees it. Every reader of this release requires it and compares it with the subject's label, beside name and UID: the `Approval` controller and the runner refuse a document for another workspace, or with none, `AuthorizationSubjectMismatch`, and `Restore` admission `ApprovalSubjectMismatch`. An `Approval` labelled other than its `Restore` or `Switchover` is `WorkspaceMismatch`, and is never judged under the other workspace's approval mode. So an approval made in `dev` never authorises a run in `prd`, even when both share a policy and someone relabels the object. The restore runner gets the workspace as `LOGWEIR_EXECUTION_SUBJECT_WORKSPACE`, and `logweir switchover run` takes `--workspace`.
+**Do:** nothing on a fresh install. Requests and approvals made under 0.4.x are not carried over: make them again. A script that writes authorization documents writes 2.3.0 with `subject.workspace`.
+**Scope:** `logweir-core`'s `each_binding_field_is_checked` and `an_older_document_reader_refuses_the_workspace`; `logweir/tests/authorization_v2.rs` (`approved-for-another-workspace` refused by both readers; a 2.2.0 document refused; the matching workspace accepted); `weirkeeper/tests/approval_policy.rs::an_approval_is_judged_in_its_subjects_workspace_and_never_another` (one-person `dev`, two-person `prd`); `restore_policy.rs`; the switchover's `admission_refuses_by_name`; `logweir-api/tests/console_approval.rs` (the signed subject names the install namespace and the workspace, and the same bytes against a relabelled `Restore` are refused). Mutants on `same(approval, restore)` and the core comparison were killed.
+[UNVERIFIED — no PoC approval has signed format 2.3.0 yet; the batch's fresh PoC install runs record rows P4 and P7, a two-person `prd` approval and a `dev` approval copied into `prd`.]
+**Rollback:** a reader before this release refuses every 2.3.0 document (an unknown field: the safer verdict, OD-7), so approvals made under this release do not survive a return to 0.4.x.
+
+#### 141. The product API is addressed by workspace; its OpenAPI document is `1.0.0-alpha.4` (PROD-19.1, PROD-03.1, PROD-07.2)
+
+**Changed.** `info.version` moves from `1.0.0-alpha.3` to `1.0.0-alpha.4`, still pre-release ([stability.md](stability.md)). 65 operations (63 before) and 307 component schemas (302 before):
+- **Breaking:** every product route moves from `/api/v1/namespaces/{ns}/…` to `/api/v1/workspaces/{ws}/…`, with the same suffixes, and `GET /api/v1/namespaces` is `GET /api/v1/workspaces` (`WorkspaceListResponse` and `WorkspaceGrant` replace `NamespaceListResponse` and `NamespaceGrant`).
+- **Breaking:** `SessionResponse.namespaces` is `workspaces`; `ApprovalPolicyView`, `ApprovalRequestView` and `SwitchoverApprovalRequestView` carry a required `workspace` in place of `namespace`; the problem code `namespace_forbidden` is `workspace_forbidden`.
+- Added: `POST …/restores/{name}/cancel` and `POST …/restores/{name}/cleanup`, `Restore.interruption` (`RestoreInterruptionView`) and the operation state `interrupted` (item 144).
+- Added: `CreateConnectionRequest.schemaRegistry` and `Connection.schemaRegistry` (`SchemaRegistryRequest`, `SchemaRegistryView`), `PointView.schemaRegistry` (`PointSchemaRegistryView`) and `RestoreCoverageView.schemas` (`RestoreSchemasView`) (item 142).
+- Unchanged: a view's `namespace` member stays, and now always names the install's namespace.
+
+Outside the document: the audit record's `namespace` field is `workspace`, and its `routeAccess` values are `workspaced` and `anyWorkspace` ([audit-log.md](audit-log.md)).
+**Do:** nothing for the console, which ships in the same image as the API. A script that calls the API moves to the `/workspaces/{ws}` paths; an audit-log consumer reads `workspace`. No client outside this repository is supported.
+**Scope:** `just schema-check` and `contract.rs::the_checked_in_openapi_document_is_what_the_types_generate`; the list is a diff of the operations, schemas, members, required members and problem codes of `v0.4.1`'s document against this one.
+**Rollback:** with item 137; an older console image serves `-alpha.3` again.
+
+#### 142. A backup captures the source's Schema Registry, and a restore imports the schemas it needs, keeping their IDs (PROD-03.1, PROD-03.2)
+
+**Changed.** A connection can name its Confluent-compatible Schema Registry: `KafkaCluster.spec.schemaRegistry: {url, username?, secretRef?: {name, passwordKey}}` (password key `registry-password` by default; `username` and `secretRef` together, for HTTP basic auth). The console's *Add connection* takes the URL, username and password, writes the password into the connection's own Secret and never shows it again. Connections are immutable, so a registry is added by creating a new connection. The connection's binding covers the registry's URL and username ([kubernetes.md](kubernetes.md#schema-registry-prod-031-032)).
+- **Backup:** after the engine, the runner snapshots every subject and version (soft-deleted included) beside the receipt as `<run_id>.schema-registry.json`; the receipt's `schema_registry` block names it (item 145). A registry that does not answer, refuses the credential or is over 100 000 versions or 32 MiB never fails the backup: the block says why it was not captured, and the catalog point and the console say "Not captured" with the reason. Compatibility settings and modes are not captured.
+- **Restore:** before any topic is created, the runner reads the framed schema IDs of every record it restores, takes the subjects holding them and the subjects they reference, and registers what the target registry lacks in its `IMPORT` mode with the source's IDs and versions. No record byte is rewritten. Each subject's mode is put back exactly as it was, also when the answer to the `IMPORT` request was lost. Imported schemas are never removed. A target connection with no registry is not refused; the scorecard says the schemas were not imported.
+- **Refused, exit 3, before any topic is created:** `SchemaConflict` (an ID or subject-version the target holds with other content), `SchemaRegistryCannotKeepIds` (a registry without `IMPORT` mode: Karapace 6.2.3, Apicurio 3.0.9's compatibility API), `SchemaRegistryReadOnly` (a read-only subject, its own mode or the global one), `SchemaRegistryModeNotRestored` (a subject's mode that could not be put back, named), `SchemaSnapshotInvalid`, `SchemaRegistryUnreachable`. The first three write nothing. Any registry answer other than the one that means "not there" refuses. The plan's `target.schema_registry` must be the target connection's (`ConnectionPlanMismatch`); the console's wizard writes it.
+- **Checks:** `registry.reachable` (connection test and backup readiness, advisory) and `target.schemas` (restore readiness, blocking: what will be imported and whether anything conflicts), listed only for a connection with a registry.
+- **Where it shows:** `Restore.status.integrity.schemas` and the API's `coverage.schemas` (imported and already present), the console's catalog point ("Captured: N subjects, M versions"; the "Registry not captured" warning only when it was not) and the restore page. [stability.md](stability.md) Never #2 is narrowed: Logweir captures a registry and imports what a restore needs, and still does not evaluate a registry's RBAC, hold field-level encryption keys, rewrite schema IDs or manage registry configuration.
+
+**Do:** name the registry when you create each connection. The target registry's user must be allowed to set a subject's mode (on Redpanda, a superuser). A Secret you create with `kubectl` holds `registry-password`, the connection's binding and the workspace label (item 139). Upgrade the verifiers that will read the new blocks (item 145).
+**Scope:** `logweir-core/tests/schema_registry.rs` (19 rows: capture and its four reasons, closure, conflicts, registries that cannot keep IDs, a partial import continued, the mode rows, every unknown answer refused before any write), receipt arms 46 to 49, `weirkeeper/tests/schema_registry_connection.rs`, `logweir-api/tests/connection_registry.rs`, the catalog's 1.8.0 row and 11 mutants, all killed. Live, `e2e/tests/schema_registry.rs` SR-1 to SR-10 on compose (Kafka 4.3.1, the `registry` profile: Karapace as source, a Redpanda v26.2.4 registry with basic auth as target): Avro with a reference, Protobuf with an import, JSON and RecordNameStrategy decoded after the restore, each refusal with no topic and nothing registered, and both readers printing the same lines; the two check rows answered from the live registries. Confluent Schema Registry 8.0.0 kept IDs in the design's prototype only; no Confluent row runs in CI.
+[UNVERIFIED — no cluster has captured or imported a registry yet; the batch's fresh PoC install runs OD-23-core's steps 1 to 4 and a read-only subject's refusal.]
+**Rollback:** with item 137. An older reader ignores the new blocks (item 145); an older chart's CRD prunes `spec.schemaRegistry`.
+
+#### 143. The engine is build `0.23.3+logweir.5`: committed-only capture, idempotent restore, repeated header keys, a byte-rate limit (PROD-00.3a, 00.3d, 00.3e, 00.3h)
+
+**Changed.** Four patches (0004 to 0007), always on except the limit:
+- **A backup captures committed records only** (`READ_COMMITTED`): no transaction marker, no aborted record, and nothing from a transaction still open (it is captured up to the last stable offset). Restoring such an archive needs no `restore.allow_transaction_markers`; an archive written by an earlier build is still refused without it (item 67). A backup whose selected partitions hold only aborted records archives no segment and fails exit 1, never a false empty capture.
+- **A restore produces as one idempotent producer,** so a resend after a lost acknowledgement is not appended twice. It needs no new grant: `Write` on the target topic, which a restore already needs, implies `IdempotentWrite` since Kafka 3.0. A second execution into the same target can still duplicate; phase 0 refuses an existing target for that reason.
+- **Repeated header keys** are archived and restored, every copy in order.
+- **`restore.rate_limit_bytes_per_sec`** (an integer ≥ 1, optional) limits the key and value bytes the whole restore produces per second, across all partitions ([drill-spec.md](formats/drill-spec.md#restorerate_limit_bytes_per_sec-prod-003h)); the console's wizard has an optional *Byte-rate limit, MB/s*. Absent, the plan's bytes are unchanged.
+- Logweir no longer renders an engine checkpoint (`checkpoint_state`, `checkpoint_interval_secs`) into the restore document: nothing is resumed (item 144). `logweir doctor` accepts exactly build 5.
+
+**Do:** roll the controller and runner images together, as for item 35. A standalone CLI install replaces its engine with build 5 and exports `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.5` and `LOGWEIR_ENGINE_DIGEST=sha256:9ebf8c668541b8e03f3f8ac3f57beb5d20b92a4cb1e526e71eaf0c02b2c7bc15` ([quickstart.md](quickstart.md)).
+**Scope:** the engine's unit oracles (400 passed; the seven patch oracles); on compose (Kafka 4.3.1, `faultproxy` profile), on build 5 built natively, with build 4 as each control: the transactional row (7 committed records archived, restored with no override; build 4 archives the markers), the lost-acknowledgement row (0 duplicates; build 4: 1,000), the shapes row (repeated keys kept; build 4 collapses them) and the byte-rate row (0.97 of the limit; build 4: 8.98 times it); `record_semantics` 13 passed with the contract asserted; `topic_identity`'s c11 and c18 rewritten to what build 5 archives and run live; the rendered document without a checkpoint (item 144's IR-4). [support-matrix.md](support-matrix.md) lists the build.
+[UNVERIFIED — no runner image built from this commit has run a backup or a restore yet; the batch's fresh PoC install runs a transactional topic, a byte-rate limited restore and the engine identity.]
+**Rollback:** with item 137. Documents build 5 signed stay valid and name their engine; an older engine ignores the rate limit and archives transaction markers again.
+
+#### 144. A restore can be cancelled; one stopped part-way is `Interrupted`, reconciled and cleaned up, never resumed (PROD-07.2)
+
+**Changed.** ([kubernetes.md](kubernetes.md#cancel-and-an-interrupted-restore))
+- **Cancel:** `POST /api/v1/workspaces/<ws>/restores/<name>/cancel`, the console's *Cancel*, or the annotation `logweir.dev/cancel-requested-by`, by whoever may create restores in the workspace, with no approval; a second request writes nothing. Before its Job exists the restore is `Failed`, `Cancelled`. While it runs, the controller suspends the run Job: the runner forwards SIGTERM to the engine, SIGKILLs it after 10 s, signs nothing and exits 1 (`failure-reason=Cancelled`), and the restore reads `Stopping` until no pod is left. New restore Jobs have a 30 s pod grace. On Linux the engine dies with the runner (`PR_SET_PDEATHSIG`). A run that signed before the cancel landed keeps its outcome.
+- **`Interrupted`:** a restore that ended without a signed scorecard after it created its target topics (cancelled, its pod deleted or evicted, a deadline, OOMKilled or crashed, the engine failed) is `phase: Interrupted` with `status.interruption.cause` (`Cancelled`, `RunnerStopped`, `RunFailed`), never a plain `Failed`. One that ended before creating anything is `Failed`, as before. Every run writes a signed, create-only targets record before its engine starts (`logweir/drills/<run_id>.targets.json` and `.targets.sig`); one it cannot write is exit 4, an evidence failure.
+- **Reconcile:** the controller starts `logweir-reconcile-<uid>-<n>` (`logweir restore reconcile --run-id`), which reads the targets record only under its signature, keeps the recorded topics still on the recorded cluster with their recorded IDs, waits for them to hold still, verifies them against the archive with the complete lane, restoring nothing, and signs an ordinary scorecard with per-partition counts. Every recorded topic kept and every partition exact is `Succeeded`, reason `ReconciledComplete`; anything else (a topic deleted or recreated is `partial` and named) stays `Interrupted`. A failing reconcile is tried three times, five minutes apart, then `verification: Failed`.
+- **Hold, Clean up, Retry:** an `Interrupted` restore frees its run-pool slot and holds its recovery point (`ActiveRestore`) until it is cleaned up or deleted. *Clean up partial topics* (`POST …/cleanup`, or `logweir.dev/cleanup-requested-by`, no second approval, offered only after a signed reconcile) runs `logweir restore cleanup` over the reconcile's scorecard: it deletes only the topics that scorecard lists, each while its topic ID is the recorded one, through a deleter scoped to the plan's mapped names. A topic someone recreated, or one under its original name, is left and named for you to check. *Retry into new topics* opens the wizard for a new `Restore` into fresh names, under the workspace's approval mode; phase 0 refuses the old partial targets.
+
+**Do:** widen each destination's `archiveRead` grant to read `s3:GetObject` on `<bucket>/logweir/drills/*` at the evidence location ([install.md §3.11](install.md#311-object-store-permissions-per-destination-role)); without it a reconcile fails `EvidenceUnreadable`. The chart grants the console `patch` on `restores` (annotations only; `spec` stays sealed).
+**Scope:** `logweir-engine-oso/tests/engine_stop.rs` (SIGTERM forwarded, SIGKILL after the grace); `reconcile.rs`'s rows (the record read only under its signature, kept by recorded ID, names outside the plan never kept, a left-out topic never a pass, another run's record refused); `weirkeeper/tests/restore_interruption.rs` (13 rows: cancel before and during, `Interrupted` on exit, lost pod, OOMKill and panic, the reconcile and its three attempts, one reconcile Job across a restart, the hold and its release, the pool slot); `logweir-api/tests/restore_interruption.rs`; `restore_cleanup.rs` (an original-name topic left; an ordinary run's scorecard deletes nothing); with their mutants killed. Live, `e2e/tests/interrupted_restore.rs` on compose (Kafka 4.3.1, OSO's engine through the docker shim): cancel with no engine left, reconcile counts equal to the targets' end offsets under both readers, a recreated topic left by Clean up, a retry, a run stopped after its engine reconciled to a pass with no second restore, a left-out topic `partial`, and a SIGKILLed runner; `stopped_restore` (FX-23) stays green. On macOS's docker-engine mode a SIGKILLed runner can leave its engine container running; the Linux `PR_SET_PDEATHSIG` half has no live row.
+[UNVERIFIED — no controller on a cluster has cancelled, reconciled or cleaned up a restore yet; the batch's fresh PoC install runs OD-23-core's steps 6 and 7 by clicks and one runner pod deleted.]
+**Rollback:** with item 137. Signed scorecards of reconciles stay valid; the targets record is internal and read by nothing else.
+
+#### 145. Format steps: backup receipt 1.9.0, scorecard 1.13.0 and 2.5.0, catalog point 1.8.0, authorization document 2.3.0 (OD-23)
+
+**Changed.** Each is one MINOR step under OD-7, written only when its new field is:
+- **Backup receipt 1.9.0:** the optional `schema_registry` block (item 142), arms 46 to 49; a backup whose source connection names no registry writes the receipt as before ([backup-receipt.md](formats/backup-receipt.md)).
+- **Scorecard 1.13.0, and 2.5.0 for a partition subset:** the optional `target.schemas` block, arms SC-1 to SC-3, for a restore whose point captured a registry or whose target connection names one; a subset whose block says nothing was imported signs 2.5.0 too ([drill-scorecard.md](formats/drill-scorecard.md)).
+- **Catalog point 1.8.0:** the receipt's `schema_registry`, summarised and cross-checked against the verified receipt (rule 3).
+- **Authorization document 2.3.0:** `subject.workspace`, required by this release's readers (item 140).
+- **The targets record** of item 144 is internal: signed with the run's key under its own payload type, read only by the reconcile, with no schema or verifier.
+
+The schemas `logweir-backup-receipt-1.9.0.json`, `logweir-drill-scorecard-1.13.0.json`, `-2.5.0.json` and `logweir-catalog-point-1.8.0.json` are new; their predecessors are frozen. `verify_scorecard.py` is 1.35.0. Switchover records and the bucket layout are unchanged, and nothing signed names a namespace, so every archive and its evidence from 0.4.x stays readable, verifiable and importable into any workspace.
+**Do:** upgrade every verifier (`verify_scorecard.py` 1.35.0, `logweir` from this release) before it reads a receipt's `registry:` line or a scorecard's `schemas:` line. A reader built before these steps accepts a 1.9.0 receipt, a 1.13.0 scorecard and a 1.8.0 point and ignores the new block; it refuses every 2.3.0 authorization document (item 140).
+**Scope:** the schema-drift rows for each new schema, `check-verifier-parity.sh` (the registry line on every accepted receipt, three accepted and seven refused scorecards for SC-1 to SC-3), the receipt corpus, `two_reader_parity` and `orchestrator.rs::a_partition_subset_that_imports_no_schemas_signs_a_version_that_defines_the_block`. What an older reader does was measured on 2026-10-16 with `v0.4.1`'s two readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`): both accept the corpus's two 1.9.0 receipts, three signed 1.13.0 and 2.5.0 scorecards and a signed 1.8.0 catalog point, exit 0, and print none of the new lines. The rules those results rest on are held on every build by `backup_receipt.rs::a_block_a_later_minor_adds_is_ignored_by_a_reader_that_does_not_know_it`, `scorecard_golden.rs::a_block_a_later_minor_adds_inside_target_is_ignored`, `catalog::an_unknown_field_inside_major_1_is_ignored` and, for the refusal of 2.3.0, `approval_policy::tests::an_older_document_reader_refuses_the_workspace`; each format page's older-reader table has the row.
+[UNVERIFIED — no PoC run has signed these formats yet; the batch's fresh PoC install reads its receipts and scorecards with both readers.]
+**Rollback:** with item 137. Documents already written stay valid under this release's readers.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
+
+**From 0.4.x to 0.5.0 (items 137 to 145) there is no `helm upgrade`:** an
+install of 0.4.x or older moves by a fresh install, and the blocks below apply
+only within a release line.
+- **Install afresh by item 137's seven steps:** export trust, keep the bucket,
+  let runs and TTL clones settle, `helm uninstall`, apply this release's CRDs
+  by hand (`helm install` keeps the old ones), install into one namespace with
+  `workspaces`, import trust, and connect a catalog in each workspace.
+- **Write the values file anew** (item 137): drop `kubernetes.namespace`,
+  `kubernetes.connectionsNamespace`, `controller.watchNamespaces`,
+  `identity.authorizedRunnerNamespaces` and `api.namespaces`; rename
+  `approvalPolicy.namespaces`, `api.console.roles.bindings[].namespace` and
+  the four `…PerNamespace` caps to their workspace names. The chart refuses
+  each old name.
+- **Label every credential Secret you create with `kubectl`** with its
+  workspace (item 139), and hand out `logweir-viewer` instead of the deleted
+  `logweir-operator`, `logweir-approver` and `logweir-retention-admin`
+  (item 137): `kubectl` write access to the namespace is an installation
+  administrator's.
+- **Make pending requests and approvals again** (item 140): this release
+  refuses an authorization document without `subject.workspace`.
+- **Move API scripts to `/api/v1/workspaces/{ws}/…`**, and audit-log readers
+  to the `workspace` field (item 141).
+- **Widen each destination's `archiveRead` grant** to `s3:GetObject` on
+  `<bucket>/logweir/drills/*` at the evidence location (item 144).
+- **Let the target registry's user set a subject's mode** (on Redpanda, a
+  superuser) for a restore that imports schemas (item 142).
+- **Upgrade every verifier** to `verify_scorecard.py` 1.35.0 or this
+  release's `logweir` (item 145).
 
 **Before `helm upgrade`, in the values file:**
 - **Remove the `notify` block** (item 74): the chart refuses it by name. With
@@ -3585,7 +3746,8 @@ In addition to the next entry's six, in its order.
   `backup: latestCompleted`**, and approve it again (item 34).
 - **Add `restore.allow_transaction_markers: true` to the plan of every restore
   of a transactional topic** that must restore as it is (Kafka Streams or
-  Connect exactly-once, Flink), and approve it again (item 67).
+  Connect exactly-once, Flink), and approve it again (item 67); an archive written by engine build 5 holds no
+  marker and needs none (item 143).
 - **A consumer that matches a scorecard's exact `format_version`** must accept
   `1.6.0` (item 36).
 
@@ -3610,8 +3772,8 @@ In addition to the next entry's six, in its order.
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35). A standalone CLI install
   replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.4` and its digest (items 28, 35, 41,
-  82 and 117),
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.5` and its digest (items 28, 35, 41,
+  82, 117 and 143),
   and every spec that names an `http://` archive endpoint says
   `allow_http: true` (item 28).
 - **Back up the console key too, once it exists** (item 29):
@@ -3673,7 +3835,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135 and 136, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144 and 145, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3787,6 +3949,22 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 134 | the runner (its messages, the multi-topic refusal) and the controller (the check relay, the details, the condition messages) | nothing; a long name shows whole once both have rolled |
 | 135 | the chart's values only (`api.console.oidc.scopes`, `api.console.oidc.displayNameClaim`) | nothing until set; both removed before the chart rolls back |
 | 136 | the console image (its build dependencies) | nothing |
+| 137 | the chart (one namespace, `workspaces`, removed and renamed values, the Roles), the controller (one watch, two required variables), the runner (`identity distribute` removed) | a fresh install, never `helm upgrade` from 0.4.x; this release's CRDs applied by hand first |
+| 138 | the controller (the label gate, references followed), the API (workspace paths, the 422 and 409), the console (addresses, the switcher), the pools and rate limits | every object labelled |
+| 139 | the controller (a Secret's label read; its Role gains `get secrets`), the chart's notes | each `kubectl`-made credential Secret labelled |
+| 140 | the authorization document (2.3.0), the controller, the runner, the API, the console | pending requests made again |
+| 141 | the API document (`1.0.0-alpha.4`), the audit record, the console image | API scripts and audit readers moved |
+| 142 | the `KafkaCluster` CRD (`spec.schemaRegistry`), the `Restore` status, the runner (receipt 1.9.0, scorecard 1.13.0 and 2.5.0, catalog point 1.8.0), the controller, the API, the console | a target registry user that may set modes; verifiers upgraded |
+| 143 | the engine in the runner image (`0.23.3+logweir.5`), the plan (`restore.rate_limit_bytes_per_sec`), the restore document (no checkpoint) | the controller and runner images rolled together |
+| 144 | the runner (stop, targets record, `restore reconcile`), the controller (`Interrupted`, reconcile and cleanup Jobs), the `Restore` CRD (`status.interruption`), the API and the chart (`patch restores`), the console | `archiveRead` widened to `logweir/drills/*` |
+| 145 | the signed formats (receipt 1.9.0, scorecard 1.13.0 and 2.5.0, catalog point 1.8.0, authorization 2.3.0) and `verify_scorecard.py` 1.35.0 | verifiers upgraded before they read the new lines |
+
+**Items 137 to 145 have no in-place rollback.** To leave `v0.5.0` for 0.4.x,
+use item 137's steps in reverse: export trust, `helm uninstall`, apply the
+older chart's CRDs, install it, import trust and connect catalogs again. The
+bucket and every document written stay readable (item 145), but a 0.4.x reader
+refuses every approval `v0.5.0` signed (item 140), so pending requests are
+made again. The steps below apply within a release line.
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

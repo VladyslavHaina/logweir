@@ -9,7 +9,7 @@
 # rewrites the three Logweir image defaults from `:latest` to that
 # publication's tag, and for a release to `:<tag>@sha256:…`.
 #
-# `kubeVersion` is Global Constraint 25's floor: the thirteen CRDs use CEL
+# `kubeVersion` is Global Constraint 25's floor: the fourteen CRDs use CEL
 # validation rules, GA at 1.29. Helm refuses an older cluster before anything
 # installs (`helm install`, `upgrade` and `template` alike). The other
 # constraints, Helm 3.19+ or 4.x and linux/amd64 or linux/arm64 nodes, are in

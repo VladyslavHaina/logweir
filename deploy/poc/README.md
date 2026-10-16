@@ -286,6 +286,28 @@ reads the unverified runs again.
 
 ## 6. Logweir, from the published chart
 
+**The CRDs first, server-side.** Helm installs `crds/` only when a CRD does not
+exist, and `helm uninstall` leaves them, so a cluster that held an earlier
+install (0.4.x) still serves the OLD CRDs, and `helm install` silently keeps
+them: the API server would then prune the fields this release added
+(`KafkaCluster.spec.schemaRegistry`, `Restore.status.interruption`). Apply the
+chart's CRDs before installing, every time, with the command an upgrade uses
+(on an empty cluster it simply creates them):
+
+```bash
+helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --untar -d poc-secrets/chart
+kubectl --context "$CTX" apply --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
+for crd in $(ls poc-secrets/chart/logweir-chart/crds | sed 's/\.yaml$//'); do
+  kubectl --context "$CTX" wait --for=condition=Established "crd/$crd.logweir.dev" --timeout=60s
+done
+# Prints nothing when every live CRD is this chart's:
+kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
+```
+
+From a checkout, the same three commands with `-f charts/logweir/crds/` and
+`ls charts/logweir/crds`. `--force-conflicts` is required: Helm owns the fields
+of the CRDs it made, so without it the apply is refused.
+
 ```bash
 helm upgrade --install logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
   --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" \

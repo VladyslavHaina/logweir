@@ -3,10 +3,10 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.8.0.json`](../../schemas/logweir-backup-receipt-1.8.0.json),
+[`schemas/logweir-backup-receipt-1.9.0.json`](../../schemas/logweir-backup-receipt-1.9.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by CI on every build, so this document and the schema cannot
-drift apart silently. Every older schema, `-1.0.0.json` to `-1.7.0.json`, is
+drift apart silently. Every older schema, `-1.0.0.json` to `-1.8.0.json`, is
 frozen beside it and never regenerated
 (`crates/logweir-core/tests/schema_drift.rs` keeps each what it was). The
 payload type keeps `version=1.0.0`: it names the major-1 envelope, and a new
@@ -80,6 +80,7 @@ values. The payload type keeps `version=1.0.0`.
 | 1.6.0 | PROD-01.4a | [`generations`](#generations--the-topics-id-before-and-after-the-engine-format-160) | every receipt from PROD-01.4a: this build signs none below 1.6.0 | 36–40 |
 | 1.7.0 | PROD-04.1 | [`consumer_positions`](#consumer_positions--consumer-position-evidence-format-170), which binds the positions document (its own format 1.0.0) | a receipt whose backup selected consumer groups; a backup that selects none writes the document it wrote before PROD-04.1, byte for byte | 30–35, and CP-1 to CP-14 over the document |
 | 1.8.0 | PROD-02.1 | [`source_watermarks` and the empty capture](#source_watermarks-and-the-empty-capture-format-180) | a receipt whose watermark read answered for every partition within the 32 KiB budget | 41–45; arm 4 admits the empty window only beside the block |
+| 1.9.0 | PROD-03.1 | [`schema_registry`](#schema_registry--the-source-registrys-snapshot-format-190) | a receipt whose source connection names a Schema Registry, captured or not | 46–49 |
 
 1.4.0 is MINOR under OD-7's third case: a reader built before it refuses a
 receipt naming a new mode through arm 5a, the safer verdict, and never reads it
@@ -101,6 +102,7 @@ so every reader that verifies a receipt still verifies a new one.
 | 1.6.0 | Accepts it and ignores the block; a 1.6.0 receipt naming a PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0 one. It prints no topic ID: use script 1.25.0 or a `logweir` from PROD-01.4a on | An older runner writes 1.3.0 to 1.5.0 receipts again, with no IDs; its points read "not established by ID" against their neighbours |
 | 1.7.0 | Accepts it, ignores the block and prints no `consumer_positions` line (script 1.25.0 and earlier): for positions use script 1.26.0 or a `logweir` from PROD-04.1 on ([the recovery path](#recovering-positions-with-the-source-offline)) | An older runner ignores `source.consumer_groups`, and `--consumer-group` is an unknown flag to it. An older controller refuses a frozen plan whose execution inputs carry `consumerGroups` (`PlanConfigMapConflict`): let such runs finish, or remove `spec.consumerGroups` from the schedule, before rolling it back |
 | 1.8.0 | Refuses an empty capture through arm 4 and reads an ordinary 1.8.0 receipt as the 1.7.0 document under it. Script 1.30.0 knows the block | An older runner writes receipts with no block, and fails a backup of an emptied source exit 1 as before PROD-02.1 |
+| 1.9.0 | Accepts it, ignores the block and prints no `schema_registry` line: measured on 2026-10-16 with `v0.4.1`'s readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`) over `receipt_1_9_with_schema_registry.json` and `receipt_1_9_registry_not_captured.json`, both `VALID`, exit 0; `backup_receipt.rs::a_block_a_later_minor_adds_is_ignored_by_a_reader_that_does_not_know_it` holds the rule (unknown fields ignored) on every build. For the snapshot line use script 1.35.0 or a `logweir` from PROD-03.1 on | Receipts already written stay valid. 0.5.0 has no in-place rollback ([release-notes.md](../release-notes.md) item 137); an older install's runner captures no registry, and its points read "registry not captured" |
 
 **Old receipts are never reinterpreted.** No reader infers a block a receipt
 lacks: a receipt before 1.1.0 has every topic's capture coverage UNKNOWN to
@@ -117,7 +119,7 @@ infers a pin for a receipt that does not carry one.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of **this** format, `1.0.0` to `1.8.0`: see [Versions](#versions). Independent of the scorecard's. |
+| `format_version` | string | Semver of **this** format, `1.0.0` to `1.9.0`: see [Versions](#versions). Independent of the scorecard's. |
 | `run_id` | string | ULID of the run that produced this receipt. Also the object key stem in the evidence bucket. |
 | `backup_id` | string | The engine's identifier for the archive this run wrote — the **execution** id under Kubernetes. **Not** `run_id`: `archive.manifest_key` is keyed on this, and a set written by an older build can carry receipts from two runs. Since RECEIPT-DUP was fixed, at most one run per `backup_id` reaches the engine (see [the execution claim](#the-execution-claim-one-engine-run-per-backup_id)), so a new execution signs exactly one receipt. |
 | `requested_at` | RFC 3339 | When the run was requested. |

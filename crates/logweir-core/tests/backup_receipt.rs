@@ -3859,3 +3859,30 @@ fn the_schema_registry_arms_refuse_each_contradiction_with_its_exact_message() {
         assert_eq!(doc.validate_invariants().unwrap_err(), want);
     }
 }
+
+/// **An older reader ignores a block a later minor adds** (reader rule: majors
+/// only, unknown fields ignored). A reader built before 1.9.0 has no
+/// `schema_registry` field, so it meets the block as an unknown one. Modelled
+/// by renaming the block in the checked-in 1.9.0 receipt: the receipt still
+/// parses and satisfies every invariant. The mutant this kills is
+/// `deny_unknown_fields` on `BackupReceipt`, which would make every older
+/// reader refuse every newer receipt. Measured on the real older readers too:
+/// `docs/formats/backup-receipt.md`, *What an older reader does*, row 1.9.0.
+#[test]
+fn a_block_a_later_minor_adds_is_ignored_by_a_reader_that_does_not_know_it() {
+    let raw =
+        include_str!("../../../e2e/fixtures/invariants/receipt_1_9_with_schema_registry.json");
+    let mut v: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let block = v
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_registry")
+        .expect("the 1.9.0 fixture carries schema_registry");
+    // CONTROL: the receipt with the block it knows is read with it.
+    let known: BackupReceipt = serde_json::from_str(raw).unwrap();
+    assert!(known.schema_registry.is_some());
+    v["a_block_a_later_minor_adds"] = block;
+    let older: BackupReceipt = serde_json::from_value(v).expect("an unknown block is ignored");
+    assert!(older.schema_registry.is_none());
+    assert_eq!(older.validate_invariants(), Ok(()));
+}

@@ -51,3 +51,26 @@ fn source_relative_rpo_and_its_reason_are_mutually_exclusive() {
     // reason is still Some(...) while captured_by_logweir is true -> invalid
     assert!(sc.validate_invariants().is_err());
 }
+
+/// **An older reader ignores a block a later minor adds inside `target`.**
+/// `target.schemas` (1.13.0, 2.5.0) is nested, so the top-level row above does
+/// not cover it: a reader built before 1.13.0 meets it as an unknown field of
+/// `target`. Modelled by an unknown block there; the mutant this kills is
+/// `deny_unknown_fields` on `TargetInfo`. Measured on the real older readers
+/// too: `docs/formats/drill-scorecard.md`, *What an older reader does*, row
+/// 1.13.0, 2.5.0.
+#[test]
+fn a_block_a_later_minor_adds_inside_target_is_ignored() {
+    let raw = include_str!("../../../e2e/fixtures/scorecard-pass.json");
+    let mut v: serde_json::Value = serde_json::from_str(raw).unwrap();
+    v["target"]["a_block_a_later_minor_adds"] = serde_json::json!({"not_imported": "noSnapshot"});
+    let parsed: Scorecard = serde_json::from_value(v).expect("an unknown block is ignored");
+    assert!(parsed.target.schemas.is_none());
+    assert!(parsed.validate_invariants().is_ok());
+    // CONTROL: the block under its own name is read.
+    let mut known: serde_json::Value = serde_json::from_str(raw).unwrap();
+    known["format_version"] = serde_json::json!("1.13.0");
+    known["target"]["schemas"] = serde_json::json!({"not_imported": "noSnapshot"});
+    let read: Scorecard = serde_json::from_value(known).unwrap();
+    assert!(read.target.schemas.is_some());
+}

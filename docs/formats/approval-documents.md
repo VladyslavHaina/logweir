@@ -57,7 +57,11 @@ carries one as an unknown field (`AuthorizationDocumentInvalid`, exit 3 in a
 runner): the safer verdict, OD-7's third case. It never reads one as an
 ordinary authorization. Every 2.1.0, 2.2.0 and 2.3.0 document carries at least
 one of its fields, so every one of them is refused there: a reader built before
-PROD-19.1 refuses every document this build writes.
+PROD-19.1 refuses every document this build writes. `logweir-core`'s
+`approval_policy::tests::an_older_document_reader_refuses_the_workspace` holds
+that for 2.3.0 on every build: a subject read with the pre-2.3.0 shape
+(`deny_unknown_fields`) refuses ``unknown field `workspace` ``, and the same
+subject without the field is read.
 
 **The approval policy snapshot** gains `approverSignature: Console` as its
 last key, only when set (PROD-16.2): every existing policy's bytes and digest

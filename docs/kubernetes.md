@@ -24,7 +24,7 @@ dropped silently, so an approved object could be edited. The CRDs live in
 `just crds`; do not hand-edit them. Every `kubectl` command in this repository
 names its context.
 
-Thirteen kinds, on `logweir.dev/v1alpha1`:
+Fourteen kinds, on `logweir.dev/v1alpha1`:
 
 | Kind | Scope | What it is |
 |---|---|---|
@@ -41,6 +41,7 @@ Thirteen kinds, on `logweir.dev/v1alpha1`:
 | `Preflight` | Namespaced | One readiness check. Authorises nothing. [Readiness checks](#readiness-checks) |
 | `TopicDiscovery` | Namespaced | One observation of the topics a connection can see. [Topic discovery](#topic-discovery) |
 | `ProtectionPolicy` | Namespaced | A recovery objective and the health against it. [Protection health](#protection-health) |
+| `Switchover` | Namespaced | Applies a restore's reviewed consumer positions to stopped groups, under its own approval. [Consumer positions](#consumer-positions) |
 
 `RehearsalSchedule` is withdrawn in v1 (release-notes item 73).
 
@@ -2990,7 +2991,7 @@ because a write in the namespace is a write in every workspace. Writing a
 deleting, is therefore an installation administrator's act with `kubectl`; the
 console cannot write one.
 
-The controller reads all thirteen kinds, patches their status, creates
+The controller reads all fourteen kinds, patches their status, creates
 `Backup`s, `Restore`s, Jobs and `ConfigMap`s, reads pods, `pods/log` and
 `events`, and holds one `patch` on `backups` (the history detach) and one on
 `trustpolicies` (the compromise finalizer). On `secrets` it holds `get` alone,
@@ -3328,15 +3329,22 @@ mismatch, and image pruning can remove it.
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23: one namespace per install,
 workspaces inside it). Export trust as in [*Recover onto a clean installation
 with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit), keep
-the bucket, `helm uninstall` the old release (one install per cluster), install
-0.5.0 into one namespace with `workspaces`, import trust, and then in each
+the bucket, `helm uninstall` the old release (one install per cluster), apply
+the 0.5.0 chart's CRDs server-side
+(`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`, then
+wait for them to be established), install 0.5.0 into one namespace with
+`workspaces`, import trust, and then in each
 workspace add connections, destinations and schedules and connect a catalog to
 see the old points. Delete the old namespaces when done. Every archive stays
-readable and verifiable: nothing in the bucket names a namespace.
+readable and verifiable: nothing in the bucket names a namespace. The CRDs go
+first because `helm uninstall` leaves the old ones and `helm install` does not
+replace a CRD that exists: without the apply, 0.5.0 runs on 0.4.x's schemas and
+the API server prunes the fields it added (`KafkaCluster.spec.schemaRegistry`,
+`Restore.status.interruption`).
 
 Within a release line, the order is always: **CRDs, then the controller and runner images together,
 then the console.** Helm installs `crds/` only on first install, so apply them
-by hand and wait for all thirteen to be established
+by hand and wait for all fourteen to be established
 ([install.md](install.md#upgrade-crds-before-upgrading-the-controller) has the
 loop). A controller started on older CRDs has its new fields pruned by the API
 server; CRDs ahead of an older controller are inert. Each release's own steps

@@ -10,7 +10,7 @@ the `docker-desktop` context; name your own explicitly.
 
 **Before you install.**
 
-- **Minimum Kubernetes: 1.29.** The thirteen CRDs use CEL validation rules, GA
+- **Minimum Kubernetes: 1.29.** The fourteen CRDs use CEL validation rules, GA
   at 1.29, and the chart's `kubeVersion: >=1.29.0-0` makes Helm refuse an older
   cluster. The `ValidatingAdmissionPolicy` of *5b* needs 1.30.
 - **Helm 3.19 or newer, or 4.x.** A first install with the console needs it:
@@ -1039,21 +1039,30 @@ in your secret store:
 
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23). Export trust as in
 *Recover onto a clean installation with the kit*, keep the bucket, `helm
-uninstall` the old release (one install per cluster), install 0.5.0 into one
-namespace with `workspaces`, import trust, and then in each workspace add
-connections, destinations and schedules and connect a catalog to see the old
-points. Delete the old namespaces when done. Every archive stays readable and
-verifiable: nothing in the bucket names a namespace.
+uninstall` the old release (one install per cluster), **apply the 0.5.0
+chart's CRDs server-side** (the first command of the block below, then its
+wait loop), install 0.5.0 into one namespace with `workspaces`, import trust,
+and then in each workspace add connections, destinations and schedules and
+connect a catalog to see the old points. Delete the old namespaces when done.
+Every archive stays readable and verifiable: nothing in the bucket names a
+namespace.
+
+**Why the CRDs go first on a fresh install too:** `helm uninstall` leaves the
+CRDs, and `helm install` creates a CRD from `crds/` only when none exists, so
+on a cluster that held 0.4.x it keeps the OLD ones without a word. The API
+server then prunes every field 0.5.0 added (`KafkaCluster.spec.schemaRegistry`,
+`Restore.status.interruption`). On an empty cluster the same apply simply
+creates them.
 
 Within a release line, read [release-notes.md](release-notes.md) first; it lists each release's
 required actions. Back up the identity, apply the new CRDs, wait for all
-thirteen, then upgrade (controller and runner together, then the console):
+fourteen, then upgrade (controller and runner together, then the console):
 
 ```bash
 kubectl --context docker-desktop apply --server-side --force-conflicts -f charts/logweir/crds/
 for crd in approvals backupdestinations backups backupschedules kafkaclusters \
            preflights protectionpolicies recoverycatalogs \
-           restores retentionpolicies topicdiscoveries trustpolicies trustrosters; do
+           restores retentionpolicies switchovers topicdiscoveries trustpolicies trustrosters; do
   kubectl --context docker-desktop wait --for=condition=Established \
     "crd/${crd}.logweir.dev" --timeout=60s
 done
