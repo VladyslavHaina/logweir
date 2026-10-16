@@ -738,6 +738,7 @@ pub fn carries_private_key(text: &str) -> bool {
 pub fn document(
     policy: &ApprovalPolicy,
     namespace: &str,
+    workspace: &str,
     name: &str,
     uid: &str,
     plan_hash: &str,
@@ -756,7 +757,7 @@ pub fn document(
             api_version: SUBJECT_API_VERSION.to_string(),
             kind: SUBJECT_KIND_RESTORE.to_string(),
             namespace: namespace.to_string(),
-            workspace: namespace.to_string(),
+            workspace: workspace.to_string(),
             name: name.to_string(),
             uid: uid.to_string(),
         },
@@ -853,7 +854,7 @@ mod tests {
 
     fn policies() -> ApprovalPolicySet {
         ApprovalPolicySet::parse(
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nnamespaces:\n  team-a: o\n",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nworkspaces:\n  team-a: o\n",
         )
         .expect("valid")
     }
@@ -894,6 +895,7 @@ mod tests {
         let at = Utc::now();
         let doc = document(
             policy,
+            "logweir",
             "team-a",
             "rst-1",
             "uid",

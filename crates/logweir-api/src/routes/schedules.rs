@@ -276,8 +276,8 @@ pub fn build(
     }
 }
 
-/// A create body's connection and destination must be in the path's
-/// workspace (PROD-19.1 §4.1). Shared with the manual backup.
+/// A body's connection and destination must be in the path's workspace
+/// (PROD-19.1 §4.1): the schedule create and edit, and the manual backup.
 pub(super) async fn refuse_references_elsewhere(
     state: &AppState,
     ws: &str,
@@ -793,6 +793,7 @@ pub async fn update(
         ));
     }
     validate_update(&request)?;
+    refuse_references_elsewhere(&state, &ws, None, request.destination_ref.as_ref()).await?;
     let version = current
         .metadata
         .resource_version

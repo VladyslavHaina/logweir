@@ -21,7 +21,7 @@ use support::{approvals_posted, FakeKube, Options, TestApp, NS_A};
 fn app() -> TestApp {
     let policies = ApprovalPolicySet::parse(&format!(
         "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: \
-         Ordinary\nnamespaces:\n  {NS_A}: team-ordinary\n"
+         Ordinary\nworkspaces:\n  {NS_A}: team-ordinary\n"
     ))
     .expect("valid");
     TestApp::with(
@@ -182,7 +182,7 @@ async fn a_switchover_refused_for_a_taken_approval_name_creates_nothing() {
 #[tokio::test]
 async fn a_governed_restore_refused_for_a_taken_confirmation_name_creates_nothing() {
     let policies = ApprovalPolicySet::parse(&format!(
-        "policies:\n  - name: prod-governed\n    mode: Governed\nnamespaces:\n  {NS_A}: \
+        "policies:\n  - name: prod-governed\n    mode: Governed\nworkspaces:\n  {NS_A}: \
          prod-governed\n"
     ))
     .expect("valid");

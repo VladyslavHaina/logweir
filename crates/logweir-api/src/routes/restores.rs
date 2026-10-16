@@ -1055,6 +1055,7 @@ fn existing_is_ours(
         && doc.subject.kind == subject.wire()
         && doc.subject.uid == subject.uid
         && doc.subject.namespace == subject.namespace
+        && doc.subject.workspace == subject.workspace
         && doc.plan_hash == subject.plan_hash()
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
@@ -1210,6 +1211,7 @@ pub(crate) async fn authorize_submission(
     let mut doc = approval::document(
         policy,
         &subject.namespace,
+        &subject.workspace,
         &subject.name,
         &subject.uid,
         &subject.plan_hash(),

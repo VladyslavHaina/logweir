@@ -642,10 +642,19 @@ pub async fn refuse_name_in_use<K: ProductResource>(
     Ok(())
 }
 
-/// A create body may name only objects of the path's workspace (PROD-19.1
+/// A request body may name only objects of the path's workspace (PROD-19.1
 /// §4.1). A reference to another workspace's object is `422` on `field`,
 /// worded as for a missing one; a missing referent is left to the
-/// controller, as before.
+/// controller, as before. Every route that accepts a referenced name calls
+/// this one helper.
+///
+/// EARLY FEEDBACK, NOT THE BOUNDARY. The referent is read once, now, and
+/// nothing keeps that answer: it can be deleted and recreated in another
+/// workspace before the controller acts. The boundary is the controller's
+/// `weirkeeper::workspace::same` at every reconcile, which refuses
+/// `WorkspaceMismatch` and creates no Job. Squatting a name another workspace
+/// expects yields a refusal there (this 422, or the 409 of
+/// [`refuse_name_in_use`]), never access.
 ///
 /// # Errors
 ///

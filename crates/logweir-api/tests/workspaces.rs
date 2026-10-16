@@ -4,7 +4,7 @@
 
 mod support;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use support::{
     seed_discovery, seed_running_preflight, topic_line, FakeKube, TestApp, INSTALL_NS,
     LOCAL_ADMIN_ACTOR, NS_A, NS_B, WORKSPACE_LABEL,
@@ -339,4 +339,140 @@ async fn a_name_another_workspace_holds_is_in_use() {
         .await;
     assert_eq!(free.status, 201, "{}", free.text());
     app.fake.assert_strict();
+}
+
+/// Every route that accepts a referenced name refuses one of another
+/// workspace with `422` on that field and writes nothing; the same request
+/// in the referent's own workspace passes the check.
+#[tokio::test]
+async fn every_path_that_names_a_referent_refuses_another_workspaces() {
+    let app = TestApp::new();
+    let connection = |name: &str| {
+        json!({
+            "metadata": {"name": name},
+            "spec": {
+                "bootstrapServers": ["kafka:9092"],
+                "auth": {"mode": "scramSha512", "username": "scram-user", "secretRef": {"name": "s"}, "tls": false},
+                "role": "source"
+            }
+        })
+    };
+    app.fake.seed("kafkaclusters", NS_B, connection("source"));
+    app.fake.seed("kafkaclusters", NS_B, connection("target"));
+    support::seed_destination(&app.fake, NS_B, "primary");
+    app.fake.seed(
+        "restores",
+        NS_B,
+        json!({"metadata": {"name": "incident", "uid": "r-uid"}, "spec": {}}),
+    );
+    let schedule = |name: &str, ws: &str| {
+        app.fake.seed(
+            "backupschedules",
+            ws,
+            json!({
+                "metadata": {"name": name, "generation": 4},
+                "spec": {
+                    "schedule": "0 3 * * *",
+                    "sourceRef": {"name": "source"},
+                    "topics": ["orders"],
+                    "archive": {"url": "s3://kafka-backups/logweir", "secretRef": {"name": "logweir-s3"}},
+                    "concurrencyPolicy": "Forbid",
+                    "suspend": false
+                },
+                "status": {"observedGeneration": 4}
+            }),
+        );
+    };
+    schedule("nightly-a", NS_A);
+    schedule("nightly-b", NS_B);
+    let edit = json!({
+        "expectedGeneration": 4,
+        "schedule": "30 2 * * *",
+        "topicSelection": {"topics": ["orders"]},
+        "destinationRef": {"name": "primary"},
+        "suspended": false
+    });
+    let plan = support::golden_plan();
+    let switchover = json!({
+        "planBytes": "plan", "planHash": "sha256:00", "approvalRef": {"name": "cutover"},
+        "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 900
+    });
+    // (method, path after the workspace, body, the refused field)
+    let rows: Vec<(&str, String, Value, &str)> = vec![
+        (
+            "POST",
+            "schedules".into(),
+            support::schedule_body(),
+            "sourceRef.name",
+        ),
+        (
+            "PUT",
+            "schedules/nightly-{ws}".into(),
+            edit,
+            "destinationRef.name",
+        ),
+        (
+            "POST",
+            "backups".into(),
+            json!({"sourceRef": {"name": "source"}, "topicSelection": {"topics": ["orders"]}, "legacyArchive": {"url": "s3://b/p"}}),
+            "sourceRef.name",
+        ),
+        (
+            "POST",
+            "restores".into(),
+            support::restore_body(&plan),
+            "target.clusterRef.name",
+        ),
+        (
+            "POST",
+            "catalogs".into(),
+            json!({"name": "connected", "destinationRef": {"name": "primary"}, "syncMode": "full", "intervalSeconds": 0}),
+            "destinationRef.name",
+        ),
+        (
+            "POST",
+            "preflights".into(),
+            json!({"operation": "backup", "backup": {"sourceConnection": "source", "legacyArchive": {"url": "s3://b/p"}, "topics": ["orders"]}}),
+            "backup.sourceConnection",
+        ),
+        ("POST", "switchovers".into(), switchover, "restoreRef.name"),
+    ];
+    for (i, (method, suffix, body, field)) in rows.iter().enumerate() {
+        let send = |ws: &str, key: String| {
+            let path = format!(
+                "/api/v1/workspaces/{ws}/{}",
+                suffix.replace("{ws}", if ws == NS_A { "a" } else { "b" })
+            );
+            let body = body.to_string();
+            let app = &app;
+            let method = *method;
+            async move {
+                if method == "PUT" {
+                    app.put(&path, &body).await
+                } else {
+                    app.post(&path, Some(&key), &body).await
+                }
+            }
+        };
+        app.fake.clear_requests();
+        let crossed = send(NS_A, format!("workspace-path-{i:04}-a")).await;
+        crossed.assert_problem(422, "validation_failed");
+        assert_eq!(crossed.json()["errors"][0]["field"], *field, "{suffix}");
+        assert!(
+            app.fake.requests().iter().all(|r| r.method == "GET"),
+            "{suffix}: something was written"
+        );
+
+        // The control: in the referent's workspace the check passes.
+        let own = send(NS_B, format!("workspace-path-{i:04}-b")).await;
+        let refused_on_field = own.status == 422
+            && own.json()["errors"]
+                .as_array()
+                .is_some_and(|e| e.iter().any(|e| e["field"] == *field));
+        assert!(
+            !refused_on_field,
+            "{suffix} in its own workspace: {}",
+            own.text()
+        );
+    }
 }

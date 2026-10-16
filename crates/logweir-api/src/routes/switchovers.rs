@@ -223,6 +223,22 @@ pub async fn create(
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: CreateSwitchoverRequest = read_json(body, MAX_JSON_BODY).await?;
+    super::refuse_reference_elsewhere::<weirkeeper::crds::restore::Restore>(
+        &state,
+        &ws,
+        "restoreRef.name",
+        "restore",
+        &request.restore_ref.name,
+    )
+    .await?;
+    super::refuse_reference_elsewhere::<weirkeeper::crds::approval::Approval>(
+        &state,
+        &ws,
+        "approvalRef.name",
+        "approval",
+        &request.approval_ref.name,
+    )
+    .await?;
     let policies = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?;
@@ -243,22 +259,6 @@ pub async fn create(
         },
     )?;
     validate_create(&request)?;
-    super::refuse_reference_elsewhere::<weirkeeper::crds::restore::Restore>(
-        &state,
-        &ws,
-        "restoreRef.name",
-        "restore",
-        &request.restore_ref.name,
-    )
-    .await?;
-    super::refuse_reference_elsewhere::<weirkeeper::crds::approval::Approval>(
-        &state,
-        &ws,
-        "approvalRef.name",
-        "approval",
-        &request.approval_ref.name,
-    )
-    .await?;
     restores::refuse_taken_approval::<Switchover>(
         &state,
         &ws,

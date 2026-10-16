@@ -927,7 +927,9 @@ impl KubeAdapter {
     /// Whether an object of kind `K` named `name` exists in ANOTHER workspace
     /// (or carries no workspace label). Names are unique per install, so the
     /// routes use this to refuse a typed name another workspace holds and a
-    /// create body that references another workspace's object.
+    /// create body that references another workspace's object. Untyped: only
+    /// the label is read, so a stored object this build cannot decode still
+    /// answers.
     ///
     /// # Errors
     ///
@@ -937,12 +939,12 @@ impl KubeAdapter {
         ws: &str,
         name: &str,
     ) -> Result<bool, KubeFailure> {
-        let api: Api<K> = self.api();
+        let api: Api<Untyped<K>> = self.api();
         match self
             .bounded("get", K::plural(&()).as_ref(), api.get(name))
             .await
         {
-            Ok(object) => Ok(!in_workspace(object.meta(), ws)),
+            Ok(object) => Ok(!in_workspace(&object.metadata, ws)),
             Err(KubeFailure::NotFound) => Ok(false),
             Err(other) => Err(other),
         }

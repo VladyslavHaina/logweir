@@ -141,12 +141,16 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 `workspaces` and the label `logweir.dev/workspace` on every object. A list
 returns the path's workspace only, a read of another workspace's object is
 `404 not_found`, and a create labels the object with the path's workspace (a
-label in the body is overwritten). A create body that names a connection,
-destination, schedule, catalog or restore not in the path's workspace is
-`422 validation_failed` on that field: "no `<kind>` named `<x>` in workspace
-`<ws>`", the same answer as a missing one. Names are unique per install: a name
-another workspace holds is `409 state_conflict`, "the name `<x>` is in use in
-this installation; names are shared by every workspace".
+label in the body is overwritten). A create or edit body that names a
+connection, destination, schedule, catalog, restore or approval not in the
+path's workspace is `422 validation_failed` on that field: "no `<kind>` named
+`<x>` in workspace `<ws>`". A typed destination or catalog name another
+workspace holds is `409 state_conflict`, "the name `<x>` is in use in this
+installation; names are shared by every workspace": names are unique per
+install. Both checks are early feedback, read once at the request: the boundary
+is the controller, which refuses a reference to another workspace's object
+(`WorkspaceMismatch`) at every reconcile and starts no Job. Taking a name
+another workspace expects gets that workspace a refusal, never access.
 
 **Who holds an action.** Roles are bound per workspace in shared mode. In
 localAdmin mode the one actor holds every action in every workspace, and the
