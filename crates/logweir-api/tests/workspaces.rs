@@ -6,7 +6,7 @@ mod support;
 
 use serde_json::{json, Value};
 use support::{
-    seed_discovery, seed_running_preflight, topic_line, FakeKube, TestApp, INSTALL_NS,
+    repo_root, seed_discovery, seed_running_preflight, topic_line, FakeKube, TestApp, INSTALL_NS,
     LOCAL_ADMIN_ACTOR, NS_A, NS_B, WORKSPACE_LABEL,
 };
 
@@ -475,4 +475,54 @@ async fn every_path_that_names_a_referent_refuses_another_workspaces() {
             own.text()
         );
     }
+}
+
+/// **Review L7.** The restore cancel/cleanup annotation is read through the
+/// workspace first, like every other patch: the adapter, asked in `team-a`
+/// with the real `resourceVersion` of a `team-b` restore, answers `NotFound`
+/// and sends no PATCH. CONTROL: the same call in `team-b` sets it.
+#[tokio::test]
+async fn a_restore_request_with_a_borrowed_version_patches_nothing() {
+    let app = TestApp::new();
+    let path =
+        repo_root().join("crates/logweir-api/tests/fixtures/restore-legacy-no-progress.json");
+    let mut r: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    r["metadata"]["name"] = json!("rst-b");
+    r["metadata"].as_object_mut().unwrap().remove("annotations");
+    r["status"] = json!({"phase": "Running"});
+    let seeded = app.fake.seed("restores", NS_B, r);
+    let rv = seeded["metadata"]["resourceVersion"]
+        .as_str()
+        .expect("a version")
+        .to_string();
+    let key = "logweir.dev/cancel-requested-by";
+
+    app.fake.clear_requests();
+    let crossed = app
+        .state
+        .kube()
+        .request_restore(NS_A, "rst-b", &rv, key, "someone")
+        .await;
+    assert!(
+        matches!(crossed, Err(logweir_api::kube::KubeFailure::NotFound)),
+        "{crossed:?}"
+    );
+    assert!(!app.fake.requests().iter().any(|r| r.method == "PATCH"));
+    assert!(
+        app.fake.object("restores", NS_B, "rst-b").unwrap()["metadata"]["annotations"]
+            .get(key)
+            .is_none()
+    );
+
+    let own = app
+        .state
+        .kube()
+        .request_restore(NS_B, "rst-b", &rv, key, "someone")
+        .await;
+    assert!(own.is_ok(), "{own:?}");
+    assert_eq!(
+        app.fake.object("restores", NS_B, "rst-b").unwrap()["metadata"]["annotations"][key],
+        "someone"
+    );
+    app.fake.assert_strict();
 }
