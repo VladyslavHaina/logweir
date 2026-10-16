@@ -2,7 +2,7 @@
 # destination, so the demo MinIO's ROOT credential is never handed to Logweir.
 #
 #   kubectl --context "$CTX" apply -f deploy/poc/minio-grants.yaml
-#   kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
+#   kubectl --context "$CTX" -n logweir wait --for=condition=complete \
 #     job/logweir-poc-minio-grants --timeout=180s
 #
 # THE PoC REVIEW'S L7. The chart's demo MinIO takes its root credential from
@@ -15,8 +15,11 @@
 # docs/install.md §3.11 measured, and the console is given only those three
 # (README.md step 9). None of them holds `s3:DeleteObject`.
 #
-# Bucket `kafka-backups`, archive prefix `poc`, evidence under `logweir/` in the
-# same bucket — the destination README.md step 9 creates.
+# Bucket `kafka-backups`, one archive prefix per workspace under `poc/`
+# (`poc/dev`, `poc/tst`, `poc/stg`, `poc/prd`), evidence under `logweir/` in the
+# same bucket — the destinations README.md step 10 creates. The reader also
+# reads `legacy/`, where an earlier install's archive is mirrored for import
+# (README.md, *Import an earlier install's archive*).
 #
 #   user                  destination grant(s)           policy
 #   logweir-poc-writer    archiveWrite (+ evidenceWrite) logweir-poc-archive-write
@@ -29,7 +32,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: logweir-poc-minio-policies
-  namespace: logweir-system
+  namespace: logweir
   labels:
     app.kubernetes.io/part-of: logweir-poc
 data:
@@ -43,9 +46,10 @@ data:
   archive-read.json: |
     {"Version": "2012-10-17", "Statement": [
       {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
-       "Condition": {"StringLike": {"s3:prefix": ["poc/*", "logweir/*"]}}},
+       "Condition": {"StringLike": {"s3:prefix": ["poc/*", "logweir/*", "legacy/*"]}}},
       {"Effect": "Allow", "Action": ["s3:GetObject"],
-       "Resource": ["arn:aws:s3:::kafka-backups/poc/*", "arn:aws:s3:::kafka-backups/logweir/*"]}
+       "Resource": ["arn:aws:s3:::kafka-backups/poc/*", "arn:aws:s3:::kafka-backups/logweir/*",
+                    "arn:aws:s3:::kafka-backups/legacy/*"]}
     ]}
   evidence-read.json: |
     {"Version": "2012-10-17", "Statement": [
@@ -58,7 +62,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: logweir-poc-minio-grants
-  namespace: logweir-system
+  namespace: logweir
   labels:
     app.kubernetes.io/part-of: logweir-poc
 spec:
@@ -97,7 +101,7 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              mc alias set poc http://logweir-minio.logweir-system.svc:9000 "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+              mc alias set poc http://logweir-minio.logweir.svc:9000 "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
               for p in archive-write archive-read evidence-read; do
                 mc admin policy create poc "logweir-poc-$p" "/policies/$p.json"
               done

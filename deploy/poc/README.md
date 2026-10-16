@@ -21,14 +21,13 @@ says the PoC stands something in for it.
 
 | File | What it is |
 |---|---|
-| [versions.env](versions.env) | every version: the Logweir commit, its `sha-` tag and chart version, the two upgrade-rehearsal baselines, the three upstream chart versions, namespaces, hostnames and Dex's fixed (PoC-only) ClusterIP |
+| [versions.env](versions.env) | every version: the Logweir commit, its `sha-` tag and chart version, the three upstream chart versions, namespaces, hostnames and Dex's fixed (PoC-only) ClusterIP |
 | [traefik.values.yaml](traefik.values.yaml) | the ingress controller (chart 41.6.0, Traefik v3.7.13, by digest): HTTPS redirect, HSTS, routes from the profile's own namespaces only, no query strings in its access log |
 | [cert-manager.values.yaml](cert-manager.values.yaml) and [issuers.yaml](issuers.yaml) | cert-manager v1.21.2, images pinned by digest, and the local CA `ClusterIssuer` |
 | [dex.values.yaml](dex.values.yaml) | Dex 0.24.1 (v2.44.0): one static user per Logweir role, secrets from a Secret; its own TLS listener for the console's back-channel |
-| [logweir.values.yaml](logweir.values.yaml) | Logweir: shared console, scoped controller, Ingress, NetworkPolicy, approval policy, demo Kafka and MinIO — and the six chart-gap values that replaced the patch |
+| [logweir.values.yaml](logweir.values.yaml) | Logweir: one namespace, `logweir`, with four workspaces `dev`, `tst`, `stg`, `prd` (OD-23); shared console, Ingress, NetworkPolicy, approval policy (`prd` two-person, the rest one-person), demo Kafka and MinIO — and the chart-gap values that replaced the patch |
 | [minio-grants.yaml](minio-grants.yaml) | three least-privilege MinIO users for the destination, so the demo MinIO's root credential is never given to Logweir |
-| [trustpolicy.sh](trustpolicy.sh) | prints the `TrustPolicy` for `logweir-poc` from the cluster's public signing key and the console's confirmation key |
-| [rehearsals/](rehearsals/) | the starting values of the two upgrade rehearsals, each for its own version's chart |
+| [trustpolicy.sh](trustpolicy.sh) | prints a `TrustPolicy` for the install's namespace from the cluster's public signing key and the console's confirmation key (only an install older than PROD-16.1 needs it) |
 | [validate.sh](validate.sh) | renders every chart with the pinned versions and these values, without a cluster (see its header) |
 
 **Why `deploy/poc/` and not `charts/logweir/examples/`.** Everything under
@@ -59,6 +58,14 @@ Catalog's code spans (O2). The PoC installed at `86a554e6` was upgraded in
 place to `02dc44b6`, then to `b748fd5f`, to `a54fb823`, to `815249cb` and
 then to `fdb48cd8` with
 [*Upgrade to a newer publication*](#upgrade-to-a-newer-publication).
+
+**One namespace, four workspaces (OD-23).** [logweir.values.yaml](logweir.values.yaml)
+installs into ONE namespace, `logweir`, and needs a chart that knows
+`workspaces` (0.5.0 and later); the `v0.4.1` pin above does not, so until
+versions.env names such a publication, install from a checkout (step 6, *From
+a checkout*). A PoC installed with an earlier chart is not upgraded in place:
+install afresh and import its archive ([*Import an earlier install's
+archive*](#import-an-earlier-installs-archive)).
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
 `localtest.me` and all its subdomains resolve to `127.0.0.1` in public DNS, and
@@ -92,16 +99,15 @@ install -d -m 0700 poc-secrets
 ## 1. Namespaces
 
 ```bash
-for ns in "$LOGWEIR_NAMESPACE" "$POC_NAMESPACE" logweir-pair "$DEX_NAMESPACE"; do
+for ns in "$LOGWEIR_NAMESPACE" "$DEX_NAMESPACE"; do
   kubectl --context "$CTX" create namespace "$ns" --dry-run=client -o yaml \
     | kubectl --context "$CTX" apply -f -
 done
 ```
 
-`logweir-poc` must exist before Logweir installs: the chart copies the signing
-identity and the runner account into it, and the demo archive credential lands
-there (`kubernetes.connectionsNamespace`). So must `logweir-pair`, the
-two-person namespace (step 9).
+`logweir` is the install's one namespace: the controller, the console and its
+keys, every Logweir object of the four workspaces, every runner Job, and the
+demo Kafka and MinIO.
 
 ## 2. Ingress controller: Traefik
 
@@ -122,7 +128,7 @@ believed from a client). Logweir only uses a standard `Ingress` with
 later with no Logweir change.
 
 **Traefik routes the profile's own namespaces only** (`dex` and
-`logweir-system` for Ingresses, `traefik` for its CRDs). A controller that reads
+`logweir` for Ingresses, `traefik` for its CRDs). A controller that reads
 Ingresses from every namespace lets anyone who may create an Ingress anywhere
 claim a path on `dex.localtest.me` or `logweir.localtest.me` — a longer path
 rule outranks the owner's — behind the owner's own certificate. Its access log
@@ -216,8 +222,12 @@ and set it in `dex.values.yaml`, `logweir.values.yaml` (`hostAliases`) and
 
 ## 5. Logweir's own Secrets and the CA reference
 
-All of these live in `logweir-system`, which the controller cannot create Jobs
-in (`controller.watchNamespaces`):
+All of these live in `logweir`, the install's one namespace. The controller
+creates Jobs there too, so whoever can create Pods or Jobs in `logweir`, or a
+Logweir object naming a Secret, holds these keys
+([docs/kubernetes.md](../../docs/kubernetes.md#workspaces), residual O1): give
+people the console, and `kubectl` write access to `logweir` only to
+administrators of every workspace.
 
 ```bash
 # The console's session and cursor keys (two lines each; keyVersion 1).
@@ -298,17 +308,21 @@ Check out `$LOGWEIR_COMMIT` first when you want exactly the published objects;
 commit.
 
 **Check:**
-- `kubectl --context "$CTX" -n logweir-system get deploy` shows `weirkeeper`
+- `kubectl --context "$CTX" get all,secrets,jobs,roles,rolebindings,serviceaccounts -A -l app.kubernetes.io/instance=logweir`
+  lists the `logweir` namespace only, plus the trusted-proxy Role and
+  RoleBinding in `traefik`; `kubectl --context "$CTX" auth can-i create jobs -n default --as system:serviceaccount:logweir:weirkeeper`
+  answers `no`;
+- `kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get deploy` shows `weirkeeper`
   (1/1, **Ready** — its readiness is `weirkeeper --probe ready` against its own
   loopback health listener) and `logweir-api` (2/2), and
   `get pdb,networkpolicy,ingress` lists the console's budget, policies and
   Ingress;
 - `kubectl --context "$CTX" -n traefik get role,rolebinding logweir-api-trusted-proxy`
-  exists — the console's one read outside its namespaces, `list endpointslices`;
+  exists — the console's one read outside its namespace, `list endpointslices`;
 - the console's log names the trusted proxy set:
-  `kubectl --context "$CTX" -n logweir-system logs deploy/logweir-api | grep 'trusted proxy set changed'`
+  `kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" logs deploy/logweir-api | grep 'trusted proxy set changed'`
   shows the Traefik pod's address;
-- `kubectl --context "$CTX" -n logweir-system get configmap logweir-signing-trust -o jsonpath='{.data.key-id}'`
+- `kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get configmap logweir-signing-trust -o jsonpath='{.data.key-id}'`
   prints the installation signer's key id (back up the identity now:
   [docs/install.md](../../docs/install.md), *Back up and recover the installation identity*);
 - `curl --cacert poc-secrets/ca.crt https://logweir.localtest.me/readyz` answers `200`.
@@ -328,7 +342,7 @@ delete. It is never handed to Logweir. A one-shot Job reads it inside the
 cluster and creates three users with the policies
 [docs/install.md](../../docs/install.md) §3.11 measured, none of which holds
 `s3:DeleteObject`. **Overwrite is not excluded:** the writer's `s3:PutObject`
-on `kafka-backups/poc/*` and `…/logweir/*` can replace an existing key on this
+on `kafka-backups/poc/*` (every workspace's prefix is under it) and `…/logweir/*` can replace an existing key on this
 unversioned bucket, because `archiveWrite` is what writes a backup's segments
 and the receipt and catalog record, and S3 IAM has no put-if-absent action.
 Verification catches part of it — a replaced receipt fails its signature, and a
@@ -342,7 +356,7 @@ that must survive a compromised writer uses a versioned or Object Lock bucket
 
 ```bash
 kubectl --context "$CTX" apply -f deploy/poc/minio-grants.yaml
-kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
+kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" wait --for=condition=complete \
   job/logweir-poc-minio-grants --timeout=180s
 ```
 
@@ -357,7 +371,7 @@ kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
 **A fresh install needs no step here.** Its identity hook generated the signer
 and the console's confirmation key and created the default `TrustPolicy`
 `logweir-installation` with both ([docs/install.md](../../docs/install.md),
-*5f*), which governs `logweir-poc` and `logweir-pair`:
+*5f*), which governs `logweir` and so every workspace in it:
 
 ```bash
 kubectl --context "$CTX" get trustpolicy logweir-installation   # DEFAULT true, KEYS 2, LOADED true
@@ -374,19 +388,16 @@ role, bound once with a `ClusterRoleBinding` — not per namespace — because a
 `TrustPolicy` is cluster-scoped and decides whose keys may sign for the
 namespaces it names. As a holder of it (the PoC's kubeconfig is a cluster
 administrator), put the two public keys on the `TrustPolicy` that governs
-`logweir-poc`:
+`logweir`:
 
 ```bash
 bash deploy/poc/trustpolicy.sh poc-secrets/confirmation.pub.pem > poc-secrets/trustpolicy.yaml
 kubectl --context "$CTX" apply -f poc-secrets/trustpolicy.yaml
-# The two-person namespace (step 9) gets its own policy with the same two keys:
-sed -e 's/^  name: logweir-poc$/  name: logweir-pair/' -e 's/^  namespaces: \[logweir-poc\]$/  namespaces: [logweir-pair]/' \
-  poc-secrets/trustpolicy.yaml | kubectl --context "$CTX" apply -f -
 ```
 
 **Check:** `kubectl --context "$CTX" get trustpolicy logweir-poc` reads `LOADED
-True` and `BOUND logweir-poc`, and every existing `Backup` in `logweir-poc`
-still reads `Valid` (`kubectl --context "$CTX" -n logweir-poc get backups`).
+True` and `BOUND logweir`, and every existing `Backup` still reads `Valid`
+(`kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get backups -L logweir.dev/workspace`).
 
 **The signer's window must open before its first signature.** The script
 opens it at the earlier of the signing Secret's and the
@@ -409,46 +420,57 @@ which redirects to Dex), sign in as `<role>@logweir.localtest.me` with the
 password in `poc-secrets/<role>.password`, and land on
 `https://logweir.localtest.me/ui/`:
 
-| User | Console role in `logweir-poc` | What it can do |
+| User | Console roles, per workspace | What it sees |
 |---|---|---|
-| `viewer` | viewer | read everything; no button acts |
-| `operator` | operator | connections, destinations, schedules, backups, restore requests — and, under this PoC's Ordinary policy, confirm its own restore request |
-| `approver` | approver | the approvals view; countersigns under a `Governed` namespace (none in this PoC) |
-| `admin` | administrator | everything above, plus the keys view |
-| `norole` | none | signs in, and is granted no namespace: every namespace read answers `404` and every write `404` or `403` — the "authenticated is not authorised" case |
+| `operator` | operator in `dev` | no picker, only `dev`: connections, destinations, schedules, backups, restore requests, and (one-person) confirms its own restore |
+| `viewer` | viewer in `tst` | only `tst`; no button acts |
+| `approver` | approver in `stg` | only `stg` and its approvals; no `prd` workspace and no `prd` request |
+| `bob` | operator in `stg`, approver in `prd` | the picker with `stg` and `prd` |
+| `alice` | operator and approver in `prd` | only `prd`: requests restores, and is never offered Approve on her own |
+| `admin` | administrator in all four | the picker with `dev`, `tst`, `stg` and `prd` |
+| `norole` | none | signs in and gets the no-role page: every workspace read answers `404` and every write `404` or `403` — the "authenticated is not authorised" case |
 
-**Check:** each user's session shows `logweir-poc` with exactly its role (and
-`norole`'s shows no namespace), and
-the audit line for the sign-in names `https://dex.localtest.me#<subject>`.
+**Check:** each user's session lists exactly its workspaces and roles (and
+`norole`'s none), typing another workspace's address (`#/prd/backups` as
+`operator`) shows the no-access page, and the audit line for the sign-in names
+`https://dex.localtest.me#<subject>`.
 
-**Two-person approval, in `logweir-pair`** (PROD-16.2; policy `poc-pair`,
-`mode: two-person`, requests valid 900 s). `alice` is operator and approver
-there, `bob` approver, `admin` administrator (not an approver). `alice` builds
-the namespace's connections, destination and catalog as step 10 does for
-`logweir-poc` (the PoC's own uses bucket `logweir-pair`, prefix `pair`), and
-requests a restore with a change ticket; `bob` opens it under *Approvals*, sees
-every topic, its target name, the target cluster and the source, and clicks
-*Approve this Restore*. Neither `alice` nor `admin` is offered the button.
+**Two-person approval, in `prd`** (PROD-16.2; policy `two-person`, requests
+valid 900 s). `alice` builds `prd`'s connections, destination and catalog as
+step 10 does, and requests a restore with a change ticket; `bob` opens it under
+*Approvals*, sees every topic, its target name, the target cluster and the
+source, and clicks *Approve this Restore*. `alice` is not offered the button.
+`dev`, `tst` and `stg` are one-person: the requester confirms.
 
 ## 10. First backup and restore, in the console
 
-Signed in as `operator`, follow [the first backup](../../docs/install.md#the-first-backup)
-and [the first restore](../../docs/install.md#the-first-restore-and-verifying-it)
-with these PoC values:
+Signed in as `admin`, in each workspace `<ws>` (`dev`, `tst`, `stg`, `prd`),
+follow [the first backup](../../docs/install.md#the-first-backup) and [the
+first restore](../../docs/install.md#the-first-restore-and-verifying-it) with
+these PoC values. **Names are unique per install, across workspaces**: where
+the console asks for one, prefix it with the workspace (`dev-source`,
+`dev-primary`); a name another workspace holds is refused ("in use in this
+installation").
 
 | Step | Value |
 |---|---|
-| Source connection | role `source`, `logweir-kafka-source.logweir-system.svc.cluster.local:9092`, plaintext. There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list prints each connection's role (`source` or `target`) under its name, which is how you tell it from the target |
-| Target connection | role `target`, `logweir-kafka-target.logweir-system.svc.cluster.local:9092`, plaintext (named `conn-…` by the console, like the source) |
-| Destination | `primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir-system.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
-| Schedule | source = the `conn-…` connection with role `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `primary`; then *Run first backup now*. There is no name to type: the console names the schedule `sch-<26 characters>` and opens it by that name |
-| Restore | from the schedule's page, *Restore this point*; target = the `conn-…` connection with role `target`, new-topic prefix `restored-`; the readiness check; *Create the Restore* (named `rst-…` by the console); confirm it (Ordinary) |
+| Source connection | role `source`, `logweir-kafka-source.logweir.svc.cluster.local:9092`, plaintext (`<ws>-source` where a name is asked for). There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list prints each connection's role (`source` or `target`) under its name, which is how you tell it from the target |
+| Target connection | role `target`, `logweir-kafka-target.logweir.svc.cluster.local:9092`, plaintext (`<ws>-target`, or `conn-…` when the console names it) |
+| Destination | `<ws>-primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc/<ws>`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
+| Schedule | source = the `conn-…` connection with role `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `<ws>-primary`; then *Run first backup now*. There is no name to type: the console names the schedule `sch-<26 characters>` and opens it by that name |
+| Restore | from the schedule's page, *Restore this point*; target = the `conn-…` connection with role `target`, new-topic prefix `restored-`; the readiness check; *Create the Restore* (named `rst-…` by the console); confirm it (one person), or in `prd` have `bob` approve it (step 9) |
 
 **Check:** the backup's operation page reads `Succeeded` with *verified by
 weirkeeper … against key …*; the restore reaches `Succeeded` with its completion
-panel, and the `restored-` topics exist on the target broker.
+panel, and the `restored-` topics exist on the target broker. `kubectl
+--context "$CTX" -n "$LOGWEIR_NAMESPACE" get kafkaclusters,backupdestinations,backupschedules,backups,restores -L logweir.dev/workspace`
+shows each object labelled with the workspace it was created in.
 
 ## Upgrade to a newer publication
+
+Between publications of the same chart line. **From 0.4.x to 0.5.0 there is no
+in-place upgrade** (OD-23): install afresh into one namespace and import the
+old archive ([below](#import-an-earlier-installs-archive)).
 
 Set `LOGWEIR_COMMIT` in `versions.env` to the newer publication, read
 [docs/release-notes.md](../../docs/release-notes.md) (its required actions come
@@ -490,11 +512,11 @@ helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
   -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
   | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
 # 2. Controller, runner and console images TOGETHER. The approval bindings are
-#    lifted for this step: a namespace that HAS a binding is unbound from here
+#    lifted for this step: a workspace that HAS a binding is unbound from here
 #    until step 3 (it resolves to the strict legacy mode, never a weaker one).
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
-  --set-json 'approvalPolicy.namespaces={}' --wait --timeout 15m
+  --set-json 'approvalPolicy.workspaces={}' --wait --timeout 15m
 # 3. Then the approval-policy binding. This rolls the controller and both
 #    console pods a second time.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
@@ -541,7 +563,7 @@ prints one line per object:
 ```bash
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
   --dry-run=server --kube-context "$CTX" \
-  -f deploy/poc/logweir.values.yaml --set-json 'approvalPolicy.namespaces={}' \
+  -f deploy/poc/logweir.values.yaml --set-json 'approvalPolicy.workspaces={}' \
   | kubectl --context "$CTX" apply --server-side --field-manager=helm --dry-run=server -f -
 ```
 
@@ -575,18 +597,18 @@ order is successive `helm upgrade`s of it. Step 2 moves the controller, the
 runner image the controller hands its Jobs and the console **together** — they
 are one chart version naming one commit's images, and the probes and console
 configuration of this chart need images of the same build — while leaving
-`approvalPolicy.namespaces` empty. Step 3 adds the binding once step 2 is
+`approvalPolicy.workspaces` empty. Step 3 adds the binding once step 2 is
 Ready. An installation with no binding to add stops after step 2 without the
 `--set-json` override.
 
 **What the empty binding means depends on whether the install already had
-one.** On the FIRST upgrade that adds a binding, step 2 leaves every namespace
-as it was, so no namespace changes approval semantics under a Restore in
+one.** On the FIRST upgrade that adds a binding, step 2 leaves every workspace
+as it was, so no workspace changes approval semantics under a Restore in
 flight. On an install that already has a binding — this profile's, since its
 first one — step 2's override **removes** it: from the moment step 2's
-controller starts until step 3's does, the workload namespace is unbound and
+controller starts until step 3's does, every workspace is unbound and
 resolves to the strict legacy mode, where a restore submitted in the console
-would wait for an approver's key instead of following the namespace's own
+would wait for an approver's key instead of following the workspace's own
 policy. On the PoC's four upgrades of this kind that window was between about
 fifty seconds and three minutes. It is the stricter direction, but a restore
 started in it does not behave as the namespace's policy says: start none
@@ -618,131 +640,21 @@ restores the previous chart AND its images together — after the checklist in
 [docs/release-notes.md](../../docs/release-notes.md), *Migration and rollback*;
 the CRDs stay.
 
-## Upgrade rehearsals
+## Import an earlier install's archive
 
-The `v0.2.0-rc.1` entry of [docs/release-notes.md](../../docs/release-notes.md) records the two
-rehearsals run on 2026-09-24, from published builds to the PoC's first
-publication (`86a554e6`); run again, each upgrades to the release in
-`versions.env`. Neither older build can
-install with this profile's values, so each has its own starting values file
-under [rehearsals/](rehearsals/), installed with **that version's own chart**
-from this repository. [validate.sh](validate.sh) renders both against their own
-charts, and checks that the candidate refuses R2's starting values until they
-are migrated. Both start from steps 1–5 above (namespaces, Traefik,
-cert-manager, Dex, Secrets); both end with the three steps of *Upgrade to a
-newer publication*, using this profile's `logweir.values.yaml`.
-
-### R1 — from `v0.1.5`
-
-`v0.1.5` has six CRDs, no managed identity, no console (there is no
-`logweir-console:v0.1.5`) and no controller scoping. Its runs execute in
-`logweir-poc`, the namespace the release keeps after the upgrade.
-
-```bash
-git archive "$R1_COMMIT" charts/logweir | (mkdir -p poc-baselines/r1 && tar -x -C poc-baselines/r1)
-git show "$R1_COMMIT:config/rbac/backup-runner-serviceaccount.yaml" > poc-baselines/r1/runner-sa.yaml
-# v0.1.5's hand-provisioned identity (its docs/install.md "Before any custom resource"):
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out poc-secrets/r1-signing.pem
-openssl pkey -in poc-secrets/r1-signing.pem -pubout -out poc-secrets/r1-signing.pub.pem
-# The runner namespace's copy, which v0.1.5 reads, AND the release namespace's,
-# which the upgraded chart's identity bootstrap finds, keeps and distributes
-# (same key both places, so the distributor reports it Existing):
-for ns in "$POC_NAMESPACE" "$LOGWEIR_NAMESPACE"; do
-  kubectl --context "$CTX" -n "$ns" create secret generic logweir-signing-key \
-    --from-file=signing.pem=poc-secrets/r1-signing.pem
-done
-kubectl --context "$CTX" -n "$POC_NAMESPACE" apply -f poc-baselines/r1/runner-sa.yaml
-# The TrustRoster `default` with that signing key and an approver key, as
-# v0.1.5's docs/install.md step 2 describes; then:
-helm install logweir poc-baselines/r1/charts/logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" \
-  -f deploy/poc/rehearsals/r1-v0.1.5.values.yaml --wait --timeout 15m
-```
-
-**Pre-upgrade state** (v0.1.5's own procedures): the two `KafkaCluster`s in
-`logweir-poc`, a `BackupSchedule` there with at least one `Backup` that
-succeeded and verified, and a `logweir-s3` credential in `logweir-poc` (v0.1.5
-has no per-grant destinations: its demo flow is the chart's root pair, the
-baseline's own shape — after the upgrade, new destinations use step 7's users).
-Record the signing key id (`sha256` of `r1-signing.pub.pem`'s DER SPKI), each
-schedule's UID and `metadata.generation`, and the backups' receipts.
-
-**Before the upgrade, let Helm adopt the two objects v0.1.5 needed by hand in
-`logweir-poc`** and this release now renders there — the runner account and the
-demo archive credential. Helm refuses to take over an object it did not create
-unless the object says which release owns it:
-
-```bash
-for obj in serviceaccount/logweir-runner secret/logweir-s3; do
-  kubectl --context "$CTX" -n "$POC_NAMESPACE" annotate "$obj" --overwrite \
-    meta.helm.sh/release-name=logweir meta.helm.sh/release-namespace="$LOGWEIR_NAMESPACE"
-  kubectl --context "$CTX" -n "$POC_NAMESPACE" label "$obj" --overwrite app.kubernetes.io/managed-by=Helm
-done
-```
-
-**A rollback to `v0.1.5` deletes those two objects again.** `helm rollback
-logweir <v0.1.5 revision>` removes everything the candidate's revision
-rendered and `v0.1.5`'s did not — including the runner ServiceAccount and
-`logweir-s3` it adopted in `logweir-poc` — and the next `v0.1.5` run then fails
-`serviceaccount "logweir-runner" not found`. Re-create both at once after the
-rollback, exactly as before the `v0.1.5` install (the runner ServiceAccount from
-`poc-baselines/r1/runner-sa.yaml`, `logweir-s3` from the demo root pair). The
-retained signing identity (`helm.sh/resource-policy: keep`) is not affected.
-
-Then the three upgrade steps. **The live round must show, after R1:**
-1. all thirteen CRDs `Established`; the six old kinds' objects unchanged;
-2. **identity** — `logweir-signing-trust`'s `key-id` equals the recorded
-   `r1-signing` key id, `logweir-signing-key` in both namespaces still holds
-   that key (same `uid` and `creationTimestamp`: nothing re-created it), and the
-   bootstrap and distributor logged `source=existing`. Those are Helm hook Jobs
-   deleted as soon as they succeed (`hook-delete-policy: hook-succeeded`), so
-   read their logs WHILE step 2 runs, from a second terminal:
-   `kubectl --context "$CTX" -n logweir-system logs -f -l job-name --prefix`
-   (and `-n logweir-poc` for the distributor);
-3. `TrustRoster/default` resolving as `legacy-roster-v1` for `logweir-poc`
-   until the `TrustPolicy` of step 8 governs it;
-4. **schedules** — same UID, `metadata.generation` and history; the next slot
-   fired by the new controller (release-note item 9);
-5. **archive readability** — every pre-upgrade receipt verifies (the console's
-   badge and `docs/verify_scorecard.py`), and the first post-upgrade restore of a
-   pre-upgrade point completes only from a valid scorecard (item 8);
-6. the console arrives Ready through Traefik, with sign-in per role (step 9);
-7. the controller Ready on its exec probes.
-
-### R2 — from `sha-f49849d…`
-
-The last publication before PLAT-15.2/17.2/19.2: managed identity and a shared
-console, but no `controller.watchNamespaces`, no `approvalPolicy.*` and none of
-the chart-gap values. Its console cannot trust the local CA (that value did not
-exist): it reports Ready, but every sign-in answers `503` (`provider_unreachable`
-in its log) until the upgrade, which is why the install waits on the controller
-only.
-
-```bash
-git archive "$R2_COMMIT" charts/logweir | (mkdir -p poc-baselines/r2 && tar -x -C poc-baselines/r2)
-helm install logweir poc-baselines/r2/charts/logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" \
-  -f deploy/poc/rehearsals/r2-f49849d.values.yaml --timeout 15m
-kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" rollout status deploy/weirkeeper --timeout=10m
-```
-
-**Pre-upgrade state:** everything the handoff's item table lists for R2 —
-the `Enforce` retention policies without `s3:GetObject` and on a versioned
-bucket, the shared backup set, the run whose ConfigMap never mounts, the
-point-bound `Restore` without a Job, and a `Backup` verified under a key then
-revoked for compromise — plus the identity key id, the schedules and the
-receipts recorded as for R1. **That key is minted for the row, never the
-installation signer.** Swap `logweir-signing-key` for a fresh key for one run,
-list that key on `logweir-poc`'s policy only, then revoke it. A candidate with
-the compromise guard applies a compromise to every namespace and holds the
-policy on deletion while `TrustRoster/default` lists the key
-([release notes](../../docs/release-notes.md), item 16).
-
-Then: first run step 2 of the upgrade with **R2's own values** against the
-candidate chart and see it refused, naming `controller.watchNamespaces`
-(release-note item 6; `validate.sh` shows the same refusal offline); then the
-three upgrade steps with this profile's values. **The live round must show,
-after R2:** the R1 list's items 1, 2 (identity from the managed bootstrap:
-`key-id` unchanged), 4, 5, 6 and 7, and release-note items 1–10 as the
-handoff's table states them — each with the pre-upgrade state it names.
+An install of 0.4.x or older is not upgraded; its archive is imported. Before
+removing the old release, copy its archive into the new MinIO under `legacy/`
+(`mc mirror` from the old bucket and prefix to `kafka-backups/legacy/<old
+prefix>`; the reader user of step 7 reads `legacy/`), and export the old signer
+as *Recover onto a clean installation with the kit* says
+([docs/install.md](../../docs/install.md#recover-onto-a-clean-installation-with-the-kit)).
+In the new install, add the old signer's `EvidenceSigning` entry, with its own
+`notBefore`, to `logweir-installation` as historical (step 8). Then, in the
+workspace that should hold the old points (say `stg`): a destination over
+bucket `kafka-backups`, prefix `legacy/<old prefix>`, with the reader's grant,
+and a catalog over it. The catalog lists the old points, and a restore of one
+ends verified. A catalog in another workspace that names that destination is
+refused: references never cross workspaces.
 
 ## Uninstall
 
@@ -776,7 +688,7 @@ Deleting the namespace deletes the PVC; `kubectl --context "$CTX" -n
 
 What remains on purpose ([charts/logweir/README.md](../../charts/logweir/README.md),
 *Uninstall, and what it leaves behind*): the retained signing identity
-(`logweir-signing-key` in both namespaces, `logweir-signing-trust`) and the
+(`logweir-signing-key`, `logweir-signing-trust`) and the
 `logweir-identity-singleton` ClusterRole; the fourteen Logweir CRDs with every
 custom resource, the `TrustPolicy` and `TrustRoster/default` included;
 cert-manager's six CRDs (`crds.keep`) and the Secrets it issued; Traefik's CRDs
@@ -792,7 +704,7 @@ for c in $(kubectl --context "$CTX" get crd -o name | grep -E '\.logweir\.dev$|\
 done
 kubectl --context "$CTX" delete crd -l app.kubernetes.io/instance=cert-manager
 kubectl --context "$CTX" delete clusterrole logweir-identity-singleton --ignore-not-found
-for ns in "$POC_NAMESPACE" "$LOGWEIR_NAMESPACE" "$DEX_NAMESPACE" "$CERT_MANAGER_NAMESPACE" "$INGRESS_NAMESPACE"; do
+for ns in "$LOGWEIR_NAMESPACE" "$DEX_NAMESPACE" "$CERT_MANAGER_NAMESPACE" "$INGRESS_NAMESPACE"; do
   kubectl --context "$CTX" delete namespace "$ns" --wait --timeout=360s --ignore-not-found
 done
 kubectl --context "$CTX" -n kube-system delete lease cert-manager-controller cert-manager-cainjector-leader-election
@@ -811,11 +723,11 @@ Then remove `poc-secrets/` and, if you trusted it, the CA from your keychain.
 | Console's trust of the IdP | `oidc.caBundle` = Dex's own namespaced back-channel CA only, `systemRoots: false`; `dex.localtest.me` mapped by `hostAliases` to **Dex's own Service** (pinned ClusterIP), where Dex terminates TLS itself — never to the shared ingress. Residual: anyone who can issue or read certificates in namespace `dex` | a publicly trusted issuer needs no bundle, a corporate PKI keeps `oidc.caBundle`; the IdP is resolved through **real DNS** — no host alias, no pinned ClusterIP. If an alias is ever needed, its target must be an endpoint only the IdP's owner can route, and the bundle's CA must not issue the IdP's name to anyone else on that path. Block Service `externalIPs` (`DenyServiceExternalIPs` or a ValidatingAdmissionPolicy) so no namespace can claim the IdP's address |
 | Console | `shared`, 2 replicas, PDB, liveness and readiness probes, non-root, read-only root filesystem, `requireTrustedProxy` | the same |
 | Trusted proxy | the Traefik Service's serving pods (`trustedProxyService`) | the same, naming your ingress controller's Service. Anyone who can edit that Service, write its EndpointSlices or create a Pod matching its selector in that namespace can add an address; a `hostNetwork` controller's endpoint is its NODE, so the node's other host processes are trusted too ([charts/logweir/README.md](../../charts/logweir/README.md)) |
-| Controller | scoped to `logweir-poc` (`watchNamespaces`), non-root, read-only root filesystem, resources set, **exec liveness and readiness probes** | the same, one namespace per team |
+| Controller | watches `logweir` only, non-root, read-only root filesystem, resources set, **exec liveness and readiness probes** | the same: one install per team, one workspace per environment |
 | NetworkPolicies | rendered for the console, the runners and the controller; console egress to Dex by **pod selector** (`oidcPeers`, Dex's pods on 5554) | the same — **enforced**. docker-desktop does not enforce NetworkPolicy, so here they are objects, not boundaries. An IdP outside the cluster is `oidcCIDRs` (its own addresses) instead |
 | Dex | 2 replicas, PDB, Kubernetes storage | the same, or your IdP directly |
-| Archive and Kafka | the chart's demo MinIO (root credential in chart values — the one exception; Logweir gets three least-privilege users) and brokers | your object store (per-role grants, [docs/install.md](../../docs/install.md) §3.11) and clusters; the connection objects in a watched namespace (`kubernetes.connectionsNamespace`) |
-| Approval policy | `Ordinary` in `logweir-poc` | `Governed` for production namespaces, with approver keys on the `TrustPolicy` |
+| Archive and Kafka | the chart's demo MinIO (root credential in chart values — the one exception; Logweir gets three least-privilege users) and brokers | your object store (per-role grants, [docs/install.md](../../docs/install.md) §3.11) and clusters |
+| Approval policy | one-person in `dev`, `tst`, `stg`; two-person in `prd` | two-person, or strict (approver keys on the `TrustPolicy`), for production workspaces |
 
 ## Swapping in a real identity provider
 
@@ -842,7 +754,7 @@ documents each one.
 |---|---|---|
 | G1 — the console could not trust a private CA for its issuer | a patch mounting the CA and setting `SSL_CERT_FILE` (replacing the system roots) | `api.console.oidc.caBundle: {configMap \| secret, key}`: the bundle is added to the system roots (`oidc.systemRoots: false` to drop them); an unreadable or empty bundle refuses to start |
 | G2 — `dex.localtest.me` resolved to the console pod itself | a patch adding `hostAliases` with an address read at install | `api.console.hostAliases`, mapping the name to Dex's OWN Service, where Dex terminates TLS itself. Chosen over a separate back-channel URL: it changes only where the name resolves, so the URL, the TLS name check and the exact `iss` comparison all stay on the one configured issuer — which is sound only because the target is an endpoint only Dex's owner can route (the first version pointed at the shared ingress, where any namespace's Ingress could have answered) |
-| G3 — the chart's own connection objects landed in the release namespace, which a scoped controller cannot watch | the PoC created them through the console instead | `kubernetes.connectionsNamespace`; the render fails when it is not watched |
+| G3 — the chart's own connection objects landed in the release namespace, which a scoped controller cannot watch | the PoC created them through the console instead | withdrawn with OD-23: the controller watches the release namespace, and the objects land there with the first workspace's label |
 | G4 — the chart was not published | installed from a checkout of the image commit | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`, published by `images.yml` beside the images, versioned with them |
 | G5 — the controller had no probes | a wedged controller was never restarted | exec liveness and readiness (`weirkeeper --probe`) against a loopback health listener |
 | G6 — `trustedProxyCidrs` needed the ingress pod's `/32` | re-read and reinstalled after every ingress pod restart | `api.console.trustedProxyService`: the ingress Service's serving pods, re-read every five seconds |
@@ -850,8 +762,8 @@ documents each one.
 ## What the first live round showed (2026-09-24), and what it did not
 
 `validate.sh` renders all four charts at their pinned versions (Logweir both as
-published and from a checkout, and the two rehearsal baselines with their own
-charts), checks every image is pinned, the cross-file addresses agree and the
+published and from a checkout; until OD-23 also the two rehearsal baselines
+with their own charts), checks every image is pinned, the cross-file addresses agree and the
 rendered Dex configuration carries no secret. On 2026-09-24 the PoC install round
 then ran this profile on docker-desktop (v1.34.1) at `LOGWEIR_COMMIT` `86a554e6`,
 from the published chart and images only, and left the final install running.

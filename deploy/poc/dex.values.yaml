@@ -82,7 +82,7 @@ config:
       username: norole
       userID: 1f0c9a4e-0005-4a1e-9e1a-000000000005
       hashFromEnv: DEX_HASH_NOROLE
-    # Two users for the two-person namespace `logweir-pair` (PROD-16.2,
+    # Two users for the two-person workspace `prd` (PROD-16.2,
     # logweir.values.yaml): `alice` requests a restore, `bob` approves it. Their
     # hashes are DEX_HASH_ALICE and DEX_HASH_BOB in `dex-poc-secrets`, added as
     # README.md step 4 adds the others.
