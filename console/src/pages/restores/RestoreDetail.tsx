@@ -371,7 +371,8 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   const stopping = !r.operation.terminal && !interrupted && r.operation.stateReason === "Stopping";
   const mayCreate = caps?.restoreCreate !== false;
   const cancellable = mayCreate && !r.operation.terminal && !interrupted && !stopping;
-  const partialTopics = [...new Set([...(scope?.complete?.partitions ?? []).map((p) => p.topic), ...r.newTopics])];
+  // The targets it created (the partition table names the SOURCE topics they were restored from).
+  const partialTopics = r.newTopics;
   const cleanupLine = cleanupWords(interruption?.cleanup, interruption?.cleanupReason);
   const schemasLine = restoreSchemasWords(restoreSchemasOf(r));
   const retry = () => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { retryOf: r.name } });
@@ -836,11 +837,15 @@ function Detail({ ws, name }: { ws: string; name: string }) {
               <Content component="p">{CANCEL_CONFIRM_SENTENCE}</Content>
             ) : (
               <>
-                <ul className="lw-plain-list" aria-label="Topics to delete">
-                  {partialTopics.map((t) => (
-                    <li key={t} className="lw-mono lw-break">{t}</li>
-                  ))}
-                </ul>
+                {partialTopics.length > 0 ? (
+                  <ul className="lw-plain-list" aria-label="Topics to delete">
+                    {partialTopics.map((t) => (
+                      <li key={t} className="lw-mono lw-break">{t}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <Content component="p">The topics the signed reconcile records as created by this restore.</Content>
+                )}
                 <Content component="p" className="lw-gap-top">{CLEANUP_CONFIRM_SENTENCE}</Content>
               </>
             )}

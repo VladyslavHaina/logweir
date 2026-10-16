@@ -186,7 +186,8 @@ describe("PROD-07.2: an interrupted restore on the mock", () => {
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Clean up partial topics" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByRole("list", { name: "Topics to delete" }).textContent).toContain("drill3-orders");
+    // Only the targets it created, never the source topics the partition table names.
+    expect(within(within(dialog).getByRole("list", { name: "Topics to delete" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["drill3-orders", "drill3-orders-dlq", "drill3-payments"]);
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete these topics" }));
     expect(await screen.findByText("Removing the partial topics.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Clean up partial topics" })).toBeNull();
