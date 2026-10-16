@@ -2360,6 +2360,30 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // FX-52 F7 (item 136): the peer that holds TypeScript at 5.
         ("console dependencies", "`openapi-typescript`"),
+        // PROD-19.1 (item 137): the step a fresh install must not skip.
+        (
+            "one namespace per install",
+            "`helm install` does not replace a CRD that exists",
+        ),
+        // PROD-19.1 (item 138): the controller's refusal across workspaces.
+        ("workspaces", "`WorkspaceMismatch`"),
+        // PROD-19.1 (item 139): the residual an operator must read.
+        (
+            "a credential Secret carries its workspace",
+            "create Pods or Jobs",
+        ),
+        // PROD-19.1 (item 140): the new signed field.
+        ("an approval names its workspace", "`subject.workspace`"),
+        // PROD-19.1 (item 141): the renamed problem code.
+        ("the API by workspace", "`workspace_forbidden`"),
+        // PROD-03.1, 03.2 (item 142): the refusal of a registry without IMPORT.
+        ("Schema Registry", "`SchemaRegistryCannotKeepIds`"),
+        // PROD-00.3a/d/e/h (item 143): the one new plan key.
+        ("engine build 5", "`restore.rate_limit_bytes_per_sec`"),
+        // PROD-07.2 (item 144): the grant a reconcile needs.
+        ("an interrupted restore", "`<bucket>/logweir/drills/*`"),
+        // OD-23 (item 145): the verifier that reads the new blocks.
+        ("format steps", "`verify_scorecard.py` 1.35.0"),
     ];
     assert_eq!(
         items.len(),
