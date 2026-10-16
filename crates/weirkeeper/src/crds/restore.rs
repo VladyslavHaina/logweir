@@ -896,7 +896,7 @@ pub struct RestoreStatus {
     /// Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`,
     /// `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual
     /// restore waiting for a slot in its namespace's manual-restore pool
-    /// (`status.queue`). `Interrupted` (PROD-07.2) is a run that ended without
+    /// (`status.queue`). `Interrupted` is a run that ended without
     /// a signed scorecard after it created its target topics
     /// (`status.interruption`). Task 20 owns the phase vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1080,7 +1080,7 @@ pub struct RestoreStatus {
     /// other `Restore`, and on anything an older controller reconciled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone: Option<CloneStatus>,
-    /// **PROD-07.2.** A run that ended without a signed scorecard after it
+    /// A run that ended without a signed scorecard after it
     /// created its target topics (`phase: Interrupted`): why, the reconcile
     /// that verified what it left, and the cleanup. Absent on every other run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1201,7 +1201,7 @@ pub struct CloneStatus {
     pub reason: Option<String>,
 }
 
-/// **PROD-07.2: an interrupted restore.** Nothing here resumes. The run's
+/// **An interrupted restore.** Nothing here resumes. The run's
 /// partial targets are verified by a reconcile Job (`logweir restore
 /// reconcile`), which signs an ordinary scorecard listing them with
 /// per-partition counts (its counts reach `status.integrity`, its keys

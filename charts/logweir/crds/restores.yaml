@@ -903,7 +903,7 @@ spec:
                     type: array
                 type: object
               interruption:
-                description: '**PROD-07.2.** A run that ended without a signed scorecard after it created its target topics (`phase: Interrupted`): why, the reconcile that verified what it left, and the cleanup. Absent on every other run.'
+                description: 'A run that ended without a signed scorecard after it created its target topics (`phase: Interrupted`): why, the reconcile that verified what it left, and the cleanup. Absent on every other run.'
                 nullable: true
                 properties:
                   attempts:
@@ -1060,7 +1060,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). `Interrupted` (PROD-07.2) is a run that ended without a signed scorecard after it created its target topics (`status.interruption`). Task 20 owns the phase vocabulary.'
+                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). `Interrupted` is a run that ended without a signed scorecard after it created its target topics (`status.interruption`). Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
               progress:
