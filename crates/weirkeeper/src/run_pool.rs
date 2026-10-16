@@ -274,7 +274,10 @@ pub fn restore_standing(restore: &Restore) -> Standing {
     }
     let status = restore.status.as_ref();
     let phase = status.and_then(|s| s.phase.as_deref());
-    if is_terminal_phase(phase) {
+    // PROD-07.2: an interrupted run's writer is gone, so it frees its slot.
+    if is_terminal_phase(phase)
+        || phase == Some(crate::controllers::restore::restore_interruption::PHASE_INTERRUPTED)
+    {
         return Standing::Finished;
     }
     if status.is_some_and(|s| s.job_ref.is_some() || admitted_by_status(s.conditions.as_ref())) {

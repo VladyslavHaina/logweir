@@ -4172,17 +4172,20 @@ pub const BACKUP_PAGE_LIMIT: u32 = 500;
 pub const MAX_BACKUP_PAGES: usize = 20;
 
 /// The terminal `Restore` phases. Any other phase, including none (a `Restore`
-/// the reconciler has not seen yet), is nonterminal and protects its point.
+/// the reconciler has not seen yet) and `Interrupted` (PROD-07.2), is
+/// nonterminal and protects its point.
 pub const TERMINAL_RESTORE_PHASES: &[&str] = &["Succeeded", "Failed", "Refused"];
 
-/// Whether this `Restore` has finished.
+/// Whether this `Restore` has finished, so it no longer holds its point. An
+/// `Interrupted` restore holds it until its partial topics were cleaned up
+/// (PROD-07.2), or until it is deleted.
 #[must_use]
 pub fn is_terminal_restore(restore: &Restore) -> bool {
-    restore
-        .status
-        .as_ref()
-        .and_then(|s| s.phase.as_deref())
-        .is_some_and(|p| TERMINAL_RESTORE_PHASES.contains(&p))
+    let phase = restore.status.as_ref().and_then(|s| s.phase.as_deref());
+    if phase == Some(super::restore::restore_interruption::PHASE_INTERRUPTED) {
+        return !super::restore::restore_interruption::holds_point(restore);
+    }
+    phase.is_some_and(|p| TERMINAL_RESTORE_PHASES.contains(&p))
 }
 
 /// Whether this `Restore` reads from the destination under evaluation.

@@ -2215,6 +2215,9 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
             let token = args.pop().expect("the token");
             let flag = args.pop().expect("its flag");
             assert_eq!(flag, logweir_core::runner_line::RUNNER_LINE_TOKEN_ARG);
+            // PROD-07.2: and each run's own id, before the token.
+            let _run_id = args.pop().expect("the run id");
+            assert_eq!(args.pop().expect("its flag"), "--run-id");
             token.as_str().expect("a string").to_string()
         })
         .collect();
