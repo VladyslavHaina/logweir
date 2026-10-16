@@ -1782,9 +1782,13 @@ fn a_slot_moves_every_host_port_and_the_default_render_does_not() {
 // ---------------------------------------------------------------------------
 
 /// The step that runs a shard: nextest over `build-e2e`'s archive (FX-53),
-/// selecting exactly the shard's `tests` by binary name.
+/// with the filter ci/gates.toml gives the shard's gate (`ci-gate.sh
+/// filter`: its `tests` less their `except`, plus its `rows`), which
+/// gate_map_lint holds equal to this job's matrix lists.
 const SHARD_RUN: &str = "cargo-nextest nextest run --archive-file ";
-const SHARD_SELECTION: &str = "-E '(binary(=${{ join(matrix.tests, ') | binary(=') }}))";
+const SHARD_FILTER: &str =
+    "filter=\"$(bash scripts/ci-gate.sh filter \"e2e-${{ matrix.shard }}\")\"";
+const SHARD_SELECTION: &str = "-E \"($filter) & not test(a_pod_really_reaches_the_k8s_listener)\"";
 
 /// The e2e package's test binaries: every `e2e/tests/*.rs`, and every
 /// `e2e/tests/<dir>/main.rs` (cargo builds both kinds).
@@ -1839,12 +1843,16 @@ fn shard_offences(job: &serde_yaml::Value, binaries: &BTreeSet<String>) -> Vec<S
         .into_iter()
         .flatten()
         .filter_map(|s| s["run"].as_str());
-    if !runs
-        .into_iter()
-        .any(|r| r.starts_with(SHARD_RUN) && r.contains(SHARD_SELECTION))
-    {
+    if !runs.into_iter().any(|r| {
+        let lines: Vec<&str> = r.lines().map(str::trim).collect();
+        lines.iter().any(|l| *l == SHARD_FILTER)
+            && lines
+                .iter()
+                .any(|l| l.starts_with(SHARD_RUN) && l.contains(SHARD_SELECTION))
+    }) {
         out.push(format!(
-            "no step runs `{SHARD_RUN}… {SHARD_SELECTION}`: the lists select nothing"
+            "no step runs `{SHARD_FILTER}` then `{SHARD_RUN}… {SHARD_SELECTION}`: the lists \
+             select nothing"
         ));
     }
     out

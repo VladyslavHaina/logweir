@@ -129,7 +129,12 @@ jobs:
         run: |
           bash scripts/ci-gate.sh describe > "$RUNNER_TEMP/map.json"
           unit="$(jq -c '[.gates | to_entries[] | select(.key | startswith("unit-")) | {gate: .key, cache: .value.job}]' "$RUNNER_TEMP/map.json")"
-          e2e="$(jq -c '[.gates | to_entries[] | select(.key | startswith("e2e-")) | {gate: .key, filter: ("(" + ([.value.tests[] | "binary(=" + . + ")"] | join(" | ")) + ") & not test(a_pod_really_reaches_the_k8s_listener)")}]' "$RUNNER_TEMP/map.json")"
+          # Each shard's filter is the map's (`ci-gate.sh filter`: whole binaries
+          # less their excepts, plus rows), as ci.yml's shards run it.
+          e2e="$(for gate in $(jq -r '.gates | keys[] | select(startswith("e2e-"))' "$RUNNER_TEMP/map.json"); do
+            filter="($(bash scripts/ci-gate.sh filter "$gate")) & not test(a_pod_really_reaches_the_k8s_listener)"
+            jq -nc --arg gate "$gate" --arg filter "$filter" '{gate: $gate, filter: $filter}'
+          done | jq -sc .)"
           [ "$(jq length <<< "$unit")" -ge 1 ] && [ "$(jq length <<< "$e2e")" -ge 1 ]
           echo "unit=$unit" | tee -a "$GITHUB_OUTPUT"
           echo "e2e=$e2e" | tee -a "$GITHUB_OUTPUT"

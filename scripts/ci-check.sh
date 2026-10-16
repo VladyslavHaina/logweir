@@ -9,9 +9,10 @@
 #                                          name is its gate's in ci/gates.toml
 #
 # THE PARTS (FX-53 §2.4). CI runs each in a job of its own, at once:
-#   lint            the CLI build, `just lint` (fmt, clippy, the shell and
-#                   Python lints), the engine-string scan of the debug CLI, the
-#                   pure-library dependency checks, the cosign-pin scan
+#   lint            the CLI build, `just lint` without its two whole-tree
+#                   scans (fmt, clippy, the shell and Python lints), the
+#                   engine-string scan of the debug CLI, the pure-library
+#                   dependency checks
 #   unit <group>    one crate group's tests with cargo-nextest, then its
 #                   doctests (nextest runs none); the groups are below
 #   generated       schema, CRD and chart drift
@@ -19,7 +20,8 @@
 #                   patch oracle
 #   python          the Python rows (the gate machinery's included) and
 #                   `just verify-py`
-#   docs            links, the unverified-label scan, `doc_lint`
+#   docs            links, the whole-tree text scans that read the docs too
+#                   (unverified labels, unsafe scope, cosign pins), `doc_lint`
 # With no part the script runs every command of every part, in one process and
 # in the order it always has, with the workspace suite as ONE libtest run
 # (`cargo test --workspace`), so a laptop needs no nextest. The unit groups and
@@ -47,9 +49,34 @@ if [[ "${CARGO_TARGET_DIR:-target}" = /* ]]; then
 fi
 }
 
+# `just lint` (the justfile; label_gate.rs and cli_verify.rs hold its lines) is
+# the local lint. CI runs it as two gates (FX-53): the two scans of the whole
+# tree's text, which read every document, run in `docs`; the rest, which reads
+# no document but the verifier's code, runs here, so a docs-only change hits
+# `lint`. workflow_lint holds every line of the recipe to exactly one of
+# lint_code() and docs().
+lint_code() {
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+./scripts/check-no-oso.sh
+./scripts/check-pure-core.sh
+./scripts/check-verifier-parity.sh
+./scripts/check-invariant-corpus.sh
+python3 scripts/test_k8s_scram_seed.py
+python3 scripts/test_plat06_case_e_rows.py
+python3 scripts/test_bind_credential_rows.py
+python3 scripts/test_no_duplicate_definitions.py
+./scripts/check-one-signer.sh
+./scripts/check-no-archive-write.sh
+}
+
 lint() {
 cli
-just lint
+lint_code
+lint_tail
+}
+
+lint_tail() {
 # The release gate's engine check, on every run, so a new uncited engine string
 # fails here rather than first at a tag.
 bash scripts/check-no-engine-in-binary.sh "$LOGWEIR_BIN"
@@ -63,10 +90,13 @@ for crate in logweir-core logweir-evidence logweir-kafka logweir-verify; do
     exit 1
   fi
 done
+}
 
 # PROD-00.2 security review: every cosign / gh attestation verification in the
 # repository pins the exact signer identity, the calling repository, ref and
-# trigger, and the issuer (images.yml is a reusable workflow).
+# trigger, and the issuer (images.yml is a reusable workflow). It reads every
+# .md, .sh, .yml, .py and workflow in the tree.
+cosign_pins() {
 python3 scripts/check-cosign-verify.py
 }
 
@@ -128,6 +158,8 @@ just chart-check
 docs() {
 just links
 ./scripts/check-unverified-labels.sh
+./scripts/check-unsafe-scope.sh
+cosign_pins
 cargo nextest run --locked --profile ci -p logweir --test doc_lint
 }
 
@@ -189,7 +221,10 @@ fi
 case "$part" in
   "")
     prepare
-    lint
+    cli
+    just lint
+    lint_tail
+    cosign_pins
     cargo test --locked --workspace
     python_rows
     generated

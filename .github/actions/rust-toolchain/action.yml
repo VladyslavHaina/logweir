@@ -1,0 +1,45 @@
+# FX-53: the toolchain rust-toolchain.toml pins, with its components, RETRIED.
+#
+# It replaces dtolnay/rust-toolchain in ci.yml, whose install retries only a
+# checksum race on the release server: run 38832659142 (PR #68, attempt 1)
+# failed `build-e2e` in 0.2 s on one refused download of
+# static.rust-lang.org/dist/channel-rust-1.89.0.toml.sha256. Here any failed
+# `rustup toolchain install` is retried, five attempts in all with a growing
+# pause, and rustup's own download retries are raised (RUSTUP_MAX_RETRIES).
+#
+# It installs the components the toolchain file lists, so no later cargo call
+# installs them through rustup's proxy (a second download, never retried), and
+# it leaves the job's environment as dtolnay's action did: CARGO_HOME, the
+# default toolchain, CARGO_INCREMENTAL=0 and CARGO_TERM_COLOR=always unless the
+# job set them (both are in Swatinem/rust-cache's key, so the keys stay the
+# same).
+name: rust-toolchain
+description: Install rust-toolchain.toml's toolchain and components, retrying a transient download failure.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        RUSTUP_MAX_RETRIES: '10'
+      run: |
+        set -euo pipefail
+        file="$GITHUB_WORKSPACE/rust-toolchain.toml"
+        channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$file")"
+        if [ -z "$channel" ]; then echo "::error::no channel in rust-toolchain.toml"; exit 1; fi
+        components="$(sed -n 's/^components = \[\(.*\)\]$/\1/p' "$file" | tr -d '" ' | tr , ' ')"
+        flags=(--profile minimal --no-self-update)
+        for c in $components; do flags+=(--component "$c"); done
+        echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+        for attempt in 1 2 3 4 5; do
+          if rustup toolchain install "$channel" "${flags[@]}"; then break; fi
+          if [ "$attempt" -eq 5 ]; then
+            echo "::error::rustup could not install $channel in 5 attempts"
+            exit 1
+          fi
+          echo "rustup toolchain install $channel failed (attempt $attempt of 5); retrying in $((attempt * 20)) s" >&2
+          sleep $((attempt * 20))
+        done
+        rustup default "$channel"
+        if [ -z "${CARGO_INCREMENTAL+set}" ]; then echo CARGO_INCREMENTAL=0 >> "$GITHUB_ENV"; fi
+        if [ -z "${CARGO_TERM_COLOR+set}" ]; then echo CARGO_TERM_COLOR=always >> "$GITHUB_ENV"; fi
+        rustc +"$channel" --version --verbose
