@@ -23,7 +23,7 @@ use crate::render_backup::RenderError;
 /// Escapes an arbitrary string for safe embedding as a YAML double-quoted
 /// scalar, and is used at EVERY interpolation site in both renderers
 /// (`backup_id`, bootstrap servers, both sides of `topic_mapping`, every
-/// storage field, `checkpoint_state`, `run_id` and `triggered_by`).
+/// storage field, the offset-report path, `run_id` and `triggered_by`).
 ///
 /// Global Constraint 4 says the three forbidden keys are never emitted "at
 /// any value" — a value that, written raw, would ITSELF contain a physical

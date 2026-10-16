@@ -649,7 +649,7 @@ pub struct RestoreRunArgs {
     /// uploads it beside the scorecard at
     /// `logweir/drills/<run_id>.offsets.json` and records that key and its
     /// sha256 in the signed document. Default: `offsets.json` in this run's
-    /// workdir, beside the restore checkpoint.
+    /// workdir.
     ///
     /// The report is WRITTEN and never applied: tag 1 commits no consumer-group
     /// offset on any cluster.

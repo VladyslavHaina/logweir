@@ -62,7 +62,7 @@ pub enum RenderError {
     /// **G-EXP**, per-value leg. The payload is the offending INPUT VALUE, so
     /// a caller can name the field; the message deliberately does not
     /// interpolate it, because the same wording has to be right for a topic,
-    /// a bootstrap server, a storage prefix and a checkpoint path.
+    /// a bootstrap server, a storage prefix and a report path.
     #[error("input value contains \"${{\", which the engine expands textually BEFORE parsing (U:kafka-backup-cli/src/commands/config.rs:1-34) — the rendered bytes are a template, not the executed document, so the plan hash would not cover what runs")]
     DollarBrace(String),
     /// **G-EXP**, post-render leg. The payload is the whole `${…}` sequence as

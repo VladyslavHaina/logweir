@@ -335,16 +335,14 @@ fn targets(lab: &mut Lab, ctx: &Ctx, label: &str) -> BTreeMap<String, String> {
 fn plan(
     ctx: &Ctx,
     mapping: &BTreeMap<String, String>,
-    checkpoint: &Path,
     offsets: &Path,
 ) -> logweir_core::engine::RestorePlan {
-    plan_in(ctx, mapping, checkpoint, offsets, ctx.window)
+    plan_in(ctx, mapping, offsets, ctx.window)
 }
 
 fn plan_in(
     ctx: &Ctx,
     mapping: &BTreeMap<String, String>,
-    checkpoint: &Path,
     offsets: &Path,
     window: (i64, i64),
 ) -> logweir_core::engine::RestorePlan {
@@ -365,14 +363,14 @@ fn plan_in(
         window_floor_source: WindowFloorSource::ArchiveManifest,
         source_partitions: Default::default(),
         default_replication_factor: 1,
-        checkpoint_state: checkpoint.to_path_buf(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: offsets.to_path_buf(),
     }
 }
 
 /// Logweir's rendered restore document, plus the two pacing keys (the same in
-/// every attempt of a scenario), written to `doc`.
+/// every attempt of a scenario) and the engine checkpoint this harness studies
+/// (Logweir renders none since PROD-07.2; 07.1-I4), written to `doc`.
 fn write_doc(
     ctx: &Ctx,
     mapping: &BTreeMap<String, String>,
@@ -391,10 +389,9 @@ fn write_doc_in(
     doc: &Path,
     window: (i64, i64),
 ) {
-    let rendered = logweir_engine_oso::render_restore::render(&plan_in(
-        ctx, mapping, checkpoint, offsets, window,
-    ))
-    .expect("the restore document renders");
+    let rendered =
+        logweir_engine_oso::render_restore::render(&plan_in(ctx, mapping, offsets, window))
+            .expect("the restore document renders");
     // The pacing keys go into the `restore:` block, right under its header:
     // it is no longer the document's last block (FX-27 appends `metrics:`).
     assert_eq!(
@@ -405,7 +402,8 @@ fn write_doc_in(
     let text = rendered.replacen(
         "\nrestore:\n",
         &format!(
-            "\nrestore:\n  produce_batch_size: {PRODUCE_BATCH}\n  rate_limit_records_per_sec: {RATE_PER_PARTITION}\n"
+            "\nrestore:\n  produce_batch_size: {PRODUCE_BATCH}\n  rate_limit_records_per_sec: {RATE_PER_PARTITION}\n  checkpoint_state: \"{}\"\n  checkpoint_interval_secs: 30\n",
+            checkpoint.display()
         ),
         1,
     );
@@ -683,12 +681,7 @@ fn verify(ctx: &Ctx, mapping: &BTreeMap<String, String>) -> Value {
         &ctx.facts,
         &sel,
         mapping,
-        &plan(
-            ctx,
-            mapping,
-            &scratch.join("cp.json"),
-            &scratch.join("off.json"),
-        ),
+        &plan(ctx, mapping, &scratch.join("off.json")),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::NewTopic,
         logweir_core::spec::Coverage::Complete,
@@ -1651,12 +1644,7 @@ fn sampled(ctx: &Ctx, mapping: &BTreeMap<String, String>, max_partitions: Option
         &ctx.facts,
         &sel.per_partition,
         mapping,
-        &plan(
-            ctx,
-            mapping,
-            &scratch.join("cp.json"),
-            &scratch.join("off.json"),
-        ),
+        &plan(ctx, mapping, &scratch.join("off.json")),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
         logweir_core::spec::TargetMode::NewTopic,
         Coverage::Sampled,
@@ -1920,14 +1908,14 @@ impl Drop for Native {
     }
 }
 
-/// Logweir renders `checkpoint_interval_secs: 30`; a row that must see a save
+/// `write_doc` sets `checkpoint_interval_secs: 30`; a row that must see a save
 /// inside a four-second topic sets its own interval.
 fn set_interval(doc: &Path, secs: u64) {
     let text = std::fs::read_to_string(doc).expect("the restore document");
     assert_eq!(
         text.matches("  checkpoint_interval_secs: 30\n").count(),
         1,
-        "the rendered document carries Logweir's interval once"
+        "the document carries the harness's interval once"
     );
     let text = text.replace(
         "  checkpoint_interval_secs: 30\n",

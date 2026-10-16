@@ -230,8 +230,7 @@ pub struct RunArgs {
     pub metrics_file: Option<PathBuf>,
     /// `--offset-report-out`. Where the ENGINE writes its offset-mapping
     /// report, which phase 8 then uploads beside the scorecard. Absent means
-    /// `offsets.json` in this run's workdir (`run_workdir`), beside the
-    /// checkpoint.
+    /// `offsets.json` in this run's workdir (`run_workdir`).
     pub offset_report_out: Option<PathBuf>,
     /// `--approver-key-ids`, repeated: the approver key ids this run accepts.
     /// Empty means not pinned. A non-empty set is checked by
@@ -2463,23 +2462,14 @@ fn execute_with_validated_approval(
             .map_err(|e| DrillError::Operational(format!("target.auth: {e}")))?,
         ..plan
     };
-    // The engine writes its restore checkpoint to `plan.checkpoint_state` and
-    // does not create its parent directory (`logweir-<run_id>`, which nothing
-    // else creates), so without this `kafka-backup restore` exits 1 with a
-    // bare `No such file or directory`. `Operational`, not a refusal: a
-    // scratch directory that cannot be created says nothing about the archive.
-    if let Some(dir) = plan.checkpoint_state.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
-    }
-    // And the offset report's parent, for exactly the same reason and with
-    // one difference that makes it worse: the engine's checkpoint write
-    // surfaces as an error, while its offset-report write is wrapped in a
-    // `warn!` [U:crates/kafka-backup-core/src/restore/engine.rs:423-425] — so
-    // a missing directory there produces no file, no failure, and no signed
-    // `evidence.offset_report_key`. By default this is the same directory the
-    // line above just created; it is a separate call because
-    // `--offset-report-out` may name any path the operator likes.
+    // The engine does not create the offset report's parent directory
+    // (`logweir-<run_id>`, which nothing else creates), and its offset-report
+    // write is wrapped in a `warn!`
+    // [U:crates/kafka-backup-core/src/restore/engine.rs:423-425] — so a
+    // missing directory there produces no file, no failure, and no signed
+    // `evidence.offset_report_key`. `--offset-report-out` may name any path
+    // the operator likes. `Operational`, not a refusal: a scratch directory
+    // that cannot be created says nothing about the archive.
     if let Some(dir) = plan.offset_report.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| DrillError::Operational(format!("{}: {e}", dir.display())))?;
@@ -3342,15 +3332,11 @@ pub fn build_plan_with_floor(
             .map(|(topic, set)| (topic, set.into_iter().collect()))
             .collect(),
         default_replication_factor: spec.target.default_replication_factor,
-        // Pod-local and never uploaded: a crashed restore is NOT resumable in
-        // v0.1 (spec §11).
-        checkpoint_state: run_workdir(run_id).join("checkpoint.json"),
-        checkpoint_interval_secs: 30,
-        // Pod-local and UPLOADED, which is the whole difference from the
-        // checkpoint above: the offset report is evidence about what the
+        rate_limit_bytes_per_sec: spec.restore.rate_limit_bytes_per_sec,
+        // Pod-local and UPLOADED: the offset report is evidence about what the
         // restore mapped, and the pod that holds it is deleted. Default:
-        // `offsets.json` beside `checkpoint.json` in the same per-run workdir,
-        // which is the one directory `execute_with_outcome` creates.
+        // `offsets.json` in the per-run workdir, which is the one directory
+        // `execute_with_outcome` creates.
         offset_report: offset_report_out
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| run_workdir(run_id).join("offsets.json")),

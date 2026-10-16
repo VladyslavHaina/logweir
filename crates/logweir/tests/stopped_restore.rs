@@ -293,8 +293,7 @@ fn build(
         },
         source_partitions: Default::default(),
         default_replication_factor: 1,
-        checkpoint_state: "/tmp/fx23/checkpoint.json".into(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: "/tmp/fx23/offsets.json".into(),
     };
     let engine = archive_engine(facts.clone(), archive);
