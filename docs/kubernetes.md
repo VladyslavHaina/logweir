@@ -1350,7 +1350,7 @@ The run Job's pod has a 30 s grace. On Linux the engine also gets
 
 **`Interrupted`.** A run that ended without a signed scorecard *after* it
 created its target topics is `phase: Interrupted`, with `status.interruption.cause`
-`Cancelled`, `RunnerStopped` (a deleted or evicted pod, a deadline) or
+`Cancelled`, `RunnerStopped` (a deleted or evicted pod, a deadline, a runner OOMKilled or crashed) or
 `RunFailed`. Before its engine starts, every run writes a create-only targets
 record, `logweir/drills/<run_id>.targets.json` (run id, plan hash, cluster ID,
 and each created topic's name, topic ID and partitions), signed by the run's
@@ -1370,8 +1370,8 @@ kept topics in `target.creation`; and a coverage note naming the interrupted run
 
 | The reconcile found | The `Restore` |
 |---|---|
-| Every kept partition exact | `Succeeded`, reason `ReconciledComplete`, without a second restore |
-| Anything else | Stays `Interrupted`, `interruption.verification: Done`; the counts are on `status.integrity` and the evidence is the reconcile's scorecard |
+| Every recorded topic kept and every partition exact | `Succeeded`, reason `ReconciledComplete`, without a second restore |
+| Anything else, including a recorded topic left out (`integrity.result: partial` names it) | Stays `Interrupted`, `interruption.verification: Done`; the counts are on `status.integrity` and the evidence is the reconcile's scorecard |
 | The run's own scorecard after all (it signed just before it stopped) | What that scorecard says |
 | No targets record, or none of its topics is still the run's | `Failed`, with the reason |
 | A failure (exit 1, no exit code) | Tried again, at most three times, five minutes apart; then `verification: Failed`. The point stays held and Clean up is not offered |
@@ -1389,7 +1389,8 @@ cleanup --run-id <the reconcile's run>`. It deletes only the topics that scoreca
 lists, each only while its topic ID is the recorded one, through a deleter scoped
 to the plan's mapped target names, and signs what it did. What it removed and
 left is on `status.teardown`; `interruption.cleanup.phase: Removed` releases the
-recovery point. A topic someone recreated is left and named.
+recovery point. A topic someone recreated, or one under its original name
+(an original-name restore), is left and named: delete it yourself once checked.
 
 **Retry** is a new `Restore` into fresh names, with its own approval; phase 0
 refuses any execution into the old partial targets.
