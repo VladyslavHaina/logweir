@@ -982,7 +982,7 @@ no token, TTL only after the status) and these volumes:
 | `approval` | immutable `ConfigMap` `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json`; under v2 also `approval-policy.json` and `confirmation.pub.pem`; for a point-bound plan `evidence-keys.json` |
 | `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | The runner's signing key, readable because `fsGroup: 65532` is set |
 | `plan` | `ConfigMap` `<restore>-plan` | `/plan` | `spec.planBytes`, verbatim |
-| `work` | `emptyDir` | `/work` | The scorecard, offset report and checkpoint, on a read-only root filesystem |
+| `work` | `emptyDir` | `/work` | The scorecard and offset report, on a read-only root filesystem |
 
 - The Job template pins the SHA-256 of the plan and every bundle member, and the
   Restore and Approval identities, and passes `--execution-contract-version 2`
@@ -1236,6 +1236,76 @@ kubectl --context docker-desktop get restore r1 \
 
 `Valid` alone says the document is authentic; `pass` alone says the drill passed
 by a document nobody verified. The `SIGNED` and `OUTCOME` columns show both.
+
+### Cancel, and an interrupted restore
+
+Nothing is ever resumed. A restore that stops part-way says so, lists what it
+left, and holds its recovery point until you retry or clean up (PROD-07.2).
+
+**Cancel** (`POST /api/v1/workspaces/<ws>/restores/<name>/cancel`, or the
+annotation `logweir.dev/cancel-requested-by: <you>`) is allowed to whoever may
+create restores in the workspace:
+
+| When | What happens |
+|---|---|
+| Before its Job exists (`Pending`, `Queued`) | `Failed`, reason `Cancelled`; nothing ran |
+| While it runs | The controller sets `spec.suspend: true` on the run Job. The runner gets SIGTERM, forwards it to the engine, SIGKILLs the engine after 10 s, signs nothing and exits 1 (`failure-reason=Cancelled`). The `Restore` stays `Running`, reason `Stopping`, until no pod of the Job is left; a pod on a lost node keeps it there (force-delete it) |
+| After the run signed | Nothing changes: the scorecard decides |
+
+The run Job's pod has a 30 s grace. On Linux the engine also gets
+`PR_SET_PDEATHSIG(SIGKILL)`, so it never outlives a killed runner.
+
+**`Interrupted`.** A run that ended without a signed scorecard *after* it
+created its target topics is `phase: Interrupted`, with `status.interruption.cause`
+`Cancelled`, `RunnerStopped` (a deleted or evicted pod, a deadline) or
+`RunFailed`. Before its engine starts, every run writes a create-only targets
+record, `logweir/drills/<run_id>.targets.json` (run id, plan hash, cluster ID,
+and each created topic's name, topic ID and partitions), signed by the run's
+signing key (`<run_id>.targets.sig`). A record that is missing its signature, or
+whose signature does not verify, is refused: nothing is verified and nothing is
+deleted. A run that ended before its creation step is `Failed`, as before.
+
+The controller then starts `logweir-reconcile-<uid>-<n>`, a copy of the run's pod
+running `logweir restore reconcile --run-id <the run>`. It keeps the recorded
+topics that the plan maps and that are still on the recorded cluster with their
+recorded topic IDs (a name deleted and created again is left out and named), waits until their end
+offsets hold still for 10 s (at most 5 minutes, else `TargetStillGrowing`), and
+verifies them against the archive with the complete lane, restoring nothing. It
+signs an ordinary scorecard for its own run id: `fail-integrity` with
+per-partition `expected`, `restored`, `matching`, `missing`, `duplicates`; the
+kept topics in `target.creation`; and a coverage note naming the interrupted run.
+
+| The reconcile found | The `Restore` |
+|---|---|
+| Every kept partition exact | `Succeeded`, reason `ReconciledComplete`, without a second restore |
+| Anything else | Stays `Interrupted`, `interruption.verification: Done`; the counts are on `status.integrity` and the evidence is the reconcile's scorecard |
+| The run's own scorecard after all (it signed just before it stopped) | What that scorecard says |
+| No targets record, or none of its topics is still the run's | `Failed`, with the reason |
+| A failure (exit 1, no exit code) | Tried again, at most three times, five minutes apart; then `verification: Failed`. The point stays held and Clean up is not offered |
+
+The reconcile reads the targets record from the evidence location with the run's
+`archiveRead` grant, which must therefore read `logweir/drills/*` there
+([install.md §3.11](install.md#311-object-store-permissions-per-destination-role)).
+
+**Clean up** (`POST …/restores/<name>/cleanup`, or
+`logweir.dev/cleanup-requested-by`), only on an `Interrupted` restore whose
+reconcile signed, and with no second approval: the controller runs
+`logweir-cleanup-<uid>-<n>`, wired as a clone's cleanup (the evidence
+destination's `evidenceRead` grant reads the scorecard), running `logweir restore
+cleanup --run-id <the reconcile's run>`. It deletes only the topics that scorecard
+lists, each only while its topic ID is the recorded one, through a deleter scoped
+to the plan's mapped target names, and signs what it did. What it removed and
+left is on `status.teardown`; `interruption.cleanup.phase: Removed` releases the
+recovery point. A topic someone recreated is left and named.
+
+**Retry** is a new `Restore` into fresh names, with its own approval; phase 0
+refuses any execution into the old partial targets.
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.status.phase}{"  "}{.status.interruption.cause}{"  "}{.status.interruption.verification}'
+# Interrupted  Cancelled  Done
+```
 
 ### Safe clones: a scratch restore kept for a declared time
 
@@ -2928,7 +2998,7 @@ run` without the controller. Its container is called `logweir`.
   | `LOGWEIR_ENGINE_BIN` | Set by the image to `/usr/local/bin/kafka-backup` |
   | `LOGWEIR_ENGINE_VERSION`, `LOGWEIR_ENGINE_DIGEST` | Not needed in the runner image, which declares its engine in `/etc/logweir/engine-identity`; mandatory outside it (an empty value is exit 1). The run checks the engine's `--version` either way |
   | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, or IRSA / Pod Identity | `object_store`'s own chain; `~/.aws/credentials`, `AWS_PROFILE` and SSO are not supported |
-  | `TMPDIR` | Where the rendered `restore.yaml` and the checkpoint land; point it at a writable volume |
+  | `TMPDIR` | Where the rendered `restore.yaml` lands; point it at a writable volume |
   | `RUST_LOG` | The example sets `info` |
 
 - **Metrics.** `--metrics-file` writes a Prometheus textfile; there is no HTTP
