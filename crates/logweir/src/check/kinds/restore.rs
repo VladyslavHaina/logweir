@@ -724,10 +724,7 @@ fn archive_checks(
                     let sha = block.snapshot_sha256.clone().unwrap_or_default();
                     *bound_snapshot = Some(
                         access
-                            .get(
-                                &key,
-                                logweir_core::schema_registry::MAX_SNAPSHOT_BYTES as u64,
-                            )
+                            .get(&key, caps::SCHEMA_SNAPSHOT)
                             .map_err(|e| {
                                 format!(
                                     "{}: the schema snapshot {key} could not be read: {e}",

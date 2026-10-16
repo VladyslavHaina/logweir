@@ -344,8 +344,8 @@ pub enum Reconciled {
 }
 
 /// A read of `key` through `store`: `Ok(None)` when it is absent.
-fn read_optional(store: &Store, key: &str, cap: u64) -> Result<Option<Vec<u8>>, DrillError> {
-    match store.get_capped(key, cap) {
+fn read_optional(store: &Store, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, DrillError> {
+    match store.get_capped(key, max_bytes) {
         Ok((bytes, _)) => Ok(Some(bytes)),
         Err(StoreError::NotFound(_)) => Ok(None),
         Err(e) => Err(DrillError::Operational(format!(

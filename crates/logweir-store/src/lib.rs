@@ -175,6 +175,9 @@ pub mod caps {
     pub const ENGINE_DOCUMENT: u64 = 64 << 20;
     /// A readiness probe's GET of a key nobody wrote.
     pub const PROBE: u64 = 0;
+    /// A Schema Registry snapshot beside its receipt (PROD-03.1), read by a
+    /// restore's import or its readiness check: the most a backup writes.
+    pub const SCHEMA_SNAPSHOT: u64 = logweir_core::schema_registry::MAX_SNAPSHOT_BYTES as u64;
 }
 
 /// The `backup_id` a manifest key belongs to: the key's parent directory.

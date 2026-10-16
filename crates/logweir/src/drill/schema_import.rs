@@ -80,7 +80,7 @@ pub fn prepare(
              snapshot; no target topic was created"
         )));
     };
-    let bytes = match archive.get_capped(key, MAX_SNAPSHOT_BYTES as u64) {
+    let bytes = match archive.get_capped(key, logweir_engine_oso::storage::caps::SCHEMA_SNAPSHOT) {
         Ok((bytes, _)) => bytes,
         Err(StoreError::NotFound(_) | StoreError::TooLarge { .. }) => {
             return Err(refused(format!(
