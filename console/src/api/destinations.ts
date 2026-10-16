@@ -250,10 +250,10 @@ const HTTPS = "https" + "://";
 const HTTP = "http" + "://";
 
 export const WRITE_ONLY_SENTENCE =
-  "Typed once and written once. The value goes into a Secret this namespace owns and is never read back: no response, status, log line or audit record carries it, and this page does not keep it either. A refusal, a reload or leaving this form loses it, on purpose. What comes back is the Secret's name.";
+  "Typed once and written once. The value goes into a Secret this workspace owns and is never read back: no response, status, log line or audit record carries it, and this page does not keep it either. A refusal, a reload or leaving this form loses it, on purpose. What comes back is the Secret's name.";
 
 export const DEFAULT_DESTINATION_SENTENCE =
-  "At most one destination per namespace is the default, and new schedules start from it. Naming a second one is refused rather than silently moving the flag: clear it on the destination that holds it first.";
+  "At most one destination per workspace is the default, and new schedules start from it. Naming a second one is refused rather than silently moving the flag: clear it on the destination that holds it first.";
 
 export const DEFAULT_ANNOTATION_RESIDUAL =
   "A default set by hand with only the logweir.dev/default-destination annotation carries no label, so the conflict check cannot see it; it still reads as the default everywhere else.";
@@ -302,7 +302,7 @@ export function destinationProblems(v: DestinationValues): Partial<Record<Destin
   const caName = v.caName.trim();
   if (caName.length > 0) {
     if (v.security !== "tls") p.caName = "A CA bundle verifies a TLS transport; a plaintext destination has nothing to verify.";
-    else if (!isObjectName(caName)) p.caName = "The name of a ConfigMap in this namespace holding the PEM bundle.";
+    else if (!isObjectName(caName)) p.caName = "The name of a ConfigMap in this workspace holding the PEM bundle.";
     if (v.caKey.trim().length > 0 && !isDataKey(v.caKey.trim())) p.caKey = "A ConfigMap data key is letters, digits, '-', '_' and '.'.";
   }
   for (const f of ["name", "description", "bucket", "prefix", "region", "endpoint", "caName", "caKey"] as const) {
@@ -435,7 +435,7 @@ export function rotationProblems(v: RotateValues, d: Pick<Destination, "access" 
   const p: Partial<Record<"caName" | "caKey" | GrantField, string>> = grantProblems(v.grants, d.access, namedSecrets(d.access));
   if (v.caChange === "set") {
     if (d.transport.security !== "tls") p.caName = "A CA bundle verifies a TLS transport; this destination is plaintext.";
-    else if (!isObjectName(v.caName.trim())) p.caName = "The name of a ConfigMap in this namespace holding the PEM bundle.";
+    else if (!isObjectName(v.caName.trim())) p.caName = "The name of a ConfigMap in this workspace holding the PEM bundle.";
     if (v.caKey.trim() && !isDataKey(v.caKey.trim())) p.caKey = "A ConfigMap data key is letters, digits, '-', '_' and '.'.";
     for (const f of ["caName", "caKey"] as const) if (carriesKeyMaterial(v[f])) p[f] = KEY_IN_PLAIN_FIELD;
   }
@@ -463,7 +463,7 @@ export function rotationField(path: string): "caName" | "caKey" | GrantField | u
 
 // ----------------------------------------------------------------- reads
 
-/** The namespace's destinations: one list, shared with the schedule and catalog pick-lists. */
+/** The workspace's destinations: one list, shared with the schedule and catalog pick-lists. */
 export const useDestinationList = useDestinations;
 
 /**
@@ -476,12 +476,12 @@ export function destinationReReadMs(d: Destination | undefined, reads: number): 
   return unjudged && reads < 30 ? 4000 : false;
 }
 
-export function useDestination(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "destinations");
+export function useDestination(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "destinations");
   return useQuery({
-    queryKey: keys.item("destinations", ns, name),
+    queryKey: keys.item("destinations", ws, name),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/destinations/{name}", { params: { path: { ws, name } }, signal }))).item,
     enabled: enabled && readable,
     refetchInterval: (q) => destinationReReadMs(q.state.data, q.state.dataUpdateCount),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
@@ -489,12 +489,12 @@ export function useDestination(ns: string, name: string, enabled = true) {
 }
 
 /** What names this destination. Its failure is not the page's: the detail still renders. */
-export function useDestinationUsage(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "destinations");
+export function useDestinationUsage(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "destinations");
   return useQuery({
-    queryKey: ["destinations", ns, "usage", name],
+    queryKey: ["destinations", ws, "usage", name],
     queryFn: async ({ signal }) =>
-      call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}/usage", { params: { path: { ns, name } }, signal })),
+      call(() => api.GET("/api/v1/workspaces/{ws}/destinations/{name}/usage", { params: { path: { ws, name } }, signal })),
     enabled: enabled && readable,
     retry: false,
   });
@@ -502,19 +502,19 @@ export function useDestinationUsage(ns: string, name: string, enabled = true) {
 
 // ---------------------------------------------------------------- writes
 
-export function useCreateDestination(ns: string) {
+export function useCreateDestination(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ key, body }: { key: string; body: CreateDestinationRequest }) => {
       try {
         return await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/destinations", { params: { path: { ns }, header: createHeaders(key) }, body }),
+          api.POST("/api/v1/workspaces/{ws}/destinations", { params: { path: { ws }, header: createHeaders(key) }, body }),
         );
       } finally {
         forgetAccessCredentials(body.access);
       }
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("destinations", ns) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("destinations", ws) }),
   });
 }
 
@@ -523,15 +523,15 @@ export function useCreateDestination(ns: string) {
  * `expectedGeneration`, so a second send after the first landed is a 412,
  * which is the right answer (the object moved).
  */
-export function useRotateAccess(ns: string, name: string) {
+export function useRotateAccess(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (body: UpdateDestinationAccessRequest) => {
       try {
         return (
           await call(() =>
-            api.POST("/api/v1/namespaces/{ns}/destinations/{name}:update-access", {
-              params: { path: { ns, name }, header: { Origin: window.location.origin } },
+            api.POST("/api/v1/workspaces/{ws}/destinations/{name}:update-access", {
+              params: { path: { ws, name }, header: { Origin: window.location.origin } },
               body,
             }),
           )
@@ -542,18 +542,18 @@ export function useRotateAccess(ns: string, name: string) {
     },
     // A test's applicability is recomputed on read; the grants it was about just changed.
     onSettled: () =>
-      Promise.all([client.invalidateQueries({ queryKey: keys.list("destinations", ns) }), client.invalidateQueries({ queryKey: ["preflights", ns] })]),
+      Promise.all([client.invalidateQueries({ queryKey: keys.list("destinations", ws) }), client.invalidateQueries({ queryKey: ["preflights", ws] })]),
   });
 }
 
 /** "Test access": one DestinationAccess Preflight per click; no roles means every role a run uses (the API fills in the fallbacks to archive-write). */
-export function useTestDestination(ns: string, name: string) {
+export function useTestDestination(ws: string, name: string) {
   return useMutation({
     mutationFn: async ({ key, roles }: { key: string; roles: GrantRole[] }) =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/destinations/{name}:test", {
-            params: { path: { ns, name }, header: createHeaders(key) },
+          api.POST("/api/v1/workspaces/{ws}/destinations/{name}:test", {
+            params: { path: { ws, name }, header: createHeaders(key) },
             body: roles.length > 0 ? { roles } : {},
           }),
         )

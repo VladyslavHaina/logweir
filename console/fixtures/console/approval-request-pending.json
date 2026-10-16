@@ -3,13 +3,13 @@
     "approvalName": "approval-x",
     "approve": {
       "offered": true,
-      "sentence": "You are an approver in this namespace and not the requester. Approving records your identity and the time, and the console signs both; the Restore then runs once weirkeeper verifies it."
+      "sentence": "You are an approver in this workspace and not the requester. Approving records your identity and the time, and the console signs both; the Restore then runs once weirkeeper verifies it."
     },
     "confirmationName": "approval-x-confirmation",
     "confirmationSha256": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
     "expiresAt": "2026-10-10T13:00:00Z",
     "issuedAt": "2026-10-10T12:00:00Z",
-    "namespace": "team-a",
+    "workspace": "team-a",
     "planHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "approvalSubject": "ordinary",
     "policy": "prod-pair",

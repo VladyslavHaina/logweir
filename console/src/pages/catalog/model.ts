@@ -9,7 +9,11 @@
 // 4. The view is a WINDOW and says so: an expired view is a missing view, not a
 //    missing archive.
 import type { Catalog, PointPage, PointView } from "../../api/backups";
-import { count } from "../../components/When";
+
+/** components/When's `count`, kept here so scripts/emit-schema-dependency.mjs can load this module under node (When is .tsx). */
+function count(n: number | null | undefined): string {
+  return typeof n === "number" ? n.toLocaleString("en-US") : "Not recorded";
+}
 
 type Condition = { type: string; status: string; reason?: string | null; message?: string | null };
 
@@ -26,14 +30,14 @@ export function viewIsUsable(c: Pick<Catalog, "conditions">): boolean {
 export const DUPLICATE_CATALOG = "DuplicateCatalog";
 
 /**
- * DUI-10: `Ready=False/DuplicateCatalog`: one destination has one catalog per namespace, so
+ * DUI-10: `Ready=False/DuplicateCatalog`: one destination has one catalog per workspace, so
  * this newer one runs no sync and publishes no view. Its message, which names the catalog
  * to use, or null for any other catalog.
  */
 export function duplicateOf(c: Pick<Catalog, "conditions">): string | null {
   const ready = conditionOf(c.conditions, "Ready");
   if (ready?.status !== "False" || ready.reason !== DUPLICATE_CATALOG) return null;
-  return ready.message || "Another catalog already indexes this destination in this namespace.";
+  return ready.message || "Another catalog already indexes this destination in this workspace.";
 }
 
 /** The catalog's point counts in a few words, or why it has none to count. */
@@ -62,7 +66,7 @@ export function catalogSentence(c: Pick<Catalog, "conditions" | "counts" | "sync
   return `${over}: ${count(c.counts.available)} of ${count(c.counts.total)} points available at the last sync.`;
 }
 
-/** The catalog in this namespace that already indexes `destination`, if one does (what makes a new one a duplicate). */
+/** The catalog in this workspace that already indexes `destination`, if one does (what makes a new one a duplicate). */
 export function catalogOf(catalogs: Pick<Catalog, "name" | "destinationRef">[] | undefined, destination: string): string | null {
   if (!destination) return null;
   return catalogs?.find((c) => c.destinationRef?.name === destination)?.name ?? null;
@@ -111,7 +115,7 @@ export const NO_ONE_CLICK_TRUST_SENTENCE =
   "This page offers no control that adds a key to a TrustPolicy. A key found beside an archive is a claim, never trusted by proximity: compare its fingerprint with its holder out of band, then have an administrator add it with kubectl.";
 
 export const BACKUP_VERDICTS_INCOMPLETE_SENTENCE =
-  "The product API could not read every Backup verdict in this namespace for this page, so a row's restorability reflects the catalog alone for the Backups it could not read. No restore is offered from this page while that is so: a catalog row never outranks a verdict the controller reached, and one nobody could read might be such a verdict.";
+  "The product API could not read every Backup verdict in this workspace for this page, so a row's restorability reflects the catalog alone for the Backups it could not read. No restore is offered from this page while that is so: a catalog row never outranks a verdict the controller reached, and one nobody could read might be such a verdict.";
 
 export const POINT_BINDING_REDACTED_SENTENCE =
   "At least one point here published its plan binding (its backup set id or its receipt key) as [redacted]: the catalog sync's own redactor withheld it, so what the API serves is not the value in the bucket, and no restore is offered for that point until the catalog publishes the value itself. Runners up to v0.2.0-rc.1 did this to every scheduled run's point: upgrade the runner image and sync the catalog again. The point id and both digests are unaffected; nothing in your archive is missing or unreadable because of this.";
@@ -226,7 +230,7 @@ export function catalogPointOffer(e: PointView | null | undefined, page: Partial
   }
   if (typeof page.backupVerdictsIncomplete === "string" && page.backupVerdictsIncomplete.length > 0) {
     return no(
-      `the product API could not read every Backup verdict in this namespace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt; this page does not offer a point over a verdict nobody could read`,
+      `the product API could not read every Backup verdict in this workspace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt; this page does not offer a point over a verdict nobody could read`,
     );
   }
   // FX-36: a record naming another document is Unreadable, and a relabelled one a Conflict: never offered.
@@ -300,7 +304,23 @@ export function consumerPositionsWords(e: Pick<PointView, "consumerPositions">):
 export const SCHEMA_REGISTRY_NOT_CAPTURED = "Registry not captured: applications may not read these records after restore.";
 
 export const SCHEMA_DEPENDENCY_NOTE =
-  "The backup that wrote these points judged their topics' archived records and found Confluent wire-format framing in their keys or values: a zero byte and a schema id that a schema registry issued. Logweir never contacts or captures a schema registry, so an application that deserializes the restored records needs the registry that issued these ids, reachable from where it runs. The restore copies the bytes unchanged either way, and nothing here blocks it.";
+  "The backup that wrote these points judged their topics' archived records and found Confluent wire-format framing in their keys or values: a zero byte and a schema id that a schema registry issued. A backup whose source connection names a Schema Registry captures it, and a restore into a target connection with a registry imports the schemas these records need, keeping their ids. Without that, an application that deserializes the restored records needs the registry that issued these ids. The restore copies the bytes unchanged either way.";
+
+const REGISTRY_REASONS: Record<string, string> = {
+  registryUnreachable: "the registry did not answer",
+  registryUnauthorized: "the registry refused the credential",
+  snapshotTooLarge: "the registry is larger than a snapshot holds (32 MiB, 100 000 versions)",
+  snapshotIncomplete: "some referenced schemas or ids are missing from the snapshot",
+};
+
+/** OD-23 (PROD-03.1): a backup's or point's Schema Registry capture in one line. Absent is "not captured". */
+export function registryCaptureWords(sr: { captured: boolean; subjects?: number | null; versions?: number | null; incompleteReason?: string | null } | null): string {
+  const why = (r: string) => REGISTRY_REASONS[r] ?? r;
+  if (!sr) return "Not captured";
+  if (!sr.captured) return `Not captured${sr.incompleteReason ? `: ${why(sr.incompleteReason)}` : ""}`;
+  const counts = `${sr.subjects ?? 0} ${sr.subjects === 1 ? "subject" : "subjects"}, ${sr.versions ?? 0} ${sr.versions === 1 ? "version" : "versions"}`;
+  return `Captured: ${counts}${sr.incompleteReason ? `; incomplete: ${why(sr.incompleteReason)}` : ""}`;
+}
 
 /** A point's schema-dependent topics, each as `topic (sides: schema ids …; basis)`. A point whose topics are not listed says nothing: not assessed, never "none". */
 export function schemaDependentTopics(e: Pick<PointView, "topics">): string[] {

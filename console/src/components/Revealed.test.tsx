@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 const refusal = () =>
-  new ApiError(409, { status: 409, code: "state_conflict" as never, detail: "`primary` is already this namespace's default destination.", requestId: "r", retryable: false });
+  new ApiError(409, { status: 409, code: "state_conflict" as never, detail: "`primary` is already this workspace's default destination.", requestId: "r", retryable: false });
 
 /** A form's foot: a submit that fails anew on every click, and a re-render that changes nothing. */
 function Form({ alert }: { alert: "outcome" | "schedules" }) {
@@ -48,7 +48,7 @@ describe("DUI-33: a refusal is brought to the reader", () => {
       fireEvent.click(screen.getByRole("button", { name: "Submit" }));
       const focused = document.activeElement as HTMLElement;
       expect(focused.className).toBe("lw-revealed");
-      expect(focused.textContent).toContain("is already this namespace's default destination");
+      expect(focused.textContent).toContain("is already this workspace's default destination");
       expect(focused.getAttribute("tabindex")).toBe("-1");
       expect(scrolled).toHaveBeenCalledTimes(1);
       expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });

@@ -27,15 +27,15 @@ export function conflictWords(error: unknown): string | null {
   return null;
 }
 
-export function BackUpNow({ ns, schedule, open, onClose }: { ns: string; schedule: Schedule; open: boolean; onClose: () => void }) {
-  const run = useRunFromSchedule(ns);
+export function BackUpNow({ ws, schedule, open, onClose }: { ws: string; schedule: Schedule; open: boolean; onClose: () => void }) {
+  const run = useRunFromSchedule(ws);
   // DUI-31.7: the revision this offers is read again when the dialog opens, so an edit made
   // elsewhere (kubectl, another tab) shows before the click and not as a 409 after it.
   const client = useQueryClient();
   useEffect(() => {
-    if (open) void client.invalidateQueries({ queryKey: keys.list("schedules", ns) });
-  }, [open, client, ns]);
-  const reading = useIsFetching({ queryKey: keys.list("schedules", ns) }) > 0;
+    if (open) void client.invalidateQueries({ queryKey: keys.list("schedules", ws) });
+  }, [open, client, ws]);
+  const reading = useIsFetching({ queryKey: keys.list("schedules", ws) }) > 0;
   const [intent, setIntent] = useState(() => mintIntent("manual"));
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<ManualBackupResponse | null>(null);
@@ -74,7 +74,7 @@ export function BackUpNow({ ns, schedule, open, onClose }: { ns: string; schedul
         {result && (
           <Alert isInline variant={result.replayed ? "info" : "success"} title={result.replayed ? "Already started" : "Backup started"}>
             {result.replayed ? "That request had already started this run, so no second run was made. " : ""}
-            <Link to="/$ns/backups/$name" params={{ ns, name: result.item.name }} onClick={onClose}>
+            <Link to="/$ws/backups/$name" params={{ ws, name: result.item.name }} onClick={onClose}>
               {result.item.name}
             </Link>{" "}
             copies revision g{result.item.scheduleRef?.generation ?? result.schedule?.generation ?? "?"}

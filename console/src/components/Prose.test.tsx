@@ -9,9 +9,9 @@ afterEach(cleanup);
 
 describe("problem details as prose", () => {
   it("renders each balanced code span as code, without its backticks", () => {
-    const { container } = render(<Prose text="`primary` is already this namespace's default destination. Clear it there first." />);
+    const { container } = render(<Prose text="`primary` is already this workspace's default destination. Clear it there first." />);
     expect(container.querySelector("code")?.textContent).toBe("primary");
-    expect(container.textContent).toBe("primary is already this namespace's default destination. Clear it there first.");
+    expect(container.textContent).toBe("primary is already this workspace's default destination. Clear it there first.");
   });
 
   it("shows an unpaired backtick as it came, and HTML as text", () => {

@@ -128,6 +128,8 @@ export interface PlanFields {
   topics: string[];
   pointInTime: string;
   timeBasis?: string | null;
+  /** PROD-00.3h: `restore.rate_limit_bytes_per_sec`, for the whole restore; absent is no limit. */
+  rateLimitBytesPerSec?: number | null;
   point?: PlanPointBinding;
   source: PlanStorage;
   target: {
@@ -310,6 +312,12 @@ export function renderPlanBytes(fields: PlanFields): string {
   out.push(`  point_in_time: ${quote(needed(f.pointInTime, "pointInTime"))}`);
   const timeBasis = timeBasisOf(f.timeBasis);
   if (timeBasis !== null) out.push(`  time_basis: ${quote(timeBasis)}`);
+  const rate = f.rateLimitBytesPerSec;
+  if (rate !== undefined && rate !== null) {
+    const n = integer(rate, "rateLimitBytesPerSec");
+    if (Number(n) < 1) throw new TypeError(`rateLimitBytesPerSec must be at least 1, not ${String(rate)}`);
+    out.push(`  rate_limit_bytes_per_sec: ${n}`);
+  }
 
   out.push("sample:");
   out.push(`  window_start: ${quote(needed(sample.windowStart, "sample.windowStart"))}`);

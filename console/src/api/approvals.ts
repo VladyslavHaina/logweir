@@ -1,7 +1,7 @@
-// Approvals (OD-8): the namespace's approval policy, the Approval records, a
+// Approvals (OD-8): the workspace's approval policy, the Approval records, a
 // two-person request as the second person is shown it, and the three ways an
 // approval is given here: the second person's click, a strict countersignature
-// made with a personal key, and an unbound namespace's two `logweir drill
+// made with a personal key, and an unbound workspace's two `logweir drill
 // approve` files. Under `confirm` the requester's own confirmation in the
 // wizard is the whole authorization, and nothing is given here.
 //
@@ -39,7 +39,7 @@ export const SUBJECT_KIND = "Restore";
 
 // ------------------------------------------------------------------ grants
 
-/** What this session may do with approvals in one namespace, from GET /session. */
+/** What this session may do with approvals in one workspace, from GET /session. */
 export interface ApprovalGrant {
   /** False until the session has answered. */
   known: boolean;
@@ -52,8 +52,8 @@ export interface ApprovalGrant {
   displayName: string;
 }
 
-export function approvalGrant(session: Session | undefined, ns: string): ApprovalGrant {
-  const grant = session?.namespaces.find((g) => g.name === ns);
+export function approvalGrant(session: Session | undefined, ws: string): ApprovalGrant {
+  const grant = session?.workspaces.find((g) => g.name === ws);
   const can = grant?.capabilities;
   return {
     known: session !== undefined,
@@ -66,14 +66,14 @@ export function approvalGrant(session: Session | undefined, ns: string): Approva
   };
 }
 
-/** The approval flags in `ns`, from the gate's session. */
-export function useApprovalGrant(ns: string): ApprovalGrant {
-  return approvalGrant(useSessionDoc(), ns);
+/** The approval flags in `ws`, from the gate's session. */
+export function useApprovalGrant(ws: string): ApprovalGrant {
+  return approvalGrant(useSessionDoc(), ws);
 }
 
 // ------------------------------------------------------------------ modes
 
-/** OD-8's modes as this page acts on them. `files` is an unbound namespace
+/** OD-8's modes as this page acts on them. `files` is an unbound workspace
  *  (`legacy-governed-v1`): the approver records the two files `logweir drill
  *  approve` wrote. */
 export type ApprovalMode = "confirm" | "twoPerson" | "strict" | "files";
@@ -100,7 +100,7 @@ export const MODE_WORDS: Record<ApprovalMode, string> = {
   files: "Unbound: the approver's own files",
 };
 
-/** What approving means in this namespace, in one or two sentences. */
+/** What approving means in this workspace, in one or two sentences. */
 export function modeSentence(mode: ApprovalMode, policyName: string): string {
   switch (mode) {
     case "confirm":
@@ -110,26 +110,26 @@ export function modeSentence(mode: ApprovalMode, policyName: string): string {
     case "strict":
       return `Policy ${policyName} is strict: an approver other than the requester countersigns each restore and each switchover with their personal key, using logweir drill countersign.`;
     case "files":
-      return `No approval policy binds this namespace (${policyName}): an approver records the two files logweir drill approve wrote on their own machine.`;
+      return `No approval policy binds this workspace (${policyName}): an approver records the two files logweir drill approve wrote on their own machine.`;
   }
 }
 
 /**
- * THE EMPTY APPROVALS TABLE, IN THE WORDS OF THE NAMESPACE'S POLICY (the old
+ * THE EMPTY APPROVALS TABLE, IN THE WORDS OF THE WORKSPACE'S POLICY (the old
  * console's sentences): under confirm the approval is the console's own signed
  * confirmation; under two-person a second person approves in the console;
- * under strict an approver countersigns; only an unbound namespace records files.
+ * under strict an approver countersigns; only an unbound workspace records files.
  */
 export function noApprovalSentence(mode: ApprovalMode): string {
   switch (mode) {
     case "confirm":
-      return "No Approval in this namespace yet. Its approval mode is confirm: creating a Restore in the wizard is the confirmation, no key is involved, and nothing is recorded here by hand.";
+      return "No Approval in this workspace yet. Its approval mode is confirm: creating a Restore in the wizard is the confirmation, no key is involved, and nothing is recorded here by hand.";
     case "twoPerson":
-      return "No Approval in this namespace yet. Its approval mode is two-person: a second person, signed in to this console as an approver and not the requester, opens a restore or a switchover waiting above and approves it there. No key is involved.";
+      return "No Approval in this workspace yet. Its approval mode is two-person: a second person, signed in to this console as an approver and not the requester, opens a restore or a switchover waiting above and approves it there. No key is involved.";
     case "strict":
-      return "No Approval in this namespace yet. Its approval mode is strict: an approver other than the requester opens a restore or a switchover waiting above and records the countersignature there.";
+      return "No Approval in this workspace yet. Its approval mode is strict: an approver other than the requester opens a restore or a switchover waiting above and records the countersignature there.";
     case "files":
-      return "No Approval in this namespace yet. Choose a Restore waiting for one above, and record it there from the two files logweir drill approve wrote on the approver's own machine.";
+      return "No Approval in this workspace yet. Choose a Restore waiting for one above, and record it there from the two files logweir drill approve wrote on the approver's own machine.";
   }
 }
 
@@ -456,7 +456,7 @@ export interface OfferView {
  * Whether the Approve button is drawn: the SERVER offered it to this session for
  * a PENDING request of THIS Restore (name and UID) named by a well-formed hash,
  * the session holds the approver capability, the link agrees with the Restore,
- * this console takes approvals under the namespace's policy, and the scope can
+ * this console takes approvals under the workspace's policy, and the scope can
  * be shown whole. Each is checked again by the API on the click.
  */
 export function consoleApprovalOffered(v: OfferView): boolean {
@@ -493,7 +493,7 @@ export const TWO_PERSON_ORIGINAL_NAME_SENTENCE =
 export const ORIGINAL_NAME_APPROVAL_SENTENCE =
   "This Restore writes under the ORIGINAL topic names, into topics that do not exist. Only an approval signed for the approval subject originalName authorises it: an ordinary approval is refused before any Job exists. On the command line: logweir drill approve --approval-subject original-name. The runner refuses again if a name exists, if the target may be the source cluster and any broker auto-creates topics, or if a declarative owner manages a name.";
 
-/** What an approver of a confirm namespace's original-name restore is told (OD-10). */
+/** What an approver of a confirm workspace's original-name restore is told (OD-10). */
 export const CONFIRM_ORIGINAL_NAME_SENTENCE =
   "This Restore writes under the ORIGINAL topic names, into topics that do not exist. Under confirm the requester re-typed every original topic name before confirming, and the console signed what was typed; the approval record below shows the names. The runner refuses again if a name exists, if the target may be the source cluster and any broker auto-creates topics, or if a declarative owner manages a name.";
 
@@ -572,38 +572,38 @@ async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   }
 }
 
-/** R1's keys: [kind, ns] for the list and [kind, ns, name] for one; the reads that
+/** R1's keys: [kind, ws] for the list and [kind, ws, name] for one; the reads that
  *  are not an Approval or a Restore each have a kind of their own. */
 export const approvalKeys = {
-  policy: (ns: string) => ["approval-policy", ns] as const,
-  list: (ns: string) => keys.list("approvals", ns),
-  one: (ns: string, name: string) => keys.item("approvals", ns, name),
-  packet: (ns: string, name: string) => ["approval-packets", ns, name] as const,
-  request: (ns: string, restore: string) => ["approval-requests", ns, restore] as const,
+  policy: (ws: string) => ["approval-policy", ws] as const,
+  list: (ws: string) => keys.list("approvals", ws),
+  one: (ws: string, name: string) => keys.item("approvals", ws, name),
+  packet: (ws: string, name: string) => ["approval-packets", ws, name] as const,
+  request: (ws: string, restore: string) => ["approval-requests", ws, restore] as const,
   /** A Restore as the approval page reads it: with its plan bytes, and null when absent. */
-  subject: (ns: string, name: string) => ["approval-subjects", ns, name] as const,
+  subject: (ws: string, name: string) => ["approval-subjects", ws, name] as const,
 };
 
-export function useApprovalPolicy(ns: string, enabled = true) {
+export function useApprovalPolicy(ws: string, enabled = true) {
   return useQuery({
-    queryKey: approvalKeys.policy(ns),
+    queryKey: approvalKeys.policy(ws),
     enabled,
     queryFn: async ({ signal }) =>
       // The OpenAPI document declares a `name` path parameter this route does not have;
       // it fills no placeholder, so the cast only satisfies the generated type.
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns } as { ns: string; name: string } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/approval-policy", { params: { path: { ws } as { ws: string; name: string } }, signal }))).item,
   });
 }
 
-export function useApprovals(ns: string, enabled = true) {
-  const readable = useCan(ns, "approvalsRead");
+export function useApprovals(ws: string, enabled = true) {
+  const readable = useCan(ws, "approvalsRead");
   return useQuery({
-    queryKey: approvalKeys.list(ns),
+    queryKey: approvalKeys.list(ws),
     enabled: enabled && readable,
     queryFn: ({ signal }) =>
       listAll("Approvals", (cursor) =>
         call(() =>
-          api.GET("/api/v1/namespaces/{ns}/approvals", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
+          api.GET("/api/v1/workspaces/{ws}/approvals", { params: { path: { ws }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
         ),
       ),
     // A recorded approval the controller has not decided yet is re-read until it has.
@@ -611,104 +611,104 @@ export function useApprovals(ns: string, enabled = true) {
   });
 }
 
-/** Every Restore in the namespace that still waits for an approval: the Restores list
+/** Every Restore in the workspace that still waits for an approval: the Restores list
  *  (one cache with the Restores page), filtered. */
-export function useWaitingRestores(ns: string, enabled = true) {
-  const all = useRestores(ns, enabled);
+export function useWaitingRestores(ws: string, enabled = true) {
+  const all = useRestores(ws, enabled);
   const waiting = useMemo(() => all.data?.filter(awaitingApproval), [all.data]);
   return { ...all, data: waiting } as typeof all;
 }
 
 /** Every Switchover held for its approval (DUI-27): the Switchovers list, filtered. */
-export function useWaitingSwitchovers(ns: string, enabled = true) {
-  const all = useSwitchovers(ns, enabled);
+export function useWaitingSwitchovers(ws: string, enabled = true) {
+  const all = useSwitchovers(ws, enabled);
   const waiting = useMemo(() => all.data?.filter(awaitingSwitchoverApproval), [all.data]);
   return { ...all, data: waiting } as typeof all;
 }
 
 /** One Restore, with its plan bytes; null when it does not exist. */
-export function useSubjectRestore(ns: string, name: string, enabled = true) {
+export function useSubjectRestore(ws: string, name: string, enabled = true) {
   return useQuery({
-    queryKey: approvalKeys.subject(ns, name),
+    queryKey: approvalKeys.subject(ws, name),
     enabled,
     queryFn: ({ signal }) =>
-      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal }))).item),
+      orNull(async () => (await call(() => api.GET("/api/v1/workspaces/{ws}/restores/{name}", { params: { path: { ws, name } }, signal }))).item),
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? 3000 : false),
   });
 }
 
 /** One Approval's metadata; null when none has that name. */
-export function useApproval(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "approvalsRead");
+export function useApproval(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "approvalsRead");
   return useQuery({
-    queryKey: approvalKeys.one(ns, name),
+    queryKey: approvalKeys.one(ws, name),
     enabled: enabled && readable && name.length > 0,
     queryFn: ({ signal }) =>
-      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/approvals/{name}", { params: { path: { ns, name } }, signal }))).item),
+      orNull(async () => (await call(() => api.GET("/api/v1/workspaces/{ws}/approvals/{name}", { params: { path: { ws, name } }, signal }))).item),
     refetchInterval: (q) => (q.state.data && recordState(q.state.data).state === "awaiting-verification" ? 2000 : false),
   });
 }
 
 /** An Approval's two documents, verbatim; null when none has that name. */
-export function useApprovalPacket(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "approvalPacketRead");
+export function useApprovalPacket(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "approvalPacketRead");
   return useQuery({
-    queryKey: approvalKeys.packet(ns, name),
+    queryKey: approvalKeys.packet(ws, name),
     enabled: enabled && readable && name.length > 0,
     queryFn: ({ signal }) =>
       orNull(
         async () =>
-          (await call(() => api.GET("/api/v1/namespaces/{ns}/approvals/{name}/packet", { params: { path: { ns, name } }, signal }))).item,
+          (await call(() => api.GET("/api/v1/workspaces/{ws}/approvals/{name}/packet", { params: { path: { ws, name } }, signal }))).item,
       ),
     staleTime: Infinity,
   });
 }
 
-async function readRequest(ns: string, name: string, signal?: AbortSignal): Promise<ApprovalRequest> {
-  return (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item;
+async function readRequest(ws: string, name: string, signal?: AbortSignal): Promise<ApprovalRequest> {
+  return (await call(() => api.GET("/api/v1/workspaces/{ws}/restores/{name}/approval-request", { params: { path: { ws, name } }, signal }))).item;
 }
 
 /** A two-person request as the second person is shown it. */
-export function useApprovalRequest(ns: string, restore: string, enabled = true) {
+export function useApprovalRequest(ws: string, restore: string, enabled = true) {
   return useQuery({
-    queryKey: approvalKeys.request(ns, restore),
+    queryKey: approvalKeys.request(ws, restore),
     enabled,
-    queryFn: ({ signal }) => readRequest(ns, restore, signal),
+    queryFn: ({ signal }) => readRequest(ws, restore, signal),
   });
 }
 
 /** The requests of several Restores, for the list and the navigation's count. */
-export function useApprovalRequests(ns: string, restores: string[], enabled = true) {
+export function useApprovalRequests(ws: string, restores: string[], enabled = true) {
   return useQueries({
     queries: restores.map((name) => ({
-      queryKey: approvalKeys.request(ns, name),
+      queryKey: approvalKeys.request(ws, name),
       enabled,
-      queryFn: ({ signal }: { signal: AbortSignal }) => readRequest(ns, name, signal),
+      queryFn: ({ signal }: { signal: AbortSignal }) => readRequest(ws, name, signal),
     })),
   });
 }
 
 /**
  * The navigation's Approvals count: requests waiting for THIS session, a
- * restore's and a switchover's alike (DUI-27). Only a two-person namespace on a
+ * restore's and a switchover's alike (DUI-27). Only a two-person workspace on a
  * console that takes approvals has any (record §4.1): under confirm nothing waits
  * for anyone, and a strict request has no server-side "offered to you" view, so
  * it is listed on the page and not counted.
- * R1 wires it into the Shell: `approvals: useApprovalsNavCount(ns)` in useNavCounts.
+ * R1 wires it into the Shell: `approvals: useApprovalsNavCount(ws)` in useNavCounts.
  */
-export function useApprovalsNavCount(ns: string): NavCount | undefined {
-  const grant = useApprovalGrant(ns);
-  const policy = useApprovalPolicy(ns, grant.approvalsRead);
+export function useApprovalsNavCount(ws: string): NavCount | undefined {
+  const grant = useApprovalGrant(ws);
+  const policy = useApprovalPolicy(ws, grant.approvalsRead);
   const twoPerson = Boolean(policy.data && approvalMode(policy.data) === "twoPerson" && policy.data.consoleApprovalAvailable);
-  const restores = useWaitingRestores(ns, twoPerson && grant.restoresRead);
+  const restores = useWaitingRestores(ws, twoPerson && grant.restoresRead);
   const requests = useApprovalRequests(
-    ns,
+    ws,
     (restores.data ?? []).map((r) => r.name),
     twoPerson,
   );
-  const switchovers = useWaitingSwitchovers(ns, twoPerson && grant.restoresRead);
+  const switchovers = useWaitingSwitchovers(ws, twoPerson && grant.restoresRead);
   const switchoverRequests = useSwitchoverApprovalRequests(
-    ns,
+    ws,
     (switchovers.data ?? []).map((s) => s.name),
     twoPerson,
   );
@@ -773,14 +773,14 @@ export interface Written {
 }
 
 /** The second person's click: ONE value, the hash of the request that was shown. */
-export async function sendConsoleApproval(ns: string, view: OfferView): Promise<Written> {
+export async function sendConsoleApproval(ws: string, view: OfferView): Promise<Written> {
   if (!consoleApprovalOffered(view) || !view.request || !view.subject) {
     throw new LocalRefusal("This session is not offered an approval for this request; nothing was sent.");
   }
   const { subject, request } = view;
   const answer = await call(() =>
-    api.POST("/api/v1/namespaces/{ns}/restores/{name}/console-approval", {
-      params: { path: { ns, name: subject.name }, header: originHeader() },
+    api.POST("/api/v1/workspaces/{ws}/restores/{name}/console-approval", {
+      params: { path: { ws, name: subject.name }, header: originHeader() },
       body: { confirmationSha256: request.confirmationSha256! },
     }),
   );
@@ -796,11 +796,11 @@ export async function planHashOf(restore: Restore): Promise<string> {
  * The Restore must still be the object the page showed: the same UID, the same
  * approvalRef and the same plan, re-read and re-hashed now. Nothing is sent otherwise.
  */
-export async function assertUnchanged(ns: string, expected: Subject): Promise<void> {
+export async function assertUnchanged(ws: string, expected: Subject): Promise<void> {
   const current = await orNull(
-    async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name: expected.name } } }))).item,
+    async () => (await call(() => api.GET("/api/v1/workspaces/{ws}/restores/{name}", { params: { path: { ws, name: expected.name } } }))).item,
   );
-  if (!current) throw new LocalRefusal(`Restore ${expected.name} no longer exists in this namespace; nothing was sent.`);
+  if (!current) throw new LocalRefusal(`Restore ${expected.name} no longer exists in this workspace; nothing was sent.`);
   const now = subjectOf(current, await planHashOf(current));
   for (const field of ["uid", "approvalName", "planHash"] as const) {
     if (now[field] !== expected[field]) {
@@ -812,14 +812,14 @@ export async function assertUnchanged(ns: string, expected: Subject): Promise<vo
 }
 
 /** A strict approver's countersigned sidecar, sent as the text the CLI wrote. */
-export async function sendCountersignature(ns: string, expected: Subject, sidecar: { text: string; fileName: string }): Promise<Written> {
+export async function sendCountersignature(ws: string, expected: Subject, sidecar: { text: string; fileName: string }): Promise<Written> {
   if (refuseKeyMaterial(sidecar.fileName, sidecar.text) !== null) throw new LocalRefusal(PRIVATE_KEY_REFUSAL, ["sidecarBytes"]);
   if (sidecar.text.trim().length === 0) throw new LocalRefusal("Paste the sidecar logweir drill countersign wrote, or choose its file.", ["sidecarBytes"]);
-  await assertUnchanged(ns, expected);
+  await assertUnchanged(ws, expected);
   const restore = expected.name;
   const answer = await call(() =>
-    api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
-      params: { path: { ns, name: restore }, header: originHeader() },
+    api.POST("/api/v1/workspaces/{ws}/restores/{name}/approval", {
+      params: { path: { ws, name: restore }, header: originHeader() },
       body: { sidecarBytes: sidecar.text },
     }),
   );
@@ -842,49 +842,49 @@ export function keyMaterialFields(files: ApprovalFiles): ("approvalBytes" | "sid
 }
 
 /**
- * An unbound namespace's two files, byte for byte (never trimmed, parsed or
+ * An unbound workspace's two files, byte for byte (never trimmed, parsed or
  * re-encoded: the controller hashes the bytes the approver signed).
  */
-export async function sendApprovalFiles(ns: string, expected: Subject, files: ApprovalFiles): Promise<Written> {
+export async function sendApprovalFiles(ws: string, expected: Subject, files: ApprovalFiles): Promise<Written> {
   const keyed = keyMaterialFields(files);
   if (keyed.length > 0) throw new LocalRefusal(PRIVATE_KEY_REFUSAL, keyed);
   const missing: ("approvalBytes" | "sidecarBytes")[] = [];
   if (files.approvalBytes.length === 0) missing.push("approvalBytes");
   if (files.sidecarBytes.length === 0) missing.push("sidecarBytes");
   if (missing.length > 0) throw new LocalRefusal("Choose both files, or paste their text.", missing);
-  await assertUnchanged(ns, expected);
+  await assertUnchanged(ws, expected);
   const restore = expected.name;
   const answer = await call(() =>
-    api.POST("/api/v1/namespaces/{ns}/restores/{name}/approval", {
-      params: { path: { ns, name: restore }, header: originHeader() },
+    api.POST("/api/v1/workspaces/{ws}/restores/{name}/approval", {
+      params: { path: { ws, name: restore }, header: originHeader() },
       body: { approvalBytes: files.approvalBytes, sidecarBytes: files.sidecarBytes },
     }),
   );
   return { approval: answer.item, replayed: answer.replayed === true };
 }
 
-function useApprovalWrite<V>(ns: string, send: (v: V) => Promise<Written>) {
+function useApprovalWrite<V>(ws: string, send: (v: V) => Promise<Written>) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: send,
     onSettled: () => {
       for (const kind of ["approvals", "approval-requests", "approval-subjects", "restores"]) {
-        void client.invalidateQueries({ queryKey: keys.list(kind, ns) });
+        void client.invalidateQueries({ queryKey: keys.list(kind, ws) });
       }
     },
   });
 }
 
-export function useConsoleApproval(ns: string) {
-  return useApprovalWrite(ns, (view: OfferView) => sendConsoleApproval(ns, view));
+export function useConsoleApproval(ws: string) {
+  return useApprovalWrite(ws, (view: OfferView) => sendConsoleApproval(ws, view));
 }
 
-export function useCountersign(ns: string, expected: Subject) {
-  return useApprovalWrite(ns, (sidecar: { text: string; fileName: string }) => sendCountersignature(ns, expected, sidecar));
+export function useCountersign(ws: string, expected: Subject) {
+  return useApprovalWrite(ws, (sidecar: { text: string; fileName: string }) => sendCountersignature(ws, expected, sidecar));
 }
 
-export function useRecordApprovalFiles(ns: string, expected: Subject) {
-  return useApprovalWrite(ns, (files: ApprovalFiles) => sendApprovalFiles(ns, expected, files));
+export function useRecordApprovalFiles(ws: string, expected: Subject) {
+  return useApprovalWrite(ws, (files: ApprovalFiles) => sendApprovalFiles(ws, expected, files));
 }
 
 /** The countersign command, verbatim (the words the old wizard and page showed). */

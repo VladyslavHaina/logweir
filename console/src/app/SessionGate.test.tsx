@@ -1,5 +1,5 @@
 // The session gate over the whole console: what GET /api/v1/session answers decides the
-// page, and the namespaces, roles and capability flags come from that document. The
+// page, and the workspaces, roles and capability flags come from that document. The
 // session reads are the API's recorded documents (console/fixtures/console/); the
 // Overview's own reads go to the in-page mock, which holds team-a and team-b.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,7 +86,7 @@ describe("unavailable", () => {
 });
 
 describe("signed in", () => {
-  it("localAdmin: lands on its namespace, names the local administrator, offers no sign-out", async () => {
+  it("localAdmin: lands on its workspace, names the local administrator, offers no sign-out", async () => {
     read.mockResolvedValue(localAdmin as Session);
     const router = renderAt("/");
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
@@ -101,11 +101,11 @@ describe("signed in", () => {
     expect(screen.queryByRole("button", { name: "Back up now" })).toBeNull();
   });
 
-  it("takes the namespaces, the roles and the navigation from the session", async () => {
-    const grant = viewer.namespaces[0]!;
+  it("takes the workspaces, the roles and the navigation from the session", async () => {
+    const grant = viewer.workspaces[0]!;
     const session = {
       ...viewer,
-      namespaces: [
+      workspaces: [
         { ...grant, name: "team-b" },
         { ...grant, name: "team-a", roles: ["operator"] },
       ],
@@ -127,7 +127,7 @@ describe("signed in", () => {
     expect(screen.getByText("Sign out")).toBeTruthy();
   });
 
-  it("says so for a namespace the session holds no role in", async () => {
+  it("says so for a workspace the session holds no role in", async () => {
     read.mockResolvedValue(localAdmin as Session);
     renderAt("/team-z");
     expect(await screen.findByText("You hold no role in team-z")).toBeTruthy();
@@ -135,8 +135,8 @@ describe("signed in", () => {
   });
 
   it("says a page whose read the role lacks is not available, and sends nothing for it", async () => {
-    const grant = viewer.namespaces[0]!;
-    const approver = { ...viewer, namespaces: [{ ...grant, roles: ["approver"], capabilities: { ...grant.capabilities, connectionsRead: false } }] };
+    const grant = viewer.workspaces[0]!;
+    const approver = { ...viewer, workspaces: [{ ...grant, roles: ["approver"], capabilities: { ...grant.capabilities, connectionsRead: false } }] };
     read.mockResolvedValue(approver as Session);
     const fetches = vi.spyOn(api, "GET");
     renderAt("/team-a/connections");
@@ -151,10 +151,10 @@ describe("signed in", () => {
     expect((fetches.mock.calls as unknown[][]).some((call) => String(call[0]).endsWith("/connections"))).toBe(true);
   });
 
-  it("names the actor and offers sign-out when no namespace is granted", async () => {
-    read.mockResolvedValue({ ...viewer, namespaces: [] } as unknown as Session);
+  it("names the actor and offers sign-out when no workspace is granted", async () => {
+    read.mockResolvedValue({ ...viewer, workspaces: [] } as unknown as Session);
     renderAt("/");
-    expect(await screen.findByRole("heading", { name: "No namespace is granted to you" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No workspace is granted to you" })).toBeTruthy();
     expect(screen.getByText("Dana Viewer")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
   });
@@ -313,11 +313,52 @@ describe("DUI-14: the user menu", () => {
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Appearance" })).toBeNull());
   });
 
-  it("shortens the subject on the no-namespace page too, whole in its title", async () => {
-    read.mockResolvedValue({ ...viewer, namespaces: [], actor: { ...viewer.actor, subject: LONG } } as unknown as Session);
+  it("shortens the subject on the no-workspace page too, whole in its title", async () => {
+    read.mockResolvedValue({ ...viewer, workspaces: [], actor: { ...viewer.actor, subject: LONG } } as unknown as Session);
     renderAt("/");
-    expect(await screen.findByRole("heading", { name: "No namespace is granted to you" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "No workspace is granted to you" })).toBeTruthy();
     expect(document.body.textContent).not.toContain(LONG);
     expect(screen.getByTitle(LONG).textContent).toContain(shortSubject(LONG));
+  });
+});
+
+describe("PROD-19.1: the workspace switcher", () => {
+  const grant = viewer.workspaces[0]!;
+  const two = { ...viewer, workspaces: [grant, { ...grant, name: "team-b" }] } as Session;
+  const switcher = () => screen.queryByRole("button", { name: /Change workspace/ });
+
+  it("is not shown when the session holds roles in one workspace", async () => {
+    read.mockResolvedValue(viewer as Session);
+    renderAt("/team-a");
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(switcher()).toBeNull();
+    expect(screen.queryByText("Workspace")).toBeNull();
+  });
+
+  it("lists exactly the granted workspaces when there are two, and switching changes the address", async () => {
+    read.mockResolvedValue(two);
+    const router = renderAt("/team-a");
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    fireEvent.click(switcher()!);
+    const options = within(await screen.findByRole("listbox", { name: "Workspaces" })).getAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual(["team-a", "team-b"]);
+    fireEvent.click(options[1]!);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/team-b"));
+  });
+
+  it("shows the no-role page for a workspace the session is not granted, and never offers it", async () => {
+    read.mockResolvedValue(two);
+    renderAt("/prd/backups");
+    expect(await screen.findByText("You hold no role in prd")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "team-b" }).getAttribute("href")).toBe("#/team-b");
+    fireEvent.click(switcher()!);
+    const options = within(await screen.findByRole("listbox", { name: "Workspaces" })).getAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual(["team-a", "team-b"]);
+    // CONTROL: one workspace and the same address: the same page, and no switcher at all.
+    cleanup();
+    read.mockResolvedValue(viewer as Session);
+    renderAt("/prd/backups");
+    expect(await screen.findByText("You hold no role in prd")).toBeTruthy();
+    expect(switcher()).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-// Every saved destination in the namespace: where it writes, how securely,
+// Every saved destination in the workspace: where it writes, how securely,
 // and whether the controller has judged it.
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -28,14 +28,14 @@ export function TransportStatus({ security }: { security: string }) {
   return <span className="lw-subtle">Not recorded</span>;
 }
 
-export const READ_ONLY_SENTENCE = "This login may read the destinations in this namespace and not add or change one: that needs the operator or administrator role.";
+export const READ_ONLY_SENTENCE = "This login may read the destinations in this workspace and not add or change one: that needs the operator or administrator role.";
 
 export function DestinationList() {
-  const { ns } = useParams({ from: "/$ns/destinations" });
+  const { ws } = useParams({ from: "/$ws/destinations" });
   const navigate = useNavigate();
-  const grant = useGrant(ns);
+  const grant = useGrant(ws);
   const readable = grant.can?.destinations !== false;
-  const list = useDestinationList(ns);
+  const list = useDestinationList(ws);
   const narrow = useNarrow();
   const [adding, setAdding] = useState(false);
   const mayAdd = mayStart(grant, "destinations") && Boolean(grant.can?.credentialWrite);
@@ -57,7 +57,7 @@ export function DestinationList() {
         <Card>
           {!readable ? (
             <Empty title="Not available to you here" icon={CloudUploadAltIcon}>
-              Your roles in {ns} do not include reading destinations.
+              Your roles in {ws} do not include reading destinations.
             </Empty>
           ) : list.isPending ? (
             <div className="lw-pad">
@@ -76,7 +76,7 @@ export function DestinationList() {
                   label="Destinations"
                   items={items.map((d) => ({
                     key: d.uid,
-                    href: `#/${ns}/destinations/${d.name}`,
+                    href: `#/${ws}/destinations/${d.name}`,
                     title: d.name,
                     meta: `${d.default ? "default · " : ""}${d.canonicalUrl}`,
                     status: <DestinationVerdict status={d.status} />,
@@ -97,7 +97,7 @@ export function DestinationList() {
                     {items.map((d) => (
                       <Tr key={d.uid}>
                         <Td dataLabel="Name">
-                          <Link to="/$ns/destinations/$name" params={{ ns, name: d.name }} className="lw-break">
+                          <Link to="/$ws/destinations/$name" params={{ ws, name: d.name }} className="lw-break">
                             {d.name}
                           </Link>
                           {d.default && (
@@ -147,11 +147,11 @@ export function DestinationList() {
       </PageSection>
       {adding && (
         <AddDestination
-          ns={ns}
+          ws={ws}
           onClose={() => setAdding(false)}
           onCreated={(name) => {
             setAdding(false);
-            void navigate({ to: "/$ns/destinations/$name", params: { ns, name } });
+            void navigate({ to: "/$ws/destinations/$name", params: { ws, name } });
           }}
         />
       )}

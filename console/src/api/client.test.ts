@@ -27,13 +27,13 @@ describe("the CSRF token", () => {
   it("rides on unsafe methods and never on reads", async () => {
     setCsrfToken("tok-123");
     const { seen, client } = recording(() => json(201, { item: { name: "b" }, requestId: "r" }));
-    await client.GET("/api/v1/namespaces/{ns}/backups", { params: { path: { ns: "team-a" } } });
-    await client.POST("/api/v1/namespaces/{ns}/backups", {
-      params: { path: { ns: "team-a" }, header: { "Idempotency-Key": "key-12345678", Origin: BASE } },
+    await client.GET("/api/v1/workspaces/{ws}/backups", { params: { path: { ws: "team-a" } } });
+    await client.POST("/api/v1/workspaces/{ws}/backups", {
+      params: { path: { ws: "team-a" }, header: { "Idempotency-Key": "key-12345678", Origin: BASE } },
       body: { scheduleRef: { name: "orders-hourly" } },
     });
-    await client.PUT("/api/v1/namespaces/{ns}/schedules/{name}", {
-      params: { path: { ns: "team-a", name: "s" }, header: { Origin: BASE } },
+    await client.PUT("/api/v1/workspaces/{ws}/schedules/{name}", {
+      params: { path: { ws: "team-a", name: "s" }, header: { Origin: BASE } },
       body: {} as never,
     });
     expect(seen.map((r) => [r.method, r.headers.get("x-csrf-token")])).toEqual([
@@ -57,12 +57,12 @@ describe("the CSRF token", () => {
 
 describe("errors", () => {
   it("turn a problem document into an ApiError with its status, code and request id", async () => {
-    const { client } = recording(() => problem(403, "namespace_forbidden", "team-z is not granted to you."));
-    const error = await call(() => client.GET("/api/v1/namespaces/{ns}/backups", { params: { path: { ns: "team-z" } } })).catch((e) => e);
+    const { client } = recording(() => problem(403, "workspace_forbidden", "team-z is not granted to you."));
+    const error = await call(() => client.GET("/api/v1/workspaces/{ws}/backups", { params: { path: { ws: "team-z" } } })).catch((e) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect([error.status, error.code, error.requestId, error.message, error.retryable]).toEqual([
       403,
-      "namespace_forbidden",
+      "workspace_forbidden",
       "01REQ",
       "team-z is not granted to you.",
       false,

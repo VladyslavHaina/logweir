@@ -15,14 +15,14 @@ import "./approvals.css";
 import { ErrorText, Prose } from "../../components/Prose";
 
 export function SwitchoverApprovalPage() {
-  const { ns, name } = useParams({ from: "/$ns/approvals/switchover/$name" });
-  const requestQ = useSwitchoverApprovalRequest(ns, name);
-  const grant = useApprovalGrant(ns);
-  const approve = useApproveSwitchover(ns, name);
+  const { ws, name } = useParams({ from: "/$ws/approvals/switchover/$name" });
+  const requestQ = useSwitchoverApprovalRequest(ws, name);
+  const grant = useApprovalGrant(ws);
+  const approve = useApproveSwitchover(ws, name);
   const request = requestQ.data;
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/approvals" params={{ ns }}>Approvals</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/approvals" params={{ ws }}>Approvals</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -68,7 +68,7 @@ export function SwitchoverApprovalPage() {
                   {approve.isSuccess ? (
                     <Alert variant="success" isInline title="Approved">
                       The Switchover runs once the controller verifies the approval.{" "}
-                      <Link to="/$ns/switchovers/$name" params={{ ns, name }}>Open the Switchover</Link>
+                      <Link to="/$ws/switchovers/$name" params={{ ws, name }}>Open the Switchover</Link>
                     </Alert>
                   ) : request.approve.offered && request.confirmationSha256 ? (
                     <>

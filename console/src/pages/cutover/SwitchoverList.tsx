@@ -1,4 +1,4 @@
-// Recover → Switchovers: every Switchover in the namespace, newest first as the API
+// Recover → Switchovers: every Switchover in the workspace, newest first as the API
 // lists them, with where each stands and what it did per group (PROD-04.2 §3.3).
 import { Link } from "@tanstack/react-router";
 import { useParams } from "@tanstack/react-router";
@@ -15,9 +15,9 @@ import { useCan } from "../../api/session";
 
 /** DUI-28: from an ended switchover back to a new review of its restore (the cutover page
  *  reads the restore again and says why when it cannot be switched over). */
-function ReviewAgain({ ns, s }: { ns: string; s: Switchover }) {
+function ReviewAgain({ ws, s }: { ws: string; s: Switchover }) {
   return (
-    <Link to="/$ns/restores/$name/cutover" params={{ ns, name: s.restore.name }} search={{}} aria-label={`Review again: restore ${s.restore.name}`}>
+    <Link to="/$ws/restores/$name/cutover" params={{ ws, name: s.restore.name }} search={{}} aria-label={`Review again: restore ${s.restore.name}`}>
       Review again
     </Link>
   );
@@ -43,11 +43,11 @@ export function groupSummary(s: Switchover): string {
 }
 
 export function SwitchoverList() {
-  const { ns } = useParams({ from: "/$ns/switchovers" });
-  const list = useSwitchovers(ns);
+  const { ws } = useParams({ from: "/$ws/switchovers" });
+  const list = useSwitchovers(ws);
   const narrow = useNarrow();
   // DUI-30: a review is a write; only a role that may create a restore here is offered one.
-  const canWrite = useCan(ns, "restoreCreate");
+  const canWrite = useCan(ws, "restoreCreate");
   const header = (
     <PageHeader
       title="Switchovers"
@@ -77,7 +77,7 @@ export function SwitchoverList() {
               title="No switchovers yet"
               icon={ExchangeAltIcon}
               actions={
-                <Link to="/$ns/restores" params={{ ns }} className="pf-v6-c-button pf-m-secondary">
+                <Link to="/$ws/restores" params={{ ws }} className="pf-v6-c-button pf-m-secondary">
                   Restores
                 </Link>
               }
@@ -90,7 +90,7 @@ export function SwitchoverList() {
                 label="Switchovers"
                 items={items.map((s) => ({
                   key: s.uid || s.name,
-                  href: `#/${ns}/switchovers/${s.name}`,
+                  href: `#/${ws}/switchovers/${s.name}`,
                   title: s.name,
                   meta: (
                     <>
@@ -98,7 +98,7 @@ export function SwitchoverList() {
                       {canWrite && isTerminal(s) && (
                         <>
                           {" · "}
-                          <ReviewAgain ns={ns} s={s} />
+                          <ReviewAgain ws={ws} s={s} />
                         </>
                       )}
                     </>
@@ -122,12 +122,12 @@ export function SwitchoverList() {
                 {items.map((s) => (
                   <Tr key={s.uid || s.name}>
                     <Td dataLabel="Switchover" className="lw-break">
-                      <Link to="/$ns/switchovers/$name" params={{ ns, name: s.name }}>
+                      <Link to="/$ws/switchovers/$name" params={{ ws, name: s.name }}>
                         {s.name}
                       </Link>
                     </Td>
                     <Td dataLabel="Restore" className="lw-break">
-                      <Link to="/$ns/restores/$name" params={{ ns, name: s.restore.name }}>
+                      <Link to="/$ws/restores/$name" params={{ ws, name: s.restore.name }}>
                         {s.restore.name}
                       </Link>
                     </Td>
@@ -139,7 +139,7 @@ export function SwitchoverList() {
                       {groupSummary(s)}
                       {s.groups.length > 0 && <div className="lw-subtle lw-small">{plural(s.groups.reduce((n, g) => n + g.partitions, 0), "partition")}</div>}
                     </Td>
-                    {canWrite && <Td dataLabel="Next">{isTerminal(s) && <ReviewAgain ns={ns} s={s} />}</Td>}
+                    {canWrite && <Td dataLabel="Next">{isTerminal(s) && <ReviewAgain ws={ws} s={s} />}</Td>}
                   </Tr>
                 ))}
               </Tbody>

@@ -1,6 +1,6 @@
 // Backups, the recovery catalog and trust (PROD-18.1 R4): every read and write
 // those pages make, over the typed client. The backup list and one backup share
-// the overview's query keys (`["backups", ns, ...]`), so a write anywhere
+// the overview's query keys (`["backups", ws, ...]`), so a write anywhere
 // refreshes both.
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, LIST_PAGE_SIZE, LocalRefusal, api, call, createHeaders, listAll, mintKey, outcomeUnknown } from "./client";
@@ -49,7 +49,7 @@ export function outcomeOf(error: unknown): Outcome {
 
 // ------------------------------------------------------------- backups
 
-/** Every Backup in the namespace, newest first, re-read while one is moving: the Overview's list, one cache. */
+/** Every Backup in the workspace, newest first, re-read while one is moving: the Overview's list, one cache. */
 export const useBackupList = useBackups;
 
 function notFound(error: unknown): boolean {
@@ -65,15 +65,15 @@ const SETTLE_READS = 60;
 /** The run's operation view: stage, diagnoses, result, evidence. Read until it is terminal and its
  *  verdict has settled. While `streaming` (stream.ts holds the run's event stream open) the stream
  *  writes this key and the poll of a moving run stands down. */
-export function useBackupOperation(ns: string, name: string, streaming = false) {
+export function useBackupOperation(ws: string, name: string, streaming = false) {
   return useQuery({
-    queryKey: keys.operation(ns, "backup", name),
-    enabled: useCan(ns, "operationsRead"),
+    queryKey: keys.operation(ws, "backup", name),
+    enabled: useCan(ws, "operationsRead"),
     queryFn: async ({ signal }) =>
       (
         await call(() =>
-          api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", {
-            params: { path: { ns, kind: "backup", name } },
+          api.GET("/api/v1/workspaces/{ws}/operations/{kind}/{name}", {
+            params: { path: { ws, kind: "backup", name } },
             signal,
           }),
         )
@@ -89,12 +89,12 @@ export function useBackupOperation(ns: string, name: string, streaming = false) 
 }
 
 /** The destination a run names, read for its bucket. A refusal is the check's caveat, not the page's error. */
-export function useRunDestination(ns: string, name: string | undefined) {
-  const readable = useCan(ns, "destinations");
+export function useRunDestination(ws: string, name: string | undefined) {
+  const readable = useCan(ws, "destinations");
   return useQuery({
-    queryKey: keys.item("destinations", ns, name ?? ""),
+    queryKey: keys.item("destinations", ws, name ?? ""),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name: name! } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/destinations/{name}", { params: { path: { ws, name: name! } }, signal }))).item,
     enabled: Boolean(name) && readable,
     retry: false,
   });
@@ -108,39 +108,39 @@ export interface RunNow {
 }
 
 /** Back up now from one schedule: one run per key, whatever happens to the answer. */
-export function useBackUpNow(ns: string) {
+export function useBackUpNow(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ schedule, generation, key }: RunNow): Promise<ManualBackupResponse> =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/backups", {
-          params: { path: { ns }, header: createHeaders(key) },
+        api.POST("/api/v1/workspaces/{ws}/backups", {
+          params: { path: { ws }, header: createHeaders(key) },
           body: { scheduleRef: { name: schedule, ...(typeof generation === "number" ? { expectedGeneration: generation } : {}) } },
         }),
       ),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("backups", ns) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("backups", ws) }),
   });
 }
 
 // -------------------------------------------------------------- catalog
 
-export function useCatalogs(ns: string) {
+export function useCatalogs(ws: string) {
   return useQuery({
-    queryKey: keys.list("catalogs", ns),
-    enabled: useCan(ns, "catalogs"),
+    queryKey: keys.list("catalogs", ws),
+    enabled: useCan(ws, "catalogs"),
     queryFn: ({ signal }) =>
       listAll("recovery catalogs", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/catalogs", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/catalogs", { params: { path: { ws }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
   });
 }
 
-export function useCatalog(ns: string, name: string) {
+export function useCatalog(ws: string, name: string) {
   return useQuery({
-    queryKey: keys.item("catalogs", ns, name),
-    enabled: useCan(ns, "catalogs"),
+    queryKey: keys.item("catalogs", ws, name),
+    enabled: useCan(ws, "catalogs"),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/catalogs/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/catalogs/{name}", { params: { path: { ws, name } }, signal }))).item,
     retry: (count, error) => !notFound(error) && count < 2,
   });
 }
@@ -150,17 +150,17 @@ export function useCatalog(ns: string, name: string) {
  * catalog that reports available points (the view lists newest first). A catalog whose
  * read fails is left out, never counted as holding nothing.
  */
-export function useNewestCatalogPoints(ns: string, catalogs: Catalog[] | undefined): { catalog: string; point: PointView }[] {
-  const readable = useCan(ns, "catalogs");
+export function useNewestCatalogPoints(ws: string, catalogs: Catalog[] | undefined): { catalog: string; point: PointView }[] {
+  const readable = useCan(ws, "catalogs");
   const wanted = readable ? (catalogs ?? []).filter((c) => (c.counts.available ?? 0) > 0 && !c.viewExpired) : [];
   const results = useQueries({
     queries: wanted.map((c) => ({
-      queryKey: ["points", ns, c.name, "newest"],
+      queryKey: ["points", ws, c.name, "newest"],
       queryFn: async ({ signal }: { signal: AbortSignal }) =>
         (
           await call(() =>
-            api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-              params: { path: { ns, name: c.name }, query: { limit: 1, selectable: "true" as const } },
+            api.GET("/api/v1/workspaces/{ws}/catalogs/{name}/points", {
+              params: { path: { ws, name: c.name }, query: { limit: 1, selectable: "true" as const } },
               signal,
             }),
           )
@@ -172,17 +172,17 @@ export function useNewestCatalogPoints(ns: string, catalogs: Catalog[] | undefin
 }
 
 /** One bounded page of the catalog's view at a time (200 points), the next only when asked for. */
-export function useCatalogPoints(ns: string, name: string, selectableOnly: boolean, enabled = true) {
-  const readable = useCan(ns, "catalogs");
+export function useCatalogPoints(ws: string, name: string, selectableOnly: boolean, enabled = true) {
+  const readable = useCan(ws, "catalogs");
   return useInfiniteQuery({
     enabled: enabled && readable,
-    queryKey: ["points", ns, name, selectableOnly ? "selectable" : "all"],
+    queryKey: ["points", ws, name, selectableOnly ? "selectable" : "all"],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam, signal }) =>
       call(() =>
-        api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
+        api.GET("/api/v1/workspaces/{ws}/catalogs/{name}/points", {
           params: {
-            path: { ns, name },
+            path: { ws, name },
             query: {
               limit: 200,
               ...(pageParam ? { cursor: pageParam } : {}),
@@ -197,26 +197,26 @@ export function useCatalogPoints(ns: string, name: string, selectableOnly: boole
   });
 }
 
-export function useCatalogSigners(ns: string, name: string) {
+export function useCatalogSigners(ws: string, name: string) {
   return useQuery({
-    queryKey: ["catalogs", ns, name, "signers"],
-    enabled: useCan(ns, "catalogs"),
+    queryKey: ["catalogs", ws, name, "signers"],
+    enabled: useCan(ws, "catalogs"),
     queryFn: async ({ signal }) =>
-      call(() => api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/signers", { params: { path: { ns, name } }, signal })),
+      call(() => api.GET("/api/v1/workspaces/{ws}/catalogs/{name}/signers", { params: { path: { ws, name } }, signal })),
     retry: false,
   });
 }
 
-/** The namespace's saved destinations, for the connect form's pick-list. A failed read leaves a text box. */
+/** The workspace's saved destinations, for the connect form's pick-list. A failed read leaves a text box. */
 export const useDestinationChoices = useDestinations;
 
 /** Connect an existing archive: one RecoveryCatalog per key. */
-export function useConnectArchive(ns: string) {
+export function useConnectArchive(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ body, key }: { body: ConnectArchiveRequest; key: string }): Promise<CatalogResponse> =>
-      call(() => api.POST("/api/v1/namespaces/{ns}/catalogs", { params: { path: { ns }, header: createHeaders(key) }, body })),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("catalogs", ns) }),
+      call(() => api.POST("/api/v1/workspaces/{ws}/catalogs", { params: { path: { ws }, header: createHeaders(key) }, body })),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("catalogs", ws) }),
   });
 }
 

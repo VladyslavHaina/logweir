@@ -39,12 +39,12 @@ function notFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
 }
 
-export function useSchedule(ns: string, name: string) {
+export function useSchedule(ws: string, name: string) {
   return useQuery({
-    queryKey: keys.item("schedules", ns, name),
-    enabled: useCan(ns, "schedulesRead"),
+    queryKey: keys.item("schedules", ws, name),
+    enabled: useCan(ws, "schedulesRead"),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/schedules/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/schedules/{name}", { params: { path: { ws, name } }, signal }))).item,
     retry: (count, error) => !notFound(error) && count < 1,
   });
 }
@@ -63,23 +63,23 @@ export function useCadencePreview(query: CadenceQuery | null) {
 
 
 /** The topics the newest successful discovery of a connection saw: an offer, never a bound. */
-export function useDiscoveredTopics(ns: string, connection: string) {
-  const readable = useCan(ns, "topicDiscovery");
+export function useDiscoveredTopics(ws: string, connection: string) {
+  const readable = useCan(ws, "topicDiscovery");
   return useQuery({
-    queryKey: ["topic-discoveries", ns, connection, "latest-topics"],
+    queryKey: ["topic-discoveries", ws, connection, "latest-topics"],
     enabled: connection.length > 0 && readable,
     queryFn: async ({ signal }) => {
       const latest = (await call(() =>
-        api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
-          params: { path: { ns, name: connection }, query: { latest: true } },
+        api.GET("/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries", {
+          params: { path: { ws, name: connection }, query: { latest: true } },
           signal,
         }),
       )) as unknown as S["DiscoveryLatestResponse"];
       const found = latest.lastSuccessful;
       if (!found) return { discovery: undefined, failed: latest.latestAttempt?.state === "failed", topics: [] as string[], more: false };
       const page = await call(() =>
-        api.GET("/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics", {
-          params: { path: { ns, id: found.id }, query: { limit: 200 } },
+        api.GET("/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics", {
+          params: { path: { ws, id: found.id }, query: { limit: 200 } },
           signal,
         }),
       );
@@ -95,26 +95,26 @@ export function useDiscoveredTopics(ns: string, connection: string) {
   });
 }
 
-export function useRetentionPolicies(ns: string) {
+export function useRetentionPolicies(ws: string) {
   return useQuery({
-    queryKey: keys.list("retention-policies", ns),
-    enabled: useCan(ns, "retention"),
+    queryKey: keys.list("retention-policies", ws),
+    enabled: useCan(ws, "retention"),
     queryFn: ({ signal }) =>
       listAll("retention policies", (cursor) =>
         call(() =>
-          api.GET("/api/v1/namespaces/{ns}/retention-policies", { params: { path: { ns }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
+          api.GET("/api/v1/workspaces/{ws}/retention-policies", { params: { path: { ws }, query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
         ),
       ),
     retry: false,
   });
 }
 
-export function useProtectionPolicy(ns: string, name: string) {
+export function useProtectionPolicy(ws: string, name: string) {
   return useQuery({
-    queryKey: keys.item("protection", ns, name),
-    enabled: useCan(ns, "protection"),
+    queryKey: keys.item("protection", ws, name),
+    enabled: useCan(ws, "protection"),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/protection-policies/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/protection-policies/{name}", { params: { path: { ws, name } }, signal }))).item,
     refetchInterval: 15_000,
     retry: (count, error) => !notFound(error) && count < 1,
   });
@@ -122,80 +122,80 @@ export function useProtectionPolicy(ns: string, name: string) {
 
 // ------------------------------------------------------------------ writes
 
-export function useCreateSchedule(ns: string) {
+export function useCreateSchedule(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ body, intent }: { body: CreateScheduleRequest; intent: string }) =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/schedules", {
-          params: { path: { ns }, header: createHeaders(intent) },
+        api.POST("/api/v1/workspaces/{ws}/schedules", {
+          params: { path: { ws }, header: createHeaders(intent) },
           body,
         }),
       ),
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("schedules", ns) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("schedules", ws) }),
   });
 }
 
-export function useEditPolicy(ns: string, name: string) {
+export function useEditPolicy(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (body: UpdateSchedulePolicyRequest) =>
       (
         await call(() =>
-          api.PUT("/api/v1/namespaces/{ns}/schedules/{name}", {
-            params: { path: { ns, name }, header: originHeader() },
+          api.PUT("/api/v1/workspaces/{ws}/schedules/{name}", {
+            params: { path: { ws, name }, header: originHeader() },
             body,
           }),
         )
       ).item,
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ns) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ws) }),
   });
 }
 
-export function useSetSuspension(ns: string, name: string) {
+export function useSetSuspension(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (body: { suspended: boolean; expectedResourceVersion: string }) =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/schedules/{name}:set-suspension", {
-            params: { path: { ns, name }, header: originHeader() },
+          api.POST("/api/v1/workspaces/{ws}/schedules/{name}:set-suspension", {
+            params: { path: { ws, name }, header: originHeader() },
             body,
           }),
         )
       ).item,
     // A refusal (412: somebody changed it meanwhile) re-reads as well as a success does.
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ns) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ws) }),
   });
 }
 
 /** Back up now from a schedule: its current revision, under the click's own intent. */
-export function useRunFromSchedule(ns: string) {
+export function useRunFromSchedule(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ schedule, generation, intent }: { schedule: string; generation: number | null | undefined; intent: string }) =>
       (await call(() =>
-        api.POST("/api/v1/namespaces/{ns}/backups", {
-          params: { path: { ns }, header: createHeaders(intent) },
+        api.POST("/api/v1/workspaces/{ws}/backups", {
+          params: { path: { ws }, header: createHeaders(intent) },
           body: {
             scheduleRef: typeof generation === "number" ? { name: schedule, expectedGeneration: generation } : { name: schedule },
           },
         }),
       )) as ManualBackupResponse,
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("backups", ns) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("backups", ws) }),
     // A policy_changed refusal names a revision this page has not read: re-read it.
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ns) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("schedules", ws) }),
   });
 }
 
 /** A backup readiness check (a Preflight of operation `backup`) for what a form describes. */
-export function useStartReadiness(ns: string) {
+export function useStartReadiness(ws: string) {
   return useMutation({
     mutationFn: async ({ backup, intent }: { backup: S["BackupPreflightRequest"]; intent: string }) =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/preflights", {
-            params: { path: { ns }, header: createHeaders(intent) },
+          api.POST("/api/v1/workspaces/{ws}/preflights", {
+            params: { path: { ws }, header: createHeaders(intent) },
             body: { operation: "backup", backup },
           }),
         )
@@ -204,13 +204,13 @@ export function useStartReadiness(ns: string) {
 }
 
 /** One readiness check, re-read until it is terminal. */
-export function usePreflight(ns: string, id: string | undefined) {
-  const readable = useCan(ns, "preflight");
+export function usePreflight(ws: string, id: string | undefined) {
+  const readable = useCan(ws, "preflight");
   return useQuery({
-    queryKey: ["preflights", ns, id],
+    queryKey: ["preflights", ws, id],
     enabled: Boolean(id) && readable,
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id ?? "" } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/preflights/{id}", { params: { path: { ws, id: id ?? "" } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.terminal ? LIVE_MS : false),
   });
 }

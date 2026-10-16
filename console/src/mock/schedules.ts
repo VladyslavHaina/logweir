@@ -157,18 +157,18 @@ for (const p of protectionPolicies) {
 const scheduleKeys = new Map<string, { name: string; body: string }>();
 const manualKeys = new Map<string, { name: string; body: string }>();
 
-function forNamespace<T extends { namespace: string }>(ns: string, items: T[]): T[] {
-  return items.filter((i) => i.namespace === ns);
+function forWorkspace<T extends { namespace: string }>(ws: string, items: T[]): T[] {
+  return items.filter((i) => i.namespace === ws);
 }
 
-function find(ns: string, name: string): Schedule | undefined {
-  return schedules.find((s) => s.namespace === ns && s.name === name);
+function find(ws: string, name: string): Schedule | undefined {
+  return schedules.find((s) => s.namespace === ws && s.name === name);
 }
 
 type Policy = S["CreateScheduleRequest"] & { topicSelection?: S["TopicSelectionRequest"] };
 
 /** The checks both schedule routes make, in the API's field paths. */
-function refusals(ns: string, body: Policy, selectionPath: "" | "topicSelection."): FieldError[] {
+function refusals(ws: string, body: Policy, selectionPath: "" | "topicSelection."): FieldError[] {
   const errors: FieldError[] = [];
   const topics = body.topicSelection ? (body.topicSelection.topics ?? []) : (body.topics ?? []);
   const all = body.topicSelection ? body.topicSelection.allUserTopics : body.allUserTopics;
@@ -183,8 +183,8 @@ function refusals(ns: string, body: Policy, selectionPath: "" | "topicSelection.
     if (/[*?[\]{}]/.test(t)) errors.push({ field: `${selectionPath}topics[${i}]`, code: "pattern_not_allowed", message: "a topic name, never a pattern" });
   });
   // The destinations the Destinations page shows (mock/destinations.ts): one store.
-  if (body.destinationRef && !destinationStore().some((d) => d.namespace === ns && d.name === body.destinationRef!.name)) {
-    errors.push({ field: "destinationRef.name", code: "not_found", message: `no BackupDestination named ${body.destinationRef.name} in ${ns}` });
+  if (body.destinationRef && !destinationStore().some((d) => d.namespace === ws && d.name === body.destinationRef!.name)) {
+    errors.push({ field: "destinationRef.name", code: "not_found", message: `no BackupDestination named ${body.destinationRef.name} in ${ws}` });
   }
   if (!body.destinationRef && !body.archive) errors.push({ field: "archive", code: "required", message: "exactly one of archive or destinationRef" });
   if (body.archive && !/^(s3|gs|az):\/\/[^@]+$|^file:\/\/\//.test(body.archive.url)) {
@@ -214,7 +214,7 @@ function applyPolicy(s: Schedule, body: Policy): Schedule {
   };
 }
 
-async function createSchedule(ns: string, request: Request): Promise<Response> {
+async function createSchedule(ws: string, request: Request): Promise<Response> {
   const key = request.headers.get("Idempotency-Key") ?? "";
   if (key.length < 8) return problem(400, "idempotency_key_required", "Idempotency-Key is required (8 to 128 visible characters).");
   const text = await request.text();
@@ -222,18 +222,18 @@ async function createSchedule(ns: string, request: Request): Promise<Response> {
   const held = scheduleKeys.get(key);
   if (held) {
     if (held.body !== text) return problem(409, "idempotency_conflict", "This idempotency key was already used with a different request body.");
-    return json(200, { item: observe(find(ns, held.name)!), replayed: true, requestId: requestId() });
+    return json(200, { item: observe(find(ws, held.name)!), replayed: true, requestId: requestId() });
   }
-  const errors = refusals(ns, body, "");
-  if (!connections.some((c) => c.namespace === ns && c.name === body.sourceRef.name)) {
-    errors.push({ field: "sourceRef.name", code: "not_found", message: `no connection named ${body.sourceRef.name} in ${ns}` });
+  const errors = refusals(ws, body, "");
+  if (!connections.some((c) => c.namespace === ws && c.name === body.sourceRef.name)) {
+    errors.push({ field: "sourceRef.name", code: "not_found", message: `no connection named ${body.sourceRef.name} in ${ws}` });
   }
   if (errors.length) return invalid(errors);
   const name = minted("sch-", key);
   const created = applyPolicy(
     {
       name,
-      namespace: ns,
+      namespace: ws,
       uid: crypto.randomUUID(),
       resourceVersion: nextVersion(),
       generation: 1,
@@ -253,15 +253,15 @@ async function createSchedule(ns: string, request: Request): Promise<Response> {
   return json(201, { item: observe(created), replayed: false, requestId: requestId() });
 }
 
-async function editSchedule(ns: string, name: string, request: Request): Promise<Response> {
-  const s = find(ns, name);
-  if (!s) return problem(404, "not_found", `No BackupSchedule named ${name} in ${ns}.`);
+async function editSchedule(ws: string, name: string, request: Request): Promise<Response> {
+  const s = find(ws, name);
+  if (!s) return problem(404, "not_found", `No BackupSchedule named ${name} in ${ws}.`);
   const body = (await request.json()) as Policy & { expectedGeneration: number; sourceRef?: { name: string } };
   if (body.sourceRef) return invalid([{ field: "sourceRef", code: "field_immutable", message: "a different cluster is a different schedule" }]);
   if (body.expectedGeneration !== s.generation) {
     return problem(412, "precondition_failed", `The schedule is at generation ${s.generation}, not ${body.expectedGeneration}. Read it again.`);
   }
-  const errors = refusals(ns, body, "topicSelection.");
+  const errors = refusals(ws, body, "topicSelection.");
   if (errors.length) return invalid(errors);
   const next = applyPolicy(s, body);
   next.generation = (s.generation ?? 1) + 1;
@@ -271,9 +271,9 @@ async function editSchedule(ns: string, name: string, request: Request): Promise
   return json(200, { item: observe(next), requestId: requestId() });
 }
 
-async function setSuspension(ns: string, name: string, request: Request): Promise<Response> {
-  const s = find(ns, name);
-  if (!s) return problem(404, "not_found", `No BackupSchedule named ${name} in ${ns}.`);
+async function setSuspension(ws: string, name: string, request: Request): Promise<Response> {
+  const s = find(ws, name);
+  if (!s) return problem(404, "not_found", `No BackupSchedule named ${name} in ${ws}.`);
   const body = (await request.json()) as S["SetSuspensionRequest"];
   if (body.expectedResourceVersion !== s.resourceVersion) {
     return problem(412, "precondition_failed", "The schedule changed since it was read (resourceVersion). Read it again and resend.");
@@ -284,13 +284,13 @@ async function setSuspension(ns: string, name: string, request: Request): Promis
   return json(200, { item: observe(next), requestId: requestId() });
 }
 
-async function backUpNow(ns: string, request: Request): Promise<Response | null> {
+async function backUpNow(ws: string, request: Request): Promise<Response | null> {
   const text = await request.clone().text();
   const body = JSON.parse(text) as S["CreateBackupRequest"];
   if (!body.scheduleRef) return null;
   const key = request.headers.get("Idempotency-Key") ?? "";
   const held = manualKeys.get(key);
-  const s = find(ns, body.scheduleRef.name);
+  const s = find(ws, body.scheduleRef.name);
   const context = s && { name: s.name, uid: s.uid, generation: s.generation ?? 1, suspended: s.suspended, activeRuns: observe(s).status.activeRuns ?? [], runPolicySha256: digest(s) };
   if (held) {
     if (held.body !== text) return problem(409, "idempotency_conflict", "This idempotency key was already used with a different request body.");
@@ -381,7 +381,7 @@ const retentionPolicies: S["RetentionPolicyView"][] = [
 
 const checks = new Map<string, { at: number; request: S["BackupPreflightRequest"] }>();
 
-function readiness(ns: string, id: string): S["Preflight"] | undefined {
+function readiness(ws: string, id: string): S["Preflight"] | undefined {
   const held = checks.get(id);
   if (!held) return undefined;
   const done = Date.now() - held.at > 2500;
@@ -396,7 +396,7 @@ function readiness(ns: string, id: string): S["Preflight"] | undefined {
   });
   return {
     id,
-    namespace: ns,
+    namespace: ws,
     uid: hex(held.at, 8) + "-1111-4000-8000-" + hex(held.at, 12),
     resourceVersion: "70500",
     operation: "backup",
@@ -433,30 +433,30 @@ export async function schedulesMock(request: Request): Promise<Response | null> 
   let p: RegExpMatchArray | null;
 
   if (method === "GET" && path === "/cadence-previews") return preview(url);
-  if ((p = path.match(/^\/namespaces\/([^/]+)\/schedules$/))) {
-    const ns = p[1]!;
+  if ((p = path.match(/^\/workspaces\/([^/]+)\/schedules$/))) {
+    const ws = p[1]!;
     if (method === "GET") {
-      const items = forNamespace(ns, schedules).map((s) => observe(s));
+      const items = forWorkspace(ws, schedules).map((s) => observe(s));
       return json(200, { items, page: { limit: 50, snapshot: nextVersion() }, requestId: requestId() });
     }
-    if (method === "POST") return createSchedule(ns, request);
+    if (method === "POST") return createSchedule(ws, request);
   }
-  if ((p = path.match(/^\/namespaces\/([^/]+)\/schedules\/([^/:]+)$/))) {
-    const [, ns, name] = p as unknown as [string, string, string];
+  if ((p = path.match(/^\/workspaces\/([^/]+)\/schedules\/([^/:]+)$/))) {
+    const [, ws, name] = p as unknown as [string, string, string];
     if (method === "GET") {
-      const s = find(ns, name);
-      return s ? json(200, { item: observe(s), requestId: requestId() }) : problem(404, "not_found", `No BackupSchedule named ${name} in ${ns}.`);
+      const s = find(ws, name);
+      return s ? json(200, { item: observe(s), requestId: requestId() }) : problem(404, "not_found", `No BackupSchedule named ${name} in ${ws}.`);
     }
-    if (method === "PUT") return editSchedule(ns, name, request);
+    if (method === "PUT") return editSchedule(ws, name, request);
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/([^/]+)\/schedules\/([^/:]+):set-suspension$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/([^/]+)\/schedules\/([^/:]+):set-suspension$/))) {
     return setSuspension(p[1]!, p[2]!, request);
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/([^/]+)\/backups$/))) return backUpNow(p[1]!, request);
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/retention-policies$/))) {
-    return json(200, { items: forNamespace(p[1]!, retentionPolicies), page: { limit: 50, snapshot: "70310" }, requestId: requestId() });
+  if (method === "POST" && (p = path.match(/^\/workspaces\/([^/]+)\/backups$/))) return backUpNow(p[1]!, request);
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/retention-policies$/))) {
+    return json(200, { items: forWorkspace(p[1]!, retentionPolicies), page: { limit: 50, snapshot: "70310" }, requestId: requestId() });
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/protection-policies\/([^/]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/protection-policies\/([^/]+)$/))) {
     const listUrl = request.url.replace(/\/[^/]+$/, "");
     const list = (await (await passthrough(new Request(listUrl))).json()) as { items: S["ProtectionPolicyView"][] };
     const found = list.items.find((x) => x.name === p![2]);
@@ -464,14 +464,14 @@ export async function schedulesMock(request: Request): Promise<Response | null> 
   }
 
   // Readiness checks this module started, and the backup ones it is asked to start.
-  if (method === "POST" && (p = path.match(/^\/namespaces\/([^/]+)\/preflights$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/([^/]+)\/preflights$/))) {
     const body = (await request.clone().json()) as S["CreatePreflightRequest"];
     if (body.operation !== "backup" || !body.backup) return null;
     const id = minted("pf-backup-", request.headers.get("Idempotency-Key") ?? String(Date.now()));
     if (!checks.has(id)) checks.set(id, { at: Date.now(), request: body.backup });
     return json(201, { item: readiness(p[1]!, id), replayed: false, requestId: requestId() });
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/([^/]+)\/preflights\/(pf-backup-[^/]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/([^/]+)\/preflights\/(pf-backup-[^/]+)$/))) {
     const item = readiness(p[1]!, p[2]!);
     return item ? json(200, { item, requestId: requestId() }) : problem(404, "not_found", `No preflight ${p[2]}.`);
   }

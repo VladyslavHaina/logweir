@@ -1,4 +1,4 @@
-// The frame every page sits in: masthead (brand, namespace, user menu), grouped
+// The frame every page sits in: masthead (brand, workspace, user menu), grouped
 // navigation with icons and counts, skip link, and the page itself. On a wide
 // screen the navigation collapses to an icon rail; below 1200 px it is a drawer.
 import { useEffect, useRef, useState, type ComponentType } from "react";
@@ -65,9 +65,9 @@ import { SessionWarning } from "./SessionClock";
 import { PageHeader } from "../components/PageHeader";
 import { Empty } from "../components/States";
 
-/** A navigation entry, shown when the session grants `flag` in the namespace (in any
- *  namespace, for `anyNamespace`). */
-type Entry = { path: string; label: string; icon: ComponentType; flag?: Flag; anyNamespace?: boolean };
+/** A navigation entry, shown when the session grants `flag` in the workspace (in any
+ *  workspace, for `anyWorkspace`). */
+type Entry = { path: string; label: string; icon: ComponentType; flag?: Flag; anyWorkspace?: boolean };
 
 export const NAV: { group: string | null; items: Entry[] }[] = [
   { group: null, items: [{ path: "", label: "Overview", icon: TachometerAltIcon }] },
@@ -91,7 +91,7 @@ export const NAV: { group: string | null; items: Entry[] }[] = [
     group: "Evidence",
     items: [
       { path: "catalog", label: "Recovery catalog", icon: CatalogIcon, flag: "catalogs" },
-      { path: "trust", label: "Trust", icon: KeyIcon, flag: "trustPoliciesRead", anyNamespace: true },
+      { path: "trust", label: "Trust", icon: KeyIcon, flag: "trustPoliciesRead", anyWorkspace: true },
     ],
   },
   {
@@ -109,18 +109,18 @@ const THEMES: { choice: ThemeChoice; label: string; icon: React.ReactNode }[] = 
   { choice: "dark", label: "Dark", icon: <MoonIcon /> },
 ];
 
-function NamespaceSelect({ ns, names }: { ns: string; names: string[] }) {
+function WorkspaceSelect({ ws, names }: { ws: string; names: string[] }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   return (
     <Select
       isOpen={open}
-      selected={ns}
+      selected={ws}
       onOpenChange={setOpen}
       onSelect={(_e, value) => {
         setOpen(false);
-        if (typeof value === "string" && value !== ns) {
-          void navigate({ to: "/$ns", params: { ns: value } });
+        if (typeof value === "string" && value !== ws) {
+          void navigate({ to: "/$ws", params: { ws: value } });
         }
       }}
       toggle={(ref) => (
@@ -128,15 +128,15 @@ function NamespaceSelect({ ns, names }: { ns: string; names: string[] }) {
           ref={ref}
           onClick={() => setOpen(!open)}
           isExpanded={open}
-          aria-label={`Namespace: ${ns}. Change namespace`}
-          className="lw-ns-toggle"
+          aria-label={`Workspace: ${ws}. Change workspace`}
+          className="lw-ws-toggle"
         >
-          <span className="lw-ns-toggle__label">Namespace</span> {ns}
+          <span className="lw-ws-toggle__label">Workspace</span> {ws}
         </MenuToggle>
       )}
       shouldFocusToggleOnSelect
     >
-      <SelectList aria-label="Namespaces">
+      <SelectList aria-label="Workspaces">
         {names.map((name) => (
           <SelectOption key={name} value={name}>
             {name}
@@ -157,13 +157,13 @@ function initials(name: string): string {
 }
 
 /** The user's name, roles here, the appearance choice and Sign out, in one menu. */
-function UserMenu({ ns }: { ns: string }) {
+function UserMenu({ ws }: { ws: string }) {
   const [open, setOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const session = useSessionDoc();
   const { choice, setChoice } = useTheme();
   const actor = session.actor;
-  const grant = grantOf(session, ns);
+  const grant = grantOf(session, ws);
   // DUI-14: the subject is an opaque identifier (often a long base64 one): shortened, whole in the title.
   const subject = shortSubject(actor.subject);
   const name = actor.displayName || subject;
@@ -201,11 +201,11 @@ function UserMenu({ ns }: { ns: string }) {
           {name === subject ? via : `${subject} · ${via}`}
         </div>
         <div className="lw-user-head__roles">
-          <div className="lw-subtle lw-small">Roles in {ns}</div>
+          <div className="lw-subtle lw-small">Roles in {ws}</div>
           {local ? (
             <span className="lw-small">Every action (local administrator)</span>
           ) : grant?.roles.length ? (
-            <LabelGroup numLabels={4} aria-label={`Roles in ${ns}`}>
+            <LabelGroup numLabels={4} aria-label={`Roles in ${ws}`}>
               {grant.roles.map((r) => (
                 <Label key={r} isCompact variant="outline">
                   {r}
@@ -262,22 +262,22 @@ function UserMenu({ ns }: { ns: string }) {
   );
 }
 
-/** A namespace in the address that the session holds no role in. */
-function NoAccess({ ns, names }: { ns: string; names: string[] }) {
+/** A workspace in the address that the session holds no role in. */
+function NoAccess({ ws, names }: { ws: string; names: string[] }) {
   return (
     <>
-      <PageHeader title={ns} />
+      <PageHeader title={ws} />
       <PageSection>
         <Card>
-          <Empty title={`You hold no role in ${ns}`} icon={LockIcon}>
-            The session grants you {names.length === 1 ? "one namespace" : `${names.length} namespaces`}:{" "}
+          <Empty title={`You hold no role in ${ws}`} icon={LockIcon}>
+            The session grants you {names.length === 1 ? "one workspace" : `${names.length} workspaces`}:{" "}
             {names.map((n, i) => (
               <span key={n}>
                 {i > 0 && ", "}
                 <a href={`#/${n}`}>{n}</a>
               </span>
             ))}
-            . Ask an administrator for a role in {ns} if you need one.
+            . Ask an administrator for a role in {ws} if you need one.
           </Empty>
         </Card>
       </PageSection>
@@ -285,16 +285,16 @@ function NoAccess({ ns, names }: { ns: string; names: string[] }) {
   );
 }
 
-/** A page the navigation names whose read the session does not grant in `ns`: nothing is
+/** A page the navigation names whose read the session does not grant in `ws`: nothing is
  *  sent for it, and the page says why rather than wait on a read that never starts. */
-function NotGranted({ ns, entry }: { ns: string; entry: Entry }) {
+function NotGranted({ ws, entry }: { ws: string; entry: Entry }) {
   return (
     <>
       <PageHeader title={entry.label} />
       <PageSection>
         <Card>
           <Empty title="Not available to you here" icon={LockIcon}>
-            Your roles in {ns} do not include reading {entry.label.toLowerCase()}. Ask an administrator for a role that does if you
+            Your roles in {ws} do not include reading {entry.label.toLowerCase()}. Ask an administrator for a role that does if you
             need it.
           </Empty>
         </Card>
@@ -303,13 +303,13 @@ function NotGranted({ ns, entry }: { ns: string; entry: Entry }) {
   );
 }
 
-function NavEntry({ ns, entry, current, rail, count }: { ns: string; entry: Entry; current: boolean; rail: boolean; count?: NavCount }) {
+function NavEntry({ ws, entry, current, rail, count }: { ws: string; entry: Entry; current: boolean; rail: boolean; count?: NavCount }) {
   const ref = useRef<HTMLAnchorElement>(null);
   const Icon = entry.icon;
   return (
     <NavItem
       itemId={entry.path}
-      to={`#/${ns}${entry.path ? `/${entry.path}` : ""}`}
+      to={`#/${ws}${entry.path ? `/${entry.path}` : ""}`}
       isActive={current}
       icon={<Icon />}
       anchorRef={ref}
@@ -327,11 +327,11 @@ function NavEntry({ ns, entry, current, rail, count }: { ns: string; entry: Entr
 }
 
 export function Shell() {
-  const { ns = "" } = useParams({ strict: false });
+  const { ws = "" } = useParams({ strict: false });
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const session = useSessionDoc();
-  const grant = grantOf(session, ns);
-  const counts = useNavCounts(ns);
+  const grant = grantOf(session, ws);
+  const counts = useNavCounts(ws);
   // PatternFly's own rule: below its xl breakpoint (1200 px) the navigation is a drawer.
   const [mobile, setMobile] = useState(() => window.innerWidth < 1200);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -371,12 +371,12 @@ export function Shell() {
   }, [drawer]);
 
   const section = pathname.split("/")[2] ?? "";
-  const names = session.namespaces.map((g) => g.name);
+  const names = session.workspaces.map((g) => g.name);
   const shown = (entry: Entry) =>
-    !entry.flag || (entry.anyNamespace ? session.capabilities[entry.flag] === true : grant?.capabilities[entry.flag] === true);
+    !entry.flag || (entry.anyWorkspace ? session.capabilities[entry.flag] === true : grant?.capabilities[entry.flag] === true);
   // A cluster-wide page (Trust) says for itself why it reads nothing.
   const current = NAV.flatMap((g) => g.items).find((i) => i.path === section && i.path !== "");
-  const denied = current && !current.anyNamespace && !shown(current) ? current : undefined;
+  const denied = current && !current.anyWorkspace && !shown(current) ? current : undefined;
 
   const masthead = (
     <Masthead display={{ default: "inline" }}>
@@ -391,7 +391,7 @@ export function Shell() {
           />
         </MastheadToggle>
         <MastheadBrand>
-          <MastheadLogo href={`#/${ns}`} aria-label="Logweir console, overview">
+          <MastheadLogo href={`#/${ws}`} aria-label="Logweir console, overview">
             <Logo />
           </MastheadLogo>
         </MastheadBrand>
@@ -399,9 +399,11 @@ export function Shell() {
       <MastheadContent>
         <Toolbar isFullHeight isStatic>
           <ToolbarContent>
-            <ToolbarItem>
-              <NamespaceSelect ns={ns} names={grant ? names : [ns, ...names]} />
-            </ToolbarItem>
+            {names.length > 1 && (
+              <ToolbarItem>
+                <WorkspaceSelect ws={ws} names={names} />
+              </ToolbarItem>
+            )}
             <ToolbarGroup align={{ default: "alignEnd" }} gap={{ default: "gapMd" }} alignItems="center">
               {MOCK && (
                 <ToolbarItem visibility={{ default: "hidden", lg: "visible" }}>
@@ -411,7 +413,7 @@ export function Shell() {
                 </ToolbarItem>
               )}
               <ToolbarItem>
-                <UserMenu ns={ns} />
+                <UserMenu ws={ws} />
               </ToolbarItem>
             </ToolbarGroup>
           </ToolbarContent>
@@ -436,7 +438,7 @@ export function Shell() {
               const items = visible.map((entry) => (
                 <NavEntry
                   key={entry.path}
-                  ns={ns}
+                  ws={ws}
                   entry={entry}
                   current={section === entry.path}
                   rail={rail && !mobile}
@@ -488,7 +490,7 @@ export function Shell() {
     >
       {/* DUI-34: the session warning sits above the page, under the masthead, and covers nothing. */}
       <SessionWarning />
-      {!grant ? <NoAccess ns={ns} names={names} /> : denied ? <NotGranted ns={ns} entry={denied} /> : <Outlet />}
+      {!grant ? <NoAccess ws={ws} names={names} /> : denied ? <NotGranted ws={ws} entry={denied} /> : <Outlet />}
     </Page>
   );
 }

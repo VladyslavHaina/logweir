@@ -46,11 +46,11 @@ const modes = () => (globalThis as unknown as { __lwMockApprovalMode: Record<str
 
 function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const tree = root.addChildren([
-    ns.addChildren([
-      createRoute({ getParentRoute: () => ns, path: "restores/new", component: RestoreWizard, validateSearch: restoreSearch }),
-      createRoute({ getParentRoute: () => ns, path: "restores/$name", component: RestoreDetail }),
+    ws.addChildren([
+      createRoute({ getParentRoute: () => ws, path: "restores/new", component: RestoreWizard, validateSearch: restoreSearch }),
+      createRoute({ getParentRoute: () => ws, path: "restores/$name", component: RestoreDetail }),
     ]),
   ]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [path] }) });
@@ -123,9 +123,9 @@ describe("DUI-41.4: Restore this point from a recovery catalog", () => {
     }
   });
 
-  it("shows it chosen when its set is also a Backup listed above (the catalog of this namespace's own destination)", async () => {
+  it("shows it chosen when its set is also a Backup listed above (the catalog of this workspace's own destination)", async () => {
     const { offers } = await readCatalogOffers("team-a");
-    const backups = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/namespaces/team-a/backups"))).json()) as { items: S["Backup"][] };
+    const backups = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/backups"))).json()) as { items: S["Backup"][] };
     const chosen = offers.find((o) => backups.items.some((b) => b.backupId === o.entry.backupId));
     expect(chosen, "a catalog point whose set a listed Backup produced").toBeTruthy();
     renderAt(`/team-a/restores/new?catalog=${chosen!.catalog.name}&point=${chosen!.entry.pointId}`);
@@ -171,7 +171,7 @@ describe("the restore wizard", () => {
     const check = net.sent.find((r) => r.method === "POST" && r.path.endsWith("/preflights"))!.body as S["CreatePreflightRequest"];
     expect(check.restore?.planBytes).toBe(body.planBytes);
     // One restore exists for it however many times it was sent: the second answer replays the first.
-    const list = (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/namespaces/team-a/restores"))).json() as Promise<{ items: S["Restore"][] }>;
+    const list = (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/restores"))).json() as Promise<{ items: S["Restore"][] }>;
     expect((await list).items.filter((r) => r.planHash === body.planHash)).toHaveLength(1);
   });
 
@@ -183,7 +183,7 @@ describe("the restore wizard", () => {
     let item: unknown = null;
     net.override = (path, method, body) => {
       const answer = (status: number) => new Response(JSON.stringify({ item, requestId: "r" }), { status, headers: { "content-type": "application/json" } });
-      if (method === "POST" && path === "/namespaces/team-a/restores") {
+      if (method === "POST" && path === "/workspaces/team-a/restores") {
         return new Response(JSON.stringify({ type: "https://logweir.dev/problems/state-conflict", title: "state_conflict", status: 409, code: "state_conflict", detail: DETAIL, requestId: "r-d3", retryable: false }), {
           status: 409,
           headers: { "content-type": "application/problem+json" },
@@ -354,7 +354,7 @@ describe("the restore wizard", () => {
         return json(201, { item, requestId: "r" });
       }
       if (method === "GET" && /\/preflights\/pf-owners$/.test(path)) return json(200, { item, requestId: "r" });
-      if (method === "GET" && path.startsWith("/namespaces/team-a/preflights/pf-owners/details")) {
+      if (method === "GET" && path.startsWith("/workspaces/team-a/preflights/pf-owners/details")) {
         return json(200, { items: [{ check: "target.topicConfiguration", entry: { check: "target.topicConfiguration", refusal: REFUSAL } }], page: { limit: 200 }, requestId: "r" });
       }
       return null;
@@ -403,7 +403,7 @@ describe("the restore wizard", () => {
 
   it("a link to a Backup that is not a recovery point is refused by name, never replaced by another", async () => {
     renderAt("/team-a/restores/new?backup=orders-hourly-gone");
-    await screen.findByText(/No Backup named orders-hourly-gone is in this namespace/);
+    await screen.findByText(/No Backup named orders-hourly-gone is in this workspace/);
     expect(screen.queryByText("Bound to")).toBeNull();
   });
 });

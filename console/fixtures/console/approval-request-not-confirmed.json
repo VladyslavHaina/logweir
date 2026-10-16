@@ -7,7 +7,7 @@
       "sentence": "There is no pending request to approve."
     },
     "confirmationName": "approval-x-confirmation",
-    "namespace": "team-a",
+    "workspace": "team-a",
     "policy": "prod-pair",
     "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "restore": "restore-x",

@@ -12,7 +12,7 @@ import type {
   Session,
 } from "../api/types";
 import { DAY, HOUR, MINUTE, NOW, iso, slot, slotName } from "./clock";
-import { APPROVAL_DEMO_GRANTS } from "./approvalNamespaces";
+import { APPROVAL_DEMO_GRANTS } from "./approvalWorkspaces";
 
 let counter = 0;
 export function requestId(): string {
@@ -68,7 +68,7 @@ const ALL: Capabilities = {
   trustPoliciesRead: true,
 };
 
-export const NAMESPACES = ["team-a", "team-b"] as const;
+export const WORKSPACES = ["team-a", "team-b"] as const;
 
 export const session: Session = {
   actor: {
@@ -82,7 +82,7 @@ export const session: Session = {
   capabilities: ALL,
   csrfToken: "prototype-only",
   expiresAt: iso(NOW + 8 * HOUR),
-  namespaces: [
+  workspaces: [
     { name: "team-a", roles: ["operator", "approver"], capabilities: ALL },
     { name: "team-b", roles: ["operator"], capabilities: ALL },
     ...APPROVAL_DEMO_GRANTS,
@@ -104,6 +104,8 @@ export const connections: Connection[] = [
     auth: { mode: "scramSha512", tls: true, username: "logweir-reader", credentialRef: { name: "orders-scram" } },
     markerTopic: "logweir.scratch",
     reachability: { state: "reachable", reason: "Reachable", clusterId: "MkU3NEVCTTlSM0FCQVRMQQ", observedAt: iso(NOW - 3 * MINUTE) },
+    // OD-23 (PROD-03.1): the record's connection field, not in the generated type yet.
+    ...({ schemaRegistry: { url: "http://schema-registry.orders.svc:8081" } } as object),
   },
   {
     name: "orders-dr",
@@ -116,6 +118,7 @@ export const connections: Connection[] = [
     auth: { mode: "scramSha512", tls: true, username: "logweir-restorer", credentialRef: { name: "orders-dr-scram" } },
     markerTopic: "logweir.scratch",
     reachability: { state: "reachable", reason: "Reachable", clusterId: "Q0xVU1RFUi1EUi0wMDAx", observedAt: iso(NOW - 3 * MINUTE) },
+    ...({ schemaRegistry: { url: "https://schema-registry.orders-dr.svc:8081", username: "logweir" } } as object),
   },
   {
     name: "analytics-prod",
@@ -205,6 +208,8 @@ function verifiedBackup(name: string, at: number, records: number, extra: Partia
     trigger: { kind: "Scheduled", attempt: 1 },
     triggeredBy: "schedule",
     windowCovered: { fromMs: at - HOUR, toMs: at + 4 * MINUTE },
+    // OD-23 (PROD-03.1): orders-prod names a registry, so each run captured it.
+    ...({ schemaRegistry: { captured: true, subjects: 4, versions: 7 } } as object),
     ...extra,
   };
 }
@@ -235,6 +240,9 @@ for (let h = currentSlotDone ? 0 : 1; h <= 30; h += 1) {
         records: undefined,
       }),
     );
+  } else if (h === 4) {
+    // The registry did not answer this run: the backup still succeeded, its capture did not.
+    hourly.push(verifiedBackup(name, at, records, { ...({ schemaRegistry: { captured: false, incompleteReason: "registryUnreachable" } } as object) }));
   } else {
     hourly.push(verifiedBackup(name, at, records));
   }
@@ -252,6 +260,8 @@ const analytics: Backup[] = [1, 2, 3, 4].map((d) => {
     scheduleRef: { name: "analytics-daily" },
     sourceRef: { name: "analytics-prod" },
     topics: ["clickstream", "sessions"],
+    // analytics-prod names no registry: nothing captured, nothing claimed.
+    ...({ schemaRegistry: undefined } as object),
     observedAuth: { mode: "mtls" },
     windowCovered: { fromMs: at - DAY, toMs: at + 20 * MINUTE },
     ...(failed
@@ -317,6 +327,7 @@ export function pointOf(backup: Backup): PointView {
     coveredFrom: iso(backup.windowCovered?.fromMs ?? seed * MINUTE),
     coveredTo: iso(backup.windowCovered?.toMs ?? seed * MINUTE),
     recoveryPointAt: iso((backup.windowCovered?.toMs ?? seed * MINUTE) - MINUTE),
+    ...({ schemaRegistry: (backup as { schemaRegistry?: unknown }).schemaRegistry } as object),
     topics: [
       { name: "orders", partitions: 3, replicationFactor: 3, applyRoute: "createTopic", configCoverage: "captured" },
       { name: "orders-dlq", partitions: 1, replicationFactor: 3, applyRoute: "createTopic", configCoverage: "captured" },

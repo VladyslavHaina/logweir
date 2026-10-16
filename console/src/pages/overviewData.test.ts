@@ -169,7 +169,7 @@ describe("needs attention", () => {
     expect(attentionItems("team-a", [], [], [down("source")], NOW)[0]!.detail).toContain("Backups from it fail until it is reachable.");
   });
 
-  it("is empty for the recorded namespace's healthy half and a reachable connection", () => {
+  it("is empty for the recorded workspace's healthy half and a reachable connection", () => {
     expect(attentionItems("team-a", [HEALTHY], [BACKUP], CONNECTIONS, NOW)).toEqual([]);
   });
 

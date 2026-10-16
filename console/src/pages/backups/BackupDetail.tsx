@@ -50,6 +50,8 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { BackupStatus, Commands, MessageValue, Term, Value, VerdictLabel, useFlags } from "./parts";
 import { Prose } from "../../components/Prose";
 import { Trigger } from "./BackupList";
+import { registryCaptureOf } from "../../api/od23";
+import { registryCaptureWords } from "../catalog/model";
 import "./evidence.css";
 import {
   BASIS_WORDS,
@@ -225,10 +227,10 @@ function Groups({ point }: { point: PointView }) {
  * run's backup set and, when the run reported the digest of its receipt, that exact receipt (a set
  * can hold more than one point).
  */
-function useRunPoint(ns: string, b: Backup | undefined, receiptSha256: string | null | undefined) {
-  const catalogs = useCatalogs(ns);
+function useRunPoint(ws: string, b: Backup | undefined, receiptSha256: string | null | undefined) {
+  const catalogs = useCatalogs(ws);
   const catalog = (catalogs.data ?? []).find((c) => b?.destinationRef && c.destinationRef?.name === b.destinationRef.name);
-  const points = useCatalogPoints(ns, catalog?.name ?? "", false, Boolean(catalog));
+  const points = useCatalogPoints(ws, catalog?.name ?? "", false, Boolean(catalog));
   const enabled = Boolean(catalog);
   const rows = (points.data?.pages ?? []).flatMap((p) => p.items);
   const point = b
@@ -237,8 +239,8 @@ function useRunPoint(ns: string, b: Backup | undefined, receiptSha256: string | 
   return { catalog, point, pending: catalogs.isPending || (enabled && points.isPending), readable: catalogs.isSuccess };
 }
 
-function PointCard({ ns, b, receiptSha256 }: { ns: string; b: Backup; receiptSha256: string | null | undefined }) {
-  const { catalog, point, pending, readable } = useRunPoint(ns, b, receiptSha256);
+function PointCard({ ws, b, receiptSha256 }: { ws: string; b: Backup; receiptSha256: string | null | undefined }) {
+  const { catalog, point, pending, readable } = useRunPoint(ws, b, receiptSha256);
   return (
     <Card>
       <CardHeader>
@@ -262,7 +264,7 @@ function PointCard({ ns, b, receiptSha256 }: { ns: string; b: Backup; receiptSha
         ) : !catalog ? (
           <Content component="p" className="lw-subtle">
             No recovery catalog indexes destination {b.destinationRef.name}, so nothing in Kubernetes lists this run's point.{" "}
-            <Link to="/$ns/catalog" params={{ ns }}>
+            <Link to="/$ws/catalog" params={{ ws }}>
               Connect one
             </Link>
             .
@@ -270,7 +272,7 @@ function PointCard({ ns, b, receiptSha256 }: { ns: string; b: Backup; receiptSha
         ) : !point ? (
           <Content component="p" className="lw-subtle">
             Catalog{" "}
-            <Link to="/$ns/catalog/$name" params={{ ns, name: catalog.name }}>
+            <Link to="/$ws/catalog/$name" params={{ ws, name: catalog.name }}>
               {catalog.name}
             </Link>{" "}
             does not list this run in the part of its view this page read. That is not "missing": a run made no point
@@ -294,7 +296,7 @@ function PointCard({ ns, b, receiptSha256 }: { ns: string; b: Backup; receiptSha
               </FlexItem>
               <FlexItem className="lw-subtle lw-small">
                 in catalog{" "}
-                <Link to="/$ns/catalog/$name" params={{ ns, name: catalog.name }}>
+                <Link to="/$ws/catalog/$name" params={{ ws, name: catalog.name }}>
                   {catalog.name}
                 </Link>
               </FlexItem>
@@ -427,8 +429,8 @@ function OperationCard({ op }: { op: OperationView }) {
   );
 }
 
-function EvidenceCard({ ns, b, op }: { ns: string; b: Backup; op: OperationView | undefined }) {
-  const destination = useRunDestination(ns, b.destinationRef?.name);
+function EvidenceCard({ ws, b, op }: { ws: string; b: Backup; op: OperationView | undefined }) {
+  const destination = useRunDestination(ws, b.destinationRef?.name);
   if (!op) {
     return (
       <Card isFullHeight>
@@ -575,18 +577,18 @@ function ResultCard({ op }: { op: OperationView }) {
 }
 
 export function BackupDetail() {
-  const { ns, name } = useParams({ from: "/$ns/backups/$name" });
+  const { ws, name } = useParams({ from: "/$ws/backups/$name" });
   const navigate = useNavigate();
-  const backup = useBackupDoc(ns, name);
+  const backup = useBackupDoc(ws, name);
   // While the run moves, its event stream writes the operation view and the poll stands down.
-  const streaming = useOperationStream(ns, "backup", name, backup.data !== undefined && !backup.data.operation.terminal);
-  const operation = useBackupOperation(ns, name, streaming);
-  const runs = useBackupList(ns);
-  const flags = useFlags(ns);
+  const streaming = useOperationStream(ws, "backup", name, backup.data !== undefined && !backup.data.operation.terminal);
+  const operation = useBackupOperation(ws, name, streaming);
+  const runs = useBackupList(ws);
+  const flags = useFlags(ws);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/backups" params={{ ns }}>Backups</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/backups" params={{ ws }}>Backups</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -628,7 +630,7 @@ export function BackupDetail() {
     <Button
       variant="primary"
       isAriaDisabled={!offer.offer}
-      onClick={() => offer.offer && void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } })}
+      onClick={() => offer.offer && void navigate({ to: "/$ws/restores/new", params: { ws }, search: { backup: b.name, uid: b.uid } })}
     >
       Restore this point
     </Button>
@@ -683,7 +685,7 @@ export function BackupDetail() {
                   {retries.map((r, i) => (
                     <span key={r.name}>
                       {i > 0 ? ", " : ""}
-                      <Link to="/$ns/backups/$name" params={{ ns, name: r.name }}>
+                      <Link to="/$ws/backups/$name" params={{ ws, name: r.name }}>
                         {r.name}
                       </Link>{" "}
                       ({(triggerWords(r.trigger) ?? "retry").toLowerCase()}, {listVerdict(r.operation).green ? "verified" : r.operation.terminal ? "not verified" : "in progress"})
@@ -725,6 +727,7 @@ export function BackupDetail() {
                   </Term>
                   <Term term="Records">{b.operation.terminal ? count(b.records) : "Counting while it runs"}</Term>
                   <Term term="Covers">{windowWords(b)}</Term>
+                  <Term term="Schema Registry">{b.operation.terminal ? registryCaptureWords(registryCaptureOf(b)) : "Captured, if the source names one, after the records"}</Term>
                   <Term term="Destination">
                     {b.destinationRef ? (
                       <>
@@ -746,7 +749,7 @@ export function BackupDetail() {
                     {b.trigger?.retryOf && (
                       <div className="lw-small">
                         Retry of{" "}
-                        <Link to="/$ns/backups/$name" params={{ ns, name: b.trigger.retryOf.name }}>
+                        <Link to="/$ws/backups/$name" params={{ ws, name: b.trigger.retryOf.name }}>
                           {b.trigger.retryOf.name}
                         </Link>
                       </div>
@@ -756,7 +759,7 @@ export function BackupDetail() {
                   <Term term="Schedule">
                     {b.scheduleRef?.name || b.schedule ? (
                       <>
-                        <a href={`#/${ns}/schedules/${encodeURIComponent((b.scheduleRef?.name ?? b.schedule)!)}`}>
+                        <a href={`#/${ws}/schedules/${encodeURIComponent((b.scheduleRef?.name ?? b.schedule)!)}`}>
                           {b.scheduleRef?.name ?? b.schedule}
                         </a>
                         {b.slot && <span className="lw-subtle"> · slot {b.slot}</span>}
@@ -797,7 +800,7 @@ export function BackupDetail() {
                 <ErrorState error={operation.error} onRetry={() => void operation.refetch()} />
               </Card>
             ) : (
-              <EvidenceCard ns={ns} b={b} op={op} />
+              <EvidenceCard ws={ws} b={b} op={op} />
             )}
           </GridItem>
           {op && (
@@ -811,7 +814,7 @@ export function BackupDetail() {
             </>
           )}
           <GridItem>
-            <PointCard ns={ns} b={b} receiptSha256={op?.evidence?.payloadSha256} />
+            <PointCard ws={ws} b={b} receiptSha256={op?.evidence?.payloadSha256} />
           </GridItem>
         </Grid>
       </PageSection>

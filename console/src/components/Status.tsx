@@ -40,6 +40,9 @@ export function RunStatus({ op }: { op: OperationSummary }) {
   const title = `state ${op.state}; verification ${op.verificationState}`;
   // DUI-22: a run held for its approval waits; it is not starting.
   if (!op.terminal && op.state === "pending" && op.stateReason === "ApprovalNotVerified") return <StatusLabel tone="neutral" text="Waiting for approval" title={title} />;
+  // PROD-07.2: stopped after it created its targets; not final while its partial targets are verified and cleaned up.
+  if ((op.state as string) === "interrupted") return <StatusLabel tone="warning" text="Interrupted" title={title} />;
+  if (!op.terminal && op.stateReason === "Stopping") return <StatusLabel tone="progress" text="Stopping" title={title} />;
   if (!op.terminal) return <StatusLabel tone="progress" text={IN_PROGRESS[op.state] ?? "In progress"} title={title} />;
   switch (op.state) {
     case "succeeded":

@@ -71,17 +71,17 @@ const READS = {
 
 function session(caps: Partial<S["Capabilities"]>) {
   const all = { ...READS, ...caps };
-  return { actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: all, namespaces: [{ name: "team-a", roles: ["operator"], capabilities: all }], requestId: "r" };
+  return { actor: { id: "a", displayName: "A", issuer: "i", subject: "s" }, authenticationMode: "oidc", bindingRevision: "1", capabilities: all, workspaces: [{ name: "team-a", roles: ["operator"], capabilities: all }], requestId: "r" };
 }
 
 const schedule = (over: Partial<Schedule> = {}): Schedule => ({ ...(policyFixture.item as unknown as Schedule), namespace: "team-a", name: "nightly", ...over });
 
-/** A router with the R3 routes under `#/<ns>/`, starting at `path`. */
+/** A router with the R3 routes under `#/<ws>/`, starting at `path`. */
 function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...scheduleRoutes(ns as never)])]),
+    routeTree: root.addChildren([ws.addChildren([...scheduleRoutes(ws as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -124,7 +124,7 @@ const created = (key: string | null) =>
 describe("Back up now", () => {
   it("one click is one run under one key, and only Back up again starts a second", async () => {
     net.answer = (r) => (r.method === "POST" ? created(r.headers.get("Idempotency-Key")) : null);
-    renderWith(<BackUpNow ns="team-a" schedule={schedule()} open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" schedule={schedule()} open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Back up now" }));
     await within(dialog).findByText("Backup started");
@@ -147,7 +147,7 @@ describe("Back up now", () => {
       if (calls === 1) throw new TypeError("Failed to fetch");
       return json(200, { ...JSON.parse("{}"), item: { name: "logweir-manual-x", scheduleRef: { name: "nightly", generation: 1 }, operation: { state: "pending", terminal: false, verifiedSuccess: false, verificationState: "pending" } }, replayed: true, requestId: "r" });
     };
-    renderWith(<BackUpNow ns="team-a" schedule={schedule()} open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" schedule={schedule()} open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Back up now" }));
     await within(dialog).findByText("No answer: whether the backup was started is unknown");
@@ -163,7 +163,7 @@ describe("Back up now", () => {
       r.method === "POST"
         ? json(409, { code: "policy_changed", status: 409, detail: "The schedule's policy changed.", policy: { currentGeneration: 7 }, requestId: "r" })
         : null;
-    renderWith(<BackUpNow ns="team-a" schedule={schedule()} open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" schedule={schedule()} open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Back up now" }));
     await within(dialog).findByText(/it is at revision g7 now/);
@@ -178,7 +178,7 @@ describe("Back up now", () => {
 
   it("a suspended schedule asks for a confirmation first, and is not refused", async () => {
     net.answer = (r) => (r.method === "POST" ? created(r.headers.get("Idempotency-Key")) : null);
-    renderWith(<BackUpNow ns="team-a" schedule={schedule({ suspended: true })} open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" schedule={schedule({ suspended: true })} open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     const button = within(dialog).getByRole("button", { name: "Back up now" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
@@ -228,8 +228,8 @@ function formNetwork(over: (r: Request, path: string, body: unknown) => Response
     const o = over(r, path, body);
     if (o) return o;
     if (path === "/session") return json(200, session(caps));
-    if (path.startsWith("/namespaces/team-a/connections?") || path === "/namespaces/team-a/connections") return json(200, { items: CONNECTIONS, page: { limit: 50 }, requestId: "r" });
-    if (path.startsWith("/namespaces/team-a/destinations")) return json(200, { items: DESTINATIONS, page: { limit: 50 }, requestId: "r" });
+    if (path.startsWith("/workspaces/team-a/connections?") || path === "/workspaces/team-a/connections") return json(200, { items: CONNECTIONS, page: { limit: 50 }, requestId: "r" });
+    if (path.startsWith("/workspaces/team-a/destinations")) return json(200, { items: DESTINATIONS, page: { limit: 50 }, requestId: "r" });
     if (path.includes("/topic-discoveries")) return json(200, { requestId: "r" });
     if (path.startsWith("/cadence-previews")) {
       const q = new URL(r.url).searchParams;
@@ -260,7 +260,7 @@ describe("guided create", () => {
     fireEvent.click(create);
     await waitFor(() => expect(posts()).toHaveLength(1));
     const sent = posts()[0]!;
-    expect(sent.path).toBe("/namespaces/team-a/schedules");
+    expect(sent.path).toBe("/workspaces/team-a/schedules");
     expect(sent.key).toMatch(/^logweir-console\.schedule\./);
     expect(sent.body).toEqual({ schedule: "0 2 * * * ", suspended: false, topics: ["orders", "payments"], destinationRef: { name: "primary" }, sourceRef: { name: "orders-prod" } });
   });
@@ -333,7 +333,7 @@ describe("guided create", () => {
   it("a connection deleted and created again under the chosen name is refused, not followed", async () => {
     let reads = 0;
     formNetwork((_r, path) => {
-      if (!path.startsWith("/namespaces/team-a/connections")) return null;
+      if (!path.startsWith("/workspaces/team-a/connections")) return null;
       reads += 1;
       // The second read (the one a submit makes) finds another object under the name.
       return json(200, { items: [{ ...CONNECTIONS[0], uid: reads === 1 ? "c-1" : "c-2" }], page: { limit: 50 }, requestId: "r" });
@@ -357,7 +357,7 @@ describe("guided create", () => {
 
 describe("the schedules list, by grant", () => {
   const listed = (path: string) =>
-    path.startsWith("/namespaces/team-a/schedules") ? json(200, { items: [schedule()], page: { limit: 50 }, requestId: "r" }) : null;
+    path.startsWith("/workspaces/team-a/schedules") ? json(200, { items: [schedule()], page: { limit: 50 }, requestId: "r" }) : null;
 
   it("offers Create a schedule to an operator", async () => {
     formNetwork((_r, path) => listed(path));
@@ -378,12 +378,12 @@ describe("suspend and resume", () => {
   it("sends the value and the revision it was read at; a stale one is re-read and said", async () => {
     let read = 0;
     formNetwork((_r, path) => {
-      if (path === "/namespaces/team-a/schedules/nightly") {
+      if (path === "/workspaces/team-a/schedules/nightly") {
         read += 1;
         return json(200, { item: schedule({ resourceVersion: String(100 + read) }), requestId: "r" });
       }
       if (path.endsWith(":set-suspension")) return json(412, { code: "precondition_failed", status: 412, detail: "The schedule changed since it was read.", requestId: "r" });
-      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/schedules/nightly");
@@ -471,12 +471,12 @@ describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
   it("re-reads a schedule whose next runs are not computed yet, and shows them without leaving the page", async () => {
     let reads = 0;
     formNetwork((r, path) => {
-      if (r.method === "GET" && path === "/namespaces/team-a/schedules/nightly") {
+      if (r.method === "GET" && path === "/workspaces/team-a/schedules/nightly") {
         reads += 1;
         const base = schedule();
         return json(200, { item: reads === 1 ? { ...base, status: { ...base.status, nextRuns: undefined } } : base, requestId: "r" });
       }
-      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/schedules/nightly");
@@ -492,8 +492,8 @@ describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
     const LONG = "rc1-settlement-ledger-eu-west-1-orders";
     expect(LONG).toHaveLength(38);
     formNetwork((r, path) => {
-      if (r.method === "GET" && path === "/namespaces/team-a/schedules/nightly") return json(200, { item: schedule({ topics: [LONG, "orders"] }), requestId: "r" });
-      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      if (r.method === "GET" && path === "/workspaces/team-a/schedules/nightly") return json(200, { item: schedule({ topics: [LONG, "orders"] }), requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/schedules/nightly");
@@ -517,7 +517,7 @@ describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
     let generation = 4;
     let reads = 0;
     formNetwork((r, path) => {
-      if (path === "/namespaces/team-a/schedules/nightly") {
+      if (path === "/workspaces/team-a/schedules/nightly") {
         if (r.method === "PUT") {
           generation = 5;
           return json(412, { code: "precondition_failed", status: 412, detail: "The schedule changed since it was read.", requestId: "r" });
@@ -526,7 +526,7 @@ describe("DUI-12 and DUI-13: one schedule's page and its edit", () => {
         const base = schedule();
         return json(200, { item: { ...base, generation, status: { ...base.status, observedGeneration: generation } }, requestId: "r" });
       }
-      if (path.startsWith("/namespaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/")) return json(200, { items: [], page: { limit: 50 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/schedules/nightly/edit");

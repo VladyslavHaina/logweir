@@ -10,7 +10,8 @@ import { keys, useBackups, useConnections, useDestinations, useOperation, useRes
 export { verdictPending };
 import { grantOf, useCan, useSessionDoc } from "./session";
 import type { Clone } from "./switchovers";
-import type { components } from "./schema";
+import type { Client } from "openapi-fetch";
+import type { components, paths } from "./schema";
 
 type S = components["schemas"];
 export type Restore = S["Restore"];
@@ -32,14 +33,14 @@ const PAGE_BUDGET = LIST_PAGE_BUDGET;
 
 /** R1's keys where the read is the shared one; the rest have their own kind. */
 export const restoreKeys = {
-  list: (ns: string) => keys.list("restores", ns),
-  item: (ns: string, name: string) => keys.item("restores", ns, name),
-  operation: (ns: string, name: string) => keys.operation(ns, "restore", name),
+  list: (ws: string) => keys.list("restores", ws),
+  item: (ws: string, name: string) => keys.item("restores", ws, name),
+  operation: (ws: string, name: string) => keys.operation(ws, "restore", name),
   /** Null when no request was made: kept apart from the Approvals page's read, which throws. */
-  approvalRequest: (ns: string, name: string) => ["restore-approval-requests", ns, name] as const,
+  approvalRequest: (ws: string, name: string) => ["restore-approval-requests", ws, name] as const,
   /** The fail-safe reading (null when unreadable), kept apart from the Approvals page's. */
-  policy: (ns: string) => ["approval-policy", ns, "fail-safe"] as const,
-  preflight: (ns: string, id: string) => ["preflights", ns, id] as const,
+  policy: (ws: string) => ["approval-policy", ws, "fail-safe"] as const,
+  preflight: (ws: string, id: string) => ["preflights", ws, id] as const,
 };
 
 export { outcomeUnknown } from "./client";
@@ -54,15 +55,15 @@ async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   }
 }
 
-/** What this session may do in a namespace. */
-export function useCapabilities(ns: string): Capabilities | undefined {
+/** What this session may do in a workspace. */
+export function useCapabilities(ws: string): Capabilities | undefined {
   const s = useSessionDoc();
-  return grantOf(s, ns)?.capabilities ?? s.capabilities;
+  return grantOf(s, ws)?.capabilities ?? s.capabilities;
 }
 
 // ------------------------------------------------------------------- reads
 
-/** The namespace's restores, newest first: R1's list, one cache with Approvals and the Overview. */
+/** The workspace's restores, newest first: R1's list, one cache with Approvals and the Overview. */
 export const useRestoreList = useRestores;
 /** One restore: R1's read. */
 export const useRestoreItem = useRestore;
@@ -79,17 +80,17 @@ export const CLONE_READS = 50;
  * recent scratch restore's view is read, at most CLONE_READS, under the same key its page
  * uses, so the two share one cache entry. A view that cannot be read leaves its row as it was.
  */
-export function useClones(ns: string, restores: Restore[] | undefined): Map<string, Clone> {
-  const readable = useCan(ns, "operationsRead");
+export function useClones(ws: string, restores: Restore[] | undefined): Map<string, Clone> {
+  const readable = useCan(ws, "operationsRead");
   const since = Date.now() - CLONE_HORIZON_MS;
   const wanted = readable
     ? (restores ?? []).filter((r) => r.target.mode === "scratch" && (Date.parse(r.createdAt ?? "") || 0) >= since).slice(0, CLONE_READS)
     : [];
   const results = useQueries({
     queries: wanted.map((r) => ({
-      queryKey: keys.operation(ns, "restore", r.name),
+      queryKey: keys.operation(ws, "restore", r.name),
       queryFn: async ({ signal }: { signal: AbortSignal }) =>
-        (await call(() => api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "restore", name: r.name } }, signal }))).item,
+        (await call(() => api.GET("/api/v1/workspaces/{ws}/operations/{kind}/{name}", { params: { path: { ws, kind: "restore", name: r.name } }, signal }))).item,
       staleTime: 30_000,
       retry: false,
     })),
@@ -101,8 +102,8 @@ export function useClones(ns: string, restores: Restore[] | undefined): Map<stri
   return out;
 }
 
-export function useRestoreOperation(ns: string, name: string, streaming = false, follow = false) {
-  return useOperation(ns, "restore", name, streaming, follow);
+export function useRestoreOperation(ws: string, name: string, streaming = false, follow = false) {
+  return useOperation(ws, "restore", name, streaming, follow);
 }
 
 /** How long a page follows a terminal restore whose verdict is still pending (DUI-38). */
@@ -132,26 +133,26 @@ export function useVerdictFollow(pending: boolean): { following: boolean; stoppe
 }
 
 /** The two-person request a restore waits on, when there is one (404 when none was made). */
-export function useApprovalRequest(ns: string, name: string, enabled: boolean) {
+export function useApprovalRequest(ws: string, name: string, enabled: boolean) {
   return useQuery({
-    queryKey: restoreKeys.approvalRequest(ns, name),
+    queryKey: restoreKeys.approvalRequest(ws, name),
     enabled,
     queryFn: ({ signal }) =>
-      orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}/approval-request", { params: { path: { ns, name } }, signal }))).item),
+      orNull(async () => (await call(() => api.GET("/api/v1/workspaces/{ws}/restores/{name}/approval-request", { params: { path: { ws, name } }, signal }))).item),
     refetchInterval: 5000,
   });
 }
 
-/** The namespace's EFFECTIVE approval policy. A read that fails is null: the page then
+/** The workspace's EFFECTIVE approval policy. A read that fails is null: the page then
  *  shows the out-of-band (strict) instructions, the fail-safe reading. */
-export function useApprovalPolicy(ns: string) {
+export function useApprovalPolicy(ws: string) {
   return useQuery({
-    queryKey: restoreKeys.policy(ns),
+    queryKey: restoreKeys.policy(ws),
     queryFn: async ({ signal }): Promise<ApprovalPolicy | null> => {
       try {
         // The published operation names a stray `name` path parameter this route does not have;
         // openapi-fetch drops what the path does not use.
-        return (await call(() => api.GET("/api/v1/namespaces/{ns}/approval-policy", { params: { path: { ns, name: "" } }, signal }))).item;
+        return (await call(() => api.GET("/api/v1/workspaces/{ws}/approval-policy", { params: { path: { ws, name: "" } }, signal }))).item;
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         return null;
@@ -167,27 +168,27 @@ export const useBackupList = useBackups;
 export const useConnectionList = useConnections;
 export const useDestinationList = useDestinations;
 
-export async function readDestination(ns: string, name: string, signal?: AbortSignal): Promise<Destination | null> {
-  return orNull(async () => (await call(() => api.GET("/api/v1/namespaces/{ns}/destinations/{name}", { params: { path: { ns, name } }, signal }))).item);
+export async function readDestination(ws: string, name: string, signal?: AbortSignal): Promise<Destination | null> {
+  return orNull(async () => (await call(() => api.GET("/api/v1/workspaces/{ws}/destinations/{name}", { params: { path: { ws, name } }, signal }))).item);
 }
 
 /** One destination, null when it does not exist (kept apart from R2's read, which throws on 404). */
-export function useDestination(ns: string, name: string) {
+export function useDestination(ws: string, name: string) {
   return useQuery({
-    queryKey: ["destinations-or-null", ns, name],
+    queryKey: ["destinations-or-null", ws, name],
     enabled: name.length > 0,
-    queryFn: ({ signal }) => readDestination(ns, name, signal),
+    queryFn: ({ signal }) => readDestination(ws, name, signal),
   });
 }
 
-export async function listCatalogs(ns: string, signal?: AbortSignal): Promise<CatalogView[]> {
+export async function listCatalogs(ws: string, signal?: AbortSignal): Promise<CatalogView[]> {
   return listAll("catalogs", (cursor) =>
-    call(() => api.GET("/api/v1/namespaces/{ns}/catalogs", { params: { path: { ns }, query: { limit: PAGE, cursor } }, signal })),
+    call(() => api.GET("/api/v1/workspaces/{ws}/catalogs", { params: { path: { ws }, query: { limit: PAGE, cursor } }, signal })),
   );
 }
 
-export async function readCatalog(ns: string, name: string, signal?: AbortSignal): Promise<CatalogView> {
-  return (await call(() => api.GET("/api/v1/namespaces/{ns}/catalogs/{name}", { params: { path: { ns, name } }, signal }))).item;
+export async function readCatalog(ws: string, name: string, signal?: AbortSignal): Promise<CatalogView> {
+  return (await call(() => api.GET("/api/v1/workspaces/{ws}/catalogs/{name}", { params: { path: { ws, name } }, signal }))).item;
 }
 
 export interface PointSearch {
@@ -199,14 +200,14 @@ export interface PointSearch {
 }
 
 /** Find one point in a catalog's view, page by page (the view holds at most 5000). */
-export async function findCatalogPoint(ns: string, catalog: string, match: (p: PointView) => boolean, signal?: AbortSignal, selectable = false): Promise<PointSearch> {
+export async function findCatalogPoint(ws: string, catalog: string, match: (p: PointView) => boolean, signal?: AbortSignal, selectable = false): Promise<PointSearch> {
   const out: PointSearch = { entry: null, viewExpired: false, backupVerdictsIncomplete: null, incomplete: false, budgetExhausted: false };
   let cursor: string | undefined;
   for (let read = 0; read < PAGE_BUDGET; read += 1) {
     const at = cursor;
     const page = await call(() =>
-      api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-        params: { path: { ns, name: catalog }, query: { limit: PAGE, ...(at ? { cursor: at } : {}), ...(selectable ? { selectable: "true" as const } : {}) } },
+      api.GET("/api/v1/workspaces/{ws}/catalogs/{name}/points", {
+        params: { path: { ws, name: catalog }, query: { limit: PAGE, ...(at ? { cursor: at } : {}), ...(selectable ? { selectable: "true" as const } : {}) } },
         signal,
       }),
     );
@@ -222,12 +223,12 @@ export async function findCatalogPoint(ns: string, catalog: string, match: (p: P
 }
 
 /** The catalog points connected archives offer, page by page across catalogs. */
-export async function readCatalogOffers(ns: string, signal?: AbortSignal) {
+export async function readCatalogOffers(ws: string, signal?: AbortSignal) {
   const offers: { catalog: CatalogView; entry: PointView; page: { viewExpired: boolean; backupVerdictsIncomplete: string | null } }[] = [];
   const notes: string[] = [];
   let catalogs: CatalogView[];
   try {
-    catalogs = await listCatalogs(ns, signal);
+    catalogs = await listCatalogs(ws, signal);
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
     return { offers, notes: [`The recovery catalogs could not be listed (${error instanceof Error ? error.message : String(error)}).`] };
@@ -239,8 +240,8 @@ export async function readCatalogOffers(ns: string, signal?: AbortSignal) {
       for (let read = 0; read < PAGE_BUDGET; read += 1) {
         const at = cursor;
         const page = await call(() =>
-          api.GET("/api/v1/namespaces/{ns}/catalogs/{name}/points", {
-            params: { path: { ns, name: catalog.name }, query: { limit: PAGE, selectable: "true", ...(at ? { cursor: at } : {}) } },
+          api.GET("/api/v1/workspaces/{ws}/catalogs/{name}/points", {
+            params: { path: { ws, name: catalog.name }, query: { limit: PAGE, selectable: "true", ...(at ? { cursor: at } : {}) } },
             signal,
           }),
         );
@@ -262,16 +263,16 @@ export async function readCatalogOffers(ns: string, signal?: AbortSignal) {
 }
 
 /** A Backup's own receipt digest, from its operation's evidence (the list does not carry it). */
-export async function readBackupReceiptDigest(ns: string, name: string, signal?: AbortSignal): Promise<string | null> {
-  const op = (await call(() => api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind: "backup", name } }, signal }))).item;
+export async function readBackupReceiptDigest(ws: string, name: string, signal?: AbortSignal): Promise<string | null> {
+  const op = (await call(() => api.GET("/api/v1/workspaces/{ws}/operations/{kind}/{name}", { params: { path: { ws, kind: "backup", name } }, signal }))).item;
   return op.evidence.payloadSha256 ?? null;
 }
 
 /** The target's newest topic discoveries (`?latest=true`), for its broker count. */
-export async function readLatestDiscoveries(ns: string, connection: string, signal?: AbortSignal) {
+export async function readLatestDiscoveries(ws: string, connection: string, signal?: AbortSignal) {
   const r = await call(() =>
-    api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
-      params: { path: { ns, name: connection }, query: { latest: true } },
+    api.GET("/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries", {
+      params: { path: { ws, name: connection }, query: { latest: true } },
       signal,
     }),
   );
@@ -282,24 +283,72 @@ export async function readLatestDiscoveries(ns: string, connection: string, sign
 
 /** Start a restore Preflight for exactly the prepared bytes. One deliberate click is one
  *  observation of mutable state, so each click mints its own key. */
-export async function startPreflight(ns: string, body: S["CreatePreflightRequest"], key: string): Promise<Preflight> {
-  return (await call(() => api.POST("/api/v1/namespaces/{ns}/preflights", { params: { path: { ns }, header: createHeaders(key) }, body }))).item;
+export async function startPreflight(ws: string, body: S["CreatePreflightRequest"], key: string): Promise<Preflight> {
+  return (await call(() => api.POST("/api/v1/workspaces/{ws}/preflights", { params: { path: { ws }, header: createHeaders(key) }, body }))).item;
 }
 
 /** Read a preflight against the hash on screen: the server recomputes `applicable` and `stale`. */
-export async function readPreflight(ns: string, id: string, planHash: string, signal?: AbortSignal): Promise<Preflight> {
-  return (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id }, query: planHash ? { planHash } : {} }, signal }))).item;
+export async function readPreflight(ws: string, id: string, planHash: string, signal?: AbortSignal): Promise<Preflight> {
+  return (await call(() => api.GET("/api/v1/workspaces/{ws}/preflights/{id}", { params: { path: { ws, id }, query: planHash ? { planHash } : {} }, signal }))).item;
 }
 
-export async function cancelPreflight(ns: string, id: string): Promise<void> {
-  await call(() => api.POST("/api/v1/namespaces/{ns}/preflights/{id}:cancel", { params: { path: { ns, id }, header: { Origin: window.location.origin } } }));
+export async function cancelPreflight(ws: string, id: string): Promise<void> {
+  await call(() => api.POST("/api/v1/workspaces/{ws}/preflights/{id}:cancel", { params: { path: { ws, id }, header: { Origin: window.location.origin } } }));
 }
 
-export function useCreateRestore(ns: string) {
+export function useCreateRestore(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ body, key }: { body: S["CreateRestoreRequest"]; key: string }) =>
-      call(() => api.POST("/api/v1/namespaces/{ns}/restores", { params: { path: { ns }, header: createHeaders(key) }, body })),
-    onSuccess: () => client.invalidateQueries({ queryKey: restoreKeys.list(ns) }),
+      call(() => api.POST("/api/v1/workspaces/{ws}/restores", { params: { path: { ws }, header: createHeaders(key) }, body })),
+    onSuccess: () => client.invalidateQueries({ queryKey: restoreKeys.list(ws) }),
   });
+}
+
+/** PROD-07.2: Cancel, or Clean up an interrupted restore's partial topics. The answer is the
+ *  Restore as the request left it; the page then follows it as it moves. */
+export function useRestoreAction(ws: string, name: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (action: "cancel" | "cleanup") => restoreAction(ws, name, action),
+    onSuccess: (item) => {
+      client.setQueryData(restoreKeys.item(ws, name), item);
+      void client.invalidateQueries({ queryKey: restoreKeys.list(ws) });
+      void client.invalidateQueries({ queryKey: restoreKeys.operation(ws, name) });
+    },
+  });
+}
+
+// PROD-07.2's two routes, typed here until the OpenAPI document carries them (see od23.ts).
+
+type Action = {
+  parameters: { query?: never; header: { Origin: string }; path: { ws: string; name: string }; cookie?: never };
+  requestBody?: never;
+  responses: {
+    200: { headers: { [name: string]: unknown }; content: { "application/json": S["RestoreResponse"] } };
+    default: { headers: { [name: string]: unknown }; content: { "application/problem+json": S["Problem"] } };
+  };
+};
+type ActionPath = {
+  parameters: { query?: never; header?: never; path?: never; cookie?: never };
+  get?: never;
+  put?: never;
+  post: Action;
+  delete?: never;
+  options?: never;
+  head?: never;
+  patch?: never;
+  trace?: never;
+};
+type Od23Paths = {
+  "/api/v1/workspaces/{ws}/restores/{name}/cancel": ActionPath;
+  "/api/v1/workspaces/{ws}/restores/{name}/cleanup": ActionPath;
+};
+
+const actions = api as unknown as Client<paths & Od23Paths>;
+
+/** Cancel or Clean up: an annotation on the Restore, so a repeated click writes nothing (no Idempotency-Key). */
+export async function restoreAction(ws: string, name: string, action: "cancel" | "cleanup"): Promise<S["Restore"]> {
+  const path = action === "cancel" ? "/api/v1/workspaces/{ws}/restores/{name}/cancel" : "/api/v1/workspaces/{ws}/restores/{name}/cleanup";
+  return (await call(() => actions.POST(path, { params: { path: { ws, name }, header: { Origin: window.location.origin } } }))).item;
 }

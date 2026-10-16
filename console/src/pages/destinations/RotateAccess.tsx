@@ -43,13 +43,13 @@ import { GrantFields, clearGrantSecrets, type GrantsForm } from "./GrantFields";
 import { Revealed } from "../../components/Revealed";
 
 export function RotateAccess({
-  ns,
+  ws,
   destination: live,
   onClose,
   onRotated,
   onReRead,
 }: {
-  ns: string;
+  ws: string;
   destination: Destination;
   onClose: () => void;
   onRotated: (d: Destination) => void;
@@ -66,7 +66,7 @@ export function RotateAccess({
       setAdopting(false);
     }
   }, [adopting, live, d.generation]);
-  const rotate = useRotateAccess(ns, d.name);
+  const rotate = useRotateAccess(ws, d.name);
   const [unmatched, setUnmatched] = useState<string[]>([]);
   const schema = z
     .object({ grants: grantsSchema, caChange: z.enum(["keep", "set", "clear"]), caName: z.string(), caKey: z.string() })

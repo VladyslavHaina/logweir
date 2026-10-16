@@ -14,8 +14,8 @@ import type { OperationView } from "./types";
 
 type Kind = "backup" | "restore";
 
-export function streamPath(ns: string, kind: Kind, name: string): string {
-  return `/api/v1/namespaces/${encodeURIComponent(ns)}/operations/${kind}/${encodeURIComponent(name)}/events`;
+export function streamPath(ws: string, kind: Kind, name: string): string {
+  return `/api/v1/workspaces/${encodeURIComponent(ws)}/operations/${kind}/${encodeURIComponent(name)}/events`;
 }
 
 /** `end` carries `{reason}`; anything else reads as no reason. */
@@ -31,7 +31,7 @@ function endReason(data: string): string {
  *  `onOpen(open)` says whether a stream is carrying the run (false once it has ended for good). */
 export function followOperation(
   client: QueryClient,
-  ns: string,
+  ws: string,
   kind: Kind,
   name: string,
   onOpen: (open: boolean) => void,
@@ -40,8 +40,8 @@ export function followOperation(
   let source: EventSource | null = null;
   let closed = false;
   const settle = () => {
-    void client.invalidateQueries({ queryKey: keys.list(`${kind}s`, ns) });
-    void client.invalidateQueries({ queryKey: keys.item(`${kind}s`, ns, name) });
+    void client.invalidateQueries({ queryKey: keys.list(`${kind}s`, ws) });
+    void client.invalidateQueries({ queryKey: keys.item(`${kind}s`, ws, name) });
   };
   const close = () => {
     closed = true;
@@ -50,7 +50,7 @@ export function followOperation(
   };
   const open = () => {
     if (closed) return;
-    source = new Source(streamPath(ns, kind, name));
+    source = new Source(streamPath(ws, kind, name));
     onOpen(true);
     const take = (event: MessageEvent<string>) => {
       let view: OperationView;
@@ -59,7 +59,7 @@ export function followOperation(
       } catch {
         return;
       }
-      client.setQueryData(keys.operation(ns, kind, name), view);
+      client.setQueryData(keys.operation(ws, kind, name), view);
       if (view.terminal) settle();
     };
     source.addEventListener("operation", take);
@@ -85,14 +85,14 @@ export function followOperation(
 
 /** Follow one run while its page is open. Returns whether the stream is carrying it, so
  *  the operation's poll (queries.ts useOperation) stands down only while it is. */
-export function useOperationStream(ns: string, kind: Kind, name: string, active: boolean): boolean {
+export function useOperationStream(ws: string, kind: Kind, name: string, active: boolean): boolean {
   const client = useQueryClient();
-  const allowed = useCan(ns, "operationEvents");
+  const allowed = useCan(ws, "operationEvents");
   const [streaming, setStreaming] = useState(false);
   const usable = active && allowed && !MOCK && typeof EventSource === "function";
   useEffect(() => {
     if (!usable) return undefined;
-    return followOperation(client, ns, kind, name, setStreaming);
-  }, [client, ns, kind, name, usable]);
+    return followOperation(client, ws, kind, name, setStreaming);
+  }, [client, ws, kind, name, usable]);
   return usable && streaming;
 }

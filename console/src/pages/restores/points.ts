@@ -53,7 +53,7 @@ export function isRecoveryPoint(b: Backup | null | undefined): b is Backup & { b
   );
 }
 
-/** The namespace's recovery points, newest first (creation order; ties keep list order). */
+/** The workspace's recovery points, newest first (creation order; ties keep list order). */
 export function recoveryPoints(backups: Backup[]): Backup[] {
   return backups
     .map((point, index) => ({ point, index }))
@@ -90,7 +90,7 @@ export function refusalSentence(r: Resolution): string {
   if (r.state === "missing") {
     return r.renamed
       ? `Backup ${r.name} was deleted and a different run now has its name (uid ${r.uid} is gone). Choose the point you mean; nothing was substituted.`
-      : `No Backup named ${r.name || r.uid} is in this namespace. Choose a recovery point below.`;
+      : `No Backup named ${r.name || r.uid} is in this workspace. Choose a recovery point below.`;
   }
   if (r.state === "unusable") {
     const b = r.backup;
@@ -178,7 +178,7 @@ export function catalogPointOffer(
     return no(`the controller refused this point's own Backup evidence (${e.backupVerdict}); a catalog row never outranks a verdict the controller reached`);
   }
   if (page.backupVerdictsIncomplete) {
-    return no(`the product API could not read every Backup verdict in this namespace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt`);
+    return no(`the product API could not read every Backup verdict in this workspace (${page.backupVerdictsIncomplete}), so it cannot say that no Backup refused this receipt`);
   }
   // FX-36: a record naming another document is Unreadable, and a relabelled one a Conflict: never offered.
   if (e.availability === "Unreadable" || e.availability === "Conflict" || e.selectable !== true) {
@@ -234,7 +234,7 @@ export function backupPoint(b: Backup & { backupId: string; windowCovered: Windo
   };
 }
 
-/** A point read from a catalog alone (no Backup in this namespace). Its destination's
+/** A point read from a catalog alone (no Backup in this workspace). Its destination's
  *  frozen facts are the live ones read now, so a later move is still caught at submit. */
 export function catalogPoint(catalog: Catalog, entry: PointView, destination: Destination | null): RecoveryPoint {
   const name = catalog.destinationRef?.name ?? "";

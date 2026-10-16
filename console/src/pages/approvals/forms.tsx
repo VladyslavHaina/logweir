@@ -1,5 +1,5 @@
-// The two forms that take an approver's own files: a strict namespace's
-// countersigned sidecar, and an unbound namespace's approval.json and
+// The two forms that take an approver's own files: a strict workspace's
+// countersigned sidecar, and an unbound workspace's approval.json and
 // approval.sig. Each is sent as the text the CLI wrote, never trimmed, parsed or
 // re-encoded. Text that is, or is named like, a private key is refused here,
 // cleared from the field and never kept; nothing is sent.
@@ -249,18 +249,18 @@ function useDocumentForm(draftKey: string, fields: Field[], messages: Record<Fie
  * here: what the approver reviews is what their own CLI prints from the bytes.
  */
 export function CountersignForm({
-  ns,
+  ws,
   subject,
   packet,
   onDone,
 }: {
-  ns: string;
+  ws: string;
   subject: Subject;
   packet: { approvalBytes: string; sidecarBytes: string } | null;
   onDone: (written: Written) => void;
 }) {
-  const draftKey = `${ns}/${subject.name}/countersign`;
-  const send = useCountersign(ns, subject);
+  const draftKey = `${ws}/${subject.name}/countersign`;
+  const send = useCountersign(ws, subject);
   const { form, fileNames, unmatched, refuse, choose, placeError } = useDocumentForm(draftKey, ["sidecarBytes"], {
     approvalBytes: "",
     sidecarBytes: "Paste the sidecar logweir drill countersign wrote, or choose its file.",
@@ -330,10 +330,10 @@ export function CountersignForm({
   );
 }
 
-/** An unbound namespace's v1 approval: the two files `logweir drill approve` wrote. */
-export function ApprovalFilesForm({ ns, subject, onDone }: { ns: string; subject: Subject; onDone: (written: Written) => void }) {
-  const draftKey = `${ns}/${subject.name}/files`;
-  const send = useRecordApprovalFiles(ns, subject);
+/** An unbound workspace's v1 approval: the two files `logweir drill approve` wrote. */
+export function ApprovalFilesForm({ ws, subject, onDone }: { ws: string; subject: Subject; onDone: (written: Written) => void }) {
+  const draftKey = `${ws}/${subject.name}/files`;
+  const send = useRecordApprovalFiles(ws, subject);
   const { form, fileNames, unmatched, refuse, choose, placeError } = useDocumentForm(draftKey, ["approvalBytes", "sidecarBytes"], {
     approvalBytes: "Choose approval.json or paste its text.",
     sidecarBytes: "Choose approval.sig or paste its text.",

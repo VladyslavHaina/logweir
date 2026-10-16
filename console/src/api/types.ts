@@ -5,7 +5,7 @@ import type { components } from "./schema";
 type S = components["schemas"];
 
 export type Session = S["SessionResponse"];
-export type NamespaceGrant = S["NamespaceGrant"];
+export type WorkspaceGrant = S["WorkspaceGrant"];
 export type Capabilities = S["Capabilities"];
 export type Backup = S["Backup"];
 export type Restore = S["Restore"];

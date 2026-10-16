@@ -308,7 +308,7 @@ describe("who may operate", () => {
     expect(grantFor(viewer, "team-a").can?.connectionsRead).toBe(true);
     expect(grantFor(viewer, "team-b")).toEqual({ known: true, can: null, mayOperate: false });
     expect(grantFor(undefined, "team-a").known).toBe(false);
-    const oidcOperator: S["SessionResponse"] = { ...viewer, namespaces: viewer.namespaces.map((g) => ({ ...g, roles: ["operator"] })) };
+    const oidcOperator: S["SessionResponse"] = { ...viewer, workspaces: viewer.workspaces.map((g) => ({ ...g, roles: ["operator"] })) };
     expect(grantFor(oidcOperator, "team-a").mayOperate).toBe(true);
   });
 
