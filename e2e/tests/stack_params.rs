@@ -1845,7 +1845,7 @@ fn shard_offences(job: &serde_yaml::Value, binaries: &BTreeSet<String>) -> Vec<S
         .filter_map(|s| s["run"].as_str());
     if !runs.into_iter().any(|r| {
         let lines: Vec<&str> = r.lines().map(str::trim).collect();
-        lines.iter().any(|l| *l == SHARD_FILTER)
+        lines.contains(&SHARD_FILTER)
             && lines
                 .iter()
                 .any(|l| l.starts_with(SHARD_RUN) && l.contains(SHARD_SELECTION))
