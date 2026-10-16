@@ -24,12 +24,9 @@ adoption and reinstall are in
   projected token: the name-scoped accounts, Roles and RoleBindings persist with
   the release so later hooks can run, with token automount off except in a hook
   Pod.
-- **Other runner namespaces** are listed in
-  `identity.authorizedRunnerNamespaces` (the release namespace always is). A
-  short-lived distributor copies the established Secret's exact bytes into a
-  fixed retained Secret there, and fails if a different signer is present. The
-  trust reference is global, so the chart enforces one installation identity per
-  cluster.
+- **Every runner Job runs in the release namespace** (OD-23: one namespace per
+  install), so the signer is never copied anywhere. The trust reference is
+  global, so the chart enforces one installation identity per cluster.
 - **The bootstrap image** reads and patches the private identity, so it is
   separate from `runnerImage` and pinned by digest (a mutable one needs the
   development-only override). The publication gate runs `identity bootstrap
@@ -135,8 +132,8 @@ March still verifies in December. The controller's one write to the object is a
 holder of a write verb on `trustpolicies` (`get`/`list`/`watch`,
 `create`/`update`/`patch`, and **no `delete`**: deleting a policy sends its
 namespaces back to `legacy-roster-v1`, so withdrawing trust is an edit). Bind it
-to someone without `logweir-operator`, who could otherwise add their own key and
-approve their own restore:
+to someone who does not request restores in the console, who could otherwise add
+their own key and approve their own restore:
 
 ```bash
 kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
