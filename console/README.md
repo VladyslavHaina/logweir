@@ -159,7 +159,6 @@ Dependabot proposes npm updates weekly, grouped, once a release is 14 days old
 | `src/api/session.tsx` | the session document under the gate: `useSessionDoc`, `useGrant`, `useCan` |
 | `src/api/stream.ts` | one run's event stream, written into the query cache |
 | `src/api/schema.d.ts` | generated from the schema; never edited by hand |
-| `src/api/od23.ts` | OD-23-core shapes the schema does not carry yet (the registry fields, a restore's interruption and schemas); goes once `npm run gen:api` carries them |
 | `src/app/` | the session gate, the shell (masthead, workspace switcher, shown only with more than one workspace, user menu, navigation with counts) and the Overview's numbers |
 | `src/lib/shell.ts` | `shellArg`: a value reaches a command an operator copies only shaped and single-quoted, or as a placeholder |
 | `src/router.tsx` | the hash routes; each page group adds its routes in one line |
