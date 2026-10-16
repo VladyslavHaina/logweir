@@ -13,9 +13,10 @@ name: ci-trace
 # (scripts/test-ci-gate.py) and is proven live once ci.yml's gates use the
 # action (FX-53 stage 4).
 #
-# THE TRACED RUN (weekly, and on dispatch). Each unit gate and each e2e shard
-# runs its own command under strace (scripts/ci-trace.py run): the unit gates
-# `scripts/ci-check.sh <gate>`, as ci.yml's check rows do; the e2e shards only
+# THE TRACED RUN (weekly, and on dispatch). Every gate that can skip runs its
+# own command under strace (scripts/ci-trace.py run): each check gate (lint,
+# the unit groups, generated, python, docs) `scripts/ci-check.sh <gate>`, as
+# ci.yml's check rows do; the e2e shards only
 # the nextest run of their binaries from an archive (not docker, not cargo),
 # after the stack is up, as ci.yml's shards do. Every file the command opened,
 # stat'ed, probed or executed is mapped to the checkout's tracked files, and
@@ -26,8 +27,10 @@ name: ci-trace
 # ignored. A canary first traces a known command, so a change in strace's
 # output format fails the job instead of passing it. The gates and shards come
 # from ci/gates.toml (`describe`); this workflow publishes nothing and records
-# no marker. Not traced: the `--features e2e` crate rows under crates/ (they
-# run in shard 4 after the suite), and directory listings (getdents).
+# no marker. Not traced: the `always` gates (supply-chain, console), which
+# never skip, so an undeclared input cannot skip them; the `--features e2e`
+# crate rows under crates/ (they run in shard 4 after the suite); and
+# directory listings (getdents).
 on:
   pull_request:
     paths:
@@ -111,14 +114,16 @@ jobs:
           grep -q "^job 'gate-machinery': job 'gate-machinery' did not pass (in_progress)" explain.out
           grep -Eq "^tree [0-9a-f]{40}: (ok|its inputs at [0-9a-f]{40} hash to [0-9a-f]{64})$" explain.out
 
-  # The gates to trace, from the map: every unit gate, with the cache its ci.yml
-  # job restores, and every e2e shard, with the nextest filter of its binaries.
+  # The gates to trace, from the map: every check gate that can skip (not an
+  # e2e shard, not `always`), with the rust-cache its ci.yml check row
+  # restores (that row's `cache`, else its job's name), and every e2e shard,
+  # with the nextest filter it runs.
   plan:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      unit: ${{ steps.plan.outputs.unit }}
+      check: ${{ steps.plan.outputs.check }}
       e2e: ${{ steps.plan.outputs.e2e }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,18 +133,28 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
         run: |
           bash scripts/ci-gate.sh describe > "$RUNNER_TEMP/map.json"
-          unit="$(jq -c '[.gates | to_entries[] | select(.key | startswith("unit-")) | {gate: .key, cache: .value.job}]' "$RUNNER_TEMP/map.json")"
+          # ci.yml's check rows: gate1..gate3 and the cache each restores (yq is
+          # on the runner image; without it each gate restores its job's name).
+          yq -o=json '.jobs.check.strategy.matrix.include' .github/workflows/ci.yml > "$RUNNER_TEMP/rows.json" 2>/dev/null \
+            || echo '[]' > "$RUNNER_TEMP/rows.json"
+          check="$(jq -c --slurpfile rows "$RUNNER_TEMP/rows.json" '
+            ($rows[0] // []) as $r
+            | [.gates | to_entries[]
+               | select((.key | startswith("e2e-") | not) and (.value.always | not))
+               | .key as $g
+               | {gate: $g, cache: ([$r[] | select(.gate1 == $g or .gate2 == $g or .gate3 == $g) | .cache][0] // .value.job)}]
+            ' "$RUNNER_TEMP/map.json")"
           # Each shard's filter is the map's (`ci-gate.sh filter`: whole binaries
           # less their excepts, plus rows), as ci.yml's shards run it.
           e2e="$(for gate in $(jq -r '.gates | keys[] | select(startswith("e2e-"))' "$RUNNER_TEMP/map.json"); do
             filter="($(bash scripts/ci-gate.sh filter "$gate")) & not test(a_pod_really_reaches_the_k8s_listener)"
             jq -nc --arg gate "$gate" --arg filter "$filter" '{gate: $gate, filter: $filter}'
           done | jq -sc .)"
-          [ "$(jq length <<< "$unit")" -ge 1 ] && [ "$(jq length <<< "$e2e")" -ge 1 ]
-          echo "unit=$unit" | tee -a "$GITHUB_OUTPUT"
+          [ "$(jq length <<< "$check")" -ge 1 ] && [ "$(jq length <<< "$e2e")" -ge 1 ]
+          echo "check=$check" | tee -a "$GITHUB_OUTPUT"
           echo "e2e=$e2e" | tee -a "$GITHUB_OUTPUT"
 
-  trace-unit:
+  trace-check:
     needs: plan
     name: trace ${{ matrix.gate }}
     runs-on: ubuntu-24.04
@@ -149,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.unit) }}
+        include: ${{ fromJSON(needs.plan.outputs.check) }}
     # ci.yml's check rows' environment, so the gate runs as it does there.
     env:
       CARGO_INCREMENTAL: "0"
