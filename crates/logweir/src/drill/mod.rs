@@ -2685,6 +2685,8 @@ fn execute_with_validated_approval(
     if subprocess::stop_requested() {
         return Err(stopped());
     }
+    // PROD-07.2: the targets record, put in phase 6 before the engine starts.
+    let mut targets_record: Option<reconcile::TargetsRecord> = None;
     let created = if let Some(kept) = reconcile {
         // The interrupted run's kept topics, with the IDs it recorded when
         // it created them: what `logweir restore cleanup` removes.
@@ -2715,31 +2717,18 @@ fn execute_with_validated_approval(
             &created,
             c.spec.target.teardown.ttl_seconds(),
         );
-        // PROD-07.2: the targets record, before the engine starts, so a run
-        // that ends without a scorecard can be reconciled.
-        if let Some(creation) = sc.target.creation.as_ref() {
-            let record = reconcile::TargetsRecord {
+        // PROD-07.2: what the targets record will say, so a run that ends
+        // without a scorecard can be reconciled.
+        targets_record = sc
+            .target
+            .creation
+            .as_ref()
+            .map(|creation| reconcile::TargetsRecord {
                 run_id: run_id.to_string(),
                 plan_hash: logweir_core::ids::sha256_prefixed(c.spec_text.as_bytes()),
                 cluster_id: admitted.target_cluster_id.clone(),
                 topics: creation.topics.clone(),
-            };
-            match reconcile::write(&c.store, &record, signer) {
-                Ok(key) => targets_written(run_id, key),
-                Err(e) => {
-                    phase9_teardown::after_failure(
-                        deleter,
-                        &admitted.topic_mapping,
-                        &created,
-                        c.spec.target.teardown.phase9_policy(false),
-                        c.spec.target.mode,
-                        run_id,
-                        &mut std::io::stdout().lock(),
-                    );
-                    return Err(e);
-                }
-            }
-        }
+            });
         created
     };
     sc.format_version = logweir_core::scorecard::format_version_with_target_creation(
@@ -2765,6 +2754,13 @@ fn execute_with_validated_approval(
             engine_report: logweir_core::engine::EngineReport::Absent,
         }),
         None => record(&mut sc, 6, "restore", || {
+            // The signed targets record first: no engine starts without it,
+            // and a failed put tears down what was created (phase 6's error
+            // arm).
+            if let Some(record) = targets_record.as_ref() {
+                let key = reconcile::write(&c.store, record, signer)?;
+                targets_written(run_id, key);
+            }
             phase6_restore::run(
                 c.engine.as_ref(),
                 &plan,

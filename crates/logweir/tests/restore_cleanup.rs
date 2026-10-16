@@ -406,9 +406,10 @@ fn without_the_runs_verified_record_nothing_is_deleted() {
     assert!(refusal(run(&plan, &Store::in_memory("logweir"), &cluster))
         .contains("is not in the evidence store"));
 
-    // Not a clone plan.
+    // Not a clone plan: PROD-07.2 lets the signed record, not the plan,
+    // say what may be cleaned, and the record is another plan's.
     let plain = plan_text("clone-", "delete");
-    assert!(refusal(run(&plain, &store, &cluster)).contains("not one"));
+    assert!(refusal(run(&plain, &store, &cluster)).contains("another plan's run"));
 
     assert!(cluster.asked().is_empty(), "{:?}", cluster.asked());
 }
