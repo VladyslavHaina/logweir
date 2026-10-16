@@ -420,28 +420,44 @@ impl Drop for Overlay {
 
 // The Secret refusal
 
-/// The controller never reads a Secret: a source-level refusal, not a
+/// The controller never reads a Secret's data: a source-level refusal, not a
 /// permission and not a comment. A controller that reads a SCRAM password or a
 /// signing key directly is holding credential material it has no business
 /// holding; the credential goes to the Job, by reference, and the Job mounts
-/// it.
+/// it. The one Secret handle is the workspace gate's (`workspace.rs`), and it
+/// reads metadata only (PROD-19.1): its labels, never its data.
 #[test]
 fn the_controller_never_reads_a_secret() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders = Vec::new();
     let mut files = 0usize;
+    let mut gate_reads = 0usize;
     walk(&src, &mut |path, text| {
         files += 1;
-        for needle in ["Api::<Secret>", "\"secrets\""] {
-            if text.contains(needle) {
+        let gate = path.ends_with("workspace.rs");
+        for needle in ["Api::<Secret>", "Api<Secret>", "\"secrets\""] {
+            if text.contains(needle) && !gate {
                 offenders.push(format!("{}: {needle}", path.display()));
+            }
+        }
+        if gate {
+            // One Secret handle, and its one call is the metadata read
+            // (`manifest_lint::weirkeeper_reads_secret_metadata_only` holds
+            // the method set across the crate).
+            gate_reads = text.matches("Api<Secret>").count();
+            if gate_reads != 1 || !text.contains("api.get_metadata_opt(&name)") {
+                offenders.push(format!(
+                    "{}: the gate's Secret read changed",
+                    path.display()
+                ));
             }
         }
     });
     assert!(files >= 3, "the walk must see src/, got {files} files");
+    assert!(gate_reads >= 1, "the gate's Secret read was not found");
     assert!(
         offenders.is_empty(),
-        "weirkeeper must not read Secrets: {offenders:?}"
+        "weirkeeper must not read Secrets' data: {offenders:?}"
     );
 }
 

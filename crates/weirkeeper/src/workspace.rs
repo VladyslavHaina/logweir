@@ -23,6 +23,7 @@
 //! carry its referrer's label (the API writes it on every credential it
 //! creates; a `kubectl` writer must set it).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -279,7 +280,7 @@ pub fn namespace() -> &'static str {
 
 /// One object a Logweir object names, whose workspace label must be the
 /// referrer's.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Referent {
     /// A `KafkaCluster`; its own Secrets are checked against the referrer too.
     Cluster(String),
@@ -387,6 +388,11 @@ impl Referrer for Backup {
                 .as_ref()
                 .and_then(|t| t.retry_of.as_ref())
                 .map(|r| Referent::Backup(local(r))),
+        );
+        out.extend(
+            spec.schedule_ref
+                .as_ref()
+                .map(|r| Referent::Schedule(r.name.clone())),
         );
         out.extend(archive_secret(Some(&spec.archive)));
         out
@@ -501,11 +507,18 @@ impl Referrer for ProtectionPolicy {
 
 /// **The workspace gate**, at the top of every namespaced reconcile: the
 /// object's own label must be one of the install's workspaces
-/// ([`REASON_UNKNOWN`]), and every object and Secret it names, and every
-/// Secret its `KafkaCluster`s and `BackupDestination`s name, must carry the
-/// same label ([`REASON_MISMATCH`]). A referent that does not exist is left to
-/// the reconcile, which already says so. An object being deleted is let
-/// through, so its clean-up still runs.
+/// ([`REASON_UNKNOWN`]), and everything it names must carry the same label
+/// ([`REASON_MISMATCH`]): every object and Secret in its spec, and, followed
+/// to the end, everything those objects name in turn. A reconcile reads
+/// through its referents (a Preflight's Restore's target connection, a
+/// Switchover's Restore's destinations), so a same-workspace referent that
+/// itself names another workspace's object or Secret is refused here, at the
+/// referrer, and not only at its own reconcile.
+///
+/// A referent that does not exist is left to the reconcile, which already
+/// says so. An object being deleted is held to the same rule: a clone's
+/// clean-up re-reads its destinations, so a refused clone keeps its finalizer
+/// and its status says why.
 ///
 /// # Errors
 ///
@@ -514,62 +527,34 @@ pub async fn admit<K: Referrer>(
     client: &Client,
     object: &K,
 ) -> Result<Option<Refusal>, kube::Error> {
-    if object.meta().deletion_timestamp.is_some() {
-        return Ok(None);
-    }
     if let Err(refusal) = installed().of(object) {
         return Ok(Some(refusal));
     }
     let namespace = object.namespace().unwrap_or_default();
     let mut pending = object.referents();
+    let mut seen: HashSet<Referent> = HashSet::new();
     while let Some(referent) = pending.pop() {
+        if !seen.insert(referent.clone()) {
+            continue;
+        }
+        let (c, ns, p) = (client, namespace.as_str(), &mut pending);
         let verdict = match referent {
-            Referent::Cluster(name) => {
-                let api: Api<KafkaCluster> = Api::namespaced(client.clone(), &namespace);
-                match api.get_opt(&name).await? {
-                    Some(cluster) => {
-                        pending.extend(cluster.referents());
-                        same(object, &cluster)
-                    }
-                    None => Ok(()),
-                }
-            }
+            Referent::Cluster(name) => follow::<KafkaCluster, _>(c, ns, object, &name, p).await?,
             Referent::Destination(name) => {
-                let api: Api<BackupDestination> = Api::namespaced(client.clone(), &namespace);
-                match api.get_opt(&name).await? {
-                    Some(destination) => {
-                        pending.extend(destination.referents());
-                        same(object, &destination)
-                    }
-                    None => Ok(()),
-                }
+                follow::<BackupDestination, _>(c, ns, object, &name, p).await?
             }
             Referent::Catalog(name) => {
-                let api: Api<RecoveryCatalog> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
+                follow::<RecoveryCatalog, _>(c, ns, object, &name, p).await?
             }
             Referent::Schedule(name) => {
-                let api: Api<BackupSchedule> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
+                follow::<BackupSchedule, _>(c, ns, object, &name, p).await?
             }
-            Referent::Backup(name) => {
-                let api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
-            }
-            Referent::Restore(name) => {
-                let api: Api<Restore> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
-            }
-            Referent::Switchover(name) => {
-                let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
-            }
-            Referent::Approval(name) => {
-                let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
-                labelled_like(object, api.get_metadata_opt(&name).await?)
-            }
+            Referent::Backup(name) => follow::<Backup, _>(c, ns, object, &name, p).await?,
+            Referent::Restore(name) => follow::<Restore, _>(c, ns, object, &name, p).await?,
+            Referent::Switchover(name) => follow::<Switchover, _>(c, ns, object, &name, p).await?,
+            Referent::Approval(name) => follow::<Approval, _>(c, ns, object, &name, p).await?,
             Referent::Secret(name) => {
-                let api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+                let api: Api<Secret> = Api::namespaced(client.clone(), ns);
                 labelled_like(object, api.get_metadata_opt(&name).await?)
             }
         };
@@ -578,6 +563,25 @@ pub async fn admit<K: Referrer>(
         }
     }
     Ok(None)
+}
+
+/// Read one referent of kind `R`, queue everything it names, and hold it to
+/// the referrer's workspace. Absent: admitted (the reconcile says so).
+async fn follow<R: Referrer, K: Referrer>(
+    client: &Client,
+    namespace: &str,
+    object: &K,
+    name: &str,
+    pending: &mut Vec<Referent>,
+) -> Result<Result<(), Refusal>, kube::Error> {
+    let api = Api::<R>::namespaced(client.clone(), namespace);
+    Ok(match api.get_opt(name).await? {
+        Some(found) => {
+            pending.extend(found.referents());
+            same(object, &found)
+        }
+        None => Ok(()),
+    })
 }
 
 fn labelled_like<A, B>(referrer: &A, referent: Option<B>) -> Result<(), Refusal>
@@ -610,7 +614,7 @@ pub async fn gate<K: Referrer>(client: &Client, object: &K) -> Result<Option<Act
         .iter()
         .any(|c| c["reason"] == reason && c["message"] == message.as_str());
     if !written {
-        let api: Api<K> = Api::namespaced(client.clone(), &object.namespace().unwrap_or_default());
+        let api = Api::<K>::namespaced(client.clone(), &object.namespace().unwrap_or_default());
         let patch = json!({
             "status": {
                 "phase": "Failed",

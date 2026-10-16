@@ -282,7 +282,8 @@ fn every_spec_reference_field_is_a_referent() {
         "spec": {"sourceRef": {"name": "src"}, "destinationRef": {"name": "dst"},
                  "topics": ["t"], "archive": {"url": "s3://b/p", "secretRef": {"name": "arch"}},
                  "triggeredBy": "manual", "deadlineSeconds": 900,
-                 "trigger": {"kind": "Retry", "attempt": 1, "retryOf": {"name": "b0"}}}
+                 "trigger": {"kind": "Retry", "attempt": 1, "retryOf": {"name": "b0"}},
+                 "scheduleRef": {"name": "s0"}}
     }));
     let schedule: BackupSchedule = object(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupSchedule", "metadata": meta("s", Some("dev")),
@@ -332,6 +333,7 @@ fn every_spec_reference_field_is_a_referent() {
             r#"Cluster("src")"#,
             r#"Destination("dst")"#,
             r#"Backup("b0")"#,
+            r#"Schedule("s0")"#,
             r#"Secret("arch")"#,
         ],
     );
@@ -404,4 +406,179 @@ fn created_backups_and_jobs_carry_the_parents_workspace() {
         Some("dev")
     );
     assert_eq!(workspace::label_of(&job_of(&backup(None))), None);
+}
+
+/// A referent the API server answers 404 for: absent, which the gate leaves
+/// to the reconcile.
+fn missing(suffix: &'static str) -> Route {
+    Route {
+        method: "GET",
+        path_suffix: suffix,
+        status: 404,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                     "reason": "NotFound", "code": 404, "message": "not found"})
+        .to_string(),
+    }
+}
+
+/// A `dev` Restore named `r` whose target connection is `tgt`, and nothing
+/// else that exists.
+fn restore_json(ws: Option<&str>) -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "metadata": meta("r", ws),
+        "spec": {"planBytes": "x", "approvalRef": {"name": "a"},
+                 "sourceArchive": {"url": "s3://b/p"}, "backupSetRef": "bs",
+                 "pointInTime": "2026-01-01T00:00:00Z",
+                 "target": {"clusterRef": {"name": "tgt"}, "mode": "scratch",
+                            "topicNaming": {"prefix": "x-"}},
+                 "deadlineSeconds": 900}
+    })
+}
+
+/// What the Restore `r` reaches: its connection `tgt` (in `cluster_ws`, with
+/// the credential `tgt-cred` in `secret_ws`) and an approval that is not
+/// there.
+fn through_restore(cluster_ws: Option<&str>, secret_ws: Option<&str>) -> Vec<Route> {
+    vec![
+        get("/restores/r", &restore_json(Some("dev"))),
+        get(
+            "/kafkaclusters/tgt",
+            &cluster("tgt", cluster_ws, Some("tgt-cred")),
+        ),
+        get("/secrets/tgt-cred", &secret("tgt-cred", secret_ws)),
+        missing("/approvals/a"),
+    ]
+}
+
+/// The security review's bypass: a reconcile that reads THROUGH a referent.
+/// A `dev` Preflight checking the `dev` Restore `r` dials that Restore's
+/// target connection and mounts its credential in a check Job, so the gate
+/// follows the Restore's own references. The Restore itself is refused at its
+/// own reconcile, but it still exists for a Preflight (or a Switchover) to
+/// name. Each mismatch is refused at the Preflight, with only the status
+/// written. CONTROL: the same chain, all `dev`, is admitted.
+#[tokio::test]
+async fn a_preflight_is_refused_for_what_its_restore_names_in_another_workspace() {
+    let pf_json = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight", "metadata": meta("pf", Some("dev")),
+        "spec": {"request": {"operation": "Restore", "restore": {"restoreRef": {"name": "r"}},
+                             "timeoutSeconds": 120}}
+    });
+    let pf: weirkeeper::crds::preflight::Preflight = object(pf_json.clone());
+    for (label, cluster_ws, secret_ws, names) in [
+        (
+            "connection in prd",
+            Some("prd"),
+            Some("prd"),
+            "KafkaCluster `tgt` is in workspace `prd`",
+        ),
+        (
+            "credential in prd",
+            Some("dev"),
+            Some("prd"),
+            "Secret `tgt-cred` is in workspace `prd`",
+        ),
+        (
+            "credential in no workspace",
+            Some("dev"),
+            None,
+            "Secret `tgt-cred` is in no workspace",
+        ),
+    ] {
+        let mut table = through_restore(cluster_ws, secret_ws);
+        table.push(patch("/preflights/pf/status", &pf_json));
+        let (client, seen, bodies) = mock_client_recording_bodies(table);
+        assert!(
+            workspace::gate(&client, &pf).await.unwrap().is_some(),
+            "{label}: refused"
+        );
+        let written: Vec<String> = bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.method != "GET")
+            .map(|b| b.body.clone())
+            .collect();
+        assert_eq!(
+            written.len(),
+            1,
+            "{label}: the status only: {:?}",
+            seen.lock().unwrap()
+        );
+        let status: Value = serde_json::from_str(&written[0]).unwrap();
+        assert_eq!(
+            status["status"]["conditions"][0]["reason"], REASON_MISMATCH,
+            "{label}"
+        );
+        let text = status["status"]["conditions"][0]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains(names) && text.ends_with("this Preflight is in workspace `dev`"),
+            "{label}: {text}"
+        );
+    }
+    let (client, seen, _) = mock_client_recording_bodies(through_restore(Some("dev"), Some("dev")));
+    assert!(workspace::gate(&client, &pf).await.unwrap().is_none());
+    assert!(seen.lock().unwrap().iter().all(|r| r.method == "GET"));
+}
+
+/// The same, one hop further, for a `Switchover`: its job dials the Restore's
+/// target connection with that connection's credential. A `dev` Switchover
+/// naming a `dev` Restore whose connection's credential is `prd` is refused at
+/// the Switchover. CONTROL: all `dev` is admitted.
+#[tokio::test]
+async fn a_switchover_is_refused_for_what_its_restore_names_in_another_workspace() {
+    let sw_json = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover", "metadata": meta("sw", Some("dev")),
+        "spec": {"planBytes": "x", "approvalRef": {"name": "a"},
+                 "restoreRef": {"name": "r", "uid": "uid-r"}, "deadlineSeconds": 600}
+    });
+    let sw: Switchover = object(sw_json.clone());
+    let mut table = through_restore(Some("dev"), Some("prd"));
+    table.push(patch("/switchovers/sw/status", &sw_json));
+    let (client, _, bodies) = mock_client_recording_bodies(table);
+    assert!(workspace::gate(&client, &sw).await.unwrap().is_some());
+    let written: Vec<String> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b.method != "GET")
+        .map(|b| b.body.clone())
+        .collect();
+    assert_eq!(written.len(), 1, "the status only");
+    assert!(
+        written[0].contains(
+            "Secret `tgt-cred` is in workspace `prd`; this Switchover is in workspace `dev`"
+        ),
+        "{}",
+        written[0]
+    );
+    let (client, _, _) = mock_client_recording_bodies(through_restore(Some("dev"), Some("dev")));
+    assert!(workspace::gate(&client, &sw).await.unwrap().is_none());
+}
+
+/// An object being deleted is held to the same rule: a TTL clone's clean-up
+/// re-reads its destinations while the Restore is being deleted, so a gate
+/// that let deletions through would mount what it names unchecked. A deleting
+/// `dev` Restore whose connection's credential is `prd` is refused (it keeps
+/// its finalizer and says why). CONTROL: the same deleting Restore, all
+/// `dev`, is admitted, so a clean clone's clean-up still runs.
+#[tokio::test]
+async fn a_restore_being_deleted_is_still_held_to_its_workspace() {
+    let mut deleting = restore_json(Some("dev"));
+    deleting["metadata"]["deletionTimestamp"] = json!("2026-10-16T10:00:00Z");
+    deleting["metadata"]["finalizers"] = json!(["logweir.dev/clone-cleanup"]);
+    let restore: Restore = object(deleting.clone());
+    let mut table = through_restore(Some("dev"), Some("prd"));
+    table.push(patch("/restores/r/status", &deleting));
+    let (client, _, bodies) = mock_client_recording_bodies(table);
+    assert!(workspace::gate(&client, &restore).await.unwrap().is_some());
+    assert!(bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|b| b.method == "PATCH" && b.body.contains(REASON_MISMATCH)));
+    let (client, _, _) = mock_client_recording_bodies(through_restore(Some("dev"), Some("dev")));
+    assert!(workspace::gate(&client, &restore).await.unwrap().is_none());
 }
