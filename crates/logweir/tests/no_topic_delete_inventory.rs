@@ -302,7 +302,10 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
     for before in [
         "verified_scorecard(inputs, store)?",
         "check_cluster(&sc.target.cluster_id, &current_cluster)",
-        "let plan = cleanup_plan(creation, &current);",
+        "let mut plan = cleanup_plan(creation, &current);",
+        // od23 review M-3: an original-name topic leaves the delete list
+        // before the one call.
+        ".partition(|t| inputs.spec.source.topics.contains(t));",
     ] {
         let at = cleanup
             .find(before)
