@@ -259,6 +259,86 @@ fn the_cleanup_deletes_only_recorded_topics_whose_id_is_unchanged() {
     assert_eq!(parsed.deleted, ["clone-orders"]);
 }
 
+/// **Only a clone's or a reconcile's scorecard drives a cleanup** (od23
+/// review M-4): every run signs `target.creation`, so an ordinary `newTopic`
+/// run's scorecard (no TTL, no reconcile note) is refused and nothing is
+/// asked of the deleter. The control is the same scorecard with the
+/// reconcile's note: its topic is deleted.
+#[test]
+fn an_ordinary_runs_scorecard_deletes_nothing() {
+    let plan = new_topic_plan("r-", "");
+    for (note, asked) in [
+        ("replay selection: the whole window", Vec::<&str>::new()),
+        (
+            "reconciliation of interrupted run R; nothing was resumed",
+            vec!["r-orders"],
+        ),
+    ] {
+        let store = store_with(&plan, &[("r-orders", Some(A))], |d| {
+            new_topic_doc(d, "r-", note)
+        });
+        let cluster = Cluster::new(&[("r-orders", TopicIdRead::Id(A.into()))]);
+        let result = run(&plan, &store, &cluster);
+        if asked.is_empty() {
+            assert!(refusal(result).contains("neither a clone"));
+        } else {
+            result.expect("the reconcile's cleanup runs");
+        }
+        assert_eq!(cluster.asked(), asked, "{note}");
+    }
+}
+
+/// **A reconcile's cleanup never deletes a topic under its original name**
+/// (od23 review M-3): an original-name restore's topic may hold writes made
+/// after the reconcile, so it is left and named, and the cleanup is final
+/// (no retry). The control is the prefixed restore of the row above.
+#[test]
+fn an_original_name_topic_is_left_by_the_cleanup() {
+    let plan = new_topic_plan("", "    original_name: {owners: []}\n");
+    let store = store_with(&plan, &[("orders", Some(A))], |d| {
+        new_topic_doc(
+            d,
+            "",
+            "reconciliation of interrupted run R; nothing was resumed",
+        )
+    });
+    let cluster = Cluster::new(&[("orders", TopicIdRead::Id(A.into()))]);
+    let cleaned = run(&plan, &store, &cluster).expect("the cleanup runs");
+    assert!(cluster.asked().is_empty(), "{:?}", cluster.asked());
+    assert!(!cleaned.retry);
+    assert!(cleaned.report.deleted.is_empty());
+    assert_eq!(cleaned.report.left.len(), 1);
+    assert_eq!(cleaned.report.left[0].topic, "orders");
+    assert!(cleaned.report.left[0]
+        .reason
+        .contains("original topic name"));
+}
+
+fn new_topic_plan(prefix: &str, naming_extra: &str) -> String {
+    format!(
+        "source:\n  storage: {{backend: s3, bucket: b, prefix: p, region: us-east-1}}\n  \
+         backup: latestCompleted\n  topics: [orders]\n\
+         target:\n  bootstrap_servers: [\"k:9092\"]\n  mode: newTopic\n  \
+         topic_mapping_prefix: \"drill-\"\n  topic_naming:\n    prefix: \"{prefix}\"\n{naming_extra}\
+         sample:\n  window_start: \"2026-10-13T00:00:00Z\"\n  \
+         window_end: \"2026-10-13T01:00:00Z\"\n  coverage: complete\n\
+         objectives: {{}}\n\
+         evidence: {{backend: s3, bucket: e, prefix: logweir/, region: us-east-1}}\n"
+    )
+}
+
+/// The fixture clone document as an ordinary `newTopic` run's: no TTL, the
+/// plan's prefix, and `note` opening its coverage note.
+fn new_topic_doc(d: &mut serde_json::Value, prefix: &str, note: &str) {
+    d["target"]["mode"] = "newTopic".into();
+    d["target"]["topic_mapping_prefix"] = prefix.into();
+    d["target"]["creation"]
+        .as_object_mut()
+        .unwrap()
+        .remove("teardown_after_seconds");
+    d["sample"]["coverage_note"] = note.into();
+}
+
 /// **C42's unit half: a repointed cluster deletes nothing** — the cluster's
 /// ID is not the scorecard's, so the cleanup refuses
 /// `CloneTargetClusterChanged` before any ID is read or any topic named.

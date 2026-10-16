@@ -279,7 +279,8 @@ fn target_client(
         &spec.target.bootstrap_servers,
         auth,
     )?
-    .with_deletable_names(mapped_target_names(spec));
+    .with_deletable_names(mapped_target_names(spec))
+    .with_protected_names(spec.source.topics.iter().cloned());
     Ok(reader)
 }
 
@@ -418,7 +419,22 @@ pub fn clean(
             (name, now)
         })
         .collect();
-    let plan = cleanup_plan(creation, &current);
+    let mut plan = cleanup_plan(creation, &current);
+    // A topic under a source topic's own name (an original-name restore) is
+    // left and named, as the run's own phase 9 leaves it: producers may have
+    // written to it since (od23 review M-3).
+    let (originals, delete): (Vec<String>, Vec<String>) = std::mem::take(&mut plan.delete)
+        .into_iter()
+        .partition(|t| inputs.spec.source.topics.contains(t));
+    plan.delete = delete;
+    plan.skipped.extend(originals.into_iter().map(|t| {
+        (
+            t,
+            "an original topic name, which Logweir never deletes: check it and delete it \
+             yourself"
+                .to_string(),
+        )
+    }));
     let mut deleted = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
     if !plan.delete.is_empty() {

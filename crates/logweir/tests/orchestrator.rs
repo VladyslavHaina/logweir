@@ -2365,6 +2365,58 @@ fn a_partition_subset_is_restored_and_signed_as_format_2_0_0() {
     assert!(sc.format_version.starts_with("1."), "{}", sc.format_version);
 }
 
+/// **A partition subset that imports no schemas still signs** (od23
+/// review H-1). The plan names a target registry and the archive captured
+/// none, so the run writes `target.schemas.not_imported: noSnapshot` before
+/// the selection picks major 2. The run passes, and its scorecard is a 2.x
+/// version that defines the block (arm SC-1), which the signer's own check
+/// and the verifier accept. The control is the same plan without the subset:
+/// a 1.x version that defines the block.
+///
+/// KILLS: the schemas raise left before the selection, which signed 2.2.0 and
+/// exited 4 after the restore had written.
+#[test]
+fn a_partition_subset_that_imports_no_schemas_signs_a_version_that_defines_the_block() {
+    for (shape, major) in [
+        (Drill::StatesAPartitionSelection, "2."),
+        (Drill::Passes, "1."),
+    ] {
+        let mut f = fixtures::orchestrator_fixture(shape);
+        f.ctx.spec.target.schema_registry = Some(logweir_core::spec::SchemaRegistrySpec {
+            url: "http://registry.invalid:8081".into(),
+            username: None,
+        });
+        execute_with(&f.args, &f.run_id, &f.ctx).expect("the run signs");
+        let bytes = scorecard_from_store(&f);
+        let sc: logweir_core::scorecard::Scorecard = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(sc.outcome, Outcome::Pass);
+        assert!(
+            sc.format_version.starts_with(major),
+            "{}",
+            sc.format_version
+        );
+        assert!(
+            logweir_core::scorecard::defines_schemas(&sc.format_version),
+            "{}",
+            sc.format_version
+        );
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        assert_eq!(
+            sc.target.schemas.and_then(|s| s.not_imported).as_deref(),
+            Some(logweir_core::schema_registry::NOT_IMPORTED_NO_SNAPSHOT)
+        );
+        let sidecar: logweir_evidence::Sidecar =
+            serde_json::from_slice(&std::fs::read(f.out.with_extension("sig")).unwrap()).unwrap();
+        logweir_evidence::verify::verify_detached(
+            &signing_pub(&f),
+            logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+            &bytes,
+            &sidecar,
+        )
+        .expect("the signed scorecard verifies");
+    }
+}
+
 /// **A stated window start is restored, judged over its window and
 /// SIGNED.** The approved plan states `restore.point_in_time:
 /// "<start>/<end>"` with the start at the archive's floor (so the restore is

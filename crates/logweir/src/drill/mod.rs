@@ -2448,6 +2448,12 @@ fn execute_with_validated_approval(
     .to_string();
     // A partition subset approved in the console is 2.1.0.
     raise_version_for_console_approval(&mut sc);
+    // A `target.schemas` written above, under the major the selection chose.
+    sc.format_version = logweir_core::scorecard::format_version_with_schemas(
+        &sc.format_version,
+        sc.target.schemas.is_some(),
+    )
+    .to_string();
     // Transaction markers, checked here, before phase 2 and
     // in every target mode: an archive whose restored partitions hold records
     // shaped like transaction markers is refused exit 3,
@@ -2885,6 +2891,9 @@ fn execute_with_validated_approval(
     })
     .map_err(torn_down)?;
     sc.integrity = verified.integrity.clone();
+    if let Some(kept) = reconcile {
+        kept.judge(&mut sc.integrity);
+    }
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
     complete_sample_info(&mut sc.sample, &sc.integrity);

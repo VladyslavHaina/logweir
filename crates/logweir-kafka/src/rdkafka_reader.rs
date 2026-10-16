@@ -343,7 +343,7 @@ impl RdKafkaReader {
     /// **PROD-07.2: scope `delete_topics` to exactly `names`**, a restore
     /// plan's mapped target names, in place of the scratch prefix: what
     /// `logweir restore cleanup` deletes from, so an interrupted restore under
-    /// any prefix (or under the original names) can be cleaned. The cleanup
+    /// any prefix can be cleaned (protected names still win). The cleanup
     /// still deletes only topics its signed record names, while each one's ID
     /// is the recorded one.
     #[must_use]

@@ -245,7 +245,9 @@ pub fn interrupted_patch(
 
 /// **The decision after a run Job's exit was read** (the run's own path):
 /// an exit that signed nothing (not 0, 2 or 3) from a run that printed its
-/// targets record is `Interrupted`. `None` keeps the ordinary terminal write.
+/// targets record is `Interrupted`, and so is an exit the runner never chooses
+/// (OOMKilled 137, a panic 101), which prints nothing: like a lost pod, the
+/// reconcile decides. `None` keeps the ordinary terminal write.
 #[must_use]
 pub fn after_exit(
     restore: &Restore,
@@ -257,6 +259,15 @@ pub fn after_exit(
 ) -> Option<Value> {
     if matches!(exit_code, 0 | 2 | 3) {
         return None;
+    }
+    if !(0..=4).contains(&exit_code) {
+        return after_crash(
+            restore,
+            job,
+            crate::conditions::TERMINAL_STATE_NO_EXIT_CODE,
+            finished,
+            now,
+        );
     }
     if crate::runner_log::key_values(log, TARGETS_RECORD_KEY_PREFIX).is_empty() {
         return None;

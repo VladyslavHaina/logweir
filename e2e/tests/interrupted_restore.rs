@@ -16,7 +16,7 @@
 //! | IR-1 | `restore reconcile` over the genuine record | exit 2, `fail-integrity`, per partition `restored` = the target's end offset and `expected` = the archive's count, `target.creation` the two targets, the note names the run; both readers verify; nothing written to the target |
 //! | IR-7 | `b`'s target deleted and created again, then `restore cleanup` over the reconcile's scorecard | `a`'s target deleted, `b`'s left and named `CloneTargetReplaced` |
 //! | IR-5 | the same plan again, then a fresh prefix | the old names: exit 3 at phase 0; the fresh prefix: exit 0 |
-//! | IR-6 | SIGTERM after the engine finished (during phase 7), then `restore reconcile` | the run exits 1 Cancelled with everything restored; the reconcile exits 0 `pass`, and the target is unchanged |
+//! | IR-6 | SIGTERM after the engine finished (during phase 7), then `restore reconcile` | the run exits 1 Cancelled with everything restored; the reconcile exits 0 `pass`, and the target is unchanged; with `b`'s target then deleted, the reconcile again exits 2, `partial` naming it |
 //! | IR-1b | SIGKILL to `logweir` inside `a` and its engine container killed (a deleted pod) | the reconcile over its record: exit 2 with the counts |
 //! | IR-4 | the rendered `restore.yaml` of every run | neither `checkpoint_state` nor `checkpoint_interval_secs` (B1's render half; collected, asserted last) |
 //!
@@ -661,6 +661,38 @@ fn an_interrupted_restore_is_honest_live() {
             before,
             (offsets(&t3[0]), offsets(&t3[1])),
             "no second restore"
+        );
+        // M-2: `b`'s target deleted, the reconcile again: only `a` is kept,
+        // and a verification of part of the run is never a pass.
+        kafka_topics(&[
+            "--bootstrap-server",
+            "kafka-broker-1:9094",
+            "--delete",
+            "--topic",
+            &t3[1],
+        ]);
+        for _ in 0..60 {
+            if !topic_exists(&t3[1]) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let (rec, sc) = reconcile(&verifying);
+        kafka::write_json(
+            &out_dir.join("ir6-reconcile-one-left-out.json"),
+            &json!({"exit": rec.status.code(), "outcome": sc["outcome"],
+                    "integrity": sc["integrity"]["result"],
+                    "partial_reason": sc["integrity"]["partial_reason"]}),
+        );
+        assert_eq!(rec.status.code(), Some(2), "{}", rec.stdout_utf8());
+        assert_eq!(sc["outcome"], "fail-integrity");
+        assert_eq!(sc["integrity"]["result"], "partial");
+        assert!(
+            sc["integrity"]["partial_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains(&t3[1])),
+            "{}",
+            sc["integrity"]
         );
     }
     late.extend(rendered_checkpoint(&verifying));

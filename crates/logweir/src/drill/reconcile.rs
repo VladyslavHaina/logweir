@@ -24,7 +24,7 @@
 use super::{DrillError, RestoreOutcome};
 use crate::exit::ExitCode;
 use logweir_core::guard::GuardRefusal;
-use logweir_core::outcome::Outcome;
+use logweir_core::outcome::{IntegrityResult, Outcome};
 use logweir_core::scorecard::Scorecard;
 use logweir_core::target_creation::{cleanup_plan, CurrentId, TargetCreation};
 use logweir_engine_oso::storage::{caps, Store, StoreError};
@@ -86,8 +86,10 @@ pub fn write(
     signer: &crate::signer::ValidatedSigner,
 ) -> Result<String, DrillError> {
     let key = targets_record_key(&record.run_id);
+    // An evidence write that fails is the evidence-failure class, exit 4,
+    // as the scorecard's own put is.
     let failed = |what: String| {
-        DrillError::Operational(format!(
+        DrillError::SigningOrLock(format!(
             "the targets record {key} could not be {what}; no engine was started"
         ))
     };
@@ -174,6 +176,24 @@ impl Kept {
             topic_preflight: Self::empty_preflight(),
             original_name: None,
         }
+    }
+
+    /// A reconcile that left out a recorded topic verified only part of what
+    /// the run created, so its verification is never a pass: `partial`, the
+    /// left-out topics named (od23 review M-2).
+    pub fn judge(&self, integrity: &mut logweir_core::scorecard::Integrity) {
+        if self.left_out.is_empty() || integrity.result != IntegrityResult::Pass {
+            return;
+        }
+        integrity.result = IntegrityResult::Partial;
+        integrity.partial_reason = Some(format!(
+            "the reconcile verified only the topics still the interrupted run's; left out: {}",
+            self.left_out
+                .iter()
+                .map(|(t, why)| format!("{t} ({why})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     /// The note the scorecard carries.
@@ -418,14 +438,7 @@ pub(super) fn execute(
         trusted.extend(crate::restore_cleanup::keyring(path)?);
     }
     let record = open(&record_key, &bytes, sidecar.as_deref(), &trusted)?;
-    if record.run_id != interrupted || record.plan_hash != plan_hash {
-        return Err(GuardRefusal(format!(
-            "{record_key} records run {} over plan {}, not run {interrupted} over this plan \
-             ({plan_hash}); nothing was verified",
-            record.run_id, record.plan_hash
-        ))
-        .into());
-    }
+    check_record(&record_key, &record, &interrupted, &plan_hash)?;
     let reader = prepared.ctx.client.as_reader();
     let cluster = reader.cluster_id()?;
     let names: Vec<String> = record.topics.iter().map(|t| t.name.clone()).collect();
@@ -463,6 +476,25 @@ pub(super) fn execute(
         prepared.approved,
         &kept,
     ))))
+}
+
+/// The record is the interrupted run's, over this plan: a record signed for
+/// another run or plan is refused, nothing verified.
+fn check_record(
+    record_key: &str,
+    record: &TargetsRecord,
+    interrupted: &str,
+    plan_hash: &str,
+) -> Result<(), DrillError> {
+    if record.run_id != interrupted || record.plan_hash != plan_hash {
+        return Err(GuardRefusal(format!(
+            "{record_key} records run {} over plan {}, not run {interrupted} over this plan \
+             ({plan_hash}); nothing was verified",
+            record.run_id, record.plan_hash
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// `logweir restore reconcile`: print what [`execute`] found and exit by the
@@ -585,6 +617,60 @@ mod tests {
         );
     }
 
+    /// **A reconcile that left out a recorded topic never signs `pass`**
+    /// (od23 review M-2): a passing verification of the kept topics becomes
+    /// `partial`, the left-out topic named, which phase 8 scores
+    /// `fail-integrity`. The control keeps every recorded topic: still a pass.
+    #[test]
+    fn a_reconcile_that_left_out_a_topic_is_never_a_pass() {
+        let pass = || logweir_core::scorecard::Integrity {
+            level: logweir_core::outcome::IntegrityLevel::ByteFingerprint,
+            result: IntegrityResult::Pass,
+            partial_reason: None,
+            records_sampled: 0,
+            records_sampled_matching: 0,
+            mismatches: 0,
+            pass_rate_measured: None,
+            restored_principal_could_consume: None,
+            verification: None,
+        };
+        let id = |n: &str| CurrentId::Id(format!("id-{n}"));
+        let one_gone: BTreeMap<String, CurrentId> = [
+            ("r-orders".to_string(), id("r-orders")),
+            ("r-payments".to_string(), CurrentId::NotFound),
+        ]
+        .into_iter()
+        .collect();
+        let kept_one = kept(&spec("r-"), &record(), "C", &one_gone)
+            .unwrap()
+            .expect("one is kept");
+        let mut integrity = pass();
+        kept_one.judge(&mut integrity);
+        assert_eq!(integrity.result, IntegrityResult::Partial);
+        assert!(
+            integrity
+                .partial_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("r-payments (no longer exists)")),
+            "{:?}",
+            integrity.partial_reason
+        );
+
+        let both: BTreeMap<String, CurrentId> = [
+            ("r-orders".to_string(), id("r-orders")),
+            ("r-payments".to_string(), id("r-payments")),
+        ]
+        .into_iter()
+        .collect();
+        let kept_both = kept(&spec("r-"), &record(), "C", &both)
+            .unwrap()
+            .expect("both are kept");
+        let mut integrity = pass();
+        kept_both.judge(&mut integrity);
+        assert_eq!(integrity.result, IntegrityResult::Pass, "the control");
+        assert!(integrity.partial_reason.is_none());
+    }
+
     /// Another cluster, or nothing kept, is nothing to verify; an ID that
     /// could not be read is an error a later attempt retries.
     #[test]
@@ -689,6 +775,37 @@ mod tests {
     }
 
     /// The record round-trips, and its key is the run's.
+    /// A genuine record of another run, or of this run over another plan,
+    /// is refused (od23 review L-2); the control is the run's own.
+    #[test]
+    fn a_record_of_another_run_or_plan_is_refused() {
+        let k = targets_record_key("R1");
+        assert!(check_record(&k, &record(), "R1", "sha256:x").is_ok());
+        for (run, plan) in [("R2", "sha256:x"), ("R1", "sha256:y")] {
+            let refused = check_record(&k, &record(), run, plan).unwrap_err();
+            assert!(matches!(refused, DrillError::Guard(_)), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_targets_record_that_cannot_be_written_is_exit_4() {
+        let signer = crate::signer::ValidatedSigner::load(
+            std::path::Path::new("../../e2e/fixtures/signed/signing.pem"),
+            logweir_evidence::PAYLOAD_TYPE_TARGETS_RECORD,
+            b"probe",
+            "nothing was written",
+        )
+        .unwrap();
+        let store = Store::in_memory("logweir");
+        write(&store, &record(), &signer).expect("the first put");
+        // The control above; the same create-only put again fails, as an
+        // unwritable evidence sink does: the evidence-failure class (CI's
+        // `an_unwritable_evidence_sink_exits_4_and_uploads_nothing`).
+        let failed = write(&store, &record(), &signer).unwrap_err();
+        assert!(matches!(failed, DrillError::SigningOrLock(_)), "{failed}");
+        assert_eq!(ExitCode::from(failed), ExitCode::SigningOrLock);
+    }
+
     #[test]
     fn the_record_round_trips_under_the_runs_key() {
         let r = record();
