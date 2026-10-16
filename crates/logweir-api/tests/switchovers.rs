@@ -171,3 +171,60 @@ fn fx38_a_partial_switchover_view_carries_the_note() {
     );
     assert!(!message.contains("not listed"), "{message}");
 }
+
+/// The reference checks run before the body's own validation, so a referenced
+/// name must never reach a Kubernetes request path unchecked: a `restoreRef`
+/// or `approvalRef` of `../../…` makes no request carrying it, and the create
+/// is refused. Control: a valid name is looked up.
+#[tokio::test]
+async fn a_path_like_reference_reaches_no_kubernetes_request() {
+    let app = TestApp::new();
+    let p = plan();
+    for (field, name) in [
+        (
+            "restoreRef",
+            "../../../api/v1/namespaces/logweir-system/secrets/x",
+        ),
+        ("approvalRef", "../secrets/x"),
+    ] {
+        let mut b = body(&p, "incident");
+        b[field]["name"] = json!(name);
+        app.fake.clear_requests();
+        let refused = app
+            .post(
+                &path(NS_A, "switchovers"),
+                Some("key-path-0001"),
+                &b.to_string(),
+            )
+            .await;
+        assert!(
+            refused.status.as_u16() >= 400,
+            "{field}: {}",
+            String::from_utf8_lossy(&refused.body)
+        );
+        let leaked: Vec<String> = app
+            .fake
+            .requests()
+            .into_iter()
+            .map(|r| r.path)
+            .filter(|p| p.contains("..") || p.contains("secrets/x"))
+            .collect();
+        assert!(leaked.is_empty(), "{field} reached Kubernetes: {leaked:?}");
+    }
+    // The control: a valid restoreRef is looked up by name.
+    app.fake.clear_requests();
+    let _ = app
+        .post(
+            &path(NS_A, "switchovers"),
+            Some("key-path-0002"),
+            &body(&p, "incident").to_string(),
+        )
+        .await;
+    assert!(
+        app.fake
+            .requests()
+            .iter()
+            .any(|r| r.method == "GET" && r.path.ends_with("/restores/incident")),
+        "the valid name was not looked up"
+    );
+}

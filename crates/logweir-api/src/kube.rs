@@ -939,6 +939,13 @@ impl KubeAdapter {
         ws: &str,
         name: &str,
     ) -> Result<bool, KubeFailure> {
+        // A body's name is not validated yet when the reference checks run:
+        // nothing that is not an object name ever reaches the request path
+        // (`../`, `/`, `?`). Such a name is held by nobody; the route's own
+        // validation refuses it.
+        if !crate::validate::is_dns_subdomain(name) {
+            return Ok(false);
+        }
         let api: Api<Untyped<K>> = self.api();
         match self
             .bounded("get", K::plural(&()).as_ref(), api.get(name))
