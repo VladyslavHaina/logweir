@@ -487,6 +487,8 @@ rules:
   # PROD-19.1: the workspace gate's metadata read of every Secret an object
   # names, so a runner Job never mounts one of another workspace or one with
   # no workspace (the signing key, the console's keys). No `list`, no `watch`.
+  # RBAC has no metadata-only `get`: the grant can read data, the code reads
+  # only labels, and the controller could already mount any Secret in a Job.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
