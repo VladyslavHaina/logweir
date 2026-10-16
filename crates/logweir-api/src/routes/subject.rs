@@ -41,7 +41,9 @@ pub enum Kind {
 pub struct Subject {
     /// Its kind.
     pub kind: Kind,
-    /// The route's namespace.
+    /// The route's workspace.
+    pub workspace: String,
+    /// The install's namespace, where it lives.
     pub namespace: String,
     /// Its name.
     pub name: String,
@@ -109,12 +111,13 @@ impl ShownScope {
 }
 
 impl Subject {
-    /// A `Restore`, read by a route of namespace `ns`.
+    /// A `Restore`, read by a route of workspace `ws`.
     #[must_use]
-    pub fn of_restore(ns: &str, restore: &Restore) -> Self {
+    pub fn of_restore(ws: &str, restore: &Restore) -> Self {
         Self {
             kind: Kind::Restore,
-            namespace: ns.to_string(),
+            workspace: ws.to_string(),
+            namespace: restore.namespace().unwrap_or_default(),
             name: restore.name_any(),
             uid: restore.uid().unwrap_or_default(),
             plan_bytes: restore.spec.plan_bytes.clone(),
@@ -123,12 +126,13 @@ impl Subject {
         }
     }
 
-    /// A `Switchover`, read by a route of namespace `ns`.
+    /// A `Switchover`, read by a route of workspace `ws`.
     #[must_use]
-    pub fn of_switchover(ns: &str, switchover: &Switchover) -> Self {
+    pub fn of_switchover(ws: &str, switchover: &Switchover) -> Self {
         Self {
             kind: Kind::Switchover,
-            namespace: ns.to_string(),
+            workspace: ws.to_string(),
+            namespace: switchover.namespace().unwrap_or_default(),
             name: switchover.name_any(),
             uid: switchover.uid().unwrap_or_default(),
             plan_bytes: switchover.spec.plan_bytes.clone(),
@@ -146,16 +150,16 @@ impl Subject {
     pub async fn fetch(
         state: &AppState,
         actor: &Actor,
-        ns: &str,
+        ws: &str,
         kind: Kind,
         name: &str,
     ) -> Result<Self, ApiError> {
         Ok(match kind {
             Kind::Restore => {
-                Self::of_restore(ns, &get_object::<Restore>(state, actor, ns, name).await?)
+                Self::of_restore(ws, &get_object::<Restore>(state, actor, ws, name).await?)
             }
             Kind::Switchover => {
-                Self::of_switchover(ns, &get_object::<Switchover>(state, actor, ns, name).await?)
+                Self::of_switchover(ws, &get_object::<Switchover>(state, actor, ws, name).await?)
             }
         })
     }

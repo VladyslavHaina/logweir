@@ -330,7 +330,7 @@ async fn an_actor_with_no_grant_is_refused() {
     /// Authenticated, bound to nothing.
     struct NoGrants;
     impl logweir_api::authz::Authorizer for NoGrants {
-        fn namespaces(&self, _actor: &logweir_api::auth::Actor) -> Vec<String> {
+        fn workspaces(&self, _actor: &logweir_api::auth::Actor) -> Vec<String> {
             Vec::new()
         }
         fn allows(

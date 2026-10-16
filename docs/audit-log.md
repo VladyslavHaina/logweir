@@ -2,8 +2,8 @@
 
 The console (`logweir-api`) writes one audit line per API request: who asked
 (`actorId`, the issuer and subject), for what (`method`, `path`, the action),
-in which namespace, with which roles, and whether it was allowed (`decision`,
-`failureCode`). `auditId` is the `X-Request-ID` the browser was answered with,
+in which workspace (`workspace`), with which roles, and whether it was allowed
+(`decision`, `failureCode`). `auditId` is the `X-Request-ID` the browser was answered with,
 and [api.md](api.md) describes the notes an approval adds. No cookie, token,
 Secret value, plan or approval body is ever written.
 
@@ -19,7 +19,7 @@ The console logs JSON. An audit line is the one whose `target` is
 `fields.audit`:
 
 ```json
-{"timestamp":"2026-10-11T09:14:03.120Z","level":"INFO","fields":{"message":"audit","audit":"{\"auditId\":\"…\",\"method\":\"POST\",\"path\":\"/api/v1/namespaces/team-a/backups\",\"authenticationMode\":\"oidc\",\"actorId\":\"https://idp.example.com/realms/logweir#4f1c…\",…,\"decision\":\"allow\",…}","notes":""},"target":"logweir_api::audit"}
+{"timestamp":"2026-10-11T09:14:03.120Z","level":"INFO","fields":{"message":"audit","audit":"{\"auditId\":\"…\",\"method\":\"POST\",\"path\":\"/api/v1/workspaces/team-a/backups\",\"authenticationMode\":\"oidc\",\"actorId\":\"https://idp.example.com/realms/logweir#4f1c…\",…,\"decision\":\"allow\",…}","notes":""},"target":"logweir_api::audit"}
 ```
 
 The lines are written at `info`. The chart sets no `RUST_LOG` on the console,

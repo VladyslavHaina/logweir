@@ -664,7 +664,7 @@ fn decide_all(
 fn decide_anywhere(state: &AppState, actor: &Actor, action: Action) -> Result<(), ApiError> {
     let authorizer = state.authorizer();
     let allowed = authorizer
-        .namespaces(actor)
+        .workspaces(actor)
         .iter()
         .any(|ws| authorizer.allows(actor, ws, action));
     if allowed {

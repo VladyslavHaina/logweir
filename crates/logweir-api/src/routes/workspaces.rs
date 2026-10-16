@@ -6,7 +6,7 @@ use http::StatusCode;
 
 use crate::app::AppState;
 use crate::auth::Actor;
-use crate::contract::NamespaceListResponse;
+use crate::contract::WorkspaceListResponse;
 use crate::http::RequestId;
 
 /// The actor's workspace grants.
@@ -17,7 +17,7 @@ pub async fn list(
 ) -> Response {
     super::json(
         StatusCode::OK,
-        &NamespaceListResponse {
+        &WorkspaceListResponse {
             request_id,
             items: super::session::grants(&state, &actor),
         },

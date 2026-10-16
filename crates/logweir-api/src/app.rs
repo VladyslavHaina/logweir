@@ -102,12 +102,12 @@ pub struct Settings {
     /// created object and in every audit line (`kubernetes.principal`).
     pub kubernetes_principal: String,
     /// The installation's approval policies and the console's
-    /// confirmation key. `Default` is every namespace on `legacy-governed-v1`
+    /// confirmation key. `Default` is every workspace on `legacy-governed-v1`
     /// and no key.
     pub approval: Arc<crate::approval::ApprovalSettings>,
     /// The manual-run create ceilings (`rateLimits` in the configuration
     /// file). `Default` is the documented ten backups and five restores per
-    /// actor, per namespace, per minute.
+    /// actor, per workspace, per minute.
     pub run_rate_limits: crate::routes::RunRateLimits,
 }
 
@@ -446,7 +446,7 @@ pub fn router(state: AppState) -> Router {
         // CLUSTER-SCOPED, AND THE ONLY ONE. A `TrustPolicy` names the
         // namespaces it governs, so it has no `{ws}` and its own
         // administrator-only rule; `routes::trust::authorize_cluster` is that
-        // rule and records the decision under the `*` pseudo-namespace.
+        // rule and records the decision under the `*` pseudo-workspace.
         .route("/api/v1/trust-policies", get(trust::list))
         .route("/api/v1/trust-policies/{name}", get(trust::get_one));
 

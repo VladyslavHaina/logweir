@@ -348,9 +348,10 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
 }
 
 /// THE INTEGRITY RULE, WITH ITS THREE MUTANTS. A chunk that is not owned by
-/// this discovery, is not immutable, or whose bytes do not hash to the digest
-/// the status indexes, is refused — the page is never served from bytes whose
-/// provenance did not hold.
+/// this discovery is another object's and reads as gone (the adapter's owner
+/// check, which is also the workspace boundary); one that is not immutable,
+/// or whose bytes do not hash to the digest the status indexes, is refused —
+/// the page is never served from bytes whose provenance did not hold.
 #[tokio::test]
 async fn a_chunk_that_fails_its_integrity_check_refuses_the_page() {
     for mutant in ["owner", "immutable", "digest"] {
@@ -379,7 +380,11 @@ async fn a_chunk_that_fails_its_integrity_check_refuses_the_page() {
                 "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0003/topics"
             ))
             .await;
-        response.assert_problem(409, "result_integrity_failed");
+        if mutant == "owner" {
+            response.assert_problem(410, "cursor_expired");
+        } else {
+            response.assert_problem(409, "result_integrity_failed");
+        }
         assert!(
             !response.text().contains("planted"),
             "the refused page still leaked a row ({mutant})"
@@ -893,7 +898,7 @@ async fn an_administrator_may_cancel_a_check_an_operator_started() {
     assert!(refused.json()["detail"]
         .as_str()
         .unwrap()
-        .contains("administrator of this namespace may cancel any"));
+        .contains("administrator of this workspace may cancel any"));
     assert_eq!(
         fake.object("topicdiscoveries", NS_A, "td-operators")
             .unwrap()["spec"]["cancelRequested"],

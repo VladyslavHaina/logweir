@@ -55,7 +55,7 @@ fn app_in(object: Value, name: &str, namespace: &str) -> TestApp {
     TestApp::with(
         fake,
         Options {
-            namespaces: vec![namespace.to_string()],
+            workspaces: vec![namespace.to_string()],
             ..Options::default()
         },
     )
@@ -412,7 +412,7 @@ async fn one_principal_may_not_hold_more_streams_than_the_ceiling() {
         .remove("exitReason");
     object["status"].as_object_mut().unwrap().remove("evidence");
     let app = app_in(object, "b9", "lw-s9");
-    let ceiling = logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_NAMESPACE;
+    let ceiling = logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_WORKSPACE;
 
     // Hold the ceiling open by never draining the bodies.
     let mut held = Vec::new();

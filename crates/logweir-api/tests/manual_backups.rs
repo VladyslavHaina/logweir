@@ -957,7 +957,7 @@ async fn the_shipped_sample_is_what_this_route_creates() {
     let app = TestApp::with(
         FakeKube::new(),
         support::Options {
-            namespaces: vec![workspace.clone()],
+            workspaces: vec![workspace.clone()],
             ..support::Options::default()
         },
     );

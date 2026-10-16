@@ -397,7 +397,7 @@ pub struct EnforcementSettingsView {
 pub struct RetentionPolicyView {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -749,13 +749,13 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadRetentionPolicies)?;
+    authorize(&state, &actor, &ws, Action::ReadRetentionPolicies)?;
     let query = list_query(uri.query())?;
     let (items, page) =
-        list_page::<RetentionPolicy>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+        list_page::<RetentionPolicy>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     let now = state.now();
     Ok(json(
         StatusCode::OK,
@@ -772,12 +772,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
-    authorize(&state, &actor, &ns, Action::ReadRetentionPolicies)?;
-    let object = get_object::<RetentionPolicy>(&state, &actor, &ns, &name).await?;
+    authorize(&state, &actor, &ws, Action::ReadRetentionPolicies)?;
+    let object = get_object::<RetentionPolicy>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &RetentionPolicyResponse {

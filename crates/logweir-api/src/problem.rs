@@ -20,7 +20,7 @@ use serde::Serialize;
 /// The stable problem codes. Clients branch on `code`, never on `detail`.
 ///
 /// The decision's baseline set is here verbatim (`unauthenticated`,
-/// `session_expired`, `forbidden`, `namespace_forbidden`, `not_found`,
+/// `session_expired`, `forbidden`, `workspace_forbidden`, `not_found`,
 /// `idempotency_conflict`, `state_conflict`, `approval_required`,
 /// `policy_mismatch`, `precondition_failed`, `validation_failed`,
 /// `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the
@@ -49,8 +49,8 @@ pub enum ProblemCode {
     SessionExpired,
     /// 403 — the actor is not permitted this action.
     Forbidden,
-    /// 403 — the namespace is not explicitly granted to the actor.
-    NamespaceForbidden,
+    /// 403 — the workspace is not explicitly granted to the actor.
+    WorkspaceForbidden,
     /// 403 — an unsafe method without an `Origin` exactly equal to the
     /// configured public origin.
     OriginMismatch,
@@ -124,7 +124,7 @@ impl ProblemCode {
         ProblemCode::Unauthenticated,
         ProblemCode::SessionExpired,
         ProblemCode::Forbidden,
-        ProblemCode::NamespaceForbidden,
+        ProblemCode::WorkspaceForbidden,
         ProblemCode::OriginMismatch,
         ProblemCode::NotFound,
         ProblemCode::MethodNotAllowed,
@@ -149,7 +149,7 @@ impl ProblemCode {
         ProblemCode::UpstreamTimeout,
     ];
 
-    /// The wire spelling, e.g. `namespace_forbidden`.
+    /// The wire spelling, e.g. `workspace_forbidden`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -161,7 +161,7 @@ impl ProblemCode {
             ProblemCode::Unauthenticated => "unauthenticated",
             ProblemCode::SessionExpired => "session_expired",
             ProblemCode::Forbidden => "forbidden",
-            ProblemCode::NamespaceForbidden => "namespace_forbidden",
+            ProblemCode::WorkspaceForbidden => "workspace_forbidden",
             ProblemCode::OriginMismatch => "origin_mismatch",
             ProblemCode::NotFound => "not_found",
             ProblemCode::MethodNotAllowed => "method_not_allowed",
@@ -198,7 +198,7 @@ impl ProblemCode {
             | ProblemCode::CursorInvalid => StatusCode::BAD_REQUEST,
             ProblemCode::Unauthenticated | ProblemCode::SessionExpired => StatusCode::UNAUTHORIZED,
             ProblemCode::Forbidden
-            | ProblemCode::NamespaceForbidden
+            | ProblemCode::WorkspaceForbidden
             | ProblemCode::OriginMismatch => StatusCode::FORBIDDEN,
             ProblemCode::NotFound => StatusCode::NOT_FOUND,
             ProblemCode::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
@@ -237,7 +237,7 @@ impl ProblemCode {
             ProblemCode::Unauthenticated => "Authentication required",
             ProblemCode::SessionExpired => "Session expired",
             ProblemCode::Forbidden => "Forbidden",
-            ProblemCode::NamespaceForbidden => "Namespace not granted",
+            ProblemCode::WorkspaceForbidden => "Workspace not granted",
             ProblemCode::OriginMismatch => "Origin not allowed",
             ProblemCode::NotFound => "Not found",
             ProblemCode::MethodNotAllowed => "Method not allowed",

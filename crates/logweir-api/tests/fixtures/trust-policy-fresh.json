@@ -31,12 +31,12 @@
       }
     ],
     "namespaces": [
-      "team-a"
+      "logweir-system"
     ]
   },
   "status": {
     "boundNamespaces": [
-      "team-a"
+      "logweir-system"
     ],
     "conditions": [
       {

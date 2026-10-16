@@ -177,7 +177,7 @@ async fn idempotency_key_problems() {
 }
 
 #[tokio::test]
-async fn namespace_forbidden_is_decided_before_any_lookup() {
+async fn workspace_forbidden_is_decided_before_any_lookup() {
     let app = TestApp::new();
     for path in [
         "/api/v1/workspaces/team-c/backups",
@@ -190,7 +190,7 @@ async fn namespace_forbidden_is_decided_before_any_lookup() {
     ] {
         app.get(path)
             .await
-            .assert_problem(403, "namespace_forbidden");
+            .assert_problem(403, "workspace_forbidden");
     }
     app.post(
         "/api/v1/workspaces/team-c/schedules",
@@ -198,14 +198,14 @@ async fn namespace_forbidden_is_decided_before_any_lookup() {
         &support::schedule_body().to_string(),
     )
     .await
-    .assert_problem(403, "namespace_forbidden");
+    .assert_problem(403, "workspace_forbidden");
     assert!(app.fake.requests().is_empty());
 }
 
 struct DenyingAuthorizer;
 
 impl Authorizer for DenyingAuthorizer {
-    fn namespaces(&self, _actor: &Actor) -> Vec<String> {
+    fn workspaces(&self, _actor: &Actor) -> Vec<String> {
         vec![NS_A.to_string()]
     }
 
@@ -259,8 +259,8 @@ async fn the_authorization_seam_denies_without_route_changes() {
         .await
         .assert_problem(403, "forbidden");
     let session = viewer.get("/api/v1/session").await.json();
-    assert_eq!(session["namespaces"].as_array().unwrap().len(), 1);
-    let caps = &session["namespaces"][0]["capabilities"];
+    assert_eq!(session["workspaces"].as_array().unwrap().len(), 1);
+    let caps = &session["workspaces"][0]["capabilities"];
     assert_eq!(caps["schedulesRead"], true);
     assert_eq!(caps["scheduleCreate"], false);
     assert_eq!(caps["approvalPacketRead"], false);
@@ -433,7 +433,7 @@ fn every_code_renders_as_a_complete_problem_document() {
         (ProblemCode::Unauthenticated, 401),
         (ProblemCode::SessionExpired, 401),
         (ProblemCode::Forbidden, 403),
-        (ProblemCode::NamespaceForbidden, 403),
+        (ProblemCode::WorkspaceForbidden, 403),
         (ProblemCode::NotFound, 404),
         (ProblemCode::IdempotencyConflict, 409),
         (ProblemCode::StateConflict, 409),
@@ -464,7 +464,7 @@ fn every_code_is_produced_or_reserved() {
         "cursor_invalid",           // cursor_and_precondition_and_conflict_codes
         "unauthenticated",          // the_authorization_seam_denies_without_route_changes
         "forbidden",                // the_authorization_seam_denies_without_route_changes
-        "namespace_forbidden",      // namespace_forbidden_is_decided_before_any_lookup
+        "workspace_forbidden",      // workspace_forbidden_is_decided_before_any_lookup
         "origin_mismatch", // boundary::unsafe_methods_need_the_exact_origin_and_json_before_anything_else
         "not_found", // boundary::kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing
         "method_not_allowed", // boundary::unimplemented_mutations_have_no_route

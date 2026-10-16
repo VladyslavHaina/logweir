@@ -165,7 +165,7 @@ async fn an_allowed_read_is_attributed_completely() {
     assert_eq!(record["displayClaim"], "u-op display");
     assert_eq!(record["bindingRevision"], "audit-rev-7");
     assert_eq!(record["roles"], serde_json::json!(["operator"]));
-    assert_eq!(record["namespace"], "team-a");
+    assert_eq!(record["workspace"], "team-a");
     assert_eq!(record["action"], "backup.read");
     assert_eq!(record["resource"], "Backup/backup-1");
     assert_eq!(record["objectName"], "backup-1");
@@ -217,7 +217,7 @@ async fn a_denied_mutation_is_recorded_as_a_deny() {
     assert_eq!(record["decision"], "deny");
     assert_eq!(record["failureCode"], "forbidden");
     assert_eq!(record["action"], "schedule.create");
-    assert_eq!(record["namespace"], "team-a");
+    assert_eq!(record["workspace"], "team-a");
     assert_eq!(record["roles"], serde_json::json!(["viewer"]));
     assert_eq!(record["httpStatus"], 403);
     assert_eq!(record["objectName"], "");
@@ -227,7 +227,7 @@ async fn a_denied_mutation_is_recorded_as_a_deny() {
 ///
 /// The response for an unbound namespace is 404 `not_found`, by design, so a
 /// caller cannot enumerate namespaces. The log must still say
-/// `namespace_forbidden`, or the enumeration defence would have cost the
+/// `workspace_forbidden`, or the enumeration defence would have cost the
 /// operator the ability to see an authorization problem.
 #[tokio::test]
 async fn an_enumeration_resistant_404_still_records_the_real_reason() {
@@ -243,10 +243,10 @@ async fn an_enumeration_resistant_404_still_records_the_real_reason() {
     let record = log.record(&request_id(&response));
     assert_eq!(record["decision"], "deny");
     assert_eq!(
-        record["failureCode"], "namespace_forbidden",
+        record["failureCode"], "workspace_forbidden",
         "the log must carry the reason the response withholds"
     );
-    assert_eq!(record["namespace"], "team-b");
+    assert_eq!(record["workspace"], "team-b");
     assert_eq!(record["action"], "backup.read");
     assert_eq!(record["roles"], serde_json::json!([]));
     assert_eq!(record["httpStatus"], 404);
@@ -1010,7 +1010,7 @@ async fn opening_an_event_stream_records_both_actions_under_the_route_s_own() {
 
     let record = log.record(&request_id(&response));
     assert_eq!(record["decision"], "allow");
-    assert_eq!(record["namespace"], "team-a");
+    assert_eq!(record["workspace"], "team-a");
     assert_eq!(
         record["action"], "operation.read",
         "the stream is filed under the domain's own read action"

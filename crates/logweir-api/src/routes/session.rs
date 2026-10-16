@@ -7,17 +7,17 @@ use http::StatusCode;
 use crate::app::AppState;
 use crate::auth::Actor;
 use crate::authz::Capabilities;
-use crate::contract::{ActorView, NamespaceGrant, SessionResponse};
+use crate::contract::{ActorView, SessionResponse, WorkspaceGrant};
 use crate::http::RequestId;
 
 /// The grants of an actor, each with its capabilities.
-pub fn grants(state: &AppState, actor: &Actor) -> Vec<NamespaceGrant> {
+pub fn grants(state: &AppState, actor: &Actor) -> Vec<WorkspaceGrant> {
     state
         .authorizer()
-        .namespaces(actor)
+        .workspaces(actor)
         .into_iter()
-        .map(|name| NamespaceGrant {
-            capabilities: Capabilities::for_namespace(state.authorizer(), actor, &name),
+        .map(|name| WorkspaceGrant {
+            capabilities: Capabilities::for_workspace(state.authorizer(), actor, &name),
             roles: state.authorizer().roles(actor, &name),
             name,
         })
@@ -33,8 +33,8 @@ pub async fn get_session(
 ) -> Response {
     let (parts, _) = request.into_parts();
     let authenticator = state.authenticator();
-    let namespaces = grants(&state, &actor);
-    let capabilities = Capabilities::union(namespaces.iter().map(|g| &g.capabilities));
+    let workspaces = grants(&state, &actor);
+    let capabilities = Capabilities::union(workspaces.iter().map(|g| &g.capabilities));
     super::json(
         StatusCode::OK,
         &SessionResponse {
@@ -49,7 +49,7 @@ pub async fn get_session(
             expires_at: authenticator.session_expiry(&parts),
             csrf_token: authenticator.csrf_token(&parts, &actor),
             binding_revision: state.authorizer().binding_revision(),
-            namespaces,
+            workspaces,
             capabilities,
         },
     )

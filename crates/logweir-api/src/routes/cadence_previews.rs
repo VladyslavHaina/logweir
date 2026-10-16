@@ -8,14 +8,14 @@
 //! disagree. `BackupSchedule.status.nextRuns` is the same shape from the same
 //! function, for a schedule that already exists.
 //!
-//! NO CLUSTER READ, AND NO NAMESPACE. A draft cadence is not an object. This
+//! NO CLUSTER READ, AND NO WORKSPACE. A draft cadence is not an object. This
 //! route asks Kubernetes nothing — `tests/cadence_previews.rs` asserts the
-//! adapter recorded no request at all — so there is no namespace to scope it
+//! adapter recorded no request at all — so there is no workspace to scope it
 //! to and no cursor, no idempotency key and no audit object. It is D1 §4.4's
 //! exact path for that reason.
 //!
 //! AUTHORIZATION IS STILL REAL. D1 §4.4 says "viewer role and above"; with no
-//! namespace in the path, that is "this actor may read schedules SOMEWHERE".
+//! workspace in the path, that is "this actor may read schedules SOMEWHERE".
 //! An actor with no such grant is `403 forbidden` and gets no evaluator: the
 //! answer is cheap, but it is still a product feature and not a public
 //! calculator.
@@ -57,13 +57,13 @@ const PARAMETERS: [&str; 10] = [
     "after",
 ];
 
-/// Whether `actor` may read schedules in ANY namespace it is bound to.
+/// Whether `actor` may read schedules in ANY workspace it is bound to.
 fn authorize_any(state: &AppState, actor: &Actor) -> Result<(), ApiError> {
     let authorizer = state.authorizer();
     let allowed = authorizer
-        .namespaces(actor)
+        .workspaces(actor)
         .iter()
-        .any(|ns| authorizer.allows(actor, ns, Action::ReadSchedules));
+        .any(|ws| authorizer.allows(actor, ws, Action::ReadSchedules));
     if allowed {
         actor
             .audit
@@ -77,7 +77,7 @@ fn authorize_any(state: &AppState, actor: &Actor) -> Result<(), ApiError> {
     Err(ApiError::new(
         ProblemCode::Forbidden,
         "Previewing a cadence requires permission to read schedules in at least one granted \
-         namespace.",
+         workspace.",
     ))
 }
 

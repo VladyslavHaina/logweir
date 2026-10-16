@@ -29,7 +29,7 @@ The configuration file must name a mode. There is no default: a file that names
 none is refused rather than read as the more permissive one.
 
 - **`mode: localAdmin`.** A loopback-only listener, the configured
-  administrator as the only actor, and namespaces from the file. Not SSO and not
+  administrator as the only actor, and workspaces from the file. Not SSO and not
   a shared console. In the cluster it is the **in-cluster administrator mode**:
   no Service, no Ingress and no ingress NetworkPolicy rule, the `<release>-api`
   ServiceAccount as identity, readiness not gated on OIDC, and
@@ -37,7 +37,7 @@ none is refused rather than read as the more permissive one.
   isolated labs and break-glass administration.
 - **`mode: shared`.** The SSO console: OpenID Connect identity, a short-lived
   encrypted session cookie, a CSRF token on every unsafe method, exact role and
-  namespace bindings, and one audit record per request. It refuses a non-HTTPS
+  workspace bindings, and one audit record per request. It refuses a non-HTTPS
   `publicBaseUrl` before it binds anything.
 
 ## Running it
@@ -51,7 +51,8 @@ uiDirectory: console/dist              # `npx vite build` in console/ writes it
 localAdmin:
   subject: admin
   displayName: Local administrator     # never used for authorization
-namespaces: [team-a]                   # explicit grants; core Namespaces are never listed
+namespace: logweir                     # the install's one namespace; every object lives here
+workspaces: [team-a]                   # the install's workspaces; core Namespaces are never listed
 kubernetes:
   source: kubeconfig                   # or `inCluster`
   context: docker-desktop              # required; `current-context` is never used
@@ -82,7 +83,7 @@ $ cargo run -p logweir-api -- --config config.yaml
 
 ## Routes
 
-`…` is `/api/v1/namespaces/{ns}`. Anything not listed is `404`. A domain with
+`…` is `/api/v1/workspaces/{ws}`. Anything not listed is `404`. A domain with
 no route has no stub: `GET /api/v1/session` reports it `false` under
 `capabilities` (today: connection tests; `trustAdministration` and
 `catalogWindowQuery` are `false` for everybody).
@@ -94,8 +95,8 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | `GET /auth/login`, `GET /auth/callback` | public | shared-mode sign-in (*Sign-in*) |
 | `GET /api/v1/session` | signed in | the actor, roles, grants, CSRF token, capability flags |
 | `POST /api/v1/session/logout` | signed in | clears the session cookie (shared mode) |
-| `GET /api/v1/namespaces` | signed in | the configured grants, never core `Namespace` objects |
-| `GET /api/v1/cadence-previews` | `schedule.read`, any namespace | the next runs of a cron line or preset |
+| `GET /api/v1/workspaces` | signed in | the workspaces the actor holds a role in, never core `Namespace` objects |
+| `GET /api/v1/cadence-previews` | `schedule.read`, any workspace | the next runs of a cron line or preset |
 | `GET …/connections[/{name}]` | `connection.read` | `KafkaCluster` projections; Secret names, never a credential |
 | `POST …/connections` | `connection.create` and `credential.write` | creates a `KafkaCluster` named `conn-<26 base32>` (*Credentials*) |
 | `GET …/connections/{name}/topic-discoveries` | `topicDiscovery.read` | a page of discoveries, or `?latest=true` |
@@ -125,7 +126,7 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | `POST …/switchovers/{name}/approval` | `approval.submit` | the restore route's submission, for subject kind `Switchover` |
 | `GET …/switchovers/{name}/approval-request` | `approval.read` | a two-person switchover request: every group, topic and position |
 | `POST …/switchovers/{name}/console-approval` | `approval.submit` | the second person's click on a switchover |
-| `GET …/approval-policy` | `approval.read` | the namespace's effective approval policy |
+| `GET …/approval-policy` | `approval.read` | the workspace's effective approval policy |
 | `GET …/approvals[/{name}]` | `approval.read` | Approval metadata, no documents |
 | `GET …/approvals/{name}/packet` | `approval.readPacket` | the approval and sidecar documents, verbatim |
 | `GET …/operations/{kind}/{name}` | `operation.read` | the normalized status of a backup, restore, discovery or preflight |
@@ -134,10 +135,21 @@ no route has no stub: `GET /api/v1/session` reports it `false` under
 | `GET …/catalogs[/{name}[/points\|/signers]]` | `catalog.read` | catalogs, their point view, their signers |
 | `POST …/catalogs` | `catalog.connect` | connects an existing archive under the `name` in the body |
 | `GET …/retention-policies[/{name}]` | `retention.read` | retention policies and their last evaluation |
-| `GET /api/v1/trust-policies[/{name}]` | `trustPolicy.read`, any namespace | the installation's trust policies (*Trust*) |
+| `GET /api/v1/trust-policies[/{name}]` | `trustPolicy.read`, any workspace | the installation's trust policies (*Trust*) |
 
-**Who holds an action.** Roles are bound per namespace in shared mode. In
-localAdmin mode the one actor holds every action in its namespaces, and the
+**Workspaces.** An install runs in one namespace; a workspace is a name in
+`workspaces` and the label `logweir.dev/workspace` on every object. A list
+returns the path's workspace only, a read of another workspace's object is
+`404 not_found`, and a create labels the object with the path's workspace (a
+label in the body is overwritten). A create body that names a connection,
+destination, schedule, catalog or restore not in the path's workspace is
+`422 validation_failed` on that field: "no `<kind>` named `<x>` in workspace
+`<ws>`", the same answer as a missing one. Names are unique per install: a name
+another workspace holds is `409 state_conflict`, "the name `<x>` is in use in
+this installation; names are shared by every workspace".
+
+**Who holds an action.** Roles are bound per workspace in shared mode. In
+localAdmin mode the one actor holds every action in every workspace, and the
 approval routes still refuse it its own requests.
 
 | action | viewer | operator | approver | administrator |
@@ -158,7 +170,7 @@ approval routes still refuse it its own requests.
 - **An approver reads only `Restore` readiness**; any other preflight answers
   as if it did not exist.
 - **An operator cancels only the checks it started**, by the `issuer#subject`
-  recorded at creation. An administrator of the namespace may cancel any; the
+  recorded at creation. An administrator of the workspace may cancel any; the
   audit line then records `cancelledAnotherActorsCheck`. Cancelling deletes no
   archive byte, topic, run or evidence.
 
@@ -199,7 +211,7 @@ approval routes still refuse it its own requests.
 
 **Durable `POST`s require `Idempotency-Key`** (8 to 128 visible ASCII
 characters). The object's name is a per-route prefix plus 130 bits of
-`SHA-256(issuer, subject, namespace, route, key)`, so a lost response, a double
+`SHA-256(issuer, subject, workspace, route, key)`, so a lost response, a double
 click, a restart or a second replica all target one name. The same key and
 request replays as `200` with the same UID; the same key with a different
 request is `409 idempotency_conflict`; an object this scope did not create is
@@ -216,7 +228,7 @@ is always `412` and nothing is written.
 
 **Lists** default to `limit=50`, at most 200: `{items, page: {limit,
 nextCursor, snapshot}}`. A cursor is MAC-authenticated with the cursor key and
-binds the actor, route, namespace, filters, a fifteen-minute expiry and the
+binds the actor, route, workspace, filters, a fifteen-minute expiry and the
 Kubernetes continue token. Tampered or replayed elsewhere is
 `400 cursor_invalid`; expired is `410 cursor_expired` (restart the list).
 Filters are exact names and label selectors.
@@ -231,7 +243,7 @@ Filters are exact names and label selectors.
 | a JSON body's total | 60 s | `400 malformed_request` ("not received within 60 seconds") |
 | connections | 256 at once | wait in the listen queue |
 | one peer | 32 at once, in shared mode with a trusted proxy configured | closed at accept; the log says `closed a connection at once` |
-| event streams | 4 per actor per namespace; a stopped reader holds one up to 310 s | `429 rate_limited`, `Retry-After` |
+| event streams | 4 per actor per workspace; a stopped reader holds one up to 310 s | `429 rate_limited`, `Retry-After` |
 
 **The per-peer cap.** The trusted proxy (`trustedProxyService` or
 `trustedProxyCidrs`) is never capped. With none configured nobody is capped: the
@@ -336,7 +348,7 @@ and nothing more: readiness is recorded, never obeyed.
   problem's `policy` member carries `currentGeneration` and
   `currentRunPolicySha256`; confirming again is a new intent.
 - `201` means the `Backup` exists. At most
-  `runs.maxManualBackupsActivePerNamespace` (default 4) manual runs hold a
+  `runs.maxManualBackupsActivePerWorkspace` (default 4) manual runs hold a
   runner slot; the rest wait `queued` / `ConcurrencyLimited` with nothing
   created, in creation order.
 
@@ -344,15 +356,15 @@ and nothing more: readiness is recorded, never obeyed.
 
 `POST …/restores` stores `planBytes` unchanged, checked against `planHash`.
 There is no cancel and no delete for a `Backup` or a `Restore`. At most
-`runs.maxManualRestoresActivePerNamespace` (default 2) admitted manual restores
-run at once per namespace; the rest wait `queued`, and an authorization that
+`runs.maxManualRestoresActivePerWorkspace` (default 2) admitted manual restores
+run at once per workspace; the rest wait `queued`, and an authorization that
 expires while queued is refused `AuthorizationExpired`.
 
 ### Approval policy
 
 The console reads the installation's approval-policy document
 (`approvalPolicyFile`, the file the controller mounts) and its
-`ConsoleConfirmation` key (`confirmationKeyFile`). Exit 2: a served namespace
+`ConsoleConfirmation` key (`confirmationKeyFile`). Exit 2: a workspace
 bound to a policy without the key; a key file that does not exist, unless
 `confirmationKeyManaged: true` says the identity hook writes it (then a confirm
 request before it exists is `409 policy_mismatch`, nothing created);
@@ -362,7 +374,7 @@ fresh-install marker is read. The modes are in [kubernetes.md](kubernetes.md).
 
 **The create's `authorization` says where the submission goes next:**
 
-| namespace | the console | `authorization.state` | next |
+| workspace | the console | `authorization.state` | next |
 |---|---|---|---|
 | unbound (`legacy-governed-v1`) | signs nothing | `awaitingApproval`, `legacy: true` | the approval page |
 | `confirm` (`Ordinary`) | signs authorization document v2 (UID, plan hash, requester, policy digest) as the `Approval` `spec.approvalRef` names | `confirmed` | the operation view |
@@ -376,16 +388,16 @@ created:
 
 | request | answer |
 |---|---|
-| a `confirm` namespace before the console's key exists | `409 policy_mismatch` |
+| a `confirm` workspace before the console's key exists | `409 policy_mismatch` |
 | the fresh-install marker cannot be read (not a `404`) | that read's error |
 | `strict` or `two-person` without `ticket`, or a blank, padded or over-128-character one | `422`, `ticket` (`required` / `invalid`) |
-| `ticket` in an unbound namespace | `422`, `ticket`, `not_accepted` |
+| `ticket` in an unbound workspace | `422`, `ticket`, `not_accepted` |
 | `strict` or `two-person` with `approvalRef.name` over 240 characters, or ending in `-confirmation` | `422`; the suffix is `reserved_suffix` |
 
 **`POST …/restores/{name}/approval`** takes `{"sidecarBytes": "…"}`, the file
 `logweir drill countersign --document <approvalBytes> --confirmation
 <sidecarBytes> --key <privkey> --out approval.sig` wrote over
-`GET …/approvals/<approvalRef>-confirmation/packet`. In an unbound namespace it
+`GET …/approvals/<approvalRef>-confirmation/packet`. In an unbound workspace it
 takes `{"approvalBytes", "sidecarBytes"}` from `logweir drill approve`, stored
 byte for byte; it verifies no signature, but refuses a sidecar that is not a v1
 approval's (`409 policy_mismatch`), a `plan_hash` that is not the Restore's
@@ -396,14 +408,14 @@ not the requester before any Job.
 | refusal | when |
 |---|---|
 | `403 forbidden` | not an Approver here, or the submitter is the requester, whatever other roles it holds |
-| `409 policy_mismatch` | a `confirm` namespace; a confirmation for another UID, plan or policy digest (submit the Restore again); a `two-person` namespace (`countersignature_not_accepted`) |
+| `409 policy_mismatch` | a `confirm` workspace; a confirmation for another UID, plan or policy digest (submit the Restore again); a `two-person` workspace (`countersignature_not_accepted`) |
 | `404 not_found` | no such Restore, or no console confirmation |
 | `409 state_conflict` | expired, or another Approval holds the name |
 | `422 validation_failed` | not a sidecar or no added signature; `approvalBytes` under `strict` (`not_accepted`); private-key text in either field (`private_key`, never echoed) |
 
 #### Two-person approval in the console (PROD-16.2)
 
-A `two-person` namespace takes its approval from a second signed-in person.
+A `two-person` workspace takes its approval from a second signed-in person.
 More refusals at `POST …/restores`:
 
 | request | answer |
@@ -476,7 +488,7 @@ The stored `Approval` has `subjectRef.kind: Switchover` and the document's
 `newTopic` mode only, and is checked against `target.topicNaming.prefix` when
 that prefix is legal. `target.topicNaming.originalName: true` restores under
 the source names into topics that do not exist; it needs `coverage: complete`.
-In a `confirm` namespace the request also carries
+In a `confirm` workspace the request also carries
 `originalNameConfirmation: {typedTopics: […]}`, the names re-typed, which the
 console signs; the route reads only `source.topics` from the plan for this.
 Such a document is `formatVersion` 2.1.0.
@@ -612,9 +624,9 @@ document; nothing in a retention evaluation was deleted.
 
 A key's state is the controller's verdict only while its evaluation is fresh;
 otherwise it is `unknown`, which is not `valid`. `GET /api/v1/trust-policies`
-needs the administrator role in at least one namespace and serves only the
-policies governing a namespace the reader administers, plus the installation
-`default`; anything else is `404`. A console reads
+needs the administrator role in at least one workspace and serves only the
+policies governing the install's namespace, plus the installation `default`;
+anything else is `404`. A console reads
 `capabilities.trustPoliciesRead` from the union of its grants. Trust writes are
 `kubectl apply` and the `logweir trust` helpers.
 
@@ -675,13 +687,13 @@ roles:
   revision: "2026-09-16.1"                         # recorded in every audit line
   bindings:
     - role: viewer                                 # viewer|operator|approver|administrator
-      namespace: team-a                            # must appear in `namespaces` below
+      workspace: team-a                            # must appear in `workspaces` below
       groups: ["logweir-team-a-viewers"]           # EXACT strings; no wildcard, no regex
     - role: operator
-      namespace: team-a
+      workspace: team-a
       groups: ["logweir-team-a-operators"]
     - role: approver
-      namespace: team-a
+      workspace: team-a
       subjects: ["https://idp.example.com/realms/logweir#3f0c…"]
 sessionKey:
   file: /var/run/secrets/session/key               # versioned key file
@@ -692,7 +704,8 @@ cursorKey:
 sessionMaxAgeSeconds: 900                          # 60…900
 trustedProxyCidrs: ["192.0.2.0/24"]                # PLACEHOLDER: your ingress pods' range; never an identity
 requireTrustedProxy: true                          # refuse any request not from it over HTTPS
-namespaces: [team-a, team-b]
+namespace: logweir-system
+workspaces: [team-a, team-b]
 kubernetes:
   source: inCluster
   principal: system:serviceaccount:logweir-system:logweir-api  # recorded on every object
@@ -732,7 +745,7 @@ Each is exit 2 with the field named.
 | `oidc.issuer` ending in `/`, or with a query, fragment or userinfo | `iss` is compared exactly |
 | a plain-HTTP issuer, unless `oidc.insecureLoopbackIssuer` with a loopback host | |
 | `oidc.systemRoots: false` without a bundle; a bundle that is unreadable, empty, malformed or holds anything but `CERTIFICATE` blocks | |
-| an unknown role; a binding namespace outside `namespaces`; a binding with neither `groups` nor `subjects`; `*` or `?` in a binding | bindings are exact |
+| an unknown role; a binding workspace outside `workspaces`; a binding with neither `groups` nor `subjects`; `*` or `?` in a binding | bindings are exact |
 | `roles.revision` empty | it is in every audit record |
 | `sessionMaxAgeSeconds` outside 60…900 | |
 | `requireTrustedProxy` with no proxy named, or a range wider than `/16` (IPv4) or `/48` (IPv6) | |
@@ -743,8 +756,8 @@ Each is exit 2 with the field named.
 
 - **Every route declares who may reach it** in
   `crates/logweir-api/src/access.rs`: `Public`, `Authenticated`,
-  `Namespaced(actions)`, `Command {verbs}` or `AnyNamespace(action)`. One layer
-  enforces it before any handler, namespace first, and records the decision. An
+  `Workspaced(actions)`, `Command {verbs}` or `AnyWorkspace(action)`. One layer
+  enforces it before any handler, workspace first, and records the decision. An
   undeclared route is `500 internal_error` (`route_access_undeclared`), an
   undeclared method `405`; `tests/route_access.rs` holds the table to the
   router.
@@ -756,9 +769,9 @@ Each is exit 2 with the field named.
   routing and named in the audit line. Nothing derives from `Host`,
   `Forwarded` or `X-Forwarded-*` except the audit field `forwardedFor` and the
   sign-in rate-limit key, and only from a trusted proxy.
-- **Enumeration resistance.** An ungranted namespace answers what a nonexistent
+- **Enumeration resistance.** An ungranted workspace answers what a nonexistent
   object answers (`404 not_found`), decided before any Kubernetes call.
-  localAdmin mode answers `403 namespace_forbidden`. The audit record has the
+  localAdmin mode answers `403 workspace_forbidden`. The audit record has the
   real reason.
 - **The trusted entry point.** With `requireTrustedProxy: true`, a socket peer
   that is not a trusted proxy is `421` (audit `untrusted_entry_point`, note
@@ -831,7 +844,7 @@ sign-in.
 
 One JSON object per request on the `logweir_api::audit` target: `auditId`
 (`X-Request-ID`), `method`, `path`, `authenticationMode`, `actorId`,
-`displayClaim`, `sessionIdHash`, `bindingRevision`, `roles`, `namespace`,
+`displayClaim`, `sessionIdHash`, `bindingRevision`, `roles`, `workspace`,
 `action`, `resource`, `decision` (default `deny`), `policyDigest`,
 `idempotencyKeyHash`, `requestHash`, `planHash`, `recoveryPoint`,
 `kubernetesPrincipal`, `objectName`, `objectUid`, `objectResourceVersion`,
@@ -854,9 +867,9 @@ attribution, not proof, and keeping stdout is the deployment's job.
 | what | limit per minute | key |
 |---|---|---|
 | `GET /auth/login`, `GET /auth/callback` | 20 | the client (below) |
-| starting a topic discovery / a preflight | 6 / 20 | actor and namespace |
-| `POST …/backups` | `rateLimits.manualBackupsPerMinute`, default 10 | actor, namespace, route |
-| `POST …/restores` | `rateLimits.manualRestoresPerMinute`, default 5 | actor, namespace, route |
+| starting a topic discovery / a preflight | 6 / 20 | actor and workspace |
+| `POST …/backups` | `rateLimits.manualBackupsPerMinute`, default 10 | actor, workspace, route |
+| `POST …/restores` | `rateLimits.manualRestoresPerMinute`, default 5 | actor, workspace, route |
 
 Past a limit the answer is `429 rate_limited` with `Retry-After` and nothing is
 created. Windows are per console process, so two replicas allow twice the rate.
@@ -889,14 +902,16 @@ The image is `logweir-console` (`Dockerfile.console`): `logweir-api` and the
 console's build at `/ui`, as `USER 65532:65532` with no `CMD`.
 `scripts/check-image-api.sh` holds the served files to this tree's
 `console/dist` and refuses a key-shaped path. The chart renders the principal under `api.enabled` (a
-ServiceAccount, three ClusterRoles, a RoleBinding per namespace) and the
+ServiceAccount, its Role in the release namespace and the cluster-scoped trust
+reads) and the
 workload under `api.console.enabled`, which needs the first; its chart README
 lists every object. A Service, an Ingress (TLS required, host
 `publicBaseUrl`'s authority) and the ingress allow rule exist only in shared
 mode. The configuration is an immutable, content-addressed ConfigMap that holds paths, never a credential, into read-only Secret volumes
-under `/var/run/logweir/`. The chart generates no key. Shared mode renders only
-with `controller.watchNamespaces`, so the controller cannot create a Job in the
-release namespace that holds those keys. The pod runs as 65532, read-only root,
+under `/var/run/logweir/`. The chart generates no key. The keys live in the
+release namespace, where the controller creates runner Jobs: whoever can create
+Pods, Jobs or Secret-naming Logweir objects there holds them
+([kubernetes.md](kubernetes.md)). The pod runs as 65532, read-only root,
 all capabilities dropped, one writable `/tmp`. Probes exist only in shared
 mode; in localAdmin mode a refused configuration shows as `CrashLoopBackOff`,
 exit code 2 and a log line naming the field. Values and commands are in

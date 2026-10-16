@@ -338,7 +338,7 @@ async fn the_transport_and_shape_rules_refuse_with_named_codes() {
 struct NoCredentialWrite;
 
 impl Authorizer for NoCredentialWrite {
-    fn namespaces(&self, _actor: &Actor) -> Vec<String> {
+    fn workspaces(&self, _actor: &Actor) -> Vec<String> {
         vec![NS_A.to_string()]
     }
 

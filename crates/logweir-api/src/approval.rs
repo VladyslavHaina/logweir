@@ -535,17 +535,17 @@ pub struct ApprovalSettings {
 }
 
 impl ApprovalSettings {
-    /// Load both files and check that they fit the namespaces this console
+    /// Load both files and check that they fit the workspaces this console
     /// serves.
     ///
     /// # Errors
     ///
-    /// A reason naming the file or the namespace.
+    /// A reason naming the file or the workspace.
     pub fn load(
         policy_file: Option<&Path>,
         key_file: Option<&Path>,
         key_managed: bool,
-        namespaces: &[String],
+        workspaces: &[String],
     ) -> Result<Self, String> {
         let policies = match policy_file {
             None => ApprovalPolicySet::default(),
@@ -575,7 +575,7 @@ impl ApprovalSettings {
             pending_confirmation_file,
             ..Self::default()
         };
-        settings.check(namespaces)?;
+        settings.check(workspaces)?;
         Ok(settings)
     }
 
@@ -609,7 +609,7 @@ impl ApprovalSettings {
         Ok(self.late_confirmation.get())
     }
 
-    /// A served namespace bound to an explicit policy needs the console key:
+    /// A workspace bound to an explicit policy needs the console key:
     /// both modes carry the console's signature, and without the key every
     /// Restore there would be created and then never authorisable.
     ///
@@ -618,21 +618,21 @@ impl ApprovalSettings {
     ///
     /// # Errors
     ///
-    /// A reason naming the first such namespace.
-    pub fn check(&self, namespaces: &[String]) -> Result<(), String> {
+    /// A reason naming the first such workspace.
+    pub fn check(&self, workspaces: &[String]) -> Result<(), String> {
         if self.confirmation.is_some() || self.pending_confirmation_file.is_some() {
             return Ok(());
         }
-        if let Some(namespace) = namespaces
+        if let Some(workspace) = workspaces
             .iter()
-            .find(|ns| !self.policies.resolve(ns).is_legacy())
+            .find(|ws| !self.policies.resolve(ws).is_legacy())
         {
             return Err(format!(
-                "namespace {namespace} is bound to approval policy {} and this console has no \
+                "workspace {workspace} is bound to approval policy {} and this console has no \
                  `confirmationKeyFile`: both ordinary and governed requests carry the console's \
                  ConsoleConfirmation signature (D0), so configure the key or unbind the \
-                 namespace",
-                self.policies.resolve(namespace).name()
+                 workspace",
+                self.policies.resolve(workspace).name()
             ));
         }
         Ok(())
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_namespace_without_a_console_key_is_a_startup_refusal() {
+    fn a_bound_workspace_without_a_console_key_is_a_startup_refusal() {
         let settings = ApprovalSettings {
             policies: policies(),
             ..ApprovalSettings::default()

@@ -1187,7 +1187,7 @@ impl Clock for TestClock {
 
 /// Harness options.
 pub struct Options {
-    pub namespaces: Vec<String>,
+    pub workspaces: Vec<String>,
     pub authenticator: Option<Arc<dyn Authenticator>>,
     pub authorizer: Option<Arc<dyn Authorizer>>,
     pub deadline: Duration,
@@ -1208,7 +1208,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            namespaces: vec![NS_A.to_string(), NS_B.to_string()],
+            workspaces: vec![NS_A.to_string(), NS_B.to_string()],
             authenticator: None,
             authorizer: None,
             deadline: Duration::from_secs(10),
@@ -1405,7 +1405,7 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
         .unwrap_or_else(|| Arc::new(LocalAdminAuthenticator::new("admin", "Local administrator")));
     let authorizer = options
         .authorizer
-        .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.namespaces.clone())));
+        .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.workspaces.clone())));
     AppState::new(Settings {
         authenticator,
         authorizer,
@@ -1825,20 +1825,20 @@ impl Default for SharedOptions {
 }
 
 /// One binding, for the table a test declares.
-pub fn binding(role: Role, namespace: &str, groups: &[&str]) -> RoleBinding {
+pub fn binding(role: Role, workspace: &str, groups: &[&str]) -> RoleBinding {
     RoleBinding {
         role,
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         subjects: Vec::new(),
     }
 }
 
 /// One binding by exact subject.
-pub fn subject_binding(role: Role, namespace: &str, subjects: &[&str]) -> RoleBinding {
+pub fn subject_binding(role: Role, workspace: &str, subjects: &[&str]) -> RoleBinding {
     RoleBinding {
         role,
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         groups: Vec::new(),
         subjects: subjects.iter().map(|s| (*s).to_string()).collect(),
     }

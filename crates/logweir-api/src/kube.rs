@@ -61,10 +61,10 @@
 //! adds it to the selector, so paging stays on the API server;
 //! [`KubeAdapter::get`] answers another workspace's object as `NotFound`; and
 //! [`KubeAdapter::create`] and [`KubeAdapter::create_credential`] set it,
-//! overwriting any value the caller put there. The four merge patches carry
-//! the `resourceVersion` of an object the route read through `get` or `list`,
-//! so the API server refuses them unless the object is still that one,
-//! label included.
+//! overwriting any value the caller put there. The four merge patches take
+//! `ws` and read the object through `get` first, so another workspace's
+//! object is `NotFound` before anything is written: a resourceVersion is a
+//! request field, and it proves nothing about which object it came from.
 //!
 //! NO INBOUND HEADER IS FORWARDED. Requests are built by `kube::Api` from typed
 //! parameters; nothing from the HTTP request reaches them but validated names.
@@ -924,6 +924,30 @@ impl KubeAdapter {
         }
     }
 
+    /// Whether an object of kind `K` named `name` exists in ANOTHER workspace
+    /// (or carries no workspace label). Names are unique per install, so the
+    /// routes use this to refuse a typed name another workspace holds and a
+    /// create body that references another workspace's object.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`] other than `NotFound`.
+    pub async fn held_elsewhere<K: ProductResource>(
+        &self,
+        ws: &str,
+        name: &str,
+    ) -> Result<bool, KubeFailure> {
+        let api: Api<K> = self.api();
+        match self
+            .bounded("get", K::plural(&()).as_ref(), api.get(name))
+            .await
+        {
+            Ok(object) => Ok(!in_workspace(object.meta(), ws)),
+            Err(KubeFailure::NotFound) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Create one object in workspace `ws`. The label is set here, over any
     /// value the object already carries. Names are unique per install, so a
     /// name another workspace holds is `AlreadyExists`.
@@ -961,10 +985,12 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale version.
     pub async fn set_schedule_suspension(
         &self,
+        ws: &str,
         name: &str,
         suspend: bool,
         expected_resource_version: &str,
     ) -> Result<BackupSchedule, KubeFailure> {
+        self.get::<BackupSchedule>(ws, name).await?;
         let api: Api<BackupSchedule> = self.api();
         let patch = serde_json::json!({
             "metadata": { "resourceVersion": expected_resource_version },
@@ -1010,10 +1036,12 @@ impl KubeAdapter {
     /// [`KubeFailure::RuleRefused`] for one of the CRD's own rules.
     pub async fn set_schedule_policy(
         &self,
+        ws: &str,
         name: &str,
         edit: &ScheduleSpecEdit,
         expected_resource_version: &str,
     ) -> Result<BackupSchedule, KubeFailure> {
+        self.get::<BackupSchedule>(ws, name).await?;
         let api: Api<BackupSchedule> = self.api();
         // EVERY OPTIONAL KEY IS SPELLED OUT, `null` INCLUDED, AND SO IS EVERY
         // OPTIONAL KEY INSIDE A NESTED OBJECT. A JSON merge patch merges an
@@ -1112,11 +1140,13 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
     pub async fn set_destination_access(
         &self,
+        ws: &str,
         name: &str,
         access: &serde_json::Value,
         ca_bundle: Option<serde_json::Value>,
         expected_resource_version: &str,
     ) -> Result<BackupDestination, KubeFailure> {
+        self.get::<BackupDestination>(ws, name).await?;
         let api: Api<BackupDestination> = self.api();
         let mut spec = serde_json::Map::new();
         spec.insert("access".to_string(), access.clone());
@@ -1156,9 +1186,11 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
     pub async fn request_check_cancel<K: CancellableCheck>(
         &self,
+        ws: &str,
         name: &str,
         expected_resource_version: &str,
     ) -> Result<K, KubeFailure> {
+        self.get::<K>(ws, name).await?;
         let api: Api<K> = self.api();
         let patch = serde_json::json!({
             "metadata": { "resourceVersion": expected_resource_version },
@@ -1241,10 +1273,36 @@ impl KubeAdapter {
     ///
     /// # Errors
     ///
-    /// [`KubeFailure`], `NotFound` when the owner was collected.
-    pub async fn get_result_document(&self, name: &str) -> Result<ResultDocument, KubeFailure> {
+    /// THE OWNER IS THE WORKSPACE BOUNDARY. A result document carries no
+    /// workspace label; it belongs to the object `owner_uid` names, which the
+    /// caller read through [`KubeAdapter::get`] in its workspace. A document
+    /// whose controlling owner is another object (a check's), and which is
+    /// not labelled with that uid as a catalog page (a catalog's, whose
+    /// controlling owner is the sync Job), is `NotFound`, exactly like a
+    /// missing one.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` when the owner was collected or the
+    /// document is another object's.
+    pub async fn get_result_document(
+        &self,
+        owner_uid: &str,
+        name: &str,
+    ) -> Result<ResultDocument, KubeFailure> {
         let api: Api<ResultDocument> = self.api();
-        self.bounded("get", "configmaps", api.get(name)).await
+        let document = self.bounded("get", "configmaps", api.get(name)).await?;
+        let catalog_page = document
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(weirkeeper::catalog_view::LABEL_CATALOG_UID))
+            .is_some_and(|uid| uid == owner_uid);
+        if document.controller_owner_uid() == Some(owner_uid) || catalog_page {
+            Ok(document)
+        } else {
+            Err(KubeFailure::NotFound)
+        }
     }
 
     /// Read the installation's public identity ConfigMap, for the
