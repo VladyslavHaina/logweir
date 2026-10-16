@@ -2950,6 +2950,54 @@ fn chart_lint_one_namespace_per_install() {
     }
 }
 
+/// **No key Secret the chart renders carries a workspace label.**
+///
+/// The controller mounts a Secret a Logweir object names only when the Secret
+/// carries `logweir.dev/workspace` equal to the referrer's (PROD-19.1, the
+/// console path of residual O1), so an unlabelled Secret in the namespace can
+/// never be mounted into a runner Job. The signing key, the console's
+/// confirmation key and the demo MinIO's root pair must stay unlabelled; the
+/// one Secret the chart labels is `logweir-s3`, the demo archive credential a
+/// destination names.
+///
+/// NEGATIVE CONTROL: labelling `logweir-signing-key` (the workspace label
+/// helper added to `identity.yaml`) fails the first assertion.
+#[test]
+fn chart_lint_no_key_secret_carries_a_workspace_label() {
+    let mut labelled = BTreeSet::new();
+    let mut keys_seen = 0usize;
+    for render in files_under("charts/logweir/rendered") {
+        let name = render
+            .strip_prefix("charts/logweir/rendered/")
+            .and_then(|f| f.strip_suffix(".yaml"))
+            .expect("a rendered file")
+            .to_string();
+        for doc in rendered(&name).iter().filter(|d| d.kind == "Secret") {
+            if ["logweir-signing-key", "logweir-console-confirmation"]
+                .contains(&doc.name().as_str())
+            {
+                keys_seen += 1;
+            }
+            if doc.value["metadata"]["labels"]
+                .get("logweir.dev/workspace")
+                .is_some()
+            {
+                labelled.insert(doc.name());
+            }
+        }
+    }
+    assert!(
+        labelled.iter().all(|n| n == "logweir-s3"),
+        "the chart renders a workspace label on Secret(s) {labelled:?}; only `logweir-s3` may \
+         carry one, because a labelled Secret is one a runner Job may mount"
+    );
+    assert!(
+        labelled.contains("logweir-s3"),
+        "the demo archive credential carries its workspace label"
+    );
+    assert!(keys_seen >= 4, "only {keys_seen} key Secrets walked");
+}
+
 /// A tiny matcher for the ONE anchored alternation shape this schema uses
 /// (`^$|^https://[^/?#@]+$`). Written here rather than pulling in a regex crate
 /// for a test: a dependency added to assert one pattern is a dependency the
