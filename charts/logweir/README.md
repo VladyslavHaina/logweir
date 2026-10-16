@@ -106,7 +106,8 @@ Standard refuses them; install a demo only into a namespace that admits them.
 Nothing optional is on by default, and nothing is rendered outside the release
 namespace but the two opt-in Roles (`strimzi.namespaces`,
 `api.console.trustedProxyService`). `manifest_lint.rs` holds the controller's
-role to its calls: no verb on `secrets`, no `update`, and `delete` only on
+role to its calls: `get` on `secrets` for their workspace label only (the
+source scan allows a metadata read and nothing else), no `update`, and `delete` only on
 `topicdiscoveries` and `preflights`. `patch` on `restores` (PROD-11.1a) adds
 and removes a TTL clone's finalizer `logweir.dev/clone-cleanup`; a rollback to
 a controller without it leaves the finalizer on clone `Restore`s, which an

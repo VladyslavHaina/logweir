@@ -484,6 +484,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  # PROD-19.1: the workspace gate's metadata read of every Secret an object
+  # names, so a runner Job never mounts one of another workspace or one with
+  # no workspace (the signing key, the console's keys). No `list`, no `watch`.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   # The `ProtectionPolicy` reconciler's watch and `patch_status`. No `get`, no
   # `update`.
   - apiGroups: ["logweir.dev"]

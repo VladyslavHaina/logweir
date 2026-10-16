@@ -2873,7 +2873,9 @@ console cannot write one.
 The controller reads all thirteen kinds, patches their status, creates
 `Backup`s, `Restore`s, Jobs and `ConfigMap`s, reads pods, `pods/log` and
 `events`, and holds one `patch` on `backups` (the history detach) and one on
-`trustpolicies` (the compromise finalizer). It holds **no verb on `secrets`, no
+`trustpolicies` (the compromise finalizer). On `secrets` it holds `get` alone,
+for the workspace gate's metadata read of each Secret an object names (its
+`logweir.dev/workspace` label, never its data). It holds **no verb on
 `pods/exec` or `pods/attach`, no `update` on anything, and `delete` on exactly
 two kinds**, `topicdiscoveries` and `preflights`. Every status write is a merge
 `PATCH` preconditioned on `metadata.resourceVersion`. The chart's
@@ -3158,7 +3160,8 @@ through `pods/log`, and writes `status.evidence.receiptKey` and `sidecarKey`.
 never guessed from the backup id.
 
 - `pods/log` is a subresource; `get` on `pods` does not cover it. The controller
-  holds no verb on `secrets`, `pods/exec` or `pods/attach`, and writes every
+  reads no Secret's data (only a named Secret's labels), holds no verb on
+  `pods/exec` or `pods/attach`, and writes every
   status with a merge `PATCH` preconditioned on `metadata.resourceVersion` (a
   `409` means another writer won; the next pass reads it).
 - `status.records` and `status.capture` are written only beside a `Valid`

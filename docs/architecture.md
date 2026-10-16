@@ -375,7 +375,8 @@ for an execution-time guard.
 
 Rejected alternatives: controller Secret reads, scoped by name or otherwise;
 API-side checks; a single discriminated `Check` kind; destination settings as
-`ConfigMap` conventions. The controller still holds no verb on `secrets`, and the
+`ConfigMap` conventions. The controller still reads no Secret's data (PROD-19.1
+gave it `get` on `secrets` for one metadata read, the workspace label), and the
 signing-oracle residual of Amendment E is unchanged: check Jobs are created under
 the same Job-create authority.
 

@@ -284,29 +284,47 @@ fn weirkeeper_can_read_pod_logs_and_nothing_more() {
     }
 }
 
-/// No rule in the `weirkeeper` ClusterRole names `secrets`, under any API
-/// group, at any verb.
+/// The controller's one grant on `secrets` is `get`, in one rule of its own,
+/// and its one call through a Secret handle is `get_metadata_opt`.
 ///
 /// Spec §9, `design-operator.md:278-281`. The runner's signing key, approval
 /// bundle and SCRAM credential reach its pod because the KUBELET projects them
 /// from references this controller writes into a PodSpec — writing a reference
-/// is not reading a value.
+/// is not reading a value. PROD-19.1 adds one read: the workspace gate
+/// (`workspace.rs`) reads the LABELS of every Secret an object names, so a Job
+/// never mounts a Secret of another workspace or of none (the signing key).
+/// RBAC cannot narrow `get` to metadata, so the source scan holds the
+/// controller to it: no `get`, `get_opt` or `list` on `Api<Secret>`, which
+/// would return the data.
 ///
 /// THIS BOUNDS READS AND NOT CAPABILITY (Global Constraint 27): Job create in
-/// a namespace holding the signing key is equivalent to
-/// holding the key, because this controller can create a pod that mounts it.
-/// The narrow statement is the one asserted here.
+/// a namespace holding the signing key is equivalent to holding the key,
+/// because this controller can create a pod that mounts it.
 #[test]
-fn weirkeeper_has_no_verb_on_secrets() {
-    for (groups, resources, verbs) in controller_rules(DEFAULT_RENDER) {
-        for r in &resources {
-            assert!(
-                r != "secrets" && !r.starts_with("secrets/"),
-                "the weirkeeper ClusterRole grants {verbs:?} on `{r}` (apiGroups {groups:?}); \
-                 spec §9 gives it no verb on Secrets anywhere"
-            );
-        }
-    }
+fn weirkeeper_reads_secret_metadata_only() {
+    let rules: Vec<_> = controller_rules(DEFAULT_RENDER)
+        .into_iter()
+        .filter(|(_, resources, _)| {
+            resources
+                .iter()
+                .any(|r| r == "secrets" || r.starts_with("secrets/") || r == "*")
+        })
+        .collect();
+    assert_eq!(
+        rules,
+        vec![(
+            vec![String::new()],
+            vec!["secrets".to_string()],
+            vec!["get".to_string()]
+        )],
+        "the weirkeeper roles' one rule on Secrets is `get` on `secrets` alone"
+    );
+    let calls = api_callers().remove("Secret").unwrap_or_default();
+    assert_eq!(
+        calls,
+        BTreeSet::from(["get_metadata_opt".to_string()]),
+        "crates/weirkeeper/src/ reads a Secret through {calls:?}; only its metadata may be read"
+    );
 }
 
 /// The `Api<T>` methods actually called under `crates/weirkeeper/src/`, per
@@ -339,21 +357,20 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         let src = std::fs::read_to_string(&f).expect("a readable .rs");
         let bytes: Vec<char> = src.chars().collect();
 
-        // `weirkeeper::scope::list_everywhere::<T>(…)`
-        // is a `list` on `T` in every watched namespace. It builds its handle
-        // inside the helper, generic over the kind, so the typed-binding scan
-        // below cannot see it; the turbofish at the call site is what names
-        // the kind, and it is read here.
+        // `follow::<T, _>(…)` in `workspace.rs` is a `get_opt` on `T`: the
+        // gate reads every referent kind through one helper, generic over the
+        // kind, so the typed-binding scan below cannot see it; the turbofish
+        // at the call site is what names the kind, and it is read here.
         let mut from = 0usize;
-        while let Some(rel) = src[from..].find("list_everywhere::<") {
-            let start = from + rel + "list_everywhere::<".len();
+        while let Some(rel) = src[from..].find("follow::<") {
+            let start = from + rel + "follow::<".len();
             from = start;
-            if let Some(end) = src[start..].find('>') {
+            if let Some(end) = src[start..].find(|c: char| c == ',' || c == '>') {
                 let ty = &src[start..start + end];
                 if !ty.is_empty() && ty.chars().all(is_word) {
                     out.entry(ty.to_string())
                         .or_default()
-                        .insert("list".to_string()); // engine-token-ok: the kube `Api::list` verb, not an engine subcommand
+                        .insert("get_opt".to_string());
                 }
             }
         }
@@ -514,6 +531,7 @@ fn every_granted_verb_has_a_caller() {
             "pods" => "Pod",
             "jobs" => "Job",
             "configmaps" => "ConfigMap",
+            "secrets" => "Secret",
             "approvals" => "Approval",
             "backupdestinations" => "BackupDestination",
             "topicdiscoveries" => "TopicDiscovery",
@@ -553,7 +571,7 @@ fn every_granted_verb_has_a_caller() {
             (Some("status"), "update") => vec!["replace_status"],
             (Some(other), v) => panic!("no caller model for subresource `{other}` verb `{v}`"),
             (None, "create") => vec!["create"],
-            (None, "get") => vec!["get", "get_opt"],
+            (None, "get") => vec!["get", "get_opt", "get_metadata_opt"],
             (None, "list") => vec!["list", WATCH], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
             (None, "watch") => vec![WATCH],
             (None, "patch") => vec!["patch"],
@@ -948,6 +966,7 @@ fn every_call_site_has_a_grant() {
             "Switchover" => ("logweir.dev", "switchovers"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
+            "Secret" => ("", "secrets"),
             "Pod" => ("", "pods"),
             // PROD-05.1a: the ONE untyped handle, `strimzi_topics.rs`'s list of
             // Strimzi `KafkaTopic`s. Its grant is opt-in
@@ -970,7 +989,7 @@ fn every_call_site_has_a_grant() {
         let status = format!("{resource}/status");
         match method {
             "create" => vec![(resource.to_string(), "create")],
-            "get" | "get_opt" => vec![(resource.to_string(), "get")],
+            "get" | "get_opt" | "get_metadata_opt" => vec![(resource.to_string(), "get")],
             "list" => vec![(resource.to_string(), "list")], // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
             "patch" => vec![(resource.to_string(), "patch")],
             "replace" => vec![(resource.to_string(), "update")],
@@ -1317,6 +1336,8 @@ fn the_shipped_roles_are_exactly_as_specified() {
         // controller owns. `list` and nothing else.
         (v(&[""]), v(&["events"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
+        // PROD-19.1: the workspace gate's metadata read of a named Secret.
+        (v(&[""]), v(&["secrets"]), v(&["get"])),
         // The `ProtectionPolicy` reconciler's own rows. `list`/`watch` is
         // `Controller::new`; NO `get`, because the reconciler never re-reads a
         // policy it was handed by the watcher.
@@ -1557,6 +1578,21 @@ fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
                          here bypasses it entirely and silently.",
                         m.kind
                     );
+                }
+                // The second grant that passes: the controller's `get` on
+                // `secrets`, alone in its rule, for the workspace gate's
+                // METADATA read of a Secret an object names (PROD-19.1). It
+                // cannot be name-scoped (the names are the objects'), and the
+                // source scan holds the controller to `get_metadata_opt`
+                // (`weirkeeper_reads_secret_metadata_only`). Job create in the
+                // namespace is already every Secret there (Global Constraint
+                // 27), so it adds no capability.
+                if m.kind == "Role"
+                    && name == "weirkeeper"
+                    && verbs == ["get"]
+                    && resources == ["secrets"]
+                {
+                    continue;
                 }
                 let scoped_verbs = ["update", "patch", "get", "list", "watch"]; // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
                 for scoped in scoped_verbs {

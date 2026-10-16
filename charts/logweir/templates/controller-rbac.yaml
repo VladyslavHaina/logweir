@@ -8,7 +8,9 @@ docs/kubernetes.md *Workspaces*).
 Every granted verb has a caller and every call has a grant: `manifest_lint.rs`
 (`every_granted_verb_has_a_caller`, `every_call_site_has_a_grant`) reads both
 roles out of every rendered variant and the `Api<T>` calls out of
-`crates/weirkeeper/src/`. No verb on `secrets`; `delete` on exactly the two
+`crates/weirkeeper/src/`. On `secrets`, `get` and nothing else: the workspace
+gate reads a named Secret's metadata (its `logweir.dev/workspace` label), never
+its data (`crates/weirkeeper/src/workspace.rs`); `delete` on exactly the two
 transient check kinds; one rule naming `pods/log` with `get`; nothing naming
 `pods/exec` or `pods/attach`.
 */ -}}
@@ -99,6 +101,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  # PROD-19.1: the workspace gate's metadata read of every Secret an object
+  # names, so a runner Job never mounts one of another workspace or one with
+  # no workspace (the signing key, the console's keys). No `list`, no `watch`.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   # The `ProtectionPolicy` reconciler's watch and `patch_status`. No `get`, no
   # `update`.
   - apiGroups: ["logweir.dev"]

@@ -995,10 +995,16 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     let controller_rules = find(&docs, "Role", "weirkeeper").value["rules"]
         .as_sequence()
         .expect("controller rules");
+    // PROD-19.1: the controller's one rule on Secrets is `get`, for the
+    // workspace gate's metadata read; the bootstrap's key is never written by
+    // it (`manifest_lint::weirkeeper_reads_secret_metadata_only`).
     assert!(controller_rules.iter().all(|rule| {
-        rule["resources"]
-            .as_sequence()
-            .is_none_or(|resources| resources.iter().all(|r| r.as_str() != Some("secrets")))
+        rule["resources"].as_sequence().is_none_or(|resources| {
+            resources.iter().all(|r| r.as_str() != Some("secrets"))
+                || rule["verbs"]
+                    .as_sequence()
+                    .is_some_and(|v| v.len() == 1 && v[0].as_str() == Some("get"))
+        })
     }));
 
     let singleton = find(&docs, "ClusterRole", "logweir-identity-singleton");
@@ -5758,7 +5764,7 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
             "the chart maps {operator} to {internal}"
         );
         let parsed = logweir_core::approval_policy::ApprovalPolicySet::parse(&format!(
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: {operator}\nnamespaces:\n  team-a: p\n"
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: {operator}\nworkspaces:\n  team-a: p\n"
         ))
         .expect("the binary reads the operator name too");
         let effective = parsed.resolve("team-a");
