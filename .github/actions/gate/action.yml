@@ -1,0 +1,58 @@
+# FX-53 §2.2: a gate job's first step after its checkout. It hashes the gate's
+# inputs (ci/gates.toml) and asks the artifacts API for a marker that proves the
+# same gate passed on the same inputs in a same-repository run of ci.yml.
+#
+#   - uses: actions/checkout@…                  # the gate's inputs are the tree
+#   - id: gate
+#     uses: ./.github/actions/gate
+#     with: { gate: unit-core, force: "${{ inputs.force || false }}" }
+#   - if: steps.gate.outputs.hit != 'true'      # on every later step
+#     run: …
+#   - if: steps.gate.outputs.hit != 'true'      # the job's last step
+#     uses: ./.github/actions/gate/record
+#
+# Anything but a proven marker runs the gate: a miss, a fork's marker, an
+# expired one, another workflow's, an API error, a map error, or a missing
+# hash. `hit` is the string 'true' only on a proof, so a step guarded by
+# `hit != 'true'` runs on every other outcome. The job needs `actions: read`
+# for the lookup; recording needs no token scope.
+name: gate
+description: Skip a CI gate whose inputs a same-repository marker proves passed.
+inputs:
+  gate:
+    description: The gate's name in ci/gates.toml.
+    required: true
+  force:
+    description: "'true' ignores markers and runs the gate (the nightly run)."
+    required: false
+    default: 'false'
+  token:
+    description: "A token with `actions: read`, for the artifacts API."
+    required: false
+    default: ${{ github.token }}
+outputs:
+  hit:
+    description: "'true' when a marker proves this gate's inputs passed; the job's later steps skip."
+    value: ${{ steps.decide.outputs.hit }}
+  proof-run:
+    description: The URL of the run whose marker proved the inputs, on a hit.
+    value: ${{ steps.decide.outputs.proof-run }}
+  hash:
+    description: "The gate's input hash ('' when there is none: the gate runs and records nothing). A job that runs several gates hands it to ./record."
+    value: ${{ steps.decide.outputs.hash }}
+runs:
+  using: composite
+  steps:
+    - id: decide
+      shell: bash
+      env:
+        GATE: ${{ inputs.gate }}
+        FORCE: ${{ inputs.force }}
+        GH_TOKEN: ${{ inputs.token }}
+        # The hash reads `cargo metadata --no-deps`, before the job installs
+        # its toolchain: the runner's preinstalled stable cargo reads the
+        # manifests without installing rust-toolchain.toml's 1.89.0.
+        RUSTUP_TOOLCHAIN: stable
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../../scripts/ci-gate.sh" decide "$GATE" "$FORCE" \
+          || echo "hit=false" >> "$GITHUB_OUTPUT"

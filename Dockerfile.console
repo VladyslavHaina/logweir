@@ -112,24 +112,32 @@ RUN set -eux; \
 # them would make one cache miss pay for both.
 RUN rustup target add "$(cat /triple)"
 
-# `COPY . .` IS THE LAST THING BEFORE THE COMPILE, so every layer above survives
-# an edit to any tracked file. `.dockerignore` keeps `target/`, `.engine/` and
-# every Dockerfile out of the context.
-COPY . .
+# THE RUST BUILD INPUTS AND NOTHING ELSE, the list `Dockerfile` copies and
+# explains (FX-53): the compile layer's cache key is what the compile reads,
+# so a console-only edit reuses it and rebuilds only the console stage below.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo .cargo
+COPY crates crates
+COPY xtask xtask
+COPY e2e/Cargo.toml e2e/
+COPY e2e/src e2e/src
 
 # `-p logweir-api` AND NOT THE WORKSPACE. This image carries one binary. A
 # workspace build would compile `logweir`, its rdkafka/librdkafka C dependencies
 # and the whole engine-facing half for nothing, and would need the SASL and
 # OpenSSL development libraries the runtime stage below deliberately does not
 # have. `logweir-api` links `weirkeeper` (the CRD types and the green-badge
-# rules) and, through it, `logweir-verify`; it links neither `logweir-evidence`
-# nor `logweir-engine-oso`, which `scripts/check-one-signer.sh` and
+# rules) and, through it, `logweir-verify`, and `logweir-evidence` (PLAT-19.2);
+# it links no `logweir-engine-oso`, which `scripts/check-one-signer.sh` and
 # `crates/logweir-api/tests/linkage.rs` assert from `cargo metadata`.
+#
+# `rm -rf target`: the layer keeps `/out`, not the target directory (FX-53).
 RUN set -eux; \
     triple="$(cat /triple)"; \
     cargo build --release --target "$triple" -p logweir-api; \
     mkdir -p /out; \
-    cp "target/$triple/release/logweir-api" /out/logweir-api
+    cp "target/$triple/release/logweir-api" /out/logweir-api; \
+    rm -rf target
 
 # ---------------------------------------------------------------------------
 # THE CONSOLE STAGE (PROD-18.1 R1)

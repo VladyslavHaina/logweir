@@ -594,35 +594,64 @@ fn version(text: &str) -> (u64, u64, u64) {
 }
 
 /// The matrix sets the stack up, and runs the suite, exactly as the CI e2e job
-/// does, so the two cannot drift apart again.
+/// does, so the two cannot drift apart again. Since FX-53 CI runs the suite
+/// through cargo-nextest from `build-e2e`'s archive, one shard at a time, so
+/// the two commands are held to the same SELECTION: the `e2e` package with its
+/// `e2e` feature, one test at a time, and the one Kubernetes-listener row left
+/// out.
 #[test]
 fn the_matrix_runs_the_ci_e2e_setup_and_command() {
     let matrix = run_lines(&workflow("engine-matrix.yml")["jobs"]["matrix"]);
-    let ci = run_lines(&workflow("ci.yml")["jobs"]["e2e"]);
+    let ci_doc = workflow("ci.yml");
+    let ci = run_lines(&ci_doc["jobs"]["e2e"]);
     for needed in ["just e2e-up", "just e2e-down"] {
         assert!(
             matrix.iter().any(|l| l == needed),
             "engine-matrix does not run `{needed}`"
         );
     }
-    let e2e_command = |lines: &[String]| {
-        lines
+    assert!(
+        ci.iter().any(|l| l == "just e2e-up"),
+        "the CI e2e job brings the stack up with `just e2e-up`"
+    );
+    const SKIPPED: &str = "a_pod_really_reaches_the_k8s_listener";
+    assert_eq!(
+        matrix
             .iter()
             .find(|l| l.starts_with("cargo test --locked -p e2e --features e2e"))
-            .cloned()
-    };
-    let ci_command = e2e_command(&ci).expect("the CI e2e job runs the e2e suite");
-    // CI splits the suite into shards by test binary; the matrix runs
-    // every binary, so it is the CI command without the shard's selection.
-    let shard = " --test ${{ join(matrix.tests, ' --test ') }}";
-    assert!(
-        ci_command.contains(shard),
-        "the CI e2e job runs its shard: {ci_command}"
+            .map(String::as_str),
+        Some(
+            "cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip \
+             a_pod_really_reaches_the_k8s_listener"
+        ),
+        "the matrix's full drill runs every e2e binary, serially, without the k8s row"
     );
-    assert_eq!(
-        e2e_command(&matrix).as_deref(),
-        Some(ci_command.replace(shard, "").as_str()),
-        "the matrix's full drill must be the CI e2e job's command"
+    // CI: the archive is the `e2e` package with its feature …
+    let build = run_lines(&ci_doc["jobs"]["build-e2e"]);
+    assert!(
+        build.iter().any(|l| l
+            .starts_with("cargo nextest archive --locked -p e2e --features e2e --archive-file ")),
+        "build-e2e archives the e2e package with its feature: {build:?}"
+    );
+    // … each shard runs its binaries from it, without the same row …
+    let shard = ci
+        .iter()
+        .find(|l| l.starts_with("cargo-nextest nextest run --archive-file "))
+        .expect("the CI e2e job runs the archived suite");
+    assert!(
+        shard.contains("--profile e2e") && shard.contains(&format!("& not test({SKIPPED})")),
+        "the CI shard leaves out `{SKIPPED}` under the e2e profile: {shard}"
+    );
+    // … and the profile runs one test at a time, as `--test-threads=1` does.
+    let nextest = read(".config/nextest.toml");
+    let profile = nextest
+        .split("[profile.e2e]")
+        .nth(1)
+        .expect(".config/nextest.toml has an e2e profile");
+    let profile = profile.split("\n[").next().unwrap();
+    assert!(
+        profile.lines().any(|l| l.trim() == "test-threads = 1"),
+        "the e2e profile must run one test at a time: {profile}"
     );
 }
 

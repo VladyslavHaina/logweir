@@ -10,11 +10,17 @@ pass. Release packaging adds checks for the artifacts users download.
 and manual dispatch. Other workflows can call the same checks.
 
 A change that touches only `docs/to-do/` (the roadmap trackers and decision
-records) starts no run: no build, test or image reads those files. A change
-that touches only other files under `docs/` still runs `check`, because its
-contract tests read `docs/api.md`, `docs/kubernetes.md`, `docs/install.md` and
-the doc footer and link lints, but it skips `e2e` and therefore `publish`: no
-binary embeds a document and no image copies one out of its build stage.
+records) starts no run: no build, test or image reads those files. The doc
+footer lint, the link check and the label and cosign scans do walk them, so a
+tracker-only commit is linted by the next run that starts; FX-53's docs gate
+and nightly full run close that gap. A change that touches only other files
+under `docs/` still runs `check`, because its contract tests read
+`docs/api.md`, `docs/kubernetes.md`, `docs/install.md` and the doc footer and
+link lints, but it skips `e2e` and therefore `publish`: no binary embeds a
+document and no image copies one out of its build stage. The verifier
+`docs/verify_scorecard.py` and its suite `docs/test_verify_scorecard.py` are
+the exception: they are code (every e2e harness user runs the verifier, and a
+release ships it), so a change to either runs everything.
 [scripts/ci-changes.sh](../scripts/ci-changes.sh) decides this from the diff
 and runs everything when it cannot tell (a new branch, a tag, a manual or
 release run). Root Markdown files such as `THIRD_PARTY_NOTICES.md` are not
@@ -22,11 +28,32 @@ under `docs/` and always run everything, since images copy them.
 
 | Job | Purpose |
 |---|---|
-| `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed. It also says whether the rebuilt console's inputs changed (`console/`, `console/fixtures/console/` or the product API's OpenAPI document) |
+| `changes` | Classifies the diff as docs-only or not; `engine`, `e2e` (and so `publish`) run only when something outside `docs/`, or the verifier, changed. It also says whether the rebuilt console's inputs changed (`console/`, `console/fixtures/console/` or the product API's OpenAPI document) |
 | `console` | Only when the console's inputs changed: `just console`, the rebuilt console's gates (lockfile install, API types, TypeScript, ESLint, Vitest, the build and its shape, `npm audit` and the licence allowlist) |
-| `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
-| `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with Logweir's build of the engine compiled from the vendored source (`scripts/engine-source.sh build`; OSO's pinned image seeds the archive) and both evidence readers; retains Compose logs and tears down the stack |
-| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `check`, `e2e` and `console`, and a `console` job skipped for a change outside its inputs passes |
+| `check` (twelve gates in eight jobs) | Runs one part of [scripts/ci-check.sh](../scripts/ci-check.sh) per gate, at once; the gates that take a few minutes share a job, each as its own step (`lint` with `supply-chain`, `python` with `docs`, and the `retention`, `xtask` and `e2e` unit groups), so a run stays within GitHub Free's 20 concurrent jobs. The gates: `lint` (formatting, Clippy, the shell and Python lints, dependency boundaries, the cosign-pin scan), seven `unit-<group>` gates (the workspace tests by crate group with cargo-nextest, then the doctests: `core`, `logweir`, `weirkeeper`, `api`, `retention` with the reaper, `xtask`, and the e2e package's rows that need no stack), `generated` (schema, CRD and chart drift), `supply-chain` (the notices diff, licences and advisories over both graphs, the engine patch oracle), `python` (the script rows and the independent Python verifier), `docs` (links, the unverified-label scan, `doc_lint`) |
+| `engine` | Builds Logweir's engine once per run with `scripts/engine-source.sh build`, or restores the binary that command built from the same inputs (a cache keyed by `engine-source.sh digest`, the recipe, the toolchain, the build packages and the runner image; saved by `main` only); checks that it prints the build env's `ENGINE_VERSION` and hands it to the shards as an artifact |
+| `build-e2e` | Builds the debug `logweir` the suite drives and archives the e2e test binaries with cargo-nextest, once per run |
+| `e2e` (eight shards) | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, one test at a time from `build-e2e`'s archive, balanced by measured time; with the `engine` job's build over OSO's extracted binary (OSO's pinned image seeds the archive; each shard checks the engine's `--version` again) and both evidence readers. One shard then runs the `--features e2e` rows under `crates/`. Retains Compose logs and tears down the stack |
+| `ci-ok` | Every gate's verdict in one job: green only when each passed, or was skipped because `changes` said its inputs did not change |
+| `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set; it needs `ci-ok` and an `e2e` that ran |
+
+### Gates and markers
+
+Every job that tests something is a gate of [ci/gates.toml](../ci/gates.toml),
+which names the tracked files it reads. The job's first step after its
+checkout, [.github/actions/gate](../.github/actions/gate/action.yml), hashes
+those files ([scripts/ci-gate.sh](../scripts/ci-gate.sh)) and looks for a run
+that proves the same gate passed on the same inputs: a push to `main`, a `v*`
+tag, or the nightly ([ci-nightly.yml](../.github/workflows/ci-nightly.yml)),
+in this repository, whose job for that gate succeeded on a commit whose tree
+gives the same hash. On such a proof the job prints the proving run and skips
+its work; on anything else (no marker, a refused one, an API error, a dirty
+checkout) it works. Those three kinds of run leave a marker when a gate
+passes; a pull-request run uses markers and never leaves one. The nightly
+passes `force`, which runs every gate whatever the markers say, and so
+re-checks the gates whose result depends on time (advisories, `npm audit`),
+which never skip anyway. `engine` and `build-e2e` build for the shards
+whenever a shard's gate misses.
 
 The Compose suite excludes the test that requires a local `docker-desktop`
 Kubernetes listener. That exclusion does not establish Kubernetes deployment
@@ -38,8 +65,11 @@ Run the repository checks locally with:
 just gate
 ```
 
-This invokes the same script as the CI `check` job. It requires Rust, just,
-Node 20+, Helm 4+, kubectl, cargo-deny, and Python with cryptography and pytest.
+This invokes the same script as the CI `check` gates, all of its parts in one
+run, with the workspace suite as one libtest run (no cargo-nextest needed);
+`scripts/ci-check.sh <part>` runs one gate's part the way CI does (the parts
+need cargo-nextest). It requires Rust, just, Node 20+, Helm 4+, kubectl,
+cargo-deny, and Python with cryptography and pytest.
 It needs Docker to extract and verify the pinned engine, but no running broker or Kubernetes cluster. It also runs `cargo deny` over the engine's own lockfile, prepared with the patch folder (`third_party/kafka-backup-deny.toml`), and `scripts/check-cosign-verify.py`. Dependency downloads
 and advisory updates may use the network.
 
@@ -97,7 +127,7 @@ that holds a credential or `contents: write` to that gate.
 | Job | What it does | Writes |
 |---|---|---|
 | `validate` | the tag (a dry run's `rehearsal_tag` input), its version and pre-release flag, and whether this run may publish: a tag push that did not delete the tag, whose tag origin still points at the run's commit | — |
-| `tests` | `ci.yml`: the same checks and Compose suite as `main` | — |
+| `tests` | `ci.yml`: the same gates as `main`, each proven in this run or by a marker for the same inputs (a gate whose input hash equals that of a gate that passed on `main`, a `v*` tag or the nightly skips and names that run); on a docs-only diff from the publication, only the docs readers run | — |
 | `plan` | `dist plan` must announce exactly the three CLI archives | artifact `dist-manifest` |
 | `build` (three) | [scripts/release-build.sh](../scripts/release-build.sh) on one native runner per target — Linux inside `rust:1.89-bookworm`, the runner image's own builder base, macOS on the runner; checks the archive's contents and notices, that no engine is inside, that the binary starts and performs `drill countersign`, and measures what it needs at run time | artifact `binary-<target>` |
 | `drill` | [release-drill.yml](../.github/workflows/release-drill.yml): a backup, an approved drill and both verifiers, driven by the packaged Linux x86-64 binary against Compose Kafka and MinIO | artifact `release-drill-evidence` |

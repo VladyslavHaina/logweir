@@ -1,0 +1,116 @@
+# Recorded by strace 6.1 in rust:1.89-bookworm (aarch64), as scripts/ci-trace.py run records (-f --seccomp-bpf -qq -y -s 4096); trimmed of system and target/ paths, every fork, chdir, exec and resumed line kept. The checkout was /work/co.
+260   execve("/usr/local/cargo/bin/cargo", ["cargo", "test", "-q"], 0xffffe6ccc420 /* 11 vars */) = 0
+260   clone(child_stack=0xffff8292d820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[261], tls=0xffff8292e6a0, child_tidptr=0xffff8292e030) = 261
+260   clone(child_stack=0xffff8271d820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[262], tls=0xffff8271e6a0, child_tidptr=0xffff8271e030) = 262
+260   clone(child_stack=0xffff8250d820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[263], tls=0xffff8250e6a0, child_tidptr=0xffff8250e030) = 263
+260   clone(child_stack=0xffff7bffe820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[264], tls=0xffff7bfff6a0, child_tidptr=0xffff7bfff030) = 264
+260   clone(child_stack=0xffff822fd820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[265], tls=0xffff822fe6a0, child_tidptr=0xffff822fe030) = 265
+260   clone(child_stack=0xffff820ed820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[266], tls=0xffff820ee6a0, child_tidptr=0xffff820ee030) = 266
+260   clone(child_stack=0xffff81edd820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[267], tls=0xffff81ede6a0, child_tidptr=0xffff81ede030) = 267
+260   clone(child_stack=0xffff81ccd820, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[268], tls=0xffff81cce6a0, child_tidptr=0xffff81cce030) = 268
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=224, ...}) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/rust-toolchain", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/rust-toolchain.toml", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=STATX_ATTR_MOUNT_ROOT, stx_mode=S_IFDIR|0755, stx_size=288, ...}) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/rust-toolchain", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/rust-toolchain.toml", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   openat(6</usr/local/rustup/toolchains>, "1.89.0-aarch64-unknown-linux-gnu", O_RDONLY|O_NOCTTY|O_CLOEXEC) = 7</usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu>
+260   openat(6</usr/local/rustup/toolchains>, "1.89.0-aarch64-unknown-linux-gnu", O_RDONLY|O_NOCTTY|O_CLOEXEC) = 7</usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu>
+260   execve("/usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu/bin/cargo", ["/usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu/bin/cargo", "test", "-q"], 0xaaaaf88329b0 /* 14 vars */) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/.cargo/config", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/.cargo/config.toml", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b101e0) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/.cargo/config", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/.cargo/config.toml", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b101e0) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/Cargo.toml", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=73, ...}) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/Cargo.toml", O_RDONLY|O_CLOEXEC) = 3</work/co/sample/Cargo.toml>
+260   statx(3</work/co/sample/Cargo.toml>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=73, ...}) = 0
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/build.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b0a2b0) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/README.md", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b0a260) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/README.txt", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b0a260) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/README", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b0a260) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/src/lib.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=25, ...}) = 0
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/src/main.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, 0xffffc0b0a380) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/src/bin", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/examples", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = -1 ENOENT (No such file or directory)
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/tests", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 3</work/co/sample/tests>
+260   newfstatat(3</work/co/sample/tests>, "", {st_mode=S_IFDIR|0755, st_size=96, ...}, AT_EMPTY_PATH) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/benches", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = -1 ENOENT (No such file or directory)
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=224, ...}) = 0
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/Cargo.lock", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=150, ...}) = 0
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/Cargo.lock", O_RDONLY|O_CLOEXEC) = 3</work/co/sample/Cargo.lock>
+260   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/Cargo.lock", O_RDONLY|O_CLOEXEC) = 3</work/co/sample/Cargo.lock>
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/target", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0755, stx_size=192, ...}) = 0
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/src/lib.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=25, ...}) = 0
+260   statx(AT_FDCWD</work/co/sample>, "/work/co/sample/tests/reads.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=930, ...}) = 0
+260   clone(child_stack=0xffffac89d7e0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[269], tls=0xffffac89e660, child_tidptr=0xffffac89dff0) = 269
+260   clone(child_stack=0xffffacbba000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+270   chdir("/work/co/sample")          = 0
+270   execve("/work/co/sample/target/debug/deps/sample-bdccd59c72d0fdca", ["/work/co/sample/target/debug/deps/sample-bdccd59c72d0fdca", "--quiet"], 0xaaab10e3cad0 /* 33 vars */ <unfinished ...>
+260   <... clone resumed>)              = 270
+270   <... execve resumed>)             = 0
+260   clone(child_stack=0xffffacbba000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+271   chdir("/work/co/sample")          = 0
+271   execve("/work/co/sample/target/debug/deps/reads-538d09143c3e3d53", ["/work/co/sample/target/debug/deps/reads-538d09143c3e3d53", "--quiet"], 0xaaab10e3cad0 /* 33 vars */ <unfinished ...>
+260   <... clone resumed>)              = 271
+271   <... execve resumed>)             = 0
+271   clone(child_stack=0xffff8a14e9c0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[272], tls=0xffff8a14f840, child_tidptr=0xffff8a14f1d0) = 272
+272   openat(AT_FDCWD</work/co/sample>, "/work/co/sample/../docs/declared.md", O_RDONLY|O_CLOEXEC) = 3</work/co/docs/declared.md>
+272   statx(3</work/co/docs/declared.md>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=9, ...}) = 0
+272   openat(AT_FDCWD</work/co/sample>, "../README.md", O_RDONLY|O_CLOEXEC) = 3</work/co/README.md>
+272   statx(3</work/co/README.md>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=9, ...}) = 0
+272   clone(child_stack=0xffff89f3e9c0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[273], tls=0xffff89f3f840, child_tidptr=0xffff89f3f1d0) = 273
+273   statx(AT_FDCWD</work/co/sample>, "../docs/undeclared.md", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=11, ...}) = 0
+272   clone(child_stack=0xffff8a341000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+274   execve("/usr/local/cargo/bin/bash", ["bash", "../scripts/read-docs.sh"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+274   execve("/usr/local/sbin/bash", ["bash", "../scripts/read-docs.sh"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+274   execve("/usr/local/bin/bash", ["bash", "../scripts/read-docs.sh"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+274   execve("/usr/sbin/bash", ["bash", "../scripts/read-docs.sh"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+274   execve("/usr/bin/bash", ["bash", "../scripts/read-docs.sh"], 0xffffdc77bd70 /* 33 vars */ <unfinished ...>
+272   <... clone resumed>)              = 274
+274   <... execve resumed>)             = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/sample", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, ".", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co", {st_mode=S_IFDIR|0755, st_size=288, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/sample", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co", {st_mode=S_IFDIR|0755, st_size=288, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, ".", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   openat(AT_FDCWD</work/co/sample>, "../scripts/read-docs.sh", O_RDONLY) = 3</work/co/scripts/read-docs.sh>
+274   newfstatat(AT_FDCWD</work/co/sample>, "../scripts/read-docs.sh", {st_mode=S_IFREG|0644, st_size=100, ...}, 0) = 0
+274   newfstatat(255</work/co/scripts/read-docs.sh>, "", {st_mode=S_IFREG|0644, st_size=100, ...}, AT_EMPTY_PATH) = 0
+274   clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0xffffa25290f0) = 275
+275   newfstatat(AT_FDCWD</work/co/sample>, ".", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+275   execve("/usr/bin/dirname", ["dirname", "../scripts/read-docs.sh"], 0xaaab097e3060 /* 33 vars */) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co", {st_mode=S_IFDIR|0755, st_size=288, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/sample", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/sample", {st_mode=S_IFDIR|0755, st_size=224, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/scripts", {st_mode=S_IFDIR|0755, st_size=160, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/scripts", {st_mode=S_IFDIR|0755, st_size=160, ...}, 0) = 0
+274   newfstatat(AT_FDCWD</work/co/sample>, "/work/co/docs", {st_mode=S_IFDIR|0755, st_size=192, ...}, 0) = 0
+274   chdir("/work/co/docs")            = 0
+274   newfstatat(AT_FDCWD</work/co/docs>, ".", {st_mode=S_IFDIR|0755, st_size=192, ...}, 0) = 0
+274   clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0xffffa25290f0) = 276
+276   execve("/usr/bin/cat", ["cat", "install.md"], 0xaaab097e73b0 /* 33 vars */) = 0
+276   openat(AT_FDCWD</work/co/docs>, "install.md", O_RDONLY) = 3</work/co/docs/install.md>
+276   newfstatat(3</work/co/docs/install.md>, "", {st_mode=S_IFREG|0644, st_size=10, ...}, AT_EMPTY_PATH) = 0
+274   newfstatat(AT_FDCWD</work/co/docs>, "caf\303\251.md", {st_mode=S_IFREG|0644, st_size=4, ...}, 0) = 0
+272   clone(child_stack=0xffff8a341000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+277   chdir("/work/co/sample/../ci")    = 0
+277   execve("/usr/local/cargo/bin/cat", ["cat", "gates.toml"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+277   execve("/usr/local/sbin/cat", ["cat", "gates.toml"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+277   execve("/usr/local/bin/cat", ["cat", "gates.toml"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+277   execve("/usr/sbin/cat", ["cat", "gates.toml"], 0xffffdc77bd70 /* 33 vars */) = -1 ENOENT (No such file or directory)
+277   execve("/usr/bin/cat", ["cat", "gates.toml"], 0xffffdc77bd70 /* 33 vars */ <unfinished ...>
+272   <... clone resumed>)              = 277
+277   <... execve resumed>)             = 0
+277   openat(AT_FDCWD</work/co/ci>, "gates.toml", O_RDONLY) = 3</work/co/ci/gates.toml>
+277   newfstatat(3</work/co/ci/gates.toml>, "", {st_mode=S_IFREG|0644, st_size=11, ...}, AT_EMPTY_PATH) = 0
+260   clone(child_stack=0xffffacbba000, flags=CLONE_VM|CLONE_VFORK|SIGCHLD <unfinished ...>
+278   chdir("/work/co/sample")          = 0
+278   execve("/usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu/bin/rustdoc", ["/usr/local/rustup/toolchains/1.89.0-aarch64-unknown-linux-gnu/bin/rustdoc", "--edition=2021", "--crate-type", "lib", "--color", "auto", "--crate-name", "sample", "--test", "src/lib.rs", "--test-run-directory", "/work/co/sample", "-L", "dependency=/work/co/sample/target/debug/deps", "-L", "dependency=/work/co/sample/target/debug/deps", "--test-args", "--quiet", "--extern", "sample=/work/co/sample/target/debug/deps/libsample-3a699da3f24daa19.rlib", "-C", "embed-bitcode=no", "--check-cfg", "cfg(docsrs,test)", "--check-cfg", "cfg(feature, values())", "--error-format", "human"], 0xaaab10e3cad0 /* 34 vars */ <unfinished ...>
+260   <... clone resumed>)              = 278
+278   <... execve resumed>)             = 0
+278   clone(child_stack=0xffff858fd240, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[279], tls=0xffff858fe0c0, child_tidptr=0xffff858fda50) = 279
+279   clone(child_stack=0xffff8497d240, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[280], tls=0xffff8497e0c0, child_tidptr=0xffff8497da50) = 280
+279   statx(AT_FDCWD</work/co/sample>, "src/lib.rs", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=25, ...}) = 0
+279   openat(AT_FDCWD</work/co/sample>, "src/lib.rs", O_RDONLY|O_CLOEXEC) = 5</work/co/sample/src/lib.rs>
+279   statx(5</work/co/sample/src/lib.rs>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=25, ...}) = 0

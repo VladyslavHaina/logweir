@@ -1,0 +1,12 @@
+README.md
+ci/gates.toml
+docs/café.md
+docs/declared.md
+docs/install.md
+docs/undeclared.md
+justfile
+sample/Cargo.toml
+sample/src/lib.rs
+sample/tests/reads.rs
+scripts/ci-trace.py
+scripts/read-docs.sh

@@ -1781,9 +1781,10 @@ fn a_slot_moves_every_host_port_and_the_default_render_does_not() {
 // 9. CI's e2e shards (FX-41): every test binary runs in exactly one.
 // ---------------------------------------------------------------------------
 
-/// The step that runs a shard: it selects exactly the shard's `tests`.
-const SHARD_RUN: &str =
-    "cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} --";
+/// The step that runs a shard: nextest over `build-e2e`'s archive (FX-53),
+/// selecting exactly the shard's `tests` by binary name.
+const SHARD_RUN: &str = "cargo-nextest nextest run --archive-file ";
+const SHARD_SELECTION: &str = "-E '(binary(=${{ join(matrix.tests, ') | binary(=') }}))";
 
 /// The e2e package's test binaries: every `e2e/tests/*.rs`, and every
 /// `e2e/tests/<dir>/main.rs` (cargo builds both kinds).
@@ -1838,9 +1839,12 @@ fn shard_offences(job: &serde_yaml::Value, binaries: &BTreeSet<String>) -> Vec<S
         .into_iter()
         .flatten()
         .filter_map(|s| s["run"].as_str());
-    if !runs.into_iter().any(|r| r.starts_with(SHARD_RUN)) {
+    if !runs
+        .into_iter()
+        .any(|r| r.starts_with(SHARD_RUN) && r.contains(SHARD_SELECTION))
+    {
         out.push(format!(
-            "no step runs `{SHARD_RUN}`: the lists select nothing"
+            "no step runs `{SHARD_RUN}… {SHARD_SELECTION}`: the lists select nothing"
         ));
     }
     out

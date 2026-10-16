@@ -4,10 +4,32 @@ on:
   # image; a change touching only them starts no run.
   push: { branches: [main], paths-ignore: ['docs/to-do/**'] }
   pull_request: { paths-ignore: ['docs/to-do/**'] }
+  # `force` runs every gate whatever its markers say (FX-53 §2.6: the nightly,
+  # ci-nightly.yml, passes it).
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Run every gate; ignore the markers that would skip one."
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      force:
+        description: "Run every gate; ignore the markers that would skip one."
+        type: boolean
+        default: false
 permissions:
   contents: read
+# THE GATES (FX-53 §2.2). Every job that tests something is a gate of
+# ci/gates.toml: its first step after the checkout, `.github/actions/gate`,
+# hashes the gate's inputs and looks for a run that proves the same gate passed
+# on the same inputs. On a hit every later step skips and the job succeeds
+# without working; on anything else it works. A pass leaves a marker (the
+# record step, the job's last) only where a run can prove something: a push to
+# main, a `v*` tag, or the nightly on main. A pull-request run uses proofs and
+# never leaves one (its merge commit is not one the API can name).
+env:
+  GATE_RECORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -30,66 +52,356 @@ jobs:
         run: |
           bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
           bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" console | tee -a "$GITHUB_OUTPUT"
+  # THE CHECK GATES (FX-53 §2.4): scripts/ci-check.sh's twelve parts, each a
+  # gate, where one serial job ran them all for 26 to 28 minutes. Every
+  # command of the old job runs in exactly one part; `bash scripts/ci-check.sh`
+  # with no part is still all of them in one run (`just gate`). The unit
+  # groups' union is the workspace (workflow_lint holds it).
+  #
+  # EIGHT JOBS FOR TWELVE GATES. GitHub Free runs at most 20 jobs at once per
+  # account, across every run. Each gate on a runner of its own made a run 23
+  # jobs, which queued against itself (run 38810896223) and against a second
+  # PR. The heavy unit groups keep a job each; the gates that take a few
+  # minutes share one, each as a step of its own that runs whatever the step
+  # before it did, so a red gate never hides another: `lint` with
+  # `supply-chain`, `python` with `docs`, and the three small unit groups.
+  # `cache` names the Rust cache a job restores; only a job with `save` writes
+  # it, on main (`python-docs` builds the `logweir` package that
+  # `unit-logweir`'s cache holds).
+  #
+  # TEST BUILDS LINK WITH mold AND KEEP LINE TABLES ONLY (FX-53): neither
+  # changes what a test does; both cut the link and the debuginfo I/O of some
+  # 300 debug test binaries. Nothing built here ships.
+  #
+  # Each row's gates (`gate1`..`gate3`, names of ci/gates.toml) are decided
+  # first; the setup runs if any of them missed, each gate's part runs if it
+  # did, and each passed gate is recorded at the end of a job that succeeded.
   check:
+    name: ${{ matrix.job }}
     runs-on: ubuntu-24.04
-    # ci-check.sh takes 18-24 minutes; at 25 the job on main 4bfc8b4a was
-    # cancelled while saving the cache, so publish was skipped.
     timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { job: lint, gate1: lint, gate2: supply-chain, cache: lint, save: true }
+          - { job: unit-core, gate1: unit-core, cache: unit-core, save: true }
+          - { job: unit-logweir, gate1: unit-logweir, cache: unit-logweir, save: true }
+          - { job: unit-weirkeeper, gate1: unit-weirkeeper, cache: unit-weirkeeper, save: true }
+          - { job: unit-api, gate1: unit-api, cache: unit-api, save: true }
+          - { job: unit-small, gate1: unit-retention, gate2: unit-xtask, gate3: unit-e2e, cache: unit-small, save: true }
+          - { job: generated, gate1: generated, cache: generated, save: true }
+          - { job: python-docs, gate1: python, gate2: docs, cache: unit-logweir, save: false }
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
       - uses: actions/checkout@v4
+      - id: gate1
+        uses: ./.github/actions/gate
+        with: { gate: '${{ matrix.gate1 }}', force: '${{ inputs.force || false }}' }
+      - id: gate2
+        if: matrix.gate2
+        uses: ./.github/actions/gate
+        with: { gate: '${{ matrix.gate2 }}', force: '${{ inputs.force || false }}' }
+      - id: gate3
+        if: matrix.gate3
+        uses: ./.github/actions/gate
+        with: { gate: '${{ matrix.gate3 }}', force: '${{ inputs.force || false }}' }
+      - name: Does any gate of this job run?
+        id: work
+        env:
+          GATE2: ${{ matrix.gate2 }}
+          GATE3: ${{ matrix.gate3 }}
+          HIT1: ${{ steps.gate1.outputs.hit }}
+          HIT2: ${{ steps.gate2.outputs.hit }}
+          HIT3: ${{ steps.gate3.outputs.hit }}
+        run: |
+          any=false
+          if [ "$HIT1" != true ]; then any=true; fi
+          if [ -n "$GATE2" ] && [ "$HIT2" != true ]; then any=true; fi
+          if [ -n "$GATE3" ] && [ "$HIT3" != true ]; then any=true; fi
+          echo "any=$any" | tee -a "$GITHUB_OUTPUT"
       # Docker Hub rate-limits anonymous pulls per IP; GitHub's shared runners
       # exhaust it (PR #13's check and e2e failed `toomanyrequests`). The
       # daemon pulls Docker Hub images through Google's public mirror first and
       # falls back to Docker Hub on a miss. No credential reaches this job.
       - name: Pull Docker Hub images through a mirror
+        if: steps.work.outputs.any == 'true'
         run: |
           sudo mkdir -p /etc/docker
           if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
           echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo systemctl restart docker
           docker info --format '{{json .RegistryConfig.Mirrors}}'
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - if: steps.work.outputs.any == 'true'
+        uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      # ONE CACHE PER JOB KIND, SAVED BY main ONLY (FX-53). A pull request's
+      # cache lives under refs/pull/<n>/merge, which no other run can read, so
+      # saving it only filled the 10 GB limit; every run still restores main's.
+      - if: steps.work.outputs.any == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ matrix.cache }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.save }}
+      - if: steps.work.outputs.any == 'true'
+        uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - uses: actions/setup-python@v5
+      - if: steps.work.outputs.any == 'true'
+        uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - uses: taiki-e/install-action@v2
-        with: { tool: 'just,cargo-deny@0.20.2' }
-      - uses: azure/setup-helm@v4
+      - if: steps.work.outputs.any == 'true'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-deny@0.20.2,cargo-nextest@0.9.148' }
+      - if: steps.work.outputs.any == 'true'
+        uses: azure/setup-helm@v4
         with: { version: v4.0.1 }
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      - run: pip install cryptography pytest
-      - run: bash scripts/ci-check.sh
+      - if: steps.work.outputs.any == 'true'
+        run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - if: steps.work.outputs.any == 'true'
+        run: pip install cryptography pytest
+      - name: ${{ matrix.gate1 }}
+        if: steps.gate1.outputs.hit != 'true'
+        run: bash scripts/ci-check.sh ${{ matrix.gate1 }}
+      - name: ${{ matrix.gate2 }}
+        if: ${{ !cancelled() && matrix.gate2 && steps.gate2.outputs.hit != 'true' }}
+        run: bash scripts/ci-check.sh ${{ matrix.gate2 }}
+      - name: ${{ matrix.gate3 }}
+        if: ${{ !cancelled() && matrix.gate3 && steps.gate3.outputs.hit != 'true' }}
+        run: bash scripts/ci-check.sh ${{ matrix.gate3 }}
+      # The markers, only when every step before passed (`success()`), and
+      # only on a proving event (GATE_RECORD).
+      - if: success() && env.GATE_RECORD == 'true' && steps.gate1.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+        with: { gate: '${{ matrix.gate1 }}', hash: '${{ steps.gate1.outputs.hash }}', hit: '${{ steps.gate1.outputs.hit }}' }
+      - if: success() && env.GATE_RECORD == 'true' && matrix.gate2 && steps.gate2.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+        with: { gate: '${{ matrix.gate2 }}', hash: '${{ steps.gate2.outputs.hash }}', hit: '${{ steps.gate2.outputs.hit }}' }
+      - if: success() && env.GATE_RECORD == 'true' && matrix.gate3 && steps.gate3.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+        with: { gate: '${{ matrix.gate3 }}', hash: '${{ steps.gate3.outputs.hash }}', hit: '${{ steps.gate3.outputs.hit }}' }
   # PROD-18.1: the rebuilt console (console/), only when it or the API schema its
   # types come from changed. `just console` is the whole job: the lockfile
   # install, the API types, tsc, ESLint, Vitest, the build and its shape, npm
   # audit and the licence allowlist.
+  # A gate that never skips (`always`: npm audit reads the advisory database).
   console:
     needs: changes
     if: needs.changes.outputs.console == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - id: gate
+        uses: ./.github/actions/gate
+        with: { gate: console, force: '${{ inputs.force || false }}' }
+      - if: steps.gate.outputs.hit != 'true'
+        uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - uses: taiki-e/install-action@v2
+      - if: steps.gate.outputs.hit != 'true'
+        uses: taiki-e/install-action@v2
         with: { tool: just }
-      - run: just console
-  # FX-41: the e2e suite in shards BY TEST BINARY (four, and PROD-04.2's fifth), each on its own
-  # runner with its own stack, engine build and logweir build (the Rust cache
-  # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
-  # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
-  # per-binary times of a local run on the default line, 4.3.1 (86 minutes
-  # of tests, 2026-10-10). Each shard's expected minutes of tests read
-  # "local; CI": CI ran the binaries whose rows are the same on 3.7.1 in 0.6
-  # of their local time. Setup takes about 15 minutes before any test runs.
-  # `publish` needs every shard.
-  e2e:
+      - if: steps.gate.outputs.hit != 'true'
+        run: just console
+      - if: success() && env.GATE_RECORD == 'true' && steps.gate.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+        with: { gate: console, hash: '${{ steps.gate.outputs.hash }}', hit: '${{ steps.gate.outputs.hit }}' }
+  # LOGWEIR'S ENGINE, BUILT ONCE PER RUN AND ONCE PER INPUT (FX-53). Every
+  # e2e shard runs it; before FX-53 each shard compiled it again (about 3
+  # minutes, five times a run, on identical inputs).
+  #
+  # WHAT SHIPS IS WHAT THE SHARDS TEST (PROD-00.2). The engine every shard's
+  # `logweir` runs is LOGWEIR'S BUILD, the one the runner image carries: the
+  # vendored tarball, verified, plus the patch folder, compiled natively by
+  # `scripts/engine-source.sh build`. This job runs exactly that command, in
+  # the environment the shards built it in (the same runner image, apt line
+  # and toolchain), or restores the binary that command produced from the same
+  # inputs. The cache key is every input of that build:
+  #   * `engine-source.sh digest`: the tarball's sha256 (which must equal its
+  #     `.sha256` file), each patch's name and sha256, and ENGINE_VERSION,
+  #     which `check` holds to the build env's ENGINE_DIGEST and the ledger;
+  #   * the recipe itself, `scripts/engine-source.sh`, and the build env;
+  #   * `rust-toolchain.toml` (the build runs from the repository root);
+  #   * the apt packages below, and the runner's OS, architecture, image and
+  #     image version (the C compiler and glibc of ring, aws-lc, zstd, SQLite).
+  # Only main saves it, as for the Rust caches. A shard installs the artifact
+  # over OSO's extracted binary and checks that it prints the build env's
+  # ENGINE_VERSION, which PROD-01.1's CONTRACT_ENGINE must equal
+  # (crates/logweir/tests/engine_pin.rs), so the record-semantics contract is
+  # asserted on the shipped engine on every run.
+  engine:
     needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      ENGINE_APT: cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # A BUILD FOR THE SHARDS (ci/gates.toml [not_gates]): it is needed when any
+      # e2e shard's gate misses, which every shard decides again for itself.
+      - name: Does any e2e shard need this build?
+        id: need
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          # Fail safe: a map that cannot be read, or names no shard, needs the build.
+          shards="$(bash scripts/ci-gate.sh gates | grep '^e2e-' || true)"
+          need=false
+          if [ -z "$shards" ]; then echo "no e2e gate could be read; building"; need=true; fi
+          for gate in $shards; do
+            out="$RUNNER_TEMP/need-$gate"
+            GITHUB_OUTPUT="$out" GITHUB_ENV=/dev/null GITHUB_STEP_SUMMARY='' \
+              bash scripts/ci-gate.sh decide "$gate" "$FORCE" > /dev/null
+            if grep -qx 'hit=true' "$out"; then
+              echo "$gate: its inputs are proven"
+            else
+              echo "$gate: runs, so it needs this build"
+              need=true
+            fi
+          done
+          echo "need=$need" | tee -a "$GITHUB_OUTPUT"
+      - name: The engine's build inputs, and the cache key they give
+        if: steps.need.outputs.need == 'true'
+        id: inputs
+        run: |
+          bash scripts/engine-source.sh check
+          digest="$(bash scripts/engine-source.sh digest)"
+          recipe="$(cat scripts/engine-source.sh third_party/kafka-backup-build.env rust-toolchain.toml | sha256sum | cut -c1-16)"
+          apt="$(printf '%s\n' "$ENGINE_APT" | sha256sum | cut -c1-12)"
+          key="engine-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${ImageVersion}-${digest#sha256:}-${recipe}-${apt}"
+          echo "key=$key" | tee -a "$GITHUB_OUTPUT"
+      - id: cache
+        if: steps.need.outputs.need == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .engine/kafka-backup
+          key: ${{ steps.inputs.outputs.key }}
+      - if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          read -ra packages <<< "$ENGINE_APT"
+          sudo apt-get update && sudo apt-get install -y "${packages[@]}"
+      - name: Build Logweir's engine from the vendored source
+        if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/engine-source.sh build
+      - if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .engine/kafka-backup
+          key: ${{ steps.inputs.outputs.key }}
+      - name: The engine is the build the build env names
+        if: steps.need.outputs.need == 'true'
+        run: |
+          want="kafka-backup $(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)"
+          got=$(.engine/kafka-backup --version)
+          [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
+          echo "$got"
+      - if: steps.need.outputs.need == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine
+          path: .engine/kafka-backup
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+  # THE e2e BUILD, ONCE PER RUN (FX-53 §2.3): the debug `logweir` every shard
+  # drives (the harness runs `<root>/target/debug/logweir`) and the e2e test
+  # binaries, archived by cargo-nextest so a shard runs them with no toolchain,
+  # cache or compile of its own. GitHub's runners check out at the same path in
+  # every job, so the paths compiled into the binaries (CARGO_MANIFEST_DIR) hold
+  # in the shards. Its Rust cache is the one the crate rows' shard restores.
+  build-e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # A BUILD FOR THE SHARDS (ci/gates.toml [not_gates]): it is needed when any
+      # e2e shard's gate misses, which every shard decides again for itself.
+      - name: Does any e2e shard need this build?
+        id: need
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          # Fail safe: a map that cannot be read, or names no shard, needs the build.
+          shards="$(bash scripts/ci-gate.sh gates | grep '^e2e-' || true)"
+          need=false
+          if [ -z "$shards" ]; then echo "no e2e gate could be read; building"; need=true; fi
+          for gate in $shards; do
+            out="$RUNNER_TEMP/need-$gate"
+            GITHUB_OUTPUT="$out" GITHUB_ENV=/dev/null GITHUB_STEP_SUMMARY='' \
+              bash scripts/ci-gate.sh decide "$gate" "$FORCE" > /dev/null
+            if grep -qx 'hit=true' "$out"; then
+              echo "$gate: its inputs are proven"
+            else
+              echo "$gate: runs, so it needs this build"
+              need=true
+            fi
+          done
+          echo "need=$need" | tee -a "$GITHUB_OUTPUT"
+      - if: steps.need.outputs.need == 'true'
+        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - if: steps.need.outputs.need == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: steps.need.outputs.need == 'true'
+        run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
+      - if: steps.need.outputs.need == 'true'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'cargo-nextest@0.9.148' }
+      - name: Build the CLI and archive the e2e test binaries
+        if: steps.need.outputs.need == 'true'
+        run: |
+          mkdir -p target/e2e-build
+          cargo nextest archive --locked -p e2e --features e2e --archive-file target/e2e-build/e2e.tar.zst
+          cargo build --locked -p logweir
+          cp target/debug/logweir target/e2e-build/logweir
+      - if: steps.need.outputs.need == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-build
+          path: target/e2e-build/
+          if-no-files-found: error
+          retention-days: 3
+  # FX-41: the e2e suite in shards BY TEST BINARY, each on its own runner with
+  # its own stack. Every file under e2e/tests/ is in exactly one shard's
+  # `tests`: e2e/tests/stack_params.rs fails otherwise, in `unit-small`. FX-53:
+  # seven shards, balanced longest-first on the per-binary nextest times of run
+  # 38810896223 (seconds of tests in each comment; `position_evidence`, alone,
+  # is the floor, and an eighth shard would not lower it but would take one
+  # more of GitHub Free's 20 concurrent jobs). A shard installs the `engine`
+  # job's engine and `build-e2e`'s CLI and archive, and compiles nothing; setup
+  # takes about 1.5 minutes before the first test. `publish` needs every shard.
+  e2e:
+    needs: [changes, engine, build-e2e]
     if: needs.changes.outputs.code == 'true'
     name: e2e ${{ matrix.shard }}
     timeout-minutes: 40
@@ -97,30 +409,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 23; 14
+          # 745
           - shard: 1
-            tests: [record_semantics, topic_identity, record_semantics_oracle, check_image,
-                    config_coverage, new_topic_parity, topic_budget]
-          # 23; 14. On 4.x group_admin's fixture is seven groups of four types.
+            tests: [position_evidence]
+          # 670
           - shard: 2
-            tests: [position_evidence, group_admin, original_name, fixture_retention,
-                    replication_factor_parity, resume_semantics, clone_ttl]
-          # 22; 13
+            tests: [topic_identity, scram, consumer_group_snapshot, topic_configuration_apply,
+                    created_topics, fixture_retention, replication_factor_parity]
+          # 668
           - shard: 3
-            tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
-                    credential_binding_store, compat_contract, stack_params, created_topics,
-                    schema_dependency, smoke, stopped_restore, topic_configuration, fault_proxy,
-                    topic_configuration_apply]
-          # 22; 13, with the `--features e2e` rows under crates/.
+            tests: [auth_modes, clone_ttl, consumer_positions, compat_contract, stack_params,
+                    credential_binding_store, check_image, resume_semantics]
+          # 668, counting about 315 for the `--features e2e` rows under crates/
+          # and the compile they need (292 s cold in run 38810896223).
           - shard: 4
             crates: true
-            tests: [guards, consumer_group_snapshot, backup_argv, mvp_demo, empty_capture,
-                    topic_ids, scram, consumer_positions, offset_side, point_set_binding]
-          # about 15; 9 (PROD-04.2's switchover rows, from the worker's
-          # single-row runs). Its own shard: in any of the four above it would
-          # bring that shard's setup and tests close to the 40-minute timeout.
+            tests: [full_drill, topic_ids, backup_argv, pitr_boundary, fault_proxy, config_coverage]
+          # 667
           - shard: 5
-            tests: [switchover]
+            tests: [switchover, group_admin, guards, offset_side, schema_dependency, stopped_restore,
+                    new_topic_parity]
+          # 665
+          - shard: 6
+            tests: [replay_selection, point_set_binding, mvp_demo, empty_capture, smoke,
+                    topic_configuration, record_semantics_oracle]
+          # 663
+          - shard: 7
+            tests: [record_semantics, original_name, topic_budget]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
@@ -129,74 +444,208 @@ jobs:
       # The broker is the default line `.env` pins, Kafka 4.3.1 (PROD-01.5a);
       # the legacy 3.7.1 line runs in engine-matrix.yml's weekly rows.
       COMPOSE_PROFILES: auth
+      # The crate rows' compile only (shard 4); the same as `build-e2e`'s, so
+      # it restores that cache.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
+      # THE GATE FIRST: a shard whose inputs a run proves downloads nothing,
+      # sets up nothing and brings no stack up.
+      - id: gate
+        uses: ./.github/actions/gate
+        with: { gate: 'e2e-${{ matrix.shard }}', force: '${{ inputs.force || false }}' }
       # Docker Hub rate-limits anonymous pulls per IP; GitHub's shared runners
       # exhaust it (PR #13's check and e2e failed `toomanyrequests`). The
       # daemon pulls Docker Hub images through Google's public mirror first and
       # falls back to Docker Hub on a miss. No credential reaches this job.
       - name: Pull Docker Hub images through a mirror
+        if: steps.gate.outputs.hit != 'true'
         run: |
           sudo mkdir -p /etc/docker
           if [ -s /etc/docker/daemon.json ]; then cur="$(sudo cat /etc/docker/daemon.json)"; else cur='{}'; fi
           echo "$cur" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
           sudo systemctl restart docker
           docker info --format '{{json .RegistryConfig.Mirrors}}'
+      # FREE DISK ONLY WHEN SHORT (FX-53). MinIO refuses every PUT below its
+      # free-space floor (`XMinioStorageFull`, 2026-09-12, when the runner had
+      # 72 GB and 14 GB free); the toolchains removed here are ones this job
+      # never uses. Today's runner starts with about 86 GB free, so deleting
+      # them (42 to 260 s a shard) bought nothing. They go only when less than
+      # FREE_DISK_NEED_GB is free. The need is the shard's own use: the
+      # `Disk used by this shard` step below prints it at the end of every
+      # shard, before the stack goes down.
       - name: free disk space (MinIO refuses writes below its free-space floor)
+        if: steps.gate.outputs.hit != 'true'
+        env:
+          FREE_DISK_NEED_GB: 40
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+          avail="$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)"
+          if [ "$avail" -lt "$FREE_DISK_NEED_GB" ]; then
+            echo "${avail} GB free, under ${FREE_DISK_NEED_GB} GB: removing unused toolchains"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+            df -h /
+          else
+            echo "${avail} GB free, at least ${FREE_DISK_NEED_GB} GB: nothing removed"
+          fi
+      # The crate rows (shard 4) compile, so that shard alone sets up Rust.
+      - if: matrix.crates && steps.gate.outputs.hit != 'true'
+        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+      - if: matrix.crates && steps.gate.outputs.hit != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e
+          save-if: false
+      - if: matrix.crates && steps.gate.outputs.hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y mold cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       # The console rows (record_semantics, schema_dependency) run the
       # console's own TypeScript with node's types stripped: Node 22.6 or later.
-      - uses: actions/setup-node@v4
+      - if: steps.gate.outputs.hit != 'true'
+        uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
-      - uses: taiki-e/install-action@v2
-        with: { tool: just }
-      - run: pip install cryptography
-      - run: cargo fetch --locked
+      - if: steps.gate.outputs.hit != 'true'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with: { tool: 'just,cargo-nextest@0.9.148' }
+      - if: steps.gate.outputs.hit != 'true'
+        run: pip install cryptography
       - name: Extract the pinned engine
+        if: steps.gate.outputs.hit != 'true'
         run: ./scripts/extract-engine.sh
       # WHAT SHIPS IS WHAT THIS JOB TESTS (PROD-00.2). The extraction above
       # pins OSO's release, which the compose stack's `kafka-backup` service
       # uses to seed the drill archive. Every engine run by `logweir` below is
-      # LOGWEIR'S BUILD, the one the runner image carries: the vendored
-      # tarball, verified, plus the patch folder, compiled natively over
-      # `.engine/kafka-backup`. It prints the build env's ENGINE_VERSION
-      # (third_party/kafka-backup-build.env), which PROD-01.1's CONTRACT_ENGINE
-      # must equal (crates/logweir/tests/engine_pin.rs), so the record-semantics
-      # contract is asserted on the shipped engine on every run.
-      - name: Build Logweir's engine from the vendored source
-        run: bash scripts/engine-source.sh build
-      - run: just e2e-up
-      - run: ./scripts/e2e-seed.sh
-      - run: cargo build --locked -p logweir
-      - run: cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
-      - name: Kafka adapter and production timeout integration tests
-        if: matrix.crates
+      # LOGWEIR'S BUILD, the one the runner image carries, which the `engine`
+      # job built with `scripts/engine-source.sh build` from this commit's
+      # inputs; it goes over OSO's `.engine/kafka-backup` here, and must print
+      # the build env's ENGINE_VERSION (see the `engine` job).
+      - if: steps.gate.outputs.hit != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: engine
+          path: ${{ runner.temp }}/engine
+      - name: Install Logweir's engine over OSO's; it is the build the build env names
+        if: steps.gate.outputs.hit != 'true'
         run: |
-          cargo test --locked -p logweir-kafka --features e2e --test live -- --test-threads=1
-          cargo test --locked -p logweir --features e2e --lib check_storage_skips_a_genuinely_unreachable_endpoint
-          cargo test --locked -p logweir --features e2e --test doctor check_7_an_unreachable_target_is_named_as_a_target_problem
-          cargo test --locked -p logweir --features e2e --test notify the_production_agent_gives_up_on_a_sink_that_never_replies
-      - if: always()
+          install -m 0755 "$RUNNER_TEMP/engine/kafka-backup" .engine/kafka-backup
+          want="kafka-backup $(sed -n 's/^ENGINE_VERSION=//p' third_party/kafka-backup-build.env)"
+          got=$(.engine/kafka-backup --version)
+          [ "$got" = "$want" ] || { echo "::error::the engine printed '$got', the build env names '$want'"; exit 1; }
+          echo "$got"
+      - if: steps.gate.outputs.hit != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: e2e-build
+          path: ${{ runner.temp }}/e2e-build
+      # The harness drives `<root>/target/debug/logweir`; it is `build-e2e`'s,
+      # and it must load here, on a runner that installed no -dev package.
+      - name: Install the CLI build-e2e built
+        if: steps.gate.outputs.hit != 'true'
+        run: |
+          install -D -m 0755 "$RUNNER_TEMP/e2e-build/logweir" target/debug/logweir
+          if ldd target/debug/logweir | grep -F 'not found'; then
+            echo "::error::target/debug/logweir needs a library this runner lacks"; exit 1
+          fi
+          target/debug/logweir --version
+      - if: steps.gate.outputs.hit != 'true'
+        run: just e2e-up
+      - if: steps.gate.outputs.hit != 'true'
+        run: ./scripts/e2e-seed.sh
+      # The shard's binaries, one test at a time (the `e2e` profile in
+      # .config/nextest.toml: the suite drives one stack), each test in its own
+      # process; the one row that needs a local Kubernetes listener is left out,
+      # as before. nextest fails a run that selects no test.
+      - name: The shard's e2e test binaries
+        if: steps.gate.outputs.hit != 'true'
+        run: >-
+          cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e-build/e2e.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE" --profile e2e
+          -E '(binary(=${{ join(matrix.tests, ') | binary(=') }})) & not test(a_pod_really_reaches_the_k8s_listener)'
+      # THE `--features e2e` ROWS UNDER crates/, after the suite: they rebuild
+      # `target/debug/logweir` with the crate's `e2e` feature, which the suite
+      # must not drive. Each crate's own test targets, so they compile here.
+      #
+      # THE NAMED ROWS GO THROUGH scripts/run-named-tests.sh (FX-53), which
+      # refuses a name that matches no test: a bare `cargo test <filter>` exits
+      # 0 having run nothing. That is how this step ran `notify`'s
+      # `the_production_agent_gives_up_on_a_sink_that_never_replies` as
+      # `0 passed … 8 filtered out` on every run after f0f01777 withdrew the
+      # drill's notification post and that row with it (PROD-17.1 B2, OD-12).
+      # The post is gone, so the row has nothing left to prove and is removed;
+      # notify.rs's remaining rows run in `unit-logweir`. A name is the test's
+      # full path, as `--list` prints it. The whole-binary rows run through
+      # nextest, which fails a selection with no test in it.
+      #
+      # FX-53 GAP 4: the 20 rows no workflow ran before, `catalog_minio` (6),
+      # `minio_options` (6) and `check_cli`'s `live` module (8).
+      - name: The --features e2e rows under crates/
+        if: matrix.crates && steps.gate.outputs.hit != 'true'
+        run: |
+          cargo nextest run --locked --profile e2e -p logweir-kafka --features e2e --test live
+          CARGO_TEST_ARGS="--locked -p logweir --features e2e --lib" bash scripts/run-named-tests.sh \
+            doctor::tests::check_storage_skips_a_genuinely_unreachable_endpoint
+          CARGO_TEST_ARGS="--locked -p logweir --features e2e --test doctor" bash scripts/run-named-tests.sh \
+            check_7_an_unreachable_target_is_named_as_a_target_problem
+          cargo nextest run --locked --profile e2e -p logweir --features e2e --test catalog_minio
+          cargo nextest run --locked --profile e2e -p logweir-store --features e2e --test minio_options
+          cargo nextest run --locked --profile e2e -p logweir --features e2e --test check_cli -E 'test(/^live::/)'
+      - if: always() && steps.gate.outputs.hit != 'true'
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
-      - if: always()
+      # The free-disk step's measurement: what this shard used, at its peak
+      # (everything installed, the stack and its volumes still up).
+      - name: Disk used by this shard
+        if: always() && steps.gate.outputs.hit != 'true'
+        run: |
+          df -h /
+          du -sh target .engine 2>/dev/null || true
+          docker system df || true
+      - if: always() && steps.gate.outputs.hit != 'true'
         uses: actions/upload-artifact@v4
         with: { name: 'compose-logs-${{ matrix.shard }}', path: /tmp/compose.log }
-      - if: always()
+      - if: always() && steps.gate.outputs.hit != 'true'
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
+      - if: success() && env.GATE_RECORD == 'true' && steps.gate.outputs.hit != 'true'
+        uses: ./.github/actions/gate/record
+        with: { gate: 'e2e-${{ matrix.shard }}', hash: '${{ steps.gate.outputs.hash }}', hit: '${{ steps.gate.outputs.hit }}' }
+
+  # EVERY GATE, IN ONE VERDICT (FX-53 §2.4): `publish`, and a reader of this
+  # run, need one job that is green exactly when every gate passed or was
+  # skipped for a reason the classifier gave. A job may be skipped only when
+  # `changes` said its inputs did not change: `console` when the console's
+  # did not, and `engine`, `build-e2e` and `e2e` when only docs/ did; any other
+  # skip, a failure or a cancellation is red.
+  ci-ok:
+    if: always()
+    needs: [changes, check, console, engine, build-e2e, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: The skips the classifier allows
+        id: skips
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          CONSOLE: ${{ needs.changes.outputs.console }}
+        run: |
+          skips=()
+          if [ "$CONSOLE" != true ]; then skips+=('"console"'); fi
+          if [ "$CODE" != true ]; then skips+=('"engine"' '"build-e2e"' '"e2e"'); fi
+          list="[$(IFS=,; echo "${skips[*]}")]"
+          echo "list=$list" | tee -a "$GITHUB_OUTPUT"
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          allowed-skips: ${{ steps.skips.outputs.list }}
+          jobs: ${{ toJSON(needs) }}
 
   publish:
-    # The console job's gates (audit, licences, ESLint, Vitest) hold the image
-    # too. It is skipped when neither console/ nor its inputs changed, and a
-    # skip passes here; a skipped check or e2e still skips publication.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.check.result == 'success' && needs.e2e.result == 'success' && needs.console.result != 'failure'
-    needs: [check, e2e, console]
+    # Every gate passed (`ci-ok`), and the e2e suite ran: a docs-only change
+    # skips it, and so publishes nothing, as before.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() && needs.ci-ok.result == 'success' && needs.e2e.result == 'success'
+    needs: [ci-ok, e2e]
     # images.yml's `sign` job signs keylessly (PROD-00.2): a reusable
     # workflow's jobs get no more than this job grants.
     permissions:

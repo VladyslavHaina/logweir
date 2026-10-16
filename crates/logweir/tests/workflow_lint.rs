@@ -37,17 +37,66 @@ fn all_workflows_parse_and_default_to_read_only() {
 fn main_publication_requires_quality_and_integration_success() {
     let ci = workflow("ci.yml");
     let publish = &ci["jobs"]["publish"];
-    assert_eq!(dependencies(publish), ["check", "e2e", "console"]);
-    // The console job's gates hold the image as well; its skip (no console
-    // change) passes, a skipped check or e2e does not, and a failure never does.
+    // FX-53: `ci-ok` is every gate's verdict; the e2e suite must also have RUN
+    // (a docs-only change skips it and publishes nothing, as before).
+    assert_eq!(dependencies(publish), ["ci-ok", "e2e"]);
     assert_eq!(
         publish["if"].as_str(),
         Some(
             "github.event_name == 'push' && github.ref == 'refs/heads/main' && !cancelled() \
-             && needs.check.result == 'success' && needs.e2e.result == 'success' \
-             && needs.console.result != 'failure'"
+             && needs.ci-ok.result == 'success' && needs.e2e.result == 'success'"
         )
     );
+    // `ci-ok` needs every other job, runs whatever they did, and lets a job
+    // skip only where the classifier said its inputs did not change.
+    let ok = &ci["jobs"]["ci-ok"];
+    assert_eq!(ok["if"].as_str(), Some("always()"));
+    let mut gates: Vec<&str> = ci["jobs"]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str().unwrap())
+        .filter(|k| !["ci-ok", "publish"].contains(k))
+        .collect();
+    gates.sort();
+    let mut needed = dependencies(ok);
+    needed.sort();
+    assert_eq!(needed, gates, "ci-ok must need every gate job");
+    let steps = ok["steps"].as_sequence().unwrap();
+    let green = steps
+        .iter()
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("re-actors/alls-green@"))
+        })
+        .expect("ci-ok runs re-actors/alls-green");
+    let sha = green["uses"].as_str().unwrap().split_once('@').unwrap().1;
+    assert!(sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(green["with"]["jobs"].as_str(), Some("${{ toJSON(needs) }}"));
+    assert_eq!(
+        green["with"]["allowed-skips"].as_str(),
+        Some("${{ steps.skips.outputs.list }}")
+    );
+    let skips = steps
+        .iter()
+        .find(|s| s["id"] == "skips")
+        .and_then(|s| s["run"].as_str())
+        .unwrap();
+    for (condition, jobs) in [
+        ("[ \"$CONSOLE\" != true ]", "'\"console\"'"),
+        (
+            "[ \"$CODE\" != true ]",
+            "'\"engine\"' '\"build-e2e\"' '\"e2e\"'",
+        ),
+    ] {
+        assert!(
+            skips
+                .lines()
+                .any(|l| l.contains(condition) && l.contains(jobs)),
+            "ci-ok allows `{jobs}` to skip only under `{condition}`: {skips}"
+        );
+    }
     assert_eq!(
         publish["uses"].as_str(),
         Some("./.github/workflows/images.yml")
@@ -175,8 +224,14 @@ fn the_chart_is_published_beside_the_images_it_names() {
     assert_eq!(
         names,
         // compat-weekly.yml runs e2e rows weekly and publishes
-        // nothing: contents read, no secret, no registry login.
+        // nothing: contents read, no secret, no registry login. So does
+        // ci-trace.yml (FX-53 §2.6): it traces the tests' file reads. So does
+        // ci-nightly.yml (FX-53 §2.6): it calls ci.yml with no secret, and
+        // ci.yml's `publish` runs only on a main push, never on its schedule
+        // or dispatch (gate_map_lint pins both).
         [
+            "ci-nightly.yml",
+            "ci-trace.yml",
             "ci.yml",
             "compat-weekly.yml",
             "engine-matrix.yml",
@@ -481,14 +536,17 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
                 })
                 .collect();
             granted.sort();
+            // FX-53: and `actions: read`, which ci.yml's gate jobs need to look
+            // a marker up (a called workflow's jobs get no more than this).
             assert_eq!(
                 granted,
                 [
+                    ("actions".to_string(), "read".to_string()),
                     ("attestations".to_string(), "write".to_string()),
                     ("contents".to_string(), "read".to_string()),
                     ("id-token".to_string(), "write".to_string()),
                 ],
-                "tests grants what ci.yml's publish asks for, and nothing more"
+                "tests grants what ci.yml's publish and gates ask for, and nothing more"
             );
             assert_ne!(
                 job["if"].as_str(),
@@ -913,11 +971,21 @@ fn docs_only_changes_skip_what_they_cannot_affect() {
         "check must run on every change"
     );
     assert!(dependencies(&jobs["check"]).is_empty());
-    assert_eq!(dependencies(&jobs["e2e"]), ["changes"]);
+    // FX-53: the shards also wait for the run's one engine build and its one
+    // e2e build, which run exactly when they do.
     assert_eq!(
-        jobs["e2e"]["if"].as_str(),
-        Some("needs.changes.outputs.code == 'true'")
+        dependencies(&jobs["e2e"]),
+        ["changes", "engine", "build-e2e"]
     );
+    assert_eq!(dependencies(&jobs["build-e2e"]), ["changes"]);
+    for job in ["e2e", "engine", "build-e2e"] {
+        assert_eq!(
+            jobs[job]["if"].as_str(),
+            Some("needs.changes.outputs.code == 'true'"),
+            "{job}"
+        );
+    }
+    assert_eq!(dependencies(&jobs["engine"]), ["changes"]);
     let classify = jobs["changes"]["steps"]
         .as_sequence()
         .unwrap()
@@ -928,6 +996,374 @@ fn docs_only_changes_skip_what_they_cannot_affect() {
         .as_str()
         .unwrap()
         .starts_with("bash scripts/ci-changes.sh "));
+}
+
+/// FX-53: LOGWEIR'S ENGINE IS BUILT ONCE PER RUN, BY THE COMMAND THAT BUILT
+/// IT IN EVERY SHARD, AND RESTORED ONLY UNDER A KEY OF ITS INPUTS. The shards
+/// install the `engine` job's artifact over OSO's extracted binary and refuse
+/// one that does not print the build env's ENGINE_VERSION; none of them
+/// compiles it. Only main saves the cache.
+#[test]
+fn the_engine_is_built_once_per_run_from_its_inputs() {
+    let ci = workflow("ci.yml");
+    let engine = &ci["jobs"]["engine"];
+    let steps = engine["steps"].as_sequence().unwrap();
+    let run = |s: &Value| s["run"].as_str().unwrap_or("").to_string();
+    let uses = |s: &Value| s["uses"].as_str().unwrap_or("").to_string();
+    let at = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        steps
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("ci.yml's engine job has no {what}"))
+    };
+    let key = at(
+        &|s| run(s).contains("bash scripts/engine-source.sh digest"),
+        "key step built from `engine-source.sh digest`",
+    );
+    let key_run = run(&steps[key]);
+    for input in [
+        "bash scripts/engine-source.sh check",
+        "scripts/engine-source.sh",
+        "third_party/kafka-backup-build.env",
+        "rust-toolchain.toml",
+        "$ENGINE_APT",
+        "${RUNNER_OS}",
+        "${RUNNER_ARCH}",
+        "${ImageOS}",
+        "${ImageVersion}",
+    ] {
+        assert!(
+            key_run.contains(input),
+            "the engine cache key leaves out `{input}`: {key_run}"
+        );
+    }
+    let restore = at(
+        &|s| uses(s).starts_with("actions/cache/restore@"),
+        "cache restore",
+    );
+    let build = at(
+        &|s| run(s) == "bash scripts/engine-source.sh build",
+        "`bash scripts/engine-source.sh build`",
+    );
+    let save = at(
+        &|s| uses(s).starts_with("actions/cache/save@"),
+        "cache save",
+    );
+    let identity = at(
+        &|s| {
+            run(s).contains("third_party/kafka-backup-build.env")
+                && run(s).contains(".engine/kafka-backup --version")
+        },
+        "identity check against the build env",
+    );
+    let upload = at(
+        &|s| uses(s).starts_with("actions/upload-artifact@"),
+        "artifact upload",
+    );
+    assert!(
+        key < restore && restore < build && build < save && save < identity && identity < upload
+    );
+    // FX-53 stage 4: only when some e2e shard's gate misses, then only on a
+    // cache miss; only main saves.
+    let miss = "steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'";
+    assert_eq!(steps[build]["if"].as_str(), Some(miss));
+    assert_eq!(
+        steps[save]["if"].as_str(),
+        Some(format!("{miss} && github.ref == 'refs/heads/main'").as_str()),
+        "only main saves the engine cache"
+    );
+    let need = steps
+        .iter()
+        .position(|s| s["id"] == "need")
+        .expect("the engine job asks whether a shard needs it");
+    assert!(need < key, "the need comes before any work");
+    let need_run = run(&steps[need]);
+    assert!(
+        need_run.contains("bash scripts/ci-gate.sh decide \"$gate\" \"$FORCE\"")
+            && need_run.contains("grep '^e2e-'")
+            && need_run.contains("need=true"),
+        "the engine is needed when any e2e gate misses: {need_run}"
+    );
+    for step in [restore, save] {
+        assert_eq!(
+            steps[step]["with"]["path"].as_str(),
+            Some(".engine/kafka-backup")
+        );
+        assert_eq!(
+            steps[step]["with"]["key"].as_str(),
+            Some("${{ steps.inputs.outputs.key }}")
+        );
+    }
+    assert_eq!(steps[upload]["with"]["name"].as_str(), Some("engine"));
+    assert_eq!(
+        steps[upload]["with"]["path"].as_str(),
+        Some(".engine/kafka-backup")
+    );
+
+    let e2e = ci["jobs"]["e2e"]["steps"].as_sequence().unwrap();
+    let text = serde_yaml::to_string(&ci["jobs"]["e2e"]).unwrap();
+    assert!(
+        !text.contains("engine-source.sh build"),
+        "a shard compiles the engine again: {text}"
+    );
+    let shard_at = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        e2e.iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("ci.yml's e2e job has no {what}"))
+    };
+    let extract = shard_at(
+        &|s| run(s) == "./scripts/extract-engine.sh",
+        "OSO extraction",
+    );
+    let download = shard_at(
+        &|s| uses(s).starts_with("actions/download-artifact@") && s["with"]["name"] == "engine",
+        "download of the `engine` artifact",
+    );
+    let install = shard_at(
+        &|s| {
+            run(s).contains(".engine/kafka-backup")
+                && run(s).contains("third_party/kafka-backup-build.env")
+                && run(s).contains("--version")
+        },
+        "install over OSO's binary with the identity check",
+    );
+    let up = shard_at(&|s| run(s) == "just e2e-up", "`just e2e-up`");
+    assert!(extract < download && download < install && install < up);
+}
+
+/// FX-53: EVERY RUST CACHE IN ci.yml IS ONE KEY PER JOB KIND, SAVED BY main
+/// ONLY, AND BY ONE JOB. A pull request's cache lives where no other run can
+/// read it; a key two jobs saved would race for the reservation.
+#[test]
+fn rust_caches_are_shared_per_job_kind_and_saved_by_main_only() {
+    let ci = workflow("ci.yml");
+    let main = "${{ github.ref == 'refs/heads/main'";
+    let mut saved: Vec<String> = Vec::new();
+    let mut restored: Vec<String> = Vec::new();
+    for (name, job) in ci["jobs"].as_mapping().unwrap() {
+        let Some(steps) = job["steps"].as_sequence() else {
+            continue;
+        };
+        let rows = job["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .cloned()
+            .unwrap_or_default();
+        for step in steps {
+            let Some(uses) = step["uses"].as_str() else {
+                continue;
+            };
+            if !uses.starts_with("Swatinem/rust-cache@") {
+                continue;
+            }
+            let sha = uses.split_once('@').unwrap().1;
+            assert!(
+                sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{name:?}: `{uses}` is not pinned by commit"
+            );
+            let key = step["with"]["shared-key"].as_str().unwrap().to_string();
+            let save_if = match &step["with"]["save-if"] {
+                Value::Bool(false) => "false".to_string(),
+                v => v.as_str().unwrap_or_default().to_string(),
+            };
+            if key == "${{ matrix.cache }}" {
+                // A matrix of gates: the row names its cache and whether it saves.
+                assert_eq!(save_if, format!("{main} && matrix.save }}}}"), "{name:?}");
+                for row in &rows {
+                    let cache = row["cache"].as_str().unwrap().to_string();
+                    if row["save"].as_bool() == Some(true) {
+                        saved.push(cache);
+                    } else {
+                        assert_eq!(row["save"].as_bool(), Some(false), "{row:?}");
+                        restored.push(cache);
+                    }
+                }
+            } else if save_if == "false" {
+                restored.push(key);
+            } else {
+                assert_eq!(
+                    save_if,
+                    format!("{main} }}}}"),
+                    "{name:?}: saves on main only"
+                );
+                saved.push(key);
+            }
+        }
+    }
+    let mut unique = saved.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        saved.len(),
+        "two jobs save one key: {saved:?}"
+    );
+    for key in &restored {
+        assert!(
+            saved.contains(key),
+            "`{key}` is restored but no job saves it: {saved:?}"
+        );
+    }
+}
+
+/// FX-53 §2.4: `check` is a matrix of scripts/ci-check.sh's parts, one gate
+/// each, and the unit groups' union is the workspace: every member in exactly
+/// one group, every group a gate.
+#[test]
+fn the_check_gates_cover_every_part_and_every_workspace_member_once() {
+    let ci = workflow("ci.yml");
+    let check = &ci["jobs"]["check"];
+    let rows = check["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap();
+    assert_eq!(check["strategy"]["fail-fast"].as_bool(), Some(false));
+    // Eight jobs for twelve gates (GitHub Free's 20 concurrent jobs): a row
+    // runs up to three gates (ci/gates.toml's names, which are ci-check.sh's
+    // parts), each a step of its own that runs on its gate's miss, whatever the
+    // step before it did (gate_map_lint holds the gate steps themselves).
+    let parts: Vec<&str> = rows
+        .iter()
+        .flat_map(|r| ["gate1", "gate2", "gate3"].map(|k| r[k].as_str()))
+        .flatten()
+        .collect();
+    let steps = check["steps"].as_sequence().unwrap();
+    for (n, key) in ["gate1", "gate2", "gate3"].iter().enumerate() {
+        let step = steps
+            .iter()
+            .find(|s| {
+                s["run"] == format!("bash scripts/ci-check.sh ${{{{ matrix.{key} }}}}").as_str()
+            })
+            .unwrap_or_else(|| panic!("check runs `ci-check.sh ${{{{ matrix.{key} }}}}`"));
+        let n = n + 1;
+        let want = if n == 1 {
+            "steps.gate1.outputs.hit != 'true'".to_string()
+        } else {
+            format!(
+                "${{{{ !cancelled() && matrix.{key} && steps.gate{n}.outputs.hit != 'true' }}}}"
+            )
+        };
+        assert_eq!(
+            step["if"].as_str(),
+            Some(want.as_str()),
+            "a gate's part runs on its miss, whatever the part before it did"
+        );
+    }
+    for part in ["lint", "generated", "supply-chain", "python", "docs"] {
+        assert_eq!(
+            parts.iter().filter(|p| **p == part).count(),
+            1,
+            "`{part}` is one gate"
+        );
+    }
+    assert!(
+        rows.len() <= 8,
+        "{} check jobs; the budget is eight",
+        rows.len()
+    );
+    let script = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
+    let table: String = script
+        .split("unit_packages() {")
+        .nth(1)
+        .unwrap()
+        .split("esac")
+        .next()
+        .unwrap()
+        .to_string();
+    let mut groups = std::collections::BTreeMap::new();
+    for line in table.lines() {
+        let Some((group, rest)) = line.trim().split_once(") echo \"") else {
+            continue;
+        };
+        let members: Vec<String> = rest
+            .trim_end_matches(" ;;")
+            .trim_end_matches('"')
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        groups.insert(group.to_string(), members);
+    }
+    let mut gated: Vec<String> = parts
+        .iter()
+        .filter_map(|p| p.strip_prefix("unit-"))
+        .map(str::to_string)
+        .collect();
+    gated.sort();
+    let mut declared: Vec<String> = groups.keys().cloned().collect();
+    declared.sort();
+    assert_eq!(gated, declared, "every unit group is one gate");
+    // The workspace's members, read from their manifests (`[workspace]
+    // members = ["crates/*", "xtask", "e2e"]`).
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root().join("crates"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.join("Cargo.toml").is_file())
+        .collect();
+    dirs.push(root().join("xtask"));
+    dirs.push(root().join("e2e"));
+    let members: Vec<String> = dirs
+        .iter()
+        .map(|d| {
+            // The `name = "…"` line of the `[package]` table (every member's
+            // manifest opens with it).
+            let manifest = std::fs::read_to_string(d.join("Cargo.toml")).unwrap();
+            let package = manifest.split("[package]").nth(1).unwrap();
+            package
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("name = \""))
+                .and_then(|n| n.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("{}: no package name", d.display()))
+                .to_string()
+        })
+        .collect();
+    let mut grouped: Vec<String> = groups.values().flatten().cloned().collect();
+    grouped.sort();
+    let mut expected = members.clone();
+    expected.sort();
+    assert_eq!(
+        grouped, expected,
+        "the unit groups must hold every workspace member exactly once"
+    );
+    let root_manifest = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(
+        root_manifest.contains(r#"members = ["crates/*", "xtask", "e2e"]"#),
+        "the workspace's members moved: update this row and the unit groups"
+    );
+}
+
+/// FX-53: every test `.config/nextest.toml` singles out (to run alone, because
+/// it writes into the working tree) exists, so a rename cannot quietly put it
+/// back beside the tests that scan the tree.
+#[test]
+fn every_nextest_override_names_a_test_that_exists() {
+    let config = std::fs::read_to_string(root().join(".config/nextest.toml")).unwrap();
+    let mut seen = 0;
+    for line in config.lines() {
+        let Some(filter) = line.trim().strip_prefix("filter = '") else {
+            continue;
+        };
+        let filter = filter.trim_end_matches('\'');
+        let (binary, test) = filter.split_once(" & ").unwrap_or_else(|| {
+            panic!("an override filter is `binary_id(..) & test(=..)`: {filter}")
+        });
+        let id = binary
+            .strip_prefix("binary_id(")
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap();
+        let name = test
+            .strip_prefix("test(=")
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap();
+        let (krate, target) = id.split_once("::").unwrap();
+        let file = root().join(format!("crates/{krate}/tests/{target}.rs"));
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("{}: {e} (override `{filter}`)", file.display()));
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "{} defines no `{name}`: the override `{filter}` selects nothing",
+            file.display()
+        );
+        seen += 1;
+    }
+    assert!(seen >= 1, "the override list was not read");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
@@ -997,6 +1433,19 @@ fn ci_changes_classifies_docs_only_diffs() {
     assert_eq!(classify(dir, "", &lookalike), "code=true");
     assert_eq!(classify(dir, &"0".repeat(40), &lookalike), "code=true");
     assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
+    // FX-53 GAP 1: THE VERIFIER IS CODE UNDER docs/. Every e2e harness user
+    // runs `docs/verify_scorecard.py`, and a release ships it, so a change to
+    // it or to its suite runs e2e; a document beside it does not.
+    let prose = commit(dir, "docs/install.md");
+    let verifier = commit(dir, "docs/verify_scorecard.py");
+    assert_eq!(classify(dir, &prose, &verifier), "code=true");
+    let suite = commit(dir, "docs/test_verify_scorecard.py");
+    assert_eq!(classify(dir, &verifier, &suite), "code=true");
+    let beside = commit(dir, "docs/verify_scorecard.md");
+    assert_eq!(classify(dir, &suite, &beside), "code=false");
+    let nested = commit(dir, "docs/formats/verify_scorecard.py");
+    assert_eq!(classify(dir, &beside, &nested), "code=false");
+    assert_eq!(classify(dir, &lookalike, &nested), "code=true");
 }
 
 /// PROD-18.1: the `console` job runs `just console` only when the diff touches

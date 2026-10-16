@@ -1,0 +1,36 @@
+# cargo-nextest's profiles for CI (FX-53 §2.4). `scripts/ci-check.sh unit
+# <group>` and `docs` run the `ci` profile; the e2e shards run `e2e`. Locally,
+# `just gate` runs the workspace suite with libtest and reads none of this.
+#
+# Each test runs in a process of its own, and the binaries of one run in
+# parallel. What libtest's one-binary-at-a-time order hid, checked before the
+# move and by the first runs: no test binds a fixed port (every `:8484` in the
+# tests is a Host header), env changes stay in their own process, and scratch
+# directories are per-process or `tempfile`, with ONE exception below.
+
+[profile.ci]
+fail-fast = false
+# Reported, never killed: some rows wait on deadlines by design
+# (logweir-api's `local_admin` took 139 s as one libtest binary).
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
+
+# A TEST THAT WRITES INTO THE WORKING TREE RUNS ALONE. weirkeeper's
+# `the_gate_scans_the_store_crate_by_default` plants a file holding `.delete(`
+# under crates/logweir-store/src for the length of one gate run; a test that
+# scans the tree meanwhile sees it (retention_policy_controller's
+# `the_gate_reports_exactly_one_crate_reaching_the_reaper` did, in run
+# 38810896223). Under libtest no other binary ran at the same time. Needing
+# every test thread, it runs with nothing beside it. workflow_lint holds each
+# filter here to a test that exists.
+[[profile.ci.overrides]]
+filter = 'binary_id(weirkeeper::retention) & test(=the_gate_scans_the_store_crate_by_default)'
+threads-required = "num-test-threads"
+
+[profile.e2e]
+# ONE TEST AT A TIME: the suite drives one compose stack, one broker and one
+# bucket (e2e/tests/harness/mod.rs), as `--test-threads=1` did.
+test-threads = 1
+fail-fast = false
+slow-timeout = { period = "300s" }
+failure-output = "immediate-final"
