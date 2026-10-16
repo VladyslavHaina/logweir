@@ -588,6 +588,155 @@ async fn refuse_references_elsewhere(
     Ok(())
 }
 
+/// `POST .../restores/{name}/cancel` (PROD-07.2).
+pub const ROUTE_CANCEL: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/cancel";
+/// `POST .../restores/{name}/cleanup` (PROD-07.2).
+pub const ROUTE_CLEANUP: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/cleanup";
+
+/// What one request asks the controller for (PROD-07.2).
+#[derive(Clone, Copy)]
+enum Request {
+    Cancel,
+    Cleanup,
+}
+
+impl Request {
+    fn annotation(self) -> &'static str {
+        use weirkeeper::controllers::restore::restore_interruption as ri;
+        match self {
+            Request::Cancel => ri::CANCEL_ANNOTATION,
+            Request::Cleanup => ri::CLEANUP_ANNOTATION,
+        }
+    }
+
+    /// Why the object's state refuses the request, if it does.
+    fn refusal(self, object: &Restore) -> Option<&'static str> {
+        use weirkeeper::controllers::restore::restore_interruption as ri;
+        let status = object.status.as_ref();
+        let phase = status.and_then(|s| s.phase.as_deref());
+        match self {
+            Request::Cancel => match phase {
+                None | Some("Pending" | "Queued" | "Running") => None,
+                _ => Some("The restore has already ended; there is nothing to cancel."),
+            },
+            Request::Cleanup => {
+                let signed = status
+                    .and_then(|s| s.interruption.as_ref())
+                    .is_some_and(|i| {
+                        i.verification.as_deref() == Some(ri::VERIFICATION_DONE)
+                            && i.reconcile_run_id.is_some()
+                    });
+                if phase == Some(ri::PHASE_INTERRUPTED) && signed {
+                    None
+                } else {
+                    Some(
+                        "Clean up is offered only for an Interrupted restore whose partial \
+                         topics a reconcile has listed in a signed scorecard.",
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// `POST .../restores/{name}/cancel` and `.../cleanup`: one annotation, set
+/// once. Whoever may create restores in the workspace may ask (OD-23 open
+/// point 3); a repeated request writes nothing.
+async fn request(
+    state: &AppState,
+    actor: &Actor,
+    ws: &str,
+    name: &str,
+    what: Request,
+) -> Result<Restore, ApiError> {
+    for _ in 0..2 {
+        let object = get_object::<Restore>(state, actor, ws, name).await?;
+        if object
+            .metadata
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key(what.annotation()))
+        {
+            return Ok(object);
+        }
+        if let Some(why) = what.refusal(&object) {
+            actor.audit.set_failure("state_conflict");
+            return Err(ApiError::new(ProblemCode::StateConflict, why));
+        }
+        let version = object.metadata.resource_version.clone().unwrap_or_default();
+        match state
+            .kube()
+            .request_restore(name, &version, what.annotation(), &actor.id())
+            .await
+        {
+            Ok(updated) => {
+                actor.audit.note(what.annotation(), "true");
+                return Ok(updated);
+            }
+            Err(KubeFailure::Conflict) => continue,
+            Err(other) => return Err(other.into_api_error()),
+        }
+    }
+    Err(ApiError::new(
+        ProblemCode::StateConflict,
+        "The restore changed concurrently; read it again and retry.",
+    ))
+}
+
+/// `POST .../restores/{name}/cancel` (PROD-07.2): stop the run. Before its
+/// Job exists the restore fails `Cancelled` and nothing ran; while it runs
+/// the controller stops the runner and its engine, and a run that created its
+/// target topics becomes `Interrupted`. 409 once it has ended.
+pub async fn cancel(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL, None)?;
+    let object = request(&state, &actor, &ws, &name, Request::Cancel).await?;
+    Ok(json(
+        StatusCode::OK,
+        &RestoreResponse {
+            request_id,
+            replayed: None,
+            item: projection::restore(&object, false),
+            authorization: None,
+        },
+    ))
+}
+
+/// `POST .../restores/{name}/cleanup` (PROD-07.2): remove the topics an
+/// interrupted run created and left, as its reconcile's signed scorecard
+/// lists them, each only while its ID is the recorded one. 409 unless the
+/// restore is `Interrupted` with a signed reconcile.
+pub async fn cleanup(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CLEANUP, None)?;
+    let object = request(&state, &actor, &ws, &name, Request::Cleanup).await?;
+    Ok(json(
+        StatusCode::OK,
+        &RestoreResponse {
+            request_id,
+            replayed: None,
+            item: projection::restore(&object, false),
+            authorization: None,
+        },
+    ))
+}
+
 /// `POST .../restores`.
 pub async fn create(
     State(state): State<AppState>,

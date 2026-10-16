@@ -2076,6 +2076,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // original-name restore states its owners in the plan.
             kafka_topic_resources: None,
             strimzi_cluster: None,
+            run_id: None,
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {

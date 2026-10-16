@@ -44,6 +44,11 @@ logweir-store = { path = "../logweir-store" }
 # `logweir-core`, `logweir-kafka` and `logweir-store` all depend on it — so it
 # adds no package to the closed graph of Global Constraint 38.
 thiserror.workspace = true
+# PROD-07.2: the runner's stop reaches the engine. `kill` (SIGTERM to the
+# child) and, on Linux, `prctl(PR_SET_PDEATHSIG)` in the launcher, both safe
+# APIs (the workspace forbids `unsafe`). Already in the graph through
+# `object_store`; only the `signal` and `process` features are added.
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
 insta.workspace = true

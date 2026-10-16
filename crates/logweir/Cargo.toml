@@ -56,6 +56,10 @@ schemars.workspace = true
 # (`src/ids.rs`), never in `logweir-core`, which keeps only the pure encoder.
 ulid.workspace = true
 ureq.workspace = true
+# PROD-07.2: `restore run` stops on SIGTERM and SIGINT (`stop_signal`). Already
+# in the graph (`logweir-store`, and `weirkeeper` with the same `signal`
+# feature); no package is added.
+tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
 insta.workspace = true

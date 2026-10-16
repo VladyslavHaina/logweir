@@ -97,6 +97,8 @@ use crate::check;
 /// (`controllers/restore_clone.rs`).
 #[path = "restore_clone.rs"]
 pub mod restore_clone;
+#[path = "restore_interruption.rs"]
+pub mod restore_interruption;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
@@ -6406,6 +6408,14 @@ async fn reconcile_restore_inner(
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
     let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
 
+    // PROD-07.2: an `Interrupted` restore's reconcile and cleanup, and a
+    // cancel.
+    if let Some(outcome) =
+        restore_interruption::before(restore, client, &namespace, now, runner, &reads).await?
+    {
+        return Ok(outcome);
+    }
+
     // STEP 0. The object's own name, before any `POST`.
     if name.len() > crate::slot::NAME_LIMIT {
         return Err(RestoreError::Refused(
@@ -6731,6 +6741,12 @@ async fn reconcile_restore_inner(
         .await?;
 
         let mut desired_job = job::build(&spec);
+        // PROD-07.2: the run's id, named here so its targets record can be
+        // found after its pod is gone, and a grace for its stop.
+        restore_interruption::prepare_run_job(
+            &mut desired_job,
+            restore_interruption::new_run_id(now).as_deref(),
+        );
         // The Job's line token, made now and kept nowhere but in the Job; a
         // re-created Job gets another. Never logged (see
         // `crate::job::new_line_token`).
@@ -6807,8 +6823,9 @@ async fn reconcile_restore_inner(
         });
     };
 
-    // STEP 2. Running.
-    if !backup::job_finished(&job) {
+    // STEP 2. Running. (A `Restore` an interruption ended may keep a
+    // suspended run Job: it is terminal, below.)
+    if !backup::job_finished(&job) && !status_is_terminal(restore) {
         // The same derivation the `Backup` twin calls, so a runner that cannot
         // mount its approval bundle is visible before its deadline.
         let stored = restore.status.as_ref().and_then(|s| s.progress.as_ref());
@@ -6942,17 +6959,29 @@ async fn reconcile_restore_inner(
              state for the runner container, or more than one pod claimed the Job and none was \
              read. A terminal status rather than watching forever, and no invented exit code"
         );
-        patch_status_if_changed(
-            &restores,
-            restore,
-            &name,
-            diagnostics::apply_finished(
-                crashed_status_patch(restore, terminal_state, &job_name, now),
-                restore.status.as_ref().and_then(|s| s.progress.as_ref()),
-                now,
-            ),
-        )
-        .await?;
+        let crashed = diagnostics::apply_finished(
+            crashed_status_patch(restore, terminal_state, &job_name, now),
+            restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+            now,
+        );
+        // PROD-07.2: a run that may have started is Interrupted, and the
+        // reconcile decides whether it created anything.
+        if let Some(patch) =
+            restore_interruption::after_crash(restore, &job, terminal_state, crashed.clone(), now)
+        {
+            patch_status_if_changed(&restores, restore, &name, patch).await?;
+            return Ok(RestoreOutcome {
+                job_name,
+                created: false,
+                admission: None,
+                exit_code: None,
+                terminal_state: Some(restore_interruption::PHASE_INTERRUPTED.to_string()),
+                keys: RestoreEvidenceKeys::default(),
+                ttl_patched: false,
+                requeue: Requeue::After(1),
+            });
+        }
+        patch_status_if_changed(&restores, restore, &name, crashed).await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -6965,21 +6994,72 @@ async fn reconcile_restore_inner(
         });
     };
 
+    finish_job(
+        restore,
+        client,
+        &namespace,
+        &job,
+        pod,
+        exit_code,
+        &reads,
+        now,
+        runner,
+        Finish::Run,
+    )
+    .await
+}
+
+/// Which Job's end [`finish_job`] reads (PROD-07.2).
+enum Finish<'a> {
+    /// The run Job's: an exit that signed nothing after the run created its
+    /// targets is `Interrupted` (`restore_interruption::after_exit`).
+    Run,
+    /// An interrupted run's reconcile Job's
+    /// (`restore_interruption::ReconcileEnd::adjust`).
+    Reconcile(&'a restore_interruption::ReconcileEnd),
+}
+
+/// **STEP 3: a Job whose runner's exit code is known** — the run Job, or a
+/// reconcile Job (PROD-07.2). Read the log, the evidence keys and the
+/// scorecard; write the terminal status, the Job's TTL and the verdict.
+#[allow(clippy::too_many_arguments)]
+async fn finish_job(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    pod: &Pod,
+    exit_code: i32,
+    reads: &Reread<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    finish: Finish<'_>,
+) -> Result<RestoreOutcome, RestoreError> {
+    let Reread {
+        scorecard,
+        verify,
+        archive_url,
+        memory,
+    } = *reads;
+    let name = restore.name_any();
+    let job_name = job.name_any();
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     // STEP 3. The code is known. Read the log through the `pods/log`
     // subresource, the only route to a runner's stdout (interface I28), with
     // THE terminal bound (`runner_log::TERMINAL`) at every exit code.
     let pod_name = pod.name_any();
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     // The Job's own line token, and by which flag (FX-43): whose lines are
     // read at all.
-    let job_token = job::job_token(&job);
+    let job_token = job::job_token(job);
     // A refused run's read failure is an answer (see the `Backup` twin). This
     // `if` is the only gate: every other exit code's failure is still a
     // reconcile error.
     let (raw, mut runner_reason) = if exit_code == 3 {
         let read = crate::refusal::read(
             &pods,
-            &namespace,
+            namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Restore,
             &job_token,
@@ -7052,7 +7132,7 @@ async fn reconcile_restore_inner(
     let routed = backup::evidence_source_for(
         restore.spec.evidence_destination_ref.as_ref(),
         client,
-        &namespace,
+        namespace,
         now,
     )
     .await
@@ -7181,6 +7261,43 @@ async fn reconcile_restore_inner(
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
+    // PROD-07.2: a run that signed nothing after it created its targets is
+    // `Interrupted` (its Job keeps no TTL: the reconcile copies it); a
+    // reconcile's end is written as the reconcile's.
+    let terminal = match finish {
+        Finish::Run => {
+            if let Some(patch) = restore_interruption::after_exit(
+                restore,
+                job,
+                exit_code,
+                log,
+                terminal.clone(),
+                now,
+            ) {
+                warn!(
+                    restore = %name,
+                    namespace = %namespace,
+                    job = %job_name,
+                    exit_code,
+                    "the run ended without a signed scorecard after it created its target \
+                     topics; the Restore is Interrupted and a reconcile Job verifies what it left"
+                );
+                patch_status_if_changed(&restores, restore, &name, patch).await?;
+                return Ok(RestoreOutcome {
+                    job_name,
+                    created: false,
+                    admission: None,
+                    exit_code: Some(exit_code),
+                    terminal_state: Some(restore_interruption::PHASE_INTERRUPTED.to_string()),
+                    keys,
+                    ttl_patched: false,
+                    requeue: Requeue::After(1),
+                });
+            }
+            terminal
+        }
+        Finish::Reconcile(end) => end.adjust(restore, terminal, &keys),
+    };
     // Where the object now stands. The verification patch below is this
     // pass's second write; preconditioned on the version the watch delivered
     // it would be refused, and a terminal `Restore` is never reconciled again.
@@ -7364,7 +7481,7 @@ async fn reconcile_restore_inner(
             &stored,
             &at,
             client,
-            &namespace,
+            namespace,
             &name,
             1,
             &evidence_from,

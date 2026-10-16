@@ -350,6 +350,15 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/workspaces/{ws}/restores/{name}/approval",
             axum::routing::post(restores::submit_approval),
         )
+        // PROD-07.2: cancel a run, clean up an interrupted one.
+        .route(
+            "/api/v1/workspaces/{ws}/restores/{name}/cancel",
+            axum::routing::post(restores::cancel),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/restores/{name}/cleanup",
+            axum::routing::post(restores::cleanup),
+        )
         // A two-person request as the approver is shown it (a
         // read), and the second person's click (POST only: no GET approves).
         .route(

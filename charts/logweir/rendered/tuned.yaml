@@ -644,13 +644,15 @@ rules:
       - topicdiscoveries
     verbs: ["create"]
   # `patch`: the merge patches `linkage.rs` pins (`backupschedules`
-  # suspension/policy, `backupdestinations` access) and `spec.cancelRequested`
-  # on the two `CancellableCheck` kinds. `Backup` and `Restore` have no cancel.
+  # suspension/policy, `backupdestinations` access), `spec.cancelRequested`
+  # on the two `CancellableCheck` kinds, and a Restore's cancel and clean-up
+  # annotations (PROD-07.2; its spec is sealed by CEL). `Backup` has no cancel.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
       - backupschedules
       - preflights
+      - restores
       - topicdiscoveries
     verbs: ["patch"]
   # PROD-04.2: a switchover is read and created through the API; never

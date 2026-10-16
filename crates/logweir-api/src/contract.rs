@@ -773,8 +773,14 @@ pub enum OperationState {
     Failed,
     /// A guard or the controller refused the run before anything executed.
     Refused,
-    /// Cancelled. Not produced by current resources (no cancel exists).
+    /// Cancelled before it created anything (PROD-07.2: a restore whose
+    /// cancel landed before its Job, or that stopped before its creation
+    /// step).
     Cancelled,
+    /// PROD-07.2: stopped before it finished after it created its target
+    /// topics; nothing was resumed. `interruption` says why and what the
+    /// reconcile found.
+    Interrupted,
     /// A phase this build does not recognise.
     Unknown,
 }
@@ -1481,6 +1487,10 @@ pub struct Restore {
     /// run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<TopicConfigurationView>,
+    /// PROD-07.2: a run that ended without a signed scorecard after it
+    /// created its target topics. ABSENT on every other run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<RestoreInterruptionView>,
     /// The source topics the new ones were restored from
     /// (`status.oldTopics`), at most 100. Nothing here was written to.
     /// Empty when none is recorded.
@@ -1489,6 +1499,34 @@ pub struct Restore {
     pub old_topics: Vec<String>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// `Restore.interruption` (PROD-07.2), from `status.interruption`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreInterruptionView {
+    /// `Cancelled`, `RunnerStopped` or `RunFailed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// Who asked for the cancel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    /// `Running`, `Done` or `Failed`: the reconcile of the partial targets.
+    /// Its signed scorecard's counts are this restore's `integrity` and
+    /// `coverage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    /// Why the reconcile failed, or what it found when nothing was left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_reason: Option<String>,
+    /// Whether `cleanup` may be requested now.
+    pub cleanup_offered: bool,
+    /// The cleanup: `Removing`, `Removed` or `RemovalFailed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<String>,
+    /// Why the cleanup failed, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_reason: Option<String>,
 }
 
 /// `Restore.topicPreflight`: the target topic's configuration as phase 0

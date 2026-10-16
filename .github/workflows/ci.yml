@@ -433,7 +433,7 @@ jobs:
             except: [record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack]
           # 773
           - shard: 5
-            tests: [replay_selection, guards, point_set_binding, backup_argv, config_coverage, stopped_restore]
+            tests: [replay_selection, guards, point_set_binding, backup_argv, config_coverage, stopped_restore, interrupted_restore]
           # 773
           - shard: 6
             tests: [auth_modes, full_drill, consumer_group_snapshot, topic_configuration_apply, smoke,

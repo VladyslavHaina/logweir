@@ -201,6 +201,10 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
             if phase == "Succeeded" {
                 return (OperationState::Succeeded, reason);
             }
+            // PROD-07.2: a cancel before anything was created.
+            if reason.as_deref() == Some("Cancelled") {
+                return (OperationState::Cancelled, reason);
+            }
             let refused = o.exit_code == Some(3)
                 || (o.exit_code.is_none()
                     && reason
@@ -212,6 +216,9 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
                 (OperationState::Failed, reason)
             }
         }
+        // PROD-07.2: stopped after it created its targets; not terminal (the
+        // reconcile may still find every partition exact).
+        Some("Interrupted") => (OperationState::Interrupted, reason),
         Some(_) => (
             OperationState::Unknown,
             Some("UnrecognizedPhase".to_string()),

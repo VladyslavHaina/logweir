@@ -16,9 +16,14 @@
 //!    is the one recorded at creation (`CloneTargetReplaced` otherwise; an ID
 //!    never recorded or not readable now is `CloneTargetIdentityUnknown`).
 //!
-//! The deleter is the prefix-scoped one phase 9 uses (the plan's
-//! `topic_mapping_prefix`, the source topics' own names protected), so a name
-//! outside the clone's namespace is refused even if a record named it.
+//! The deleter is scoped to the plan's mapped target names (PROD-07.2), so a
+//! name the plan does not map is refused even if a record named it.
+//!
+//! **PROD-07.2: an interrupted restore.** The same command removes what an
+//! interrupted restore left: `--run-id` then names the reconcile's scorecard
+//! (`logweir restore reconcile`), whose `target.creation` lists the topics
+//! the interrupted run created and left, with the IDs it recorded. The rules
+//! above are unchanged; the attestation's `teardown_policy` is `delete`.
 //!
 //! The outcome is the existing teardown attestation, `teardown_policy: ttl`,
 //! signed and put create-only at `logweir/drills/<run_id>.cleanup.json` (or
@@ -34,7 +39,7 @@ use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
 use logweir_core::guard::GuardRefusal;
 use logweir_core::scorecard::Scorecard;
-use logweir_core::spec::{DrillSpec, TargetMode};
+use logweir_core::spec::DrillSpec;
 use logweir_core::target_creation::{
     check_cluster, cleanup_attestation_key, cleanup_plan, CloneCleanupLeft, CloneCleanupReport,
     CurrentId,
@@ -167,7 +172,7 @@ pub fn execute(args: &CleanupArgs) -> Result<Cleaned, DrillError> {
     })?;
     let spec: DrillSpec = serde_yaml::from_slice(&plan_bytes)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
-    refuse_unless_clone(&spec)?;
+    refuse_shape(&spec)?;
     crate::credential_binding::check_projected_bindings()?;
     crate::drill::check_projected_credentials()?;
     let signer = ValidatedSigner::load(
@@ -218,25 +223,29 @@ pub fn execute(args: &CleanupArgs) -> Result<Cleaned, DrillError> {
     )
 }
 
-/// The plan is a TTL clone (scratch mode, `target.teardown: {ttl_seconds}`
-/// within its bounds), or the cleanup refuses: it runs for clones only.
-fn refuse_unless_clone(spec: &DrillSpec) -> Result<(), DrillError> {
+/// A clone shape the runner refuses is refused here too. Whether the plan's
+/// run may be cleaned at all is the signed record's to say ([`clean`]).
+fn refuse_shape(spec: &DrillSpec) -> Result<(), DrillError> {
     if let Some(refusal) = logweir_core::target_creation::refuse_teardown_shape(spec) {
         return Err(GuardRefusal(refusal).into());
-    }
-    if spec.target.teardown.ttl_seconds().is_none() {
-        return Err(GuardRefusal(
-            "restore cleanup removes a clone, and this plan is not one: target.teardown is \
-             not {ttl_seconds: N}; nothing was deleted"
-                .to_string(),
-        )
-        .into());
     }
     Ok(())
 }
 
+/// The plan's mapped target names: the only names the cleanup's deleter may
+/// delete (PROD-07.2).
+#[must_use]
+pub fn mapped_target_names(spec: &DrillSpec) -> Vec<String> {
+    let prefix = logweir_core::spec::target_topic_prefix(spec);
+    spec.source
+        .topics
+        .iter()
+        .map(|t| format!("{prefix}{t}"))
+        .collect()
+}
+
 /// The evidence keyring's public keys.
-fn keyring(path: &std::path::Path) -> Result<Vec<VerifyingKey>, DrillError> {
+pub(crate) fn keyring(path: &std::path::Path) -> Result<Vec<VerifyingKey>, DrillError> {
     let bytes = std::fs::read(path).map_err(|e| {
         DrillError::Operational(format!("evidence keyring {}: {e}", path.display()))
     })?;
@@ -270,14 +279,7 @@ fn target_client(
         &spec.target.bootstrap_servers,
         auth,
     )?
-    .with_scratch_prefix(spec.target.topic_mapping_prefix.clone())
-    .map_err(|e| {
-        GuardRefusal(format!(
-            "target.topic_mapping_prefix is not a usable scratch namespace ({e}); nothing was \
-             deleted"
-        ))
-    })?
-    .with_protected_names(spec.source.topics.iter().cloned());
+    .with_deletable_names(mapped_target_names(spec));
     Ok(reader)
 }
 
@@ -363,7 +365,7 @@ pub fn clean(
     store: &dyn EvidenceStores,
     signer: &ValidatedSigner,
 ) -> Result<Cleaned, DrillError> {
-    refuse_unless_clone(inputs.spec)?;
+    refuse_shape(inputs.spec)?;
     let (bytes, sc) = verified_scorecard(inputs, store)?;
     let refuse = |why: String| -> DrillError { GuardRefusal(why).into() };
     let Some(creation) = sc.target.creation.as_ref() else {
@@ -373,18 +375,26 @@ pub fn clean(
             sc.format_version
         )));
     };
-    if creation.teardown_after_seconds.is_none() || !sc.target.mode.is_scratch() {
+    let is_clone = creation.teardown_after_seconds.is_some() && sc.target.mode.is_scratch();
+    // PROD-07.2: a reconcile's scorecard, which lists what an interrupted run
+    // left. Its note is signed, so a plan cannot make one up.
+    let is_reconcile = sc
+        .sample
+        .coverage_note
+        .starts_with(crate::drill::reconcile::NOTE_PREFIX);
+    if !is_clone && !is_reconcile {
         return Err(refuse(
-            "the run's scorecard does not record a clone (target.creation.teardown_after_seconds \
-             in scratch mode); nothing was deleted"
+            "the run's scorecard records neither a clone (target.creation.teardown_after_seconds \
+             in scratch mode) nor the reconciliation of an interrupted run; nothing was deleted"
                 .to_string(),
         ));
     }
-    if sc.target.topic_mapping_prefix != inputs.spec.target.topic_mapping_prefix {
+    let prefix = logweir_core::spec::target_topic_prefix(inputs.spec);
+    if sc.target.topic_mapping_prefix != prefix {
         return Err(refuse(format!(
-            "the run's scorecard maps through {:?} and this plan through {:?}; nothing was \
+            "the run's scorecard maps through {:?} and this plan through {prefix:?}; nothing was \
              deleted",
-            sc.target.topic_mapping_prefix, inputs.spec.target.topic_mapping_prefix
+            sc.target.topic_mapping_prefix
         )));
     }
     let current_cluster = reader.cluster_id()?;
@@ -442,9 +452,13 @@ pub fn clean(
         .collect();
     let attestation = crate::drill::phase9_teardown::TeardownAttestation {
         run_id: sc.run_id.clone(),
-        target_mode: TargetMode::Scratch,
+        target_mode: sc.target.mode,
         scorecard_sha256: logweir_core::ids::sha256_prefixed(&bytes),
-        teardown_policy: logweir_core::target_creation::TEARDOWN_POLICY_TTL.to_string(),
+        teardown_policy: if is_clone {
+            logweir_core::target_creation::TEARDOWN_POLICY_TTL.to_string()
+        } else {
+            "delete".to_string()
+        },
         topics_deleted: deleted.clone(),
         topics_failed: left.clone(),
         // Global Constraint 1: the clock is read here, in `crates/logweir`.

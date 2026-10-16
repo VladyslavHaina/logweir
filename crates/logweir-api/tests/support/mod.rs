@@ -466,11 +466,19 @@ fn check_attribution(s: &mut State, plural: &str, name: &str, object: &Value) {
 }
 
 /// The kinds whose spec this fake will accept a merge patch for.
-pub const PATCHABLE: [&str; 4] = [
+pub const PATCHABLE: [&str; 5] = [
     "backupschedules",
     "backupdestinations",
     "topicdiscoveries",
     "preflights",
+    // PROD-07.2: the cancel and cleanup annotations, and nothing else.
+    "restores",
+];
+
+/// The annotations a `Restore` patch may set (PROD-07.2).
+pub const RESTORE_REQUEST_ANNOTATIONS: [&str; 2] = [
+    "logweir.dev/cancel-requested-by",
+    "logweir.dev/cleanup-requested-by",
 ];
 
 /// The discovery group: a labelled LIST of `endpointslices`, and nothing else.
@@ -1014,11 +1022,21 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                 "topicdiscoveries" | "preflights" => &["cancelRequested"],
                 _ => &[],
             };
+            let restore_annotations = |k: &str, v: &Value| {
+                plural == "restores"
+                    && k == "annotations"
+                    && v.as_object().is_some_and(|a| {
+                        a.keys()
+                            .all(|k| RESTORE_REQUEST_ANNOTATIONS.contains(&k.as_str()))
+                    })
+            };
             let allowed = patch.as_object().is_some_and(|o| {
                 o.keys().all(|k| k == "metadata" || k == "spec")
                     && o.get("metadata").is_none_or(|m| {
-                        m.as_object()
-                            .is_some_and(|m| m.keys().all(|k| k == "resourceVersion"))
+                        m.as_object().is_some_and(|m| {
+                            m.iter()
+                                .all(|(k, v)| k == "resourceVersion" || restore_annotations(k, v))
+                        })
                     })
                     && o.get("spec").is_none_or(|sp| {
                         sp.as_object()
@@ -1066,6 +1084,9 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             let mut updated = current;
             let mut body = patch.clone();
             body.as_object_mut().unwrap().remove("metadata");
+            if let Some(annotations) = patch.pointer("/metadata/annotations") {
+                merge(&mut updated["metadata"]["annotations"], annotations);
+            }
             let spec_changed = body.get("spec").is_some();
             merge(&mut updated, &body);
             // THE CRD'S OWN CEL, ON THE MERGED RESULT, LIKE A REAL API SERVER.

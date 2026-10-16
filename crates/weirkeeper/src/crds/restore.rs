@@ -894,9 +894,11 @@ pub enum AuthorizationKind {
 #[serde(rename_all = "camelCase")]
 pub struct RestoreStatus {
     /// Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`,
-    /// `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for
-    /// a slot in its namespace's manual-restore pool (`status.queue`). Task 20
-    /// owns the phase vocabulary.
+    /// `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual
+    /// restore waiting for a slot in its namespace's manual-restore pool
+    /// (`status.queue`). `Interrupted` is a run that ended without
+    /// a signed scorecard after it created its target topics
+    /// (`status.interruption`). Task 20 owns the phase vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     /// The runner's exit code (Global Constraint 11). `2` is the most valuable
@@ -1078,6 +1080,11 @@ pub struct RestoreStatus {
     /// other `Restore`, and on anything an older controller reconciled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone: Option<CloneStatus>,
+    /// A run that ended without a signed scorecard after it
+    /// created its target topics (`phase: Interrupted`): why, the reconcile
+    /// that verified what it left, and the cleanup. Absent on every other run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<RestoreInterruption>,
     /// For a plan carrying `target.topic_configuration`: each
     /// target topic's replication factor with its reason, its overrides
     /// before (Logweir's during-restore settings and the source's at-creation
@@ -1189,6 +1196,82 @@ pub struct CloneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
     /// Why the cleanup failed or refused, when it did; bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub reason: Option<String>,
+}
+
+/// **An interrupted restore.** Nothing here resumes. The run's
+/// partial targets are verified by a reconcile Job (`logweir restore
+/// reconcile`), which signs an ordinary scorecard listing them with
+/// per-partition counts (its counts reach `status.integrity`, its keys
+/// `status.evidence`); `Clean up` (the annotation
+/// `logweir.dev/cleanup-requested-by`) then runs `logweir restore cleanup`
+/// over that scorecard, and what it removed and left reaches
+/// `status.teardown`. The recovery point stays held while `Interrupted`
+/// until the cleanup succeeded or the `Restore` is deleted.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreInterruption {
+    /// `Cancelled` (a cancel was requested), `RunnerStopped` (the runner was
+    /// stopped or killed: a deleted or evicted pod, a deadline) or
+    /// `RunFailed` (the run failed after it created its targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// Who asked for the cancel, from `logweir.dev/cancel-requested-by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub requested_by: Option<String>,
+    /// When the controller saw that no pod of the run was left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer_gone_at: Option<Time>,
+    /// The interrupted run's id (its targets record is
+    /// `logweir/drills/<runId>.targets.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub run_id: Option<String>,
+    /// `Running`, `Done` or `Failed`: the reconcile's state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    /// Why the reconcile failed (or the last attempt did); bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub verification_reason: Option<String>,
+    /// How many reconcile Jobs were started: at most 3, five minutes apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// The current reconcile Job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ref: Option<LocalRef>,
+    /// The run id of the reconcile's signed scorecard, which the cleanup
+    /// reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub reconcile_run_id: Option<String>,
+    /// The cleanup, once asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<InterruptionCleanup>,
+}
+
+/// An interrupted restore's cleanup: `Removing` while its Job runs, then
+/// `Removed` (the point is released) or `RemovalFailed` with the reason.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterruptionCleanup {
+    /// `Removing`, `Removed` or `RemovalFailed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Who asked for it, from `logweir.dev/cleanup-requested-by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 256))]
+    pub requested_by: Option<String>,
+    /// How many cleanup Jobs were started: at most 3, five minutes apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    /// The current cleanup Job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ref: Option<LocalRef>,
+    /// Why it failed, when it did; bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 1024))]
     pub reason: Option<String>,

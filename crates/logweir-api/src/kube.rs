@@ -1217,6 +1217,41 @@ impl KubeAdapter {
         .await
     }
 
+    /// **PROD-07.2: ask the controller to cancel a `Restore`, or to clean up
+    /// an interrupted one**: the one annotation `key` (`weirkeeper`'s
+    /// `CANCEL_ANNOTATION` or `CLEANUP_ANNOTATION`) set to `by`, under an
+    /// optimistic-concurrency precondition. Metadata only: the sealed `spec`
+    /// is never touched.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
+    pub async fn request_restore(
+        &self,
+        name: &str,
+        expected_resource_version: &str,
+        key: &str,
+        by: &str,
+    ) -> Result<Restore, KubeFailure> {
+        let api: Api<Restore> = self.api();
+        let patch = serde_json::json!({
+            "metadata": {
+                "resourceVersion": expected_resource_version,
+                "annotations": { key: by },
+            },
+        });
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_string()),
+            ..PatchParams::default()
+        };
+        self.bounded(
+            "patch",
+            "restores",
+            api.patch(name, &params, &Patch::Merge(&patch)),
+        )
+        .await
+    }
+
     /// One page of a CLUSTER-SCOPED list. Reads only.
     ///
     /// # Errors
