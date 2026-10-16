@@ -1,4 +1,4 @@
-// What the Overview and the navigation's counts show, worked out once from the lists the
+// What the Overview and the navigation's counts show, worked out once from the lists that the
 // API publishes (protection policies, backups, restores, connections). Pure functions
 // of the documents and `now`, so the rows in attention.test.ts pin every number.
 import { useApprovalsNavCount } from "../api/approvals";
