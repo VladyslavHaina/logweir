@@ -1,7 +1,7 @@
 //! **Two-person approval in the console**: the request as the
 //! second person is shown it, and that person's click.
 //!
-//! A namespace bound to a policy whose `approverSignature` is `Console`
+//! A workspace bound to a policy whose `approverSignature` is `Console`
 //! (`two-person`) takes its approval from a second person who signs in to the
 //! shared console and clicks Approve. No personal key, no copy, sign and
 //! paste. The console signs the approval with the key that signed the
@@ -17,14 +17,14 @@
 //!    nothing.
 //! 1. **Role.** `approval.submit`, which only the Approver role grants. An
 //!    Administrator is not an Approver unless separately bound as one.
-//! 2. **Mode.** A shared console, and a namespace whose CURRENT policy takes
+//! 2. **Mode.** A shared console, and a workspace whose CURRENT policy takes
 //!    its approval from the console.
 //! 3. **The console verifies its OWN earlier signature on the stored
 //!    request** (`crate::approval::verified_request`), and until that passes
 //!    reads nothing else of the stored object — which is why
 //!    [`load_request`] hands it the two byte strings and nothing more.
 //! 4. **The verified bytes are held to the Restore the click names**: its
-//!    namespace, name, current UID, the hash of its current plan bytes, the
+//!    workspace, name, current UID, the hash of its current plan bytes, the
 //!    current policy's name, digest and mode, and the window
 //!    (`logweir_core::approval_policy::check_request_binding`). A signature
 //!    copied from another request names another one of those.
@@ -85,8 +85,8 @@ pub const ROUTE_SWITCHOVER_REQUEST: &str =
 pub const ROUTE_SWITCHOVER_APPROVE: &str =
     "POST /api/v1/workspaces/{ws}/switchovers/{name}/console-approval";
 
-/// What both routes need about the namespace before they read a request: the
-/// policy a `two-person` namespace is bound to, or the refusal.
+/// What both routes need about the workspace before they read a request: the
+/// policy a `two-person` workspace is bound to, or the refusal.
 ///
 /// # Errors
 ///
@@ -94,12 +94,12 @@ pub const ROUTE_SWITCHOVER_APPROVE: &str =
 async fn console_policy(
     state: &AppState,
     actor: &Actor,
-    ns: &str,
+    ws: &str,
 ) -> Result<ApprovalPolicy, ApiError> {
     let effective = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?
-        .resolve(ns);
+        .resolve(ws);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     if let Some(digest) = effective.digest() {
@@ -119,7 +119,7 @@ async fn console_policy(
             Err(ApiError::new(
                 ProblemCode::PolicyMismatch,
                 format!(
-                    "Namespace {ns} is under approval policy {} ({}), which does not take its \
+                    "Workspace {ws} is under approval policy {} ({}), which does not take its \
                      approval from the console; there is no request to approve in the console \
                      here.",
                     effective.name(),
@@ -150,13 +150,13 @@ enum Loaded {
 
 /// **Steps 3 and 4.** Read the stored request for `subject` (a `Restore` or a
 /// `Switchover`), verify this console's own signature on it, and hold the
-/// verified bytes to the object, its kind, its plan and the namespace's
+/// verified bytes to the object, its kind, its plan and the workspace's
 /// current policy.
 ///
 /// THE STORED OBJECT IS REDUCED TO TWO STRINGS BEFORE ANYTHING IS DECIDED:
 /// `spec.approvalBytes` and `spec.sidecarBytes`. Its annotations, labels,
 /// `spec.planHash` and `spec.subjectRef` are whatever the last writer with
-/// `create approvals` in the namespace put there, and nothing below decides
+/// `create approvals` in the workspace put there, and nothing below decides
 /// on them. The one exception is shown, not decided on: the requester's
 /// display document (DUI-21), served only when this console's own signature
 /// over it verifies and it binds this request ([`approval::verified_display`]).
@@ -169,7 +169,7 @@ async fn load_request(
     subject: &Subject,
     bound: &ApprovalPolicy,
 ) -> Result<Loaded, ApiError> {
-    let ns = subject.namespace.as_str();
+    let ws = subject.workspace.as_str();
     let key = match state.approval().confirmation_key() {
         Ok(Some(key)) => key,
         Ok(None) => {
@@ -184,7 +184,7 @@ async fn load_request(
     };
     let confirmation_name = approval::confirmation_name(&subject.approval_name);
     let (approval_bytes, sidecar_bytes, annotations) =
-        match state.kube().get::<Approval>(ns, &confirmation_name).await {
+        match state.kube().get::<Approval>(ws, &confirmation_name).await {
             Ok(object) => (
                 object.spec.approval_bytes,
                 object.spec.sidecar_bytes,
@@ -209,7 +209,7 @@ async fn load_request(
         Ok(verified) => verified,
         Err(reason) => {
             tracing::warn!(
-                namespace = %ns,
+                workspace = %ws,
                 confirmation = %confirmation_name,
                 reason = %reason,
                 "a stored approval request is NOT this console's confirmation and will not be \
@@ -257,7 +257,7 @@ async fn load_request(
         Err(AuthorizationRefusal::Expired(_)) => Ok(Loaded::Expired(verified, name)),
         Err(refusal) => {
             tracing::warn!(
-                namespace = %ns,
+                workspace = %ws,
                 confirmation = %confirmation_name,
                 reason = refusal.reason(),
                 "a stored approval request carries this console's signature and does not bind \
@@ -267,7 +267,7 @@ async fn load_request(
                 code: "confirmation_not_bound",
                 sentence: format!(
                     "The stored request {confirmation_name} was not signed for this {}'s UID \
-                     and plan under the namespace's current policy {} ({}). It is never \
+                     and plan under the workspace's current policy {} ({}). It is never \
                      approved. Submit the {} again.",
                     subject.title(),
                     bound.name,
@@ -287,7 +287,7 @@ async fn stored_approval(
 ) -> Result<Option<(Approval, Option<RestoreAuthorization>)>, ApiError> {
     match state
         .kube()
-        .get::<Approval>(&subject.namespace, &subject.approval_name)
+        .get::<Approval>(&subject.workspace, &subject.approval_name)
         .await
     {
         Ok(object) => {
@@ -324,7 +324,7 @@ fn offer(
     subject: &Subject,
     requester: &Requester,
 ) -> ApproveOfferView {
-    let ns = subject.namespace.as_str();
+    let ws = subject.workspace.as_str();
     let refuse = |refusal: ApproveRefusal, sentence: String| ApproveOfferView {
         offered: false,
         refusal: Some(refusal),
@@ -338,10 +338,10 @@ fn offer(
                 .to_string(),
         );
     }
-    if !state.authorizer().allows(actor, ns, Action::SubmitApproval) {
+    if !state.authorizer().allows(actor, ws, Action::SubmitApproval) {
         return refuse(
             ApproveRefusal::NotApprover,
-            "Your sign-in holds no approver role in this namespace. An administrator is not an \
+            "Your sign-in holds no approver role in this workspace. An administrator is not an \
              approver unless separately bound as one."
                 .to_string(),
         );
@@ -536,19 +536,19 @@ fn switchover_scope_view(scope: &approval_scope::SwitchoverScope) -> SwitchoverS
 ///
 /// # Errors
 ///
-/// `policy_mismatch` outside a two-person namespace, `not_found`.
+/// `policy_mismatch` outside a two-person workspace, `not_found`.
 #[allow(clippy::too_many_lines)]
 async fn request_for(
     state: &AppState,
     actor: &Actor,
-    ns: &str,
+    ws: &str,
     kind: Kind,
     name: &str,
 ) -> Result<(ApprovalRequestView, Option<ShownScope>), ApiError> {
-    let subject = Subject::fetch(state, actor, ns, kind, name).await?;
-    let bound = console_policy(state, actor, ns).await?;
+    let subject = Subject::fetch(state, actor, ws, kind, name).await?;
+    let bound = console_policy(state, actor, ws).await?;
     let mut view = ApprovalRequestView {
-        namespace: ns.to_string(),
+        workspace: ws.to_string(),
         restore: subject.name.clone(),
         restore_uid: subject.uid.clone(),
         confirmation_name: approval::confirmation_name(&subject.approval_name),
@@ -686,17 +686,17 @@ async fn request_for(
 ///
 /// # Errors
 ///
-/// `policy_mismatch` outside a two-person namespace, `not_found`.
+/// `policy_mismatch` outside a two-person workspace, `not_found`.
 pub async fn request(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let (mut view, shown) = request_for(&state, &actor, &ns, Kind::Restore, &name).await?;
+    let (mut view, shown) = request_for(&state, &actor, &ws, Kind::Restore, &name).await?;
     if let Some(ShownScope::Restore { scope, .. }) = &shown {
         view.scope = Some(scope_view(scope));
     }
@@ -716,17 +716,17 @@ pub async fn request(
 ///
 /// # Errors
 ///
-/// `policy_mismatch` outside a two-person namespace, `not_found`.
+/// `policy_mismatch` outside a two-person workspace, `not_found`.
 pub async fn switchover_request(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let (view, shown) = request_for(&state, &actor, &ns, Kind::Switchover, &name).await?;
+    let (view, shown) = request_for(&state, &actor, &ws, Kind::Switchover, &name).await?;
     let scope = match &shown {
         Some(ShownScope::Switchover { scope, .. }) => Some(switchover_scope_view(scope)),
         _ => None,
@@ -736,7 +736,7 @@ pub async fn switchover_request(
         &SwitchoverApprovalRequestResponse {
             request_id,
             item: SwitchoverApprovalRequestView {
-                namespace: view.namespace,
+                workspace: view.workspace,
                 switchover: view.restore,
                 switchover_uid: view.restore_uid,
                 approval_name: view.approval_name,
@@ -797,7 +797,7 @@ fn refused(actor: &Actor, code: &'static str, problem: ProblemCode, detail: Stri
 /// # Errors
 ///
 /// `forbidden` (not an approver; the requester; not a second person),
-/// `policy_mismatch` (the administrator console; a namespace that does not
+/// `policy_mismatch` (the administrator console; a workspace that does not
 /// take its approval from the console; a stored request that is not this
 /// console's, or not this Restore's), `not_found`, `state_conflict` (expired;
 /// changed since it was shown; already approved by someone else),
@@ -806,7 +806,7 @@ pub async fn approve(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -814,7 +814,7 @@ pub async fn approve(
         &state,
         &actor,
         request_id,
-        &ns,
+        &ws,
         Kind::Restore,
         &name,
         &uri,
@@ -834,7 +834,7 @@ pub async fn switchover_approve(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -842,7 +842,7 @@ pub async fn switchover_approve(
         &state,
         &actor,
         request_id,
-        &ns,
+        &ws,
         Kind::Switchover,
         &name,
         &uri,
@@ -858,14 +858,14 @@ async fn approve_for(
     state: &AppState,
     actor: &Actor,
     request_id: String,
-    ns: &str,
+    ws: &str,
     kind: Kind,
     name: &str,
     uri: &Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
     // ---- 1. the Approver role ---------------------------------------------
-    authorize(state, actor, ns, Action::SubmitApproval)?;
+    authorize(state, actor, ws, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: ConsoleApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
     let well_formed = request
@@ -887,7 +887,7 @@ async fn approve_for(
     }
     actor.audit.note("approverPrincipal", &actor.id());
     note_principal(actor, "approver", &actor.issuer, &actor.subject);
-    // ---- 2. the console's mode, and the namespace's ------------------------
+    // ---- 2. the console's mode, and the workspace's ------------------------
     if !ApprovalRoute::SecondPersonInConsole.console_may_approve(state.console_kind())
         || policy::fold_issuer(&actor.issuer) == policy::LOCAL_ADMIN_ISSUER
     {
@@ -900,8 +900,8 @@ async fn approve_for(
                 .to_string(),
         ));
     }
-    let subject = Subject::fetch(state, actor, ns, kind, name).await?;
-    let bound = console_policy(state, actor, ns).await?;
+    let subject = Subject::fetch(state, actor, ws, kind, name).await?;
+    let bound = console_policy(state, actor, ws).await?;
     // ---- 3 / 4. the console's own signature, then the binding --------------
     let verified = match load_request(state, &subject, &bound).await? {
         Loaded::Pending(verified, _) => verified,
@@ -1044,7 +1044,6 @@ async fn approve_for(
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(approval_name.clone()),
-            namespace: Some(ns.to_string()),
             // FOR A HUMAN READING THE OBJECT, NEVER FOR A DECISION: every
             // reader takes these from the signed bytes.
             annotations: Some(
@@ -1087,12 +1086,12 @@ async fn approve_for(
         status: None,
     };
     // ---- 8. create-only ----------------------------------------------------
-    let (stored, replayed) = match state.kube().create(ns, &object).await {
+    let (stored, replayed) = match state.kube().create(ws, &object).await {
         Ok(created) => (created, false),
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(ns, &approval_name)
+                .get::<Approval>(ws, &approval_name)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             // A REPLAY IS THE SAME APPROVER'S APPROVAL OF THE SAME REQUEST,
@@ -1132,7 +1131,7 @@ async fn approve_for(
     };
     actor
         .audit
-        .note("approval", &format!("{ns}/{}", stored.name_any()));
+        .note("approval", &format!("{ws}/{}", stored.name_any()));
     Ok(json(
         if replayed {
             StatusCode::OK

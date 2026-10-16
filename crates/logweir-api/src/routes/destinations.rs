@@ -82,8 +82,8 @@ pub const UPDATE_ACCESS: &str = ":update-access";
 /// The `:test` command suffix.
 pub const TEST: &str = ":test";
 
-/// The annotation that marks the namespace default. At most one destination
-/// per namespace may hold it; the create route refuses a second.
+/// The annotation that marks the workspace default. At most one destination
+/// per workspace may hold it; the create route refuses a second.
 pub const DEFAULT_ANNOTATION: &str = "logweir.dev/default-destination";
 
 /// The label on every `Preflight` the API starts against a destination (an
@@ -102,7 +102,7 @@ pub const DESTINATION_TEST_LABEL: &str = "logweir.dev/destination-test";
 
 /// The label the API's own default destination carries, so the at-most-one
 /// check is a bounded selector read rather than a scan of every destination in
-/// the namespace.
+/// the workspace.
 ///
 /// The ANNOTATION D2 §3.1 names is written too, and [`is_default`] honours
 /// either, so a default set by hand with `kubectl` still reads as one.
@@ -126,7 +126,7 @@ pub const WRITE_ONLY_ANNOTATION: &str = "logweir.dev/write-only";
 /// The Secret `type` of an object-store credential this service creates.
 ///
 /// A DISTINCT TYPE, DELIBERATELY. `create` on Secrets is broad — in a
-/// namespace it can mint a `kubernetes.io/service-account-token` for any
+/// workspace it can mint a `kubernetes.io/service-account-token` for any
 /// ServiceAccount there. A distinct, immutable-after-create type is what a
 /// ValidatingAdmissionPolicy scoped to the console ServiceAccount can require,
 /// so this service's create permission cannot be spent on anything else. The
@@ -1058,7 +1058,6 @@ fn build_ca_bundle(bundle: &CaBundleRequest) -> CaBundleRef {
 /// Build the stored object for a validated create request.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     mut annotations: BTreeMap<String, String>,
     request: &CreateDestinationRequest,
@@ -1071,7 +1070,6 @@ pub fn build(
     BackupDestination {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             labels: Some(labels),
             ..ObjectMeta::default()
@@ -1106,7 +1104,6 @@ pub fn build(
 /// OWNED BY THE DESTINATION, so deleting the destination collects it; the API
 /// never deletes anything itself.
 fn build_credential_secret(
-    namespace: &str,
     destination: &BackupDestination,
     role: DestinationRoleDto,
     new: &crate::contract::NewCredentialRequest,
@@ -1142,7 +1139,6 @@ fn build_credential_secret(
     WriteOnlyCredential {
         metadata: ObjectMeta {
             name: Some(secret_name),
-            namespace: Some(namespace.to_string()),
             labels: Some(BTreeMap::from([
                 (MANAGED_BY_LABEL.to_string(), MANAGED_BY_VALUE.to_string()),
                 (CREDENTIAL_FOR_LABEL.to_string(), name.clone()),
@@ -1229,7 +1225,7 @@ fn planned_credentials(
 /// written; or the adapter's failure.
 async fn refuse_taken_credential_names(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     destination: &str,
     access: &AccessRequest,
     naming: CredentialNaming<'_>,
@@ -1237,7 +1233,7 @@ async fn refuse_taken_credential_names(
     let mut taken = Vec::new();
     for (role, _) in planned_credentials(access) {
         let name = naming.name(destination, role);
-        let probe = probe_secret(namespace, &name);
+        let probe = probe_secret(&name);
         if state
             .kube()
             .credential_name_is_taken(&probe)
@@ -1251,7 +1247,7 @@ async fn refuse_taken_credential_names(
         return Ok(());
     }
     tracing::warn!(
-        namespace,
+        workspace,
         destination,
         secrets = %taken.join(","),
         "credential secret names already exist; nothing was written"
@@ -1281,11 +1277,10 @@ async fn refuse_taken_credential_names(
 /// A name-only Secret for the dry-run probe. NO `data`, and no owner
 /// reference: the destination may not exist yet, and a name conflict is
 /// decided by the name.
-fn probe_secret(namespace: &str, name: &str) -> WriteOnlyCredential {
+fn probe_secret(name: &str) -> WriteOnlyCredential {
     WriteOnlyCredential {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
             labels: Some(BTreeMap::from([(
                 MANAGED_BY_LABEL.to_string(),
                 MANAGED_BY_VALUE.to_string(),
@@ -1339,7 +1334,7 @@ struct CredentialOutcome {
 /// failure.
 async fn create_new_credentials(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     destination: &BackupDestination,
     access: &AccessRequest,
     request_id: &str,
@@ -1379,7 +1374,6 @@ async fn create_new_credentials(
             continue;
         };
         let secret = build_credential_secret(
-            namespace,
             destination,
             role,
             new,
@@ -1387,13 +1381,13 @@ async fn create_new_credentials(
             naming.name(&destination_name, role),
             &binding,
         );
-        match state.kube().create_credential(namespace, &secret).await {
+        match state.kube().create_credential(workspace, &secret).await {
             Ok(reference) => {
                 // THE LOG LINE IS A NAME. Not a key, not a length, not a
                 // prefix: the only non-secret fact about a credential is which
                 // object holds it.
                 tracing::info!(
-                    namespace,
+                    workspace,
                     secret = %reference.name,
                     role = role_slug(role),
                     "credential secret created"
@@ -1406,7 +1400,7 @@ async fn create_new_credentials(
                     ExistingCredential::AcceptAsReplay => outcome.replayed.push(name),
                     ExistingCredential::Refuse => {
                         tracing::warn!(
-                            namespace,
+                            workspace,
                             secret = %name,
                             role = role_slug(role),
                             "credential secret already exists; the entered value was NOT written"
@@ -1468,13 +1462,13 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadDestinations)?;
+    authorize(&state, &actor, &ws, Action::ReadDestinations)?;
     let query = list_query(uri.query())?;
     let (items, page) =
-        list_page::<BackupDestination>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+        list_page::<BackupDestination>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &DestinationList {
@@ -1490,13 +1484,13 @@ pub async fn list(
 /// ONE SELECTOR, PAGED TO EXHAUSTION, BOUNDED. The selector is
 /// [`DESTINATION_TEST_LABEL`], which only `:test` sets, so every object the
 /// pages return is an access test for this destination; the loop follows the
-/// continue token so a namespace with many tests cannot hide the newest one
+/// continue token so a workspace with many tests cannot hide the newest one
 /// behind a first page in name order; and [`MAX_PAGES`] caps the work, with
 /// the cap REPORTED rather than swallowed — a `lastTest` that might not be the
 /// last is worse than none, so the caller is told.
 async fn last_test(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<Option<LastTestView>, ApiError> {
     let selector = format!("{DESTINATION_TEST_LABEL}={name}");
@@ -1511,7 +1505,7 @@ async fn last_test(
         };
         let list = state
             .kube()
-            .list::<PreflightCr>(namespace, &page)
+            .list::<PreflightCr>(workspace, &page)
             .await
             .map_err(KubeFailure::into_api_error)?;
         for item in list.items {
@@ -1537,7 +1531,7 @@ async fn last_test(
     // little else — and the alternative is a `stale` flag on the destination
     // page that means something weaker than the same flag on the preflight
     // page, which is worse than the reads.
-    let live = super::preflights::read_live_binding(state, namespace, &newest).await;
+    let live = super::preflights::read_live_binding(state, workspace, &newest).await;
     let projected = super::preflights::project(&newest, now, None, Some(&live));
     Ok(Some(LastTestView {
         preflight_id: projected.id.clone(),
@@ -1553,13 +1547,13 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadDestinations)?;
+    authorize(&state, &actor, &ws, Action::ReadDestinations)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
-    let test = last_test(&state, &ns, &name).await?;
+    let object = get_object::<BackupDestination>(&state, &actor, &ws, &name).await?;
+    let test = last_test(&state, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &DestinationResponse {
@@ -1582,20 +1576,20 @@ pub async fn usage(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadDestinations)?;
+    authorize(&state, &actor, &ws, Action::ReadDestinations)?;
     crate::http::parse_query(uri.query(), &[])?;
     check_name(&name)?;
-    let (schedules, schedules_cut) = naming::<BackupSchedule>(&state, &ns, |s| {
+    let (schedules, schedules_cut) = naming::<BackupSchedule>(&state, &ws, |s| {
         s.spec
             .destination_ref
             .as_ref()
             .is_some_and(|r| r.name == name)
     })
     .await?;
-    let (backups, backups_cut) = naming::<BackupCr>(&state, &ns, |b| {
+    let (backups, backups_cut) = naming::<BackupCr>(&state, &ws, |b| {
         b.spec
             .destination_ref
             .as_ref()
@@ -1623,7 +1617,7 @@ pub async fn usage(
             // THE BASIS IS PART OF THE ANSWER: what was read, so an empty list
             // is read as "nothing read names it" and no more.
             basis: format!(
-                "schedules and backups in this namespace whose spec.destinationRef names this \
+                "schedules and backups in this workspace whose spec.destinationRef names this \
                  destination, from at most {} of each",
                 MAX_PAGES * MAX_LIMIT as usize
             ),
@@ -1631,12 +1625,12 @@ pub async fn usage(
     ))
 }
 
-/// The `K`s in `ns` that `names` holds for, at most [`MAX_USAGE_ENTRIES`], and
+/// The `K`s in `ws` that `names` holds for, at most [`MAX_USAGE_ENTRIES`], and
 /// whether the answer was cut: more matches than that, or more pages than
 /// [`MAX_PAGES`].
 async fn naming<K: crate::kube::ProductResource>(
     state: &AppState,
-    ns: &str,
+    ws: &str,
     names: impl Fn(&K) -> bool,
 ) -> Result<(Vec<ObjectMeta>, bool), ApiError> {
     let mut found = Vec::new();
@@ -1649,7 +1643,7 @@ async fn naming<K: crate::kube::ProductResource>(
         };
         let list = state
             .kube()
-            .list::<K>(ns, &page)
+            .list::<K>(ws, &page)
             .await
             .map_err(KubeFailure::into_api_error)?;
         found.extend(
@@ -1674,12 +1668,12 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ManageDestinations)?;
+    authorize(&state, &actor, &ws, Action::ManageDestinations)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateDestinationRequest = read_json(body, MAX_JSON_BODY).await?;
@@ -1697,7 +1691,7 @@ pub async fn create(
         return Err(ApiError::destination_invalid(errors));
     }
     if request.access_carries_a_value() {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
+        authorize_also(&state, &actor, &ws, Action::WriteCredential)?;
     }
     // Canonical form: an omitted probe and an omitted default are the values
     // the API applies, so both spellings hash identically and replay as one.
@@ -1712,7 +1706,7 @@ pub async fn create(
     });
     request.default = Some(request.default.unwrap_or(false));
     if request.default == Some(true) {
-        refuse_second_default(&state, &ns, &request.name).await?;
+        refuse_second_default(&state, &ws, &request.name).await?;
     }
     // THE REPLAY QUESTION IS ASKED FIRST, AND ONLY OF THIS SERVICE'S OWN RECORD.
     // `created.replayed` cannot answer it: it says a destination already existed
@@ -1723,7 +1717,7 @@ pub async fn create(
     let replaying = is_own_replay::<BackupDestination, _>(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         &request.name,
         &key,
@@ -1733,9 +1727,10 @@ pub async fn create(
     // AND NOTHING IS WRITTEN UNTIL EVERY NAME IS KNOWN TO BE FREE. Not the
     // destination, and not the first of four Secrets.
     if !replaying {
+        super::refuse_name_in_use::<BackupDestination>(&state, &ws, &request.name).await?;
         refuse_taken_credential_names(
             &state,
-            &ns,
+            &ws,
             &request.name,
             &request.access,
             CredentialNaming::Create,
@@ -1745,18 +1740,18 @@ pub async fn create(
     let created = create_named_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         &request.name,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
     let outcome = create_new_credentials(
         &state,
-        &ns,
+        &ws,
         &created.object,
         &request.access,
         &request_id,
@@ -1779,12 +1774,12 @@ pub async fn create(
     ))
 }
 
-/// At most one destination per namespace is the default.
+/// At most one destination per workspace is the default.
 ///
 /// ONE BOUNDED SELECTOR READ. Searching one 200-object page for the annotation
-/// would let a namespace with more destinations accept a second default.
+/// would let a workspace with more destinations accept a second default.
 /// Selecting on [`DEFAULT_LABEL`] returns only the holders, of which there is
-/// at most one in a namespace this API has managed alone.
+/// at most one in a workspace this API has managed alone.
 ///
 /// THE RESIDUAL, STATED: a default set by hand with only the annotation D2
 /// §3.1 names carries no label, so this check does not see it. It still reads
@@ -1796,7 +1791,7 @@ pub async fn create(
 /// `state_conflict` naming the destination that already holds it.
 async fn refuse_second_default(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<(), ApiError> {
     let page = PageRequest {
@@ -1806,7 +1801,7 @@ async fn refuse_second_default(
     };
     let list = state
         .kube()
-        .list::<BackupDestination>(namespace, &page)
+        .list::<BackupDestination>(workspace, &page)
         .await
         .map_err(KubeFailure::into_api_error)?;
     let holder = list
@@ -1817,8 +1812,8 @@ async fn refuse_second_default(
         return Err(ApiError::new(
             ProblemCode::StateConflict,
             format!(
-                "`{}` is already this namespace's default destination. Clear it there before \
-                 naming another: a namespace with two defaults has none.",
+                "`{}` is already this workspace's default destination. Clear it there before \
+                 naming another: a workspace with two defaults has none.",
                 holder.meta().name.clone().unwrap_or_default()
             ),
         ));
@@ -1850,21 +1845,21 @@ pub async fn update_access(
     state: AppState,
     request_id: String,
     actor: Actor,
-    ns: String,
+    ws: String,
     name: String,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ManageDestinations)?;
+    authorize(&state, &actor, &ws, Action::ManageDestinations)?;
     check_name(&name)?;
     crate::http::parse_query(uri.query(), &[])?;
     IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE_ACCESS, Some("expectedGeneration"))?;
     let request: UpdateDestinationAccessRequest = read_json(body, MAX_JSON_BODY).await?;
     if access_carries_a_value(&request.access) {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
+        authorize_also(&state, &actor, &ws, Action::WriteCredential)?;
     }
-    let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<BackupDestination>(&state, &actor, &ws, &name).await?;
     // THE PRECONDITION BEFORE ANY FIELD RULE (DUI-2). A request written
     // against an older generation is answered 412 whatever its fields say: a
     // stale tab's "keep" names the Secret the rotation it missed replaced, and
@@ -1934,10 +1929,10 @@ pub async fn update_access(
     // service can neither read nor overwrite.
     let suffix = rotation_suffix(&request_id);
     let naming = CredentialNaming::Rotation(&suffix);
-    refuse_taken_credential_names(&state, &ns, &name, &request.access, naming).await?;
+    refuse_taken_credential_names(&state, &ws, &name, &request.access, naming).await?;
     let outcome = create_new_credentials(
         &state,
-        &ns,
+        &ws,
         &object,
         &request.access,
         &request_id,
@@ -1961,7 +1956,7 @@ pub async fn update_access(
     let version = object.meta().resource_version.clone().unwrap_or_default();
     let updated = state
         .kube()
-        .set_destination_access(&name, &access_json, ca_bundle, &version)
+        .set_destination_access(&ws, &name, &access_json, ca_bundle, &version)
         .await
         .map_err(|failure| match failure {
             KubeFailure::Conflict => ApiError::new(
@@ -1977,7 +1972,7 @@ pub async fn update_access(
         })?;
     note_credentials(&actor, &outcome);
     tracing::info!(
-        namespace = %ns,
+        workspace = %ws,
         name = %name,
         actor = %actor.id(),
         "destination access rotated"
@@ -1998,18 +1993,18 @@ pub async fn test(
     state: AppState,
     request_id: String,
     actor: Actor,
-    ns: String,
+    ws: String,
     name: String,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ManageDestinations)?;
+    authorize(&state, &actor, &ws, Action::ManageDestinations)?;
     check_name(&name)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: TestDestinationRequest = read_json(body, MAX_JSON_BODY).await?;
-    let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<BackupDestination>(&state, &actor, &ws, &name).await?;
     let roles = match &request.roles {
         Some(roles) if roles.is_empty() => {
             return Err(ApiError::validation(vec![FieldError::new(
@@ -2029,7 +2024,7 @@ pub async fn test(
     let created = super::preflights::start_destination_access(
         &state,
         &actor,
-        &ns,
+        &ws,
         &name,
         &roles,
         &key,
@@ -2073,7 +2068,7 @@ pub async fn command(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, target)): ApiPath<(String, String)>,
+    ApiPath((ws, target)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
@@ -2083,7 +2078,7 @@ pub async fn command(
             state,
             request_id,
             actor,
-            ns,
+            ws,
             name.to_string(),
             uri,
             headers,
@@ -2096,7 +2091,7 @@ pub async fn command(
             state,
             request_id,
             actor,
-            ns,
+            ws,
             name.to_string(),
             uri,
             headers,

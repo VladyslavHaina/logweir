@@ -40,6 +40,10 @@
 
 mod support;
 
+/// The `metadata.uid` of `tests/fixtures/recovery-catalog.json`, which its
+/// pages carry as `logweir.dev/catalog-uid`.
+const CATALOG_UID: &str = "catalog-primary-uid";
+
 use std::time::Instant;
 
 use logweir_api::routes::catalogs::{
@@ -172,6 +176,7 @@ fn seed_view(fake: &FakeKube, points: usize, pages: usize) {
             json!({
                 "metadata": {
                     "name": name,
+                    "labels": {weirkeeper::catalog_view::LABEL_CATALOG_UID: CATALOG_UID},
                     "annotations": {weirkeeper::catalog_view::PAGE_DIGEST_ANNOTATION: digest.clone()}
                 },
                 "immutable": true,

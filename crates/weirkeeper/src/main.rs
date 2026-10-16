@@ -230,10 +230,10 @@ fn run() -> ExitCode {
     };
     info!(
         approval_policy_digest = %approval_policies.digest(),
-        bound_namespaces = ?approval_policies.bound_namespaces(),
+        bound_workspaces = ?approval_policies.bound_workspaces(),
         allow_ordinary_confirmation = approval_policies.allows_ordinary_confirmation(),
         default_mode = ?approval_policies.default_mode(),
-        "the approval policies this controller enforces; an unbound namespace is \
+        "the approval policies this controller enforces; an unbound workspace is \
          legacy-governed-v1 unless defaultMode or the fresh-install marker says confirm"
     );
     // Where the fresh-install marker is read: both variables or neither (the

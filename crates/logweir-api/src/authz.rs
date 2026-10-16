@@ -1,11 +1,11 @@
-//! Authorization: may this actor do this, in this namespace.
+//! Authorization: may this actor do this, in this workspace.
 //!
-//! NAMESPACE FIRST, BEFORE ANY LOOKUP. [`authorize`] checks the namespace grant
-//! before the action and before any Kubernetes call, so an ungranted namespace
-//! answers `namespace_forbidden` whether or not it exists — the answer never
+//! WORKSPACE FIRST, BEFORE ANY LOOKUP. [`authorize`] checks the workspace grant
+//! before the action and before any Kubernetes call, so an ungranted workspace
+//! answers `workspace_forbidden` whether or not it exists — the answer never
 //! depends on cluster state the actor may not see.
 //!
-//! NAMESPACES ARE EXPLICIT. [`Authorizer::namespaces`] returns configured
+//! WORKSPACES ARE EXPLICIT. [`Authorizer::workspaces`] returns configured
 //! grants; nothing here or anywhere in this crate lists core `Namespace`
 //! objects.
 //!
@@ -23,19 +23,19 @@
 //! that would erase that.
 //!
 //! BINDINGS ARE EXACT STRINGS, RE-READ PER REQUEST. [`RoleBindings`] maps exact
-//! group claims and exact `issuer#subject` strings to `(role, namespace)`
+//! group claims and exact `issuer#subject` strings to `(role, workspace)`
 //! pairs. No regex, no wildcard, no email-domain inference and no default
-//! namespace. [`SharedAuthorizer`] holds them behind an `RwLock`, so replacing
+//! workspace. [`SharedAuthorizer`] holds them behind an `RwLock`, so replacing
 //! the table takes effect on the next request rather than on the next restart,
 //! and the session cookie carries only the raw claims — never the derived
 //! roles — so a removed binding cannot be replayed from a cookie.
 //!
 //! ENUMERATION RESISTANCE IS A MODE, NOT A GUESS. In shared mode an ungranted
-//! namespace answers exactly what a nonexistent object answers — 404
-//! `not_found` — so a caller cannot map which namespaces exist. In localAdmin
-//! mode the more informative 403 `namespace_forbidden` is kept: there is one
+//! workspace answers exactly what a nonexistent object answers — 404
+//! `not_found` — so a caller cannot map which workspaces exist. In localAdmin
+//! mode the more informative 403 `workspace_forbidden` is kept: there is one
 //! actor, it is the administrator, and there is nothing to enumerate.
-//! [`Authorizer::hides_unbound_namespaces`] is the switch, and the audit record
+//! [`Authorizer::hides_unbound_workspaces`] is the switch, and the audit record
 //! keeps the real reason either way.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -177,14 +177,14 @@ impl Action {
 
 /// Decides grants and actions for an actor.
 pub trait Authorizer: Send + Sync + 'static {
-    /// The namespaces explicitly granted to `actor`, in a stable order.
-    fn namespaces(&self, actor: &Actor) -> Vec<String>;
+    /// The workspaces explicitly granted to `actor`, in a stable order.
+    fn workspaces(&self, actor: &Actor) -> Vec<String>;
 
-    /// Whether `actor` may perform `action` in the granted `namespace`.
-    fn allows(&self, actor: &Actor, namespace: &str, action: Action) -> bool;
+    /// Whether `actor` may perform `action` in the granted `workspace`.
+    fn allows(&self, actor: &Actor, workspace: &str, action: Action) -> bool;
 
-    /// The roles `actor` holds in `namespace`, sorted, for the audit record.
-    fn roles(&self, _actor: &Actor, _namespace: &str) -> Vec<Role> {
+    /// The roles `actor` holds in `workspace`, sorted, for the audit record.
+    fn roles(&self, _actor: &Actor, _workspace: &str) -> Vec<Role> {
         Vec::new()
     }
 
@@ -195,9 +195,9 @@ pub trait Authorizer: Send + Sync + 'static {
         String::new()
     }
 
-    /// Whether an ungranted namespace must be indistinguishable from a
+    /// Whether an ungranted workspace must be indistinguishable from a
     /// nonexistent one. See the module documentation.
-    fn hides_unbound_namespaces(&self) -> bool {
+    fn hides_unbound_workspaces(&self) -> bool {
         false
     }
 
@@ -231,10 +231,10 @@ pub enum Role {
     /// Creates and runs operations. Never submits a governed approval and
     /// never changes trust or policy.
     Operator,
-    /// Submits governed approvals in approver-bound namespaces. Cannot create
+    /// Submits governed approvals in approver-bound workspaces. Cannot create
     /// an execution.
     Approver,
-    /// Administers bound namespaces. Is STILL the requester when it operates,
+    /// Administers bound workspaces. Is STILL the requester when it operates,
     /// and is not an approver unless separately bound as one.
     Administrator,
 }
@@ -267,11 +267,11 @@ impl Role {
 
     /// THE DECISION TABLE. One arm per action per role, written out.
     ///
-    /// Read it as the matrix in D0 §"Application role and namespace matrix":
+    /// Read it as the matrix in D0 §"Application role and namespace matrix", read per workspace:
     /// Viewer never mutates; Operator never submits a governed approval and
     /// never changes trust or APPROVAL policy; Approver cannot create an
     /// execution and sees only what a governed approval needs; Administrator
-    /// administers its bound namespaces but is NOT an approver.
+    /// administers its bound workspaces but is NOT an approver.
     ///
     /// "APPROVAL POLICY", NOT "POLICY". An operator DOES change a
     /// `BackupSchedule`'s policy — that is [`Action::EditSchedulePolicy`], ten
@@ -388,7 +388,7 @@ impl Role {
                     // THE ONE CLUSTER-SCOPED READ, AND ONLY HERE. D3 §10 calls
                     // `GET /api/v1/trust-policies` an installation-admin read:
                     // a `TrustPolicy` names the namespaces it governs, so
-                    // serving it to a viewer bound in one namespace would
+                    // serving it to a viewer bound in one workspace would
                     // publish the shape of every other. §7.1's "an operator or
                     // approver has read only" is about the Kubernetes verb on
                     // the object, which is a separate grant on a separate
@@ -399,14 +399,14 @@ impl Role {
     }
 }
 
-/// One administrator-written binding: a role in one exact namespace for exact
+/// One administrator-written binding: a role in one exact workspace for exact
 /// group strings and exact subjects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleBinding {
     /// The role granted.
     pub role: Role,
-    /// The exact namespace. Never a pattern, never a default.
-    pub namespace: String,
+    /// The exact workspace. Never a pattern, never a default.
+    pub workspace: String,
     /// Exact group claim strings.
     pub groups: Vec<String>,
     /// Exact `issuer#subject` actor IDs.
@@ -436,13 +436,13 @@ pub struct RoleBindings {
 }
 
 impl RoleBindings {
-    /// Every `(namespace, roles)` pair for an actor, unioned across bindings.
+    /// Every `(workspace, roles)` pair for an actor, unioned across bindings.
     #[must_use]
-    pub fn roles_by_namespace(&self, actor: &Actor) -> BTreeMap<String, BTreeSet<Role>> {
+    pub fn roles_by_workspace(&self, actor: &Actor) -> BTreeMap<String, BTreeSet<Role>> {
         let mut out: BTreeMap<String, BTreeSet<Role>> = BTreeMap::new();
         for binding in &self.bindings {
             if binding.matches(actor) {
-                out.entry(binding.namespace.clone())
+                out.entry(binding.workspace.clone())
                     .or_default()
                     .insert(binding.role);
             }
@@ -487,27 +487,27 @@ impl SharedAuthorizer {
 }
 
 impl Authorizer for SharedAuthorizer {
-    fn namespaces(&self, actor: &Actor) -> Vec<String> {
+    fn workspaces(&self, actor: &Actor) -> Vec<String> {
         self.bindings()
-            .roles_by_namespace(actor)
+            .roles_by_workspace(actor)
             .into_keys()
             .collect()
     }
 
-    fn allows(&self, actor: &Actor, namespace: &str, action: Action) -> bool {
+    fn allows(&self, actor: &Actor, workspace: &str, action: Action) -> bool {
         if !action.implemented() {
             return false;
         }
         self.bindings()
-            .roles_by_namespace(actor)
-            .get(namespace)
+            .roles_by_workspace(actor)
+            .get(workspace)
             .is_some_and(|roles| roles.iter().any(|role| role.allows(action)))
     }
 
-    fn roles(&self, actor: &Actor, namespace: &str) -> Vec<Role> {
+    fn roles(&self, actor: &Actor, workspace: &str) -> Vec<Role> {
         self.bindings()
-            .roles_by_namespace(actor)
-            .remove(namespace)
+            .roles_by_workspace(actor)
+            .remove(workspace)
             .map(|roles| roles.into_iter().collect())
             .unwrap_or_default()
     }
@@ -516,7 +516,7 @@ impl Authorizer for SharedAuthorizer {
         self.bindings().revision.clone()
     }
 
-    fn hides_unbound_namespaces(&self) -> bool {
+    fn hides_unbound_workspaces(&self) -> bool {
         true
     }
 
@@ -576,21 +576,21 @@ pub fn independent_principals(requester: &Principal, approver: &Principal) -> bo
 /// route calls this.
 /// # Errors
 ///
-/// `forbidden` when the actor holds no Approver binding in the namespace, or
+/// `forbidden` when the actor holds no Approver binding in the workspace, or
 /// when the approver is the requester.
 pub fn authorize_governed_approval(
     authorizer: &dyn Authorizer,
     approver: &Actor,
-    namespace: &str,
+    workspace: &str,
     requester: &Principal,
 ) -> Result<(), ApiError> {
     if !authorizer
-        .roles(approver, namespace)
+        .roles(approver, workspace)
         .contains(&Role::Approver)
     {
         return Err(ApiError::new(
             ProblemCode::Forbidden,
-            "Submitting a governed approval requires an Approver binding in this namespace.",
+            "Submitting a governed approval requires an Approver binding in this workspace.",
         ));
     }
     if !independent_principals(requester, &Principal::of(approver)) {
@@ -603,88 +603,88 @@ pub fn authorize_governed_approval(
 }
 
 /// The local administrator may perform every implemented action in every
-/// configured namespace, and nothing anywhere else.
+/// configured workspace, and nothing anywhere else.
 #[derive(Clone, Debug)]
 pub struct LocalAdminAuthorizer {
-    namespaces: Vec<String>,
+    workspaces: Vec<String>,
 }
 
 impl LocalAdminAuthorizer {
-    /// An authorizer over the configured namespace list.
+    /// An authorizer over the configured workspace list.
     #[must_use]
-    pub fn new(namespaces: Vec<String>) -> Self {
-        Self { namespaces }
+    pub fn new(workspaces: Vec<String>) -> Self {
+        Self { workspaces }
     }
 }
 
 impl Authorizer for LocalAdminAuthorizer {
-    fn namespaces(&self, _actor: &Actor) -> Vec<String> {
-        self.namespaces.clone()
+    fn workspaces(&self, _actor: &Actor) -> Vec<String> {
+        self.workspaces.clone()
     }
 
-    fn allows(&self, _actor: &Actor, namespace: &str, action: Action) -> bool {
-        action.implemented() && self.namespaces.iter().any(|n| n == namespace)
+    fn allows(&self, _actor: &Actor, workspace: &str, action: Action) -> bool {
+        action.implemented() && self.workspaces.iter().any(|n| n == workspace)
     }
 }
 
-/// Namespace grant first, then the action.
+/// Workspace grant first, then the action.
 ///
 /// # Errors
 ///
-/// `namespace_forbidden` when the namespace is not granted (checked first and
+/// `workspace_forbidden` when the workspace is not granted (checked first and
 /// independently of whether it exists), `forbidden` when the action is not.
 pub fn authorize(
     authorizer: &dyn Authorizer,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     action: Action,
 ) -> Result<(), ApiError> {
-    decide(authorizer, actor, namespace, action)
-        .map_err(|denial| denial.response(authorizer.hides_unbound_namespaces()))
+    decide(authorizer, actor, workspace, action)
+        .map_err(|denial| denial.response(authorizer.hides_unbound_workspaces()))
 }
 
 /// Why a request was refused — the REAL reason, which is not always the reason
 /// the response is allowed to state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Denial {
-    /// The namespace is not bound to this actor.
-    NamespaceNotGranted,
-    /// The namespace is bound, but not for this action.
+    /// The workspace is not bound to this actor.
+    WorkspaceNotGranted,
+    /// The workspace is bound, but not for this action.
     ActionNotPermitted,
 }
 
 impl Denial {
     /// The stable code the AUDIT record carries. It always names the real
     /// reason, even when the response withholds it for enumeration resistance:
-    /// hiding a namespace from a caller must not also hide an authorization
+    /// hiding a workspace from a caller must not also hide an authorization
     /// problem from the operator reading the log.
     #[must_use]
     pub const fn audit_code(self) -> &'static str {
         match self {
-            Denial::NamespaceNotGranted => ProblemCode::NamespaceForbidden.as_str(),
+            Denial::WorkspaceNotGranted => ProblemCode::WorkspaceForbidden.as_str(),
             Denial::ActionNotPermitted => ProblemCode::Forbidden.as_str(),
         }
     }
 
-    /// The response. With `hide_unbound`, an ungranted namespace answers
+    /// The response. With `hide_unbound`, an ungranted workspace answers
     /// exactly what a nonexistent object answers.
     #[must_use]
     pub fn response(self, hide_unbound: bool) -> ApiError {
         match self {
-            Denial::NamespaceNotGranted if hide_unbound => ApiError::not_found(),
-            Denial::NamespaceNotGranted => ApiError::new(
-                ProblemCode::NamespaceForbidden,
-                "The namespace is not granted to this actor.",
+            Denial::WorkspaceNotGranted if hide_unbound => ApiError::not_found(),
+            Denial::WorkspaceNotGranted => ApiError::new(
+                ProblemCode::WorkspaceForbidden,
+                "The workspace is not granted to this actor.",
             ),
             Denial::ActionNotPermitted => ApiError::new(
                 ProblemCode::Forbidden,
-                "The actor is not permitted this action in this namespace.",
+                "The actor is not permitted this action in this workspace.",
             ),
         }
     }
 }
 
-/// The decision itself: namespace grant first, then the action.
+/// The decision itself: workspace grant first, then the action.
 ///
 /// # Errors
 ///
@@ -692,19 +692,19 @@ impl Denial {
 pub fn decide(
     authorizer: &dyn Authorizer,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     action: Action,
 ) -> Result<(), Denial> {
-    if !authorizer.namespaces(actor).iter().any(|n| n == namespace) {
-        return Err(Denial::NamespaceNotGranted);
+    if !authorizer.workspaces(actor).iter().any(|n| n == workspace) {
+        return Err(Denial::WorkspaceNotGranted);
     }
-    if !action.implemented() || !authorizer.allows(actor, namespace, action) {
+    if !action.implemented() || !authorizer.allows(actor, workspace, action) {
         return Err(Denial::ActionNotPermitted);
     }
     Ok(())
 }
 
-/// The capability flags of one namespace grant.
+/// The capability flags of one workspace grant.
 ///
 /// Every flag is `implemented && allowed`. The eight domains that have no
 /// route in this build are always `false`.
@@ -744,7 +744,7 @@ pub struct Capabilities {
     /// ONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a
     /// schedule's future policy editable, and this crate's decision (recorded
     /// in `docs/api.md`) is that an operator who may WRITE a policy into a
-    /// bound namespace may write a new one over it: the edit reaches exactly
+    /// bound workspace may write a new one over it: the edit reaches exactly
     /// the fields `POST` already sets, never `spec.sourceRef`, and never a
     /// created run. `Action::EditSchedulePolicy` is a separate action so the
     /// AUDIT record says `schedule.editPolicy` rather than `schedule.create`,
@@ -799,11 +799,11 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// The flags for `actor` in `namespace`.
+    /// The flags for `actor` in `workspace`.
     #[must_use]
-    pub fn for_namespace(authorizer: &dyn Authorizer, actor: &Actor, namespace: &str) -> Self {
+    pub fn for_workspace(authorizer: &dyn Authorizer, actor: &Actor, workspace: &str) -> Self {
         let can =
-            |action: Action| action.implemented() && authorizer.allows(actor, namespace, action);
+            |action: Action| action.implemented() && authorizer.allows(actor, workspace, action);
         Self {
             connections_read: can(Action::ReadConnections),
             connection_create: can(Action::CreateConnection),
@@ -910,10 +910,10 @@ mod tests {
     }
 
     #[test]
-    fn the_namespace_is_checked_before_the_action() {
+    fn the_workspace_is_checked_before_the_action() {
         let z = LocalAdminAuthorizer::new(vec!["team-a".into()]);
         let err = authorize(&z, &actor(), "team-b", Action::TestConnection).unwrap_err();
-        assert_eq!(err.code, ProblemCode::NamespaceForbidden);
+        assert_eq!(err.code, ProblemCode::WorkspaceForbidden);
         let err = authorize(&z, &actor(), "team-a", Action::TestConnection).unwrap_err();
         assert_eq!(err.code, ProblemCode::Forbidden);
         assert!(authorize(&z, &actor(), "team-a", Action::CreateSchedule).is_ok());
@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn unimplemented_domains_are_never_advertised() {
         let z = LocalAdminAuthorizer::new(vec!["team-a".into()]);
-        let c = Capabilities::for_namespace(&z, &actor(), "team-a");
+        let c = Capabilities::for_workspace(&z, &actor(), "team-a");
         assert!(c.schedule_create && c.restore_create && c.connection_create);
         assert!(c.topic_discovery && c.preflight && c.destinations && c.credential_write);
         // `POST .../backups` has a route, so the flag is not a permanent `false`.
@@ -945,7 +945,7 @@ mod tests {
         // capability, never a fake stub" takes in the contract.
         assert!(!c.trust_administration && !c.catalog_window_query);
         assert_eq!(
-            Capabilities::for_namespace(&z, &actor(), "team-b"),
+            Capabilities::for_workspace(&z, &actor(), "team-b"),
             Capabilities::none()
         );
     }

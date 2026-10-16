@@ -347,9 +347,9 @@ async fn forged_identity_and_impersonation_headers_have_no_effect() {
     assert_eq!(response.status.as_u16(), 200);
     let body = response.json();
     assert_eq!(body["actor"]["id"], format!("{ISSUER}#u-view"));
-    assert_eq!(body["namespaces"][0]["roles"][0], "viewer");
+    assert_eq!(body["workspaces"][0]["roles"][0], "viewer");
     assert_eq!(
-        body["namespaces"][0]["capabilities"]["scheduleCreate"],
+        body["workspaces"][0]["capabilities"]["scheduleCreate"],
         false
     );
     let text = String::from_utf8_lossy(&response.body);

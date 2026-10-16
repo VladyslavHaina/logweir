@@ -2,14 +2,14 @@
 //!
 //! A cursor is `base64url(payload) "." base64url(HMAC-SHA256(key, payload))`.
 //! The payload binds the actor (as a SHA-256 of the actor ID, so no identity
-//! appears in a URL), the route, the namespace, the canonical filters, an
+//! appears in a URL), the route, the workspace, the canonical filters, an
 //! expiry fifteen minutes after issue, and the Kubernetes continue token.
 //!
 //! THE ORDER OF CHECKS IS THE CONTRACT. The MAC is verified first, in constant
 //! time; a cursor that fails it is `cursor_invalid` whatever else it says, so
 //! an attacker cannot learn anything by editing the expiry. Only an
 //! authentic cursor is then compared with the request's scope (a mismatch is
-//! `cursor_invalid`: another actor, route, namespace or filter set) and only
+//! `cursor_invalid`: another actor, route, workspace or filter set) and only
 //! then with the clock (`cursor_expired`).
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -57,8 +57,8 @@ pub struct CursorScope {
     pub actor_id: String,
     /// The route identifier, e.g. `GET /api/v1/workspaces/{ws}/backups`.
     pub route: String,
-    /// The namespace.
-    pub namespace: String,
+    /// The workspace.
+    pub workspace: String,
     /// The canonical filter string (empty for none).
     pub filters: String,
 }
@@ -99,7 +99,7 @@ pub fn seal(
         v: VERSION,
         a: actor_digest(&scope.actor_id),
         r: scope.route.clone(),
-        n: scope.namespace.clone(),
+        n: scope.workspace.clone(),
         f: scope.filters.clone(),
         e: now.timestamp() + CURSOR_TTL_SECONDS,
         c: continue_token.to_string(),
@@ -145,7 +145,7 @@ pub fn open(
     if payload.v != VERSION
         || payload.a != actor_digest(&scope.actor_id)
         || payload.r != scope.route
-        || payload.n != scope.namespace
+        || payload.n != scope.workspace
         || payload.f != scope.filters
         || payload.c.is_empty()
     {
@@ -165,7 +165,7 @@ mod tests {
         CursorScope {
             actor_id: "urn:logweir:local-admin#admin".into(),
             route: "GET /api/v1/workspaces/{ws}/backups".into(),
-            namespace: "team-a".into(),
+            workspace: "team-a".into(),
             filters: String::new(),
         }
     }
@@ -187,7 +187,7 @@ mod tests {
         let key = CursorKey::new(vec![7; 32]);
         let c = seal(&key, &scope(), "tok", t(0));
         let mut other = scope();
-        other.namespace = "team-b".into();
+        other.workspace = "team-b".into();
         assert_eq!(open(&key, &other, &c, t(1)), Err(CursorError::Invalid));
         let mut other = scope();
         other.actor_id = "someone-else".into();

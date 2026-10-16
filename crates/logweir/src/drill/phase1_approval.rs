@@ -276,6 +276,7 @@ pub fn verify_bytes(
 #[derive(Clone, Debug)]
 pub struct ContractSubject {
     pub namespace: String,
+    pub workspace: String,
     pub name: String,
     pub uid: String,
 }
@@ -399,6 +400,7 @@ pub fn verify_authorization_v2_bytes_for(
     let expected = ExpectedSubject {
         kind: kind.to_string(),
         namespace: subject.namespace.clone(),
+        workspace: subject.workspace.clone(),
         name: subject.name.clone(),
         uid: subject.uid.clone(),
         plan_hash: sha256_prefixed(spec_text.as_bytes()),

@@ -316,7 +316,7 @@ async fn an_upgraded_install_keeps_legacy_and_a_patched_marker_changes_nothing()
 async fn an_explicit_binding_wins_over_the_fresh_install_default() {
     let install = install(
         &format!(
-            "policies:\n  - name: prod-governed\n    mode: strict\nnamespaces:\n  {NS_A}: prod-governed\n"
+            "policies:\n  - name: prod-governed\n    mode: strict\nworkspaces:\n  {NS_A}: prod-governed\n"
         ),
         Cluster::Fresh,
     );

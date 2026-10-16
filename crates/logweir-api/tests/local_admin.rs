@@ -354,7 +354,7 @@ impl Drop for Fixture {
 fn config_text(fixture: &Fixture, listen: &str, origin: &str, context: &str) -> String {
     format!(
         "mode: localAdmin\nlisten: \"{listen}\"\npublicOrigin: \"{origin}\"\nuiDirectory: {}\n\
-         localAdmin:\n  subject: admin\nnamespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  \
+         localAdmin:\n  subject: admin\nnamespace: logweir-system\nworkspaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  \
          kubeconfig: {}\n  context: {context}\ncursorKeyFile: {}\n",
         fixture.ui().display(),
         fixture.path("kubeconfig.yaml"),
@@ -659,11 +659,11 @@ fn shared_config_text(fixture: &Fixture, listen: &str, public_base_url: &str) ->
          uiDirectory: {ui}\n\
          oidc:\n  issuer: https://idp.example/realms/logweir\n  clientId: logweir-console\n  \
          clientSecretFile: {secret}\n\
-         roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    namespace: team-a\n    \
+         roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    workspace: team-a\n    \
          groups: [lw-viewers]\n\
          sessionKey:\n  file: {session}\n  expectedVersion: 1\n\
          cursorKey:\n  file: {cursor}\n  expectedVersion: 1\n\
-         namespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: {kubeconfig}\n  \
+         namespace: logweir-system\nworkspaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: {kubeconfig}\n  \
          context: fixture\n",
         ui = fixture.ui().display(),
         secret = fixture.path("client.secret"),
@@ -1989,7 +1989,7 @@ impl FakeKube {
         let mut object: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         object["metadata"]["name"] = "sse".into();
-        object["metadata"]["namespace"] = "team-a".into();
+        object["metadata"]["namespace"] = "logweir-system".into();
         object["metadata"]["labels"][weirkeeper::workspace::LABEL] = "team-a".into();
         // Unsettled, as `operation_stream.rs` makes one: the stream stays open.
         object["status"]["phase"] = "Running".into();
@@ -2031,7 +2031,7 @@ impl FakeKube {
                     let (status, body) = if path
                         .split('?')
                         .next()
-                        .is_some_and(|p| p.ends_with("/namespaces/team-a/backups/sse"))
+                        .is_some_and(|p| p.ends_with("/namespaces/logweir-system/backups/sse"))
                     {
                         reads.fetch_add(1, Ordering::Relaxed);
                         ("200 OK", backup)

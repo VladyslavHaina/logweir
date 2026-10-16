@@ -4,7 +4,7 @@
 //!
 //! Everything about the two approval modes that is decidable without a clock
 //! read, a key, a cluster or a file: the installation's policy set and how a
-//! namespace resolves to one policy; the policy SNAPSHOT (the exact bytes a run
+//! workspace resolves to one policy; the policy SNAPSHOT (the exact bytes a run
 //! freezes, and the digest every signed document names); the authorization
 //! document v2 both modes produce; and the binding checks every boundary makes
 //! over it (the Approval controller, Restore admission and the runner). The
@@ -13,7 +13,7 @@
 //!
 //! # Where the policy lives, and why it is not a namespaced object
 //!
-//! The policies AND their namespace bindings live in one installation document,
+//! The policies AND their workspace bindings live in one installation document,
 //! which the chart renders once and mounts into both the controller and
 //! `logweir-api`, so the two consume the same bytes and the same digest. A
 //! namespaced policy object would let whoever holds namespace RBAC name its own
@@ -32,7 +32,7 @@
 //! * [`ApprovalMode::Ordinary`] — the console's confirmation signature alone:
 //!   an authorised operator confirming their own operation.
 //!
-//! A namespace with no binding resolves to [`EffectivePolicy::Legacy`]
+//! A workspace with no binding resolves to [`EffectivePolicy::Legacy`]
 //! (`legacy-governed-v1`), which is TODAY'S behaviour byte for byte: a v1
 //! approval document signed by a `GovernedApproval` key — UNLESS the
 //! installation's unbound default says `confirm` (below).
@@ -40,8 +40,8 @@
 //! # The unbound default, and why an upgrade never reaches it
 //!
 //! A FRESH install starts with one-person confirmation in the console for every
-//! namespace without a binding, so the first restore needs no personal key. An
-//! unbound namespace then resolves to [`default_confirm_policy`]
+//! workspace without a binding, so the first restore needs no personal key. An
+//! unbound workspace then resolves to [`default_confirm_policy`]
 //! (`default-confirm-v1`, `Ordinary`), a concrete, content-addressed policy
 //! like any other: the console signs a v2 document naming it, and every
 //! checkpoint compares that name and digest exactly as for an explicit binding.
@@ -111,10 +111,10 @@ use serde::{Deserialize, Serialize};
 use crate::ids::sha256_prefixed;
 use crate::trust::KeyUsage;
 
-/// The name the synthesised policy of an unbound namespace carries.
+/// The name the synthesised policy of an unbound workspace carries.
 pub const LEGACY_GOVERNED_POLICY_NAME: &str = "legacy-governed-v1";
 
-/// The name of the policy an unbound namespace resolves to when the
+/// The name of the policy an unbound workspace resolves to when the
 /// installation's unbound default is `confirm` ([`default_confirm_policy`]).
 /// Reserved: no declared policy may carry it.
 pub const DEFAULT_CONFIRM_POLICY_NAME: &str = "default-confirm-v1";
@@ -178,7 +178,7 @@ pub const MAX_TICKET_LEN: usize = 128;
 /// The most policies one installation document may declare.
 pub const MAX_POLICIES: usize = 64;
 
-/// The most namespace bindings one installation document may declare.
+/// The most workspace bindings one installation document may declare.
 pub const MAX_BINDINGS: usize = 256;
 
 /// The DSSE `payloadType` of an authorization document v2.
@@ -192,11 +192,9 @@ pub const PAYLOAD_TYPE_RESTORE_AUTHORIZATION: &str =
     "application/vnd.logweir.restore-authorization+json;version=2.0.0";
 
 /// The document's `formatVersion`: what this build reads (major 2), and the
-/// version every document that carries neither `approvalSubject` nor
-/// `originalNameConfirmation` is written at — so every such document is byte
-/// for byte what it was. [`restore_authorization_format_version_for`] picks
-/// [`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`] for one that does.
-pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
+/// version every document it writes is written at, 2.3.0 since every document
+/// names its subject's workspace ([`RESTORE_AUTHORIZATION_WORKSPACE_SINCE_MINOR`]).
+pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.3.0";
 
 /// The minor that defines `approvalSubject` and `originalNameConfirmation`. A
 /// document declaring an older minor that carries either is refused: the fields
@@ -206,8 +204,7 @@ pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
 /// (`crate::execution_contract::STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR`).
 pub const RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR: u64 = 1;
 
-/// The version a document that carries `approvalSubject` or
-/// `originalNameConfirmation` is written at.
+/// The version that defines `approvalSubject` and `originalNameConfirmation`.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT: &str = "2.1.0";
 
 /// The minor that defines `approver` and `approvedAt`, the
@@ -216,49 +213,13 @@ pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT: &str = "2.1.0";
 /// document that predates them cannot have said so.
 pub const RESTORE_AUTHORIZATION_APPROVER_SINCE_MINOR: u64 = 2;
 
-/// The version a document that carries `approver` or
-/// `approvedAt` is written at.
+/// The version that defines `approver` and `approvedAt`.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_APPROVER: &str = "2.2.0";
 
-/// The `formatVersion` an authorization document v2 WITHOUT a console
-/// approver is written at: 2.1.0 when it carries the approval subject or the
-/// typed confirmation, 2.0.0 otherwise. A request (and a one-person
-/// confirmation) takes its version from here;
-/// [`restore_authorization_format_version`] is the whole rule.
-#[must_use]
-pub fn restore_authorization_format_version_for(
-    approval_subject: Option<&str>,
-    original_name_confirmation: Option<&crate::original_name::OriginalNameConfirmation>,
-) -> &'static str {
-    restore_authorization_format_version(approval_subject, original_name_confirmation, false)
-}
-
-/// The `formatVersion` an authorization document v2 is written at — THE ONE
-/// PLACE a writer takes the version from:
-///
-/// * **2.2.0** when it carries the console approver (`approver`,
-///   `approvedAt`);
-/// * else **2.1.0** when it carries the approval subject or the typed
-///   confirmation;
-/// * else **2.0.0**.
-///
-/// Each step is taken exactly when its fields are present, so a document
-/// that does not need a field is byte for byte what it was before the field
-/// existed.
-#[must_use]
-pub fn restore_authorization_format_version(
-    approval_subject: Option<&str>,
-    original_name_confirmation: Option<&crate::original_name::OriginalNameConfirmation>,
-    console_approver: bool,
-) -> &'static str {
-    if console_approver {
-        RESTORE_AUTHORIZATION_FORMAT_VERSION_APPROVER
-    } else if approval_subject.is_some() || original_name_confirmation.is_some() {
-        RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT
-    } else {
-        RESTORE_AUTHORIZATION_FORMAT_VERSION
-    }
-}
+/// The minor that defines `subject.workspace` (PROD-19.1). A document
+/// declaring an older minor that carries it is refused, and one without it
+/// names no workspace, so this build refuses it as another subject.
+pub const RESTORE_AUTHORIZATION_WORKSPACE_SINCE_MINOR: u64 = 3;
 
 /// The issuer of the in-cluster administrator console's one identity
 /// (`localAdmin` mode): never a party to a console approval, because its one
@@ -645,7 +606,7 @@ pub enum MarkerRefusal {
     /// It does not carry the hook's provenance or the confirm annotation.
     NotHookMade,
     /// It is no longer the default policy, so it no longer governs unbound
-    /// namespaces.
+    /// workspaces.
     NotDefault,
     /// It does not declare the claimed keys with exactly their one usage each
     /// and the hook's principals.
@@ -683,7 +644,7 @@ impl MarkerRefusal {
 /// * `installation_namespace`: its namespace;
 /// * `policy`: the `TrustPolicy` the claim names, as read (`None`: absent).
 ///
-/// WHY THE BINDING. Without it, turning a governed namespace into one-person
+/// WHY THE BINDING. Without it, turning a governed workspace into one-person
 /// confirmation would take ONE ConfigMap patch instead of an approval-policy
 /// rollout plus a trust administrator trusting the console key. Bound, the
 /// marker is honoured only beside a trust entry the identity hook made in the
@@ -745,14 +706,14 @@ pub fn verify_marker(
 /// The installation document's explicit unbound default (`defaultMode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnboundDefault {
-    /// `defaultMode: confirm` — every unbound namespace is `default-confirm-v1`.
+    /// `defaultMode: confirm` — every unbound workspace is `default-confirm-v1`.
     Confirm,
-    /// `defaultMode: strict` — every unbound namespace is `legacy-governed-v1`,
+    /// `defaultMode: strict` — every unbound workspace is `legacy-governed-v1`,
     /// whatever the marker says.
     Strict,
 }
 
-/// WHY an unbound namespace resolves the way it does — what the console shows
+/// WHY an unbound workspace resolves the way it does — what the console shows
 /// beside the mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnboundBasis {
@@ -776,7 +737,7 @@ impl UnboundBasis {
     }
 }
 
-/// The policy an unbound namespace resolves to under a `confirm`
+/// The policy an unbound workspace resolves to under a `confirm`
 /// unbound default: `Ordinary`, the ordinary default lifetime, no approver.
 ///
 /// A CONSTANT, so the console and the controller compute the same snapshot and
@@ -930,14 +891,14 @@ impl ApprovalPolicy {
     }
 }
 
-/// What a namespace resolves to.
+/// What a workspace resolves to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectivePolicy {
     /// No binding and a `strict` (or unmarked) unbound default:
     /// `legacy-governed-v1`, today's behaviour. Accepts v1 approval documents
     /// signed by a `GovernedApproval` key and nothing else.
     Legacy,
-    /// An explicit installation binding, or an unbound namespace
+    /// An explicit installation binding, or an unbound workspace
     /// under a `confirm` unbound default, which is the concrete
     /// [`default_confirm_policy`]. Accepts authorization document v2 naming
     /// exactly this policy, and nothing else.
@@ -1039,7 +1000,7 @@ struct PolicyEntry {
     require_distinct_principal: Option<bool>,
     /// `Console`, or absent (a personal key). A field an OLDER
     /// binary does not know, so it refuses the whole document at start
-    /// (`deny_unknown_fields`) rather than run a two-person namespace as a
+    /// (`deny_unknown_fields`) rather than run a two-person workspace as a
     /// strict one, or the reverse.
     #[serde(default)]
     approver_signature: Option<String>,
@@ -1061,13 +1022,13 @@ struct PolicySetDocument {
     #[serde(default)]
     policies: Vec<PolicyEntry>,
     #[serde(default)]
-    namespaces: BTreeMap<String, String>,
+    workspaces: BTreeMap<String, String>,
 }
 
-/// The installation's approval policies and namespace bindings.
+/// The installation's approval policies and workspace bindings.
 ///
 /// `Default` is the installation that configured nothing and is not marked:
-/// every namespace resolves to [`EffectivePolicy::Legacy`], which is what an
+/// every workspace resolves to [`EffectivePolicy::Legacy`], which is what an
 /// upgrade without a policy document must mean. A fresh install's readers apply
 /// the marker they observed with [`Self::with_installation`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1117,7 +1078,7 @@ impl ApprovalPolicySet {
     ///   `requireDistinctPrincipal: true` on an `Ordinary` one, which has no
     ///   approver to compare;
     /// * `maxAgeSeconds` outside [`MIN_MAX_AGE_SECONDS`]..=[`MAX_MAX_AGE_SECONDS`];
-    /// * a binding naming an invalid namespace or an undeclared policy;
+    /// * a binding naming an invalid workspace or an undeclared policy;
     /// * more than [`MAX_POLICIES`] policies or [`MAX_BINDINGS`] bindings.
     pub fn parse(text: &str) -> Result<Self, PolicyConfigError> {
         if text.trim().is_empty() {
@@ -1133,7 +1094,7 @@ impl ApprovalPolicySet {
             // one.
             Some("confirm") if !document.allow_ordinary_confirmation => {
                 return Err(PolicyConfigError(
-                    "defaultMode confirm is ordinary confirmation for every unbound namespace, \
+                    "defaultMode confirm is ordinary confirmation for every unbound workspace, \
                      and allowOrdinaryConfirmation is not true; ordinary confirmation is an \
                      explicit installation decision (D0) and is never enabled by one field alone"
                         .to_string(),
@@ -1144,8 +1105,8 @@ impl ApprovalPolicySet {
             Some("two-person") => {
                 return Err(PolicyConfigError(
                     "defaultMode two-person is not a default: two-person approval in the console \
-                     is set per namespace. Declare a policy with mode: two-person (Governed with \
-                     approverSignature: Console) and bind each namespace to it; defaultMode is \
+                     is set per workspace. Declare a policy with mode: two-person (Governed with \
+                     approverSignature: Console) and bind each workspace to it; defaultMode is \
                      confirm or strict"
                         .to_string(),
                 ));
@@ -1163,10 +1124,10 @@ impl ApprovalPolicySet {
                 document.policies.len()
             )));
         }
-        if document.namespaces.len() > MAX_BINDINGS {
+        if document.workspaces.len() > MAX_BINDINGS {
             return Err(PolicyConfigError(format!(
-                "`namespaces` declares {} bindings; at most {MAX_BINDINGS}",
-                document.namespaces.len()
+                "`workspaces` declares {} bindings; at most {MAX_BINDINGS}",
+                document.workspaces.len()
             )));
         }
         let mut policies = BTreeMap::new();
@@ -1182,8 +1143,8 @@ impl ApprovalPolicySet {
                 || entry.name == DEFAULT_CONFIRM_POLICY_NAME
             {
                 return Err(PolicyConfigError(format!(
-                    "{field}.name {:?} is reserved for the policy an unbound namespace resolves \
-                     to; leave the namespace unbound instead",
+                    "{field}.name {:?} is reserved for the policy an unbound workspace resolves \
+                     to; leave the workspace unbound instead",
                     entry.name
                 )));
             }
@@ -1265,15 +1226,15 @@ impl ApprovalPolicySet {
                 )));
             }
         }
-        for (namespace, policy) in &document.namespaces {
-            if !is_dns_label(namespace) {
+        for (workspace, policy) in &document.workspaces {
+            if !is_dns_label(workspace) {
                 return Err(PolicyConfigError(format!(
-                    "namespaces.{namespace:?} is not a namespace name"
+                    "workspaces.{workspace:?} is not a workspace name"
                 )));
             }
             if !policies.contains_key(policy) {
                 return Err(PolicyConfigError(format!(
-                    "namespaces.{namespace} names policy {policy:?}, which `policies` does not \
+                    "workspaces.{workspace} names policy {policy:?}, which `policies` does not \
                      declare"
                 )));
             }
@@ -1281,7 +1242,7 @@ impl ApprovalPolicySet {
         Ok(Self {
             allow_ordinary_confirmation: document.allow_ordinary_confirmation,
             policies,
-            bindings: document.namespaces,
+            bindings: document.workspaces,
             default_mode,
             installation: InstallationMarker::Unmarked,
         })
@@ -1309,7 +1270,7 @@ impl ApprovalPolicySet {
         self.default_mode
     }
 
-    /// Why an UNBOUND namespace resolves the way it does — the order is the
+    /// Why an UNBOUND workspace resolves the way it does — the order is the
     /// module header's: an explicit `defaultMode`, then the fresh-install
     /// marker, then `legacy-governed-v1`.
     #[must_use]
@@ -1321,7 +1282,7 @@ impl ApprovalPolicySet {
         }
     }
 
-    /// What an unbound namespace resolves to.
+    /// What an unbound workspace resolves to.
     #[must_use]
     pub fn unbound(&self) -> EffectivePolicy {
         match self.unbound_basis() {
@@ -1334,18 +1295,18 @@ impl ApprovalPolicySet {
         }
     }
 
-    /// Whether `namespace` has an explicit binding.
+    /// Whether `workspace` has an explicit binding.
     #[must_use]
-    pub fn is_bound(&self, namespace: &str) -> bool {
-        self.bindings.contains_key(namespace)
+    pub fn is_bound(&self, workspace: &str) -> bool {
+        self.bindings.contains_key(workspace)
     }
 
-    /// What `namespace` resolves to: its explicit binding — which always wins
+    /// What `workspace` resolves to: its explicit binding — which always wins
     /// — or the unbound default ([`Self::unbound`]).
     #[must_use]
-    pub fn resolve(&self, namespace: &str) -> EffectivePolicy {
+    pub fn resolve(&self, workspace: &str) -> EffectivePolicy {
         self.bindings
-            .get(namespace)
+            .get(workspace)
             .and_then(|name| self.policies.get(name))
             .map_or_else(
                 || self.unbound(),
@@ -1366,9 +1327,9 @@ impl ApprovalPolicySet {
         self.allow_ordinary_confirmation
     }
 
-    /// The bound namespaces, sorted.
+    /// The bound workspaces, sorted.
     #[must_use]
-    pub fn bound_namespaces(&self) -> Vec<String> {
+    pub fn bound_workspaces(&self) -> Vec<String> {
         self.bindings.keys().cloned().collect()
     }
 
@@ -1376,11 +1337,11 @@ impl ApprovalPolicySet {
     /// readiness value both processes expose, so an operator can
     /// see that the console and the controller run the same configuration.
     ///
-    /// It also covers what an UNBOUND namespace resolves to, when
+    /// It also covers what an UNBOUND workspace resolves to, when
     /// that is not `legacy-governed-v1` — so a console that has read the
     /// fresh-install marker and a controller that has not yet publish
     /// different digests, and the disagreement is visible. An installation
-    /// whose unbound namespaces are legacy keeps the digest it always had.
+    /// whose unbound workspaces are legacy keeps the digest it always had.
     #[must_use]
     pub fn digest(&self) -> String {
         #[derive(Serialize)]
@@ -1388,14 +1349,14 @@ impl ApprovalPolicySet {
         struct Canonical<'a> {
             allow_ordinary_confirmation: bool,
             policies: Vec<String>,
-            namespaces: &'a BTreeMap<String, String>,
+            workspaces: &'a BTreeMap<String, String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             unbound_default: Option<String>,
         }
         let canonical = Canonical {
             allow_ordinary_confirmation: self.allow_ordinary_confirmation,
             policies: self.policies.values().map(ApprovalPolicy::digest).collect(),
-            namespaces: &self.bindings,
+            workspaces: &self.bindings,
             unbound_default: self.unbound().digest(),
         };
         sha256_prefixed(&serde_json::to_vec(&canonical).unwrap_or_default())
@@ -1410,8 +1371,15 @@ pub struct AuthorizedSubject {
     pub api_version: String,
     /// `Restore`.
     pub kind: String,
-    /// The subject's namespace.
+    /// The subject's namespace: the install's one namespace.
     pub namespace: String,
+    /// The subject's workspace, its `logweir.dev/workspace` label.
+    /// DEFINED FROM FORMAT 2.3.0 and required by this build: a document
+    /// without it names no workspace, so it matches none
+    /// ([`AuthorizationRefusal::SubjectMismatch`]), and a `dev` approval can
+    /// never authorise a `prd` run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
     /// The subject's name.
     pub name: String,
     /// The subject's immutable UID — what stops a document from following a
@@ -1577,6 +1545,7 @@ impl RestoreAuthorization {
         doc.check_subject_fields_version()?;
         // And the 2.2.0 fields, the same way.
         doc.check_approver_fields()?;
+        doc.check_workspace_version()?;
         Ok(doc)
     }
 
@@ -1623,6 +1592,28 @@ impl RestoreAuthorization {
             ));
         }
         Ok(())
+    }
+
+    /// **`subject.workspace` is format 2.3.0.** A document that carries it
+    /// under an older minor is refused, as the 2.1.0 and 2.2.0 fields are.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthorizationRefusal::DocumentInvalid`], naming both versions.
+    pub fn check_workspace_version(&self) -> Result<(), AuthorizationRefusal> {
+        if self.subject.workspace.is_empty()
+            || numeric_version(&self.format_version).is_some_and(|(major, minor, _)| {
+                major == 2 && minor >= RESTORE_AUTHORIZATION_WORKSPACE_SINCE_MINOR
+            })
+        {
+            return Ok(());
+        }
+        Err(AuthorizationRefusal::DocumentInvalid(format!(
+            "the document carries `subject.workspace`, which is defined from formatVersion \
+             {RESTORE_AUTHORIZATION_FORMAT_VERSION}, and it declares {:?}; a document \
+             that predates the field cannot carry it",
+            self.format_version
+        )))
     }
 
     /// Whether the document carries a field defined from format 2.1.0.
@@ -1693,6 +1684,8 @@ pub struct ExpectedSubject {
     pub kind: String,
     /// The subject's namespace.
     pub namespace: String,
+    /// The subject's workspace label.
+    pub workspace: String,
     /// The subject's name.
     pub name: String,
     /// The subject's UID.
@@ -1719,7 +1712,7 @@ pub enum AuthorizationRefusal {
         want: String,
     },
     /// The document names another policy, another digest, or another mode
-    /// than the namespace is bound to — including a v2 document in a namespace
+    /// than the workspace is bound to — including a v2 document in a workspace
     /// with no binding.
     PolicyMismatch(String),
     /// The validity window is not well formed or exceeds the policy.
@@ -1777,11 +1770,11 @@ impl std::fmt::Display for AuthorizationRefusal {
     }
 }
 
-/// The refusal a v2 document earns in a namespace with no binding.
+/// The refusal a v2 document earns in a workspace with no binding.
 #[must_use]
-pub fn unbound_namespace_refusal(namespace: &str) -> AuthorizationRefusal {
+pub fn unbound_workspace_refusal(workspace: &str) -> AuthorizationRefusal {
     AuthorizationRefusal::PolicyMismatch(format!(
-        "namespace {namespace} is bound to no approval policy, so it resolves to \
+        "workspace {workspace} is bound to no approval policy, so it resolves to \
          {LEGACY_GOVERNED_POLICY_NAME}, which accepts a v1 approval document signed by a \
          GovernedApproval key and no authorization document v2"
     ))
@@ -1791,7 +1784,7 @@ pub fn unbound_namespace_refusal(namespace: &str) -> AuthorizationRefusal {
 #[must_use]
 pub fn v1_under_bound_policy_refusal(policy: &ApprovalPolicy) -> AuthorizationRefusal {
     AuthorizationRefusal::PolicyMismatch(format!(
-        "this namespace is bound to approval policy {} ({}), which accepts authorization \
+        "this workspace is bound to approval policy {} ({}), which accepts authorization \
          document v2 only; a v1 approval document carries no console-attested requester, so \
          neither the policy nor separation of duties can be checked against it",
         policy.name, policy.mode
@@ -1852,6 +1845,7 @@ fn check_document_binding(
     doc.check_subject_fields_version()?;
     // And the 2.2.0 fields under 2.0.0 or 2.1.0, the same way.
     doc.check_approver_fields()?;
+    doc.check_workspace_version()?;
     // THE POLICY IS ONE OF THE TABLE'S ROWS, or nothing is judged
     // under it. Every reader reaches this, whatever else it calls.
     let route = policy.route()?;
@@ -1862,6 +1856,12 @@ fn check_document_binding(
         Some(format!("kind {}", subject.kind))
     } else if subject.namespace != expected.namespace {
         Some(format!("namespace {}", subject.namespace))
+    } else if subject.workspace != expected.workspace {
+        Some(if subject.workspace.is_empty() {
+            "no workspace".to_string()
+        } else {
+            format!("workspace {}", subject.workspace)
+        })
     } else if subject.name != expected.name {
         Some(format!("name {}", subject.name))
     } else if subject.uid != expected.uid {
@@ -1871,9 +1871,9 @@ fn check_document_binding(
     };
     if let Some(what) = mismatch {
         return Err(AuthorizationRefusal::SubjectMismatch(format!(
-            "the authorization document names {what}, but the subject is {} {}/{} UID {}; a \
-             document authorises exactly one object",
-            expected.kind, expected.namespace, expected.name, expected.uid
+            "the authorization document names {what}, but the subject is {} {}/{} in workspace \
+             {} UID {}; a document authorises exactly one object",
+            expected.kind, expected.namespace, expected.name, expected.workspace, expected.uid
         )));
     }
     if doc.plan_hash != expected.plan_hash {
@@ -1888,7 +1888,7 @@ fn check_document_binding(
         || doc.authorization_mode != policy.mode
     {
         return Err(AuthorizationRefusal::PolicyMismatch(format!(
-            "the authorization document was issued under policy {} ({}, {}), but this namespace \
+            "the authorization document was issued under policy {} ({}, {}), but this workspace \
              is bound to policy {} ({}, {}); a policy change requires a new confirmation",
             doc.policy.name,
             doc.authorization_mode,
@@ -1950,7 +1950,7 @@ fn check_document_binding(
 /// The caller has already verified its own `ConsoleConfirmation` signature
 /// over the exact bytes `doc` was parsed from; everything the approval will
 /// carry is then copied from `doc`, so this is where a signature lifted from
-/// ANOTHER request is refused: another namespace, name or UID, another plan,
+/// ANOTHER request is refused: another namespace, workspace, name or UID, another plan,
 /// another policy or digest, an expired or malformed window. And a request is
 /// not an approval: one that already names an approver is refused, so a
 /// stored approval can never be presented for a second one.
@@ -2515,7 +2515,7 @@ policies:
   - name: prod-governed
     mode: Governed
     maxAgeSeconds: 3600
-namespaces:
+workspaces:
   team-a: team-ordinary
   prod: prod-governed
 ";
@@ -2549,6 +2549,7 @@ namespaces:
         ExpectedSubject {
             kind: SUBJECT_KIND_RESTORE.to_string(),
             namespace: "team-a".into(),
+            workspace: "dev".into(),
             name: "rst-1".into(),
             uid: "uid-1".into(),
             plan_hash: format!("sha256:{}", "a".repeat(64)),
@@ -2564,6 +2565,7 @@ namespaces:
                 api_version: SUBJECT_API_VERSION.into(),
                 kind: SUBJECT_KIND_RESTORE.into(),
                 namespace: "team-a".into(),
+                workspace: "dev".into(),
                 name: "rst-1".into(),
                 uid: "uid-1".into(),
             },
@@ -2667,10 +2669,10 @@ namespaces:
                 "policies:\n  - name: g\n    mode: Governed\n    maxAgeSeconds: 604801\n",
                 "maxAgeSeconds",
             ),
-            ("namespaces:\n  team-a: nothing\n", "does not declare"),
+            ("workspaces:\n  team-a: nothing\n", "does not declare"),
             (
-                "policies:\n  - name: g\n    mode: Governed\nnamespaces:\n  Team_A: g\n",
-                "not a namespace",
+                "policies:\n  - name: g\n    mode: Governed\nworkspaces:\n  Team_A: g\n",
+                "not a workspace",
             ),
             (
                 "policies:\n  - name: g\n    mode: Governed\n    extra: 1\n",
@@ -2748,35 +2750,20 @@ namespaces:
         let typed = OriginalNameConfirmation {
             typed_topics: vec!["orders".into()],
         };
-        // THE WRITER.
-        assert_eq!(
-            restore_authorization_format_version_for(None, None),
-            "2.0.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version_for(Some("originalName"), None),
-            "2.1.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version_for(Some("originalName"), Some(&typed)),
-            "2.1.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version_for(None, Some(&typed)),
-            "2.1.0"
-        );
-        assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION, "2.0.0");
+        // THE WRITER: every document is 2.3.0, since every one names its
+        // workspace.
+        assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION, "2.3.0");
         assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT, "2.1.0");
 
-        // AN ORDINARY DOCUMENT IS BYTE FOR BYTE WHAT IT WAS: these are the
-        // bytes the writer produced before the fields existed, key for key.
+        // AN ORDINARY DOCUMENT, key for key: the fields it does not need are
+        // absent.
         let p = policy(ApprovalMode::Ordinary);
         let ordinary = doc(&p);
         let was = format!(
-            "{{\"formatVersion\":\"2.0.0\",\"kind\":\"RestoreAuthorization\",\
+            "{{\"formatVersion\":\"2.3.0\",\"kind\":\"RestoreAuthorization\",\
              \"authorizationMode\":\"Ordinary\",\"subject\":{{\"apiVersion\":\
              \"logweir.dev/v1alpha1\",\"kind\":\"Restore\",\"namespace\":\"team-a\",\
-             \"name\":\"rst-1\",\"uid\":\"uid-1\"}},\"planHash\":\"sha256:{}\",\
+             \"workspace\":\"dev\",\"name\":\"rst-1\",\"uid\":\"uid-1\"}},\"planHash\":\"sha256:{}\",\
              \"requester\":{{\"issuer\":\"https://idp.example\",\"subject\":\"alice\"}},\
              \"policy\":{{\"name\":\"{}\",\"digest\":\"{}\"}},\
              \"issuedAt\":\"2026-09-22T10:00:00Z\",\"expiresAt\":\"2026-09-22T10:10:00Z\"}}",
@@ -2790,7 +2777,6 @@ namespaces:
         let mut subject = doc(&p);
         subject.approval_subject = Some("originalName".into());
         subject.original_name_confirmation = Some(typed.clone());
-        subject.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT.into();
         assert_eq!(check_binding(&subject, &expected(), &p), Ok(()));
         assert_eq!(
             RestoreAuthorization::from_bytes(&subject.to_bytes()),
@@ -2798,12 +2784,11 @@ namespaces:
         );
         assert!(String::from_utf8(subject.to_bytes())
             .unwrap()
-            .starts_with("{\"formatVersion\":\"2.1.0\","));
+            .starts_with("{\"formatVersion\":\"2.3.0\","));
         // ... and under a Governed policy, the subject alone.
         let g = policy(ApprovalMode::Governed);
         let mut governed = doc(&g);
         governed.approval_subject = Some("originalName".into());
-        governed.format_version = "2.1.0".into();
         assert_eq!(check_binding(&governed, &expected(), &g), Ok(()));
 
         // The same fields under a version that predates them: refused by the
@@ -2877,23 +2862,15 @@ namespaces:
             }
         }
 
-        // CONTROLS. A 2.0.0 document without the fields is read as before, and
-        // a minor adds optional fields only: 2.1.0 without them is accepted.
+        // CONTROLS. A document without the fields is accepted, and a later
+        // minor or patch of major 2, written as three numbers, reads the
+        // fields: the rule is "from 2.1.0", not "exactly 2.1.0".
         assert_eq!(check_binding(&ordinary, &expected(), &p), Ok(()));
         assert_eq!(
             RestoreAuthorization::from_bytes(&ordinary.to_bytes()),
             Ok(ordinary.clone())
         );
-        let mut newer = ordinary.clone();
-        newer.format_version = "2.1.0".into();
-        assert_eq!(check_binding(&newer, &expected(), &p), Ok(()));
-        assert_eq!(
-            RestoreAuthorization::from_bytes(&newer.to_bytes()),
-            Ok(newer)
-        );
-        // A later minor or patch of major 2, written as three numbers, reads
-        // the fields: the rule is "from 2.1.0", not "exactly 2.1.0".
-        for version in ["2.1.1", "2.2.0", "2.10.0"] {
+        for version in ["2.3.1", "2.4.0", "2.10.0"] {
             let mut later = subject.clone();
             later.format_version = version.into();
             assert_eq!(check_binding(&later, &expected(), &p), Ok(()), "{version}");
@@ -2929,6 +2906,19 @@ namespaces:
         let mut d = doc(&p);
         d.subject.namespace = "team-b".into();
         cases.push((d, "AuthorizationSubjectMismatch"));
+        // A `dev` document for a subject labelled `prd`, and a 2.2.0 document
+        // that names no workspace.
+        let mut d = doc(&p);
+        d.subject.workspace = "prd".into();
+        cases.push((d, "AuthorizationSubjectMismatch"));
+        let mut d = doc(&p);
+        d.subject.workspace = String::new();
+        d.format_version = "2.2.0".into();
+        cases.push((d, "AuthorizationSubjectMismatch"));
+        // The workspace under a version that predates it.
+        let mut d = doc(&p);
+        d.format_version = "2.2.0".into();
+        cases.push((d, "AuthorizationDocumentInvalid"));
         let mut d = doc(&p);
         d.subject.kind = "Backup".into();
         cases.push((d, "AuthorizationSubjectMismatch"));
@@ -3361,7 +3351,7 @@ namespaces:
                 "policies:\n  - name: default-confirm-v1\n    mode: Governed\n",
                 "reserved",
             ),
-            ("defaultMode: two-person\n", "set per namespace"),
+            ("defaultMode: two-person\n", "set per workspace"),
             ("defaultMode: Ordinary\n", "not a mode"),
             ("defaultMode: \"\"\n", "not a mode"),
             (
@@ -3392,7 +3382,7 @@ namespaces:
             #[serde(default)]
             policies: Vec<serde_yaml::Value>,
             #[serde(default)]
-            namespaces: BTreeMap<String, String>,
+            workspaces: BTreeMap<String, String>,
         }
         let old = |text: &str| serde_yaml::from_str::<OldPolicySetDocument>(text).is_ok();
         assert!(
@@ -3450,14 +3440,14 @@ namespaces:
         struct Old<'a> {
             allow_ordinary_confirmation: bool,
             policies: Vec<String>,
-            namespaces: &'a BTreeMap<String, String>,
+            workspaces: &'a BTreeMap<String, String>,
         }
         let s = set();
         let old = sha256_prefixed(
             &serde_json::to_vec(&Old {
                 allow_ordinary_confirmation: true,
                 policies: s.policies.values().map(ApprovalPolicy::digest).collect(),
-                namespaces: &s.bindings,
+                workspaces: &s.bindings,
             })
             .unwrap_or_default(),
         );
@@ -3484,7 +3474,7 @@ namespaces:
   - name: prod-governed
     mode: Governed
     maxAgeSeconds: 3600
-namespaces:
+workspaces:
   team-a: prod-pair
   prod: prod-governed
 ";
@@ -3508,7 +3498,6 @@ namespaces:
     /// minutes after the request was made.
     fn approved(policy: &ApprovalPolicy) -> RestoreAuthorization {
         let mut d = request(policy);
-        d.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION_APPROVER.into();
         d.approver = Some(Approver {
             issuer: "https://idp.example".into(),
             subject: "bob".into(),
@@ -3701,7 +3690,7 @@ namespaces:
                 "policies:\n  - name: p\n    mode: two-person\n    requireDistinctPrincipal: false\n",
                 "requireDistinctPrincipal",
             ),
-            ("defaultMode: two-person\n", "set per namespace"),
+            ("defaultMode: two-person\n", "set per workspace"),
         ] {
             let err = ApprovalPolicySet::parse(text)
                 .err()
@@ -3738,7 +3727,7 @@ namespaces:
             #[serde(default)]
             policies: Vec<OldPolicyEntry>,
             #[serde(default)]
-            namespaces: BTreeMap<String, String>,
+            workspaces: BTreeMap<String, String>,
         }
         let old = |text: &str| serde_yaml::from_str::<OldPolicySetDocument>(text);
         // What the chart renders for a two-person policy: the internal words.
@@ -3807,46 +3796,13 @@ namespaces:
     /// older version; a reader that refuses 2.2.0.
     #[test]
     fn the_approver_fields_are_format_2_2_0_and_refused_under_older_versions() {
-        use crate::original_name::OriginalNameConfirmation;
-        let typed = OriginalNameConfirmation {
-            typed_topics: vec!["orders".into()],
-        };
-        // THE WRITER: 2.2.0 exactly when the approver is present.
-        assert_eq!(
-            restore_authorization_format_version(None, None, false),
-            "2.0.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version(Some("originalName"), None, false),
-            "2.1.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version(None, Some(&typed), false),
-            "2.1.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version(None, None, true),
-            "2.2.0"
-        );
-        assert_eq!(
-            restore_authorization_format_version(Some("originalName"), None, true),
-            "2.2.0"
-        );
-        assert_eq!(RESTORE_AUTHORIZATION_FORMAT_VERSION_APPROVER, "2.2.0");
-        // The two-argument writer is the one without an approver.
-        assert_eq!(
-            restore_authorization_format_version_for(None, None),
-            "2.0.0"
-        );
-
         let p = pair();
-        // A REQUEST UNDER A TWO-PERSON POLICY IS BYTE FOR BYTE A 2.0.0
-        // DOCUMENT: these are the keys the writer before the fields produced.
+        // A REQUEST UNDER A TWO-PERSON POLICY, key for key.
         let was = format!(
-            "{{\"formatVersion\":\"2.0.0\",\"kind\":\"RestoreAuthorization\",\
+            "{{\"formatVersion\":\"2.3.0\",\"kind\":\"RestoreAuthorization\",\
              \"authorizationMode\":\"Governed\",\"subject\":{{\"apiVersion\":\
              \"logweir.dev/v1alpha1\",\"kind\":\"Restore\",\"namespace\":\"team-a\",\
-             \"name\":\"rst-1\",\"uid\":\"uid-1\"}},\"planHash\":\"sha256:{}\",\
+             \"workspace\":\"dev\",\"name\":\"rst-1\",\"uid\":\"uid-1\"}},\"planHash\":\"sha256:{}\",\
              \"requester\":{{\"issuer\":\"https://idp.example\",\"subject\":\"alice\"}},\
              \"policy\":{{\"name\":\"{}\",\"digest\":\"{}\"}},\
              \"issuedAt\":\"2026-09-22T10:00:00Z\",\"expiresAt\":\"2026-09-22T10:10:00Z\",\
@@ -3856,28 +3812,25 @@ namespaces:
             p.digest()
         );
         assert_eq!(String::from_utf8(request(&p).to_bytes()).unwrap(), was);
-        // ... and a 2.1.0 one, key for key, when it names the subject.
+        // ... and when it names the subject.
         let mut subject_request = request(&p);
         subject_request.approval_subject = Some("originalName".into());
-        subject_request.format_version = "2.1.0".into();
         assert_eq!(
             String::from_utf8(subject_request.to_bytes()).unwrap(),
-            was.replace("\"formatVersion\":\"2.0.0\"", "\"formatVersion\":\"2.1.0\"")
-                .replace(
-                    "\"ticket\":\"CHG-1\"}",
-                    "\"ticket\":\"CHG-1\",\"approvalSubject\":\"originalName\"}"
-                )
+            was.replace(
+                "\"ticket\":\"CHG-1\"}",
+                "\"ticket\":\"CHG-1\",\"approvalSubject\":\"originalName\"}"
+            )
         );
         // THE APPROVAL: the same keys, then the two new ones, last.
         let a = approved(&p);
         assert_eq!(
             String::from_utf8(a.to_bytes()).unwrap(),
-            was.replace("\"formatVersion\":\"2.0.0\"", "\"formatVersion\":\"2.2.0\"")
-                .replace(
-                    "\"ticket\":\"CHG-1\"}",
-                    "\"ticket\":\"CHG-1\",\"approver\":{\"issuer\":\"https://idp.example\",\
+            was.replace(
+                "\"ticket\":\"CHG-1\"}",
+                "\"ticket\":\"CHG-1\",\"approver\":{\"issuer\":\"https://idp.example\",\
                      \"subject\":\"bob\"},\"approvedAt\":\"2026-09-22T10:04:00Z\"}"
-                )
+            )
         );
         assert_eq!(check_binding(&a, &expected(), &p), Ok(()));
         assert_eq!(
@@ -3966,14 +3919,12 @@ namespaces:
         // CONTROLS. A later minor or patch reads the fields; and a minor adds
         // optional fields only, so 2.2.0 WITHOUT them parses (it is then a
         // request, which a Console policy does not accept as an approval).
-        for version in ["2.2.0", "2.2.1", "2.3.0", "2.10.0"] {
+        for version in ["2.3.0", "2.3.1", "2.4.0", "2.10.0"] {
             let mut later = a.clone();
             later.format_version = version.into();
             assert_eq!(check_binding(&later, &expected(), &p), Ok(()), "{version}");
         }
-        let mut newer_request = request(&p);
-        newer_request.format_version = "2.2.0".into();
-        assert!(RestoreAuthorization::from_bytes(&newer_request.to_bytes()).is_ok());
+        assert!(RestoreAuthorization::from_bytes(&request(&p).to_bytes()).is_ok());
     }
 
     /// THE OLDER READER, frozen: the document exactly as a 2.1.0 reader had it
@@ -4022,6 +3973,33 @@ namespaces:
         subject_request.approval_subject = Some("originalName".into());
         subject_request.format_version = "2.1.0".into();
         assert!(old(&subject_request.to_bytes()).is_ok());
+    }
+
+    /// THE OLDER READER, frozen at 2.2.0: its subject has no `workspace`, and
+    /// `deny_unknown_fields` makes it refuse every document this build writes.
+    #[test]
+    fn an_older_document_reader_refuses_the_workspace() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct OldSubject {
+            api_version: String,
+            kind: String,
+            namespace: String,
+            name: String,
+            uid: String,
+        }
+        let subject = |d: &RestoreAuthorization| {
+            let v = serde_json::to_value(&d.subject).unwrap_or_default();
+            serde_json::from_value::<OldSubject>(v).map(|_| ())
+        };
+        let d = doc(&policy(ApprovalMode::Ordinary));
+        let refused = subject(&d).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("unknown field `workspace`"), "{refused}");
+        // NEGATIVE CONTROL: the same subject without the field.
+        let mut old = d.clone();
+        old.subject.workspace = String::new();
+        assert!(subject(&old).is_ok());
     }
 
     /// **THE IDENTITY RULE.** Every row is a way the approver might not be a
@@ -4313,7 +4291,6 @@ namespaces:
             policy(ApprovalMode::Ordinary),
         ] {
             let mut forged = doc(&strict);
-            forged.format_version = "2.2.0".into();
             forged.approver = Some(approver("https://idp.example", "bob"));
             forged.approved_at = Some(at("2026-09-22T10:04:00Z"));
             for verdict in [
@@ -4346,10 +4323,6 @@ namespaces:
         let p = pair();
         let mut d = approved(&p);
         d.approval_subject = Some("originalName".into());
-        assert_eq!(
-            restore_authorization_format_version(d.approval_subject.as_deref(), None, true),
-            "2.2.0"
-        );
         assert_eq!(check_binding(&d, &expected(), &p), Ok(()));
         assert_eq!(
             RestoreAuthorization::from_bytes(&d.to_bytes()),

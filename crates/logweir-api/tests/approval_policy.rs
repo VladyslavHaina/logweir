@@ -44,7 +44,7 @@ fn console(binding: &str) -> Console {
     let key = SigningKey::generate_ed25519();
     let public = key.verifying_key();
     let policies =
-        ApprovalPolicySet::parse(&format!("{POLICIES}namespaces:\n  {NS_A}: {binding}\n"))
+        ApprovalPolicySet::parse(&format!("{POLICIES}workspaces:\n  {NS_A}: {binding}\n"))
             .expect("valid");
     Console {
         settings: Arc::new(ApprovalSettings {
@@ -1199,7 +1199,7 @@ fn a_bound_namespace_without_a_console_key_refuses_to_start() {
     let path = dir.join("policy.yaml");
     std::fs::write(
         &path,
-        format!("{POLICIES}namespaces:\n  {NS_A}: team-ordinary\n"),
+        format!("{POLICIES}workspaces:\n  {NS_A}: team-ordinary\n"),
     )
     .expect("write");
     let err =
@@ -1227,7 +1227,7 @@ async fn a_confirmation_from_before_a_policy_change_cannot_be_approved() {
 
     // The same cluster, a console restarted under an EDITED Governed policy.
     let edited = ApprovalPolicySet::parse(&format!(
-        "{}  - name: prod-governed\n    mode: Governed\n    maxAgeSeconds: 7200\nnamespaces:\n  {NS_A}: prod-governed\n",
+        "{}  - name: prod-governed\n    mode: Governed\n    maxAgeSeconds: 7200\nworkspaces:\n  {NS_A}: prod-governed\n",
         "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: Ordinary\n"
     ))
     .expect("valid");

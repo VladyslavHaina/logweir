@@ -184,10 +184,10 @@ const fn is_terminal(state: PreflightState) -> bool {
 /// The kinds a `Preflight`'s `status.binding.referents[]` can name, and
 /// whether this service can read one.
 ///
-/// ALL NINE ARE READ: the namespaced `KafkaCluster`, `BackupDestination`,
+/// ALL NINE ARE READ: the workspaced `KafkaCluster`, `BackupDestination`,
 /// `Backup`, `Restore`, `Approval`, `BackupSchedule` and `RecoveryCatalog`
 /// (a catalog point's catalog), plus two CLUSTER-SCOPED trust referents,
-/// `TrustRoster/default` and the namespace's governing `TrustPolicy`, both
+/// `TrustRoster/default` and the workspace's governing `TrustPolicy`, both
 /// compared by uid and generation like every other referent: the roster
 /// through [`crate::kube::KubeAdapter::get_trust_roster`], which reads
 /// `default` and nothing else, and the policy through the read-only
@@ -273,11 +273,11 @@ pub const BASIS_NO_BINDING: &str =
 /// ignore the field.
 ///
 /// The digest is over the PARSED `LOGWEIR_POLICY_CONFIGMAP` document (default
-/// `weirkeeper-policy`, key `policy.json`) in the installation namespace.
+/// `weirkeeper-policy`, key `policy.json`) in the installation workspace.
 /// This service reads a `ConfigMap` only when a check owns it (owner UID,
 /// immutability and digest all verified); that document is owned by nothing,
-/// mutable, and outside the actor's granted namespaces, so reading it would
-/// be a new grant and a cross-namespace read.
+/// mutable, and outside the actor's granted workspaces, so reading it would
+/// be a new grant and a cross-workspace read.
 pub const COVERED_POLICY_BY_CONTROLLER: &str =
     "policyDigest:byController(the reconciler compares it each pass and downgrades the result)";
 
@@ -337,7 +337,7 @@ pub struct LiveBinding {
 /// could not check.
 pub async fn read_live_binding(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     object: &PreflightCr,
 ) -> LiveBinding {
     let recorded = object
@@ -348,7 +348,7 @@ pub async fn read_live_binding(
         .unwrap_or_default();
     let mut readings = Vec::with_capacity(recorded.len());
     for referent in recorded {
-        let reading = read_one_referent(state, namespace, &referent).await;
+        let reading = read_one_referent(state, workspace, &referent).await;
         readings.push((referent, reading));
     }
     LiveBinding {
@@ -362,7 +362,7 @@ pub async fn read_live_binding(
 
 async fn read_one_referent(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     referent: &Referent,
 ) -> ReferentReading {
     // A name that cannot exist is `Absent` without a Kubernetes call.
@@ -371,21 +371,21 @@ async fn read_one_referent(
     }
     match referent.kind.as_str() {
         REFERENT_KIND_KAFKA_CLUSTER => {
-            revision::<KafkaCluster>(state, namespace, &referent.name).await
+            revision::<KafkaCluster>(state, workspace, &referent.name).await
         }
         REFERENT_KIND_DESTINATION => {
-            revision::<BackupDestination>(state, namespace, &referent.name).await
+            revision::<BackupDestination>(state, workspace, &referent.name).await
         }
-        REFERENT_KIND_BACKUP => revision::<BackupCr>(state, namespace, &referent.name).await,
-        REFERENT_KIND_RESTORE => revision::<RestoreCr>(state, namespace, &referent.name).await,
-        REFERENT_KIND_APPROVAL => revision::<ApprovalCr>(state, namespace, &referent.name).await,
+        REFERENT_KIND_BACKUP => revision::<BackupCr>(state, workspace, &referent.name).await,
+        REFERENT_KIND_RESTORE => revision::<RestoreCr>(state, workspace, &referent.name).await,
+        REFERENT_KIND_APPROVAL => revision::<ApprovalCr>(state, workspace, &referent.name).await,
         REFERENT_KIND_SCHEDULE => {
-            revision::<BackupSchedule>(state, namespace, &referent.name).await
+            revision::<BackupSchedule>(state, workspace, &referent.name).await
         }
         REFERENT_KIND_RECOVERY_CATALOG => {
-            revision::<RecoveryCatalog>(state, namespace, &referent.name).await
+            revision::<RecoveryCatalog>(state, workspace, &referent.name).await
         }
-        // THE TWO CLUSTER-SCOPED TRUST REFERENTS. The check's namespace does
+        // THE TWO CLUSTER-SCOPED TRUST REFERENTS. The check's workspace does
         // not enter either read: a cluster-scoped object has none.
         REFERENT_KIND_TRUST_ROSTER if referent.name == weirkeeper::ROSTER_NAME => {
             reading_of(state.kube().get_trust_roster().await)
@@ -404,10 +404,10 @@ async fn read_one_referent(
 
 async fn revision<K: crate::kube::ProductResource>(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> ReferentReading {
-    reading_of(state.kube().get::<K>(namespace, name).await)
+    reading_of(state.kube().get::<K>(workspace, name).await)
 }
 
 /// One read's outcome as a [`ReferentReading`]. A refused, timed-out or
@@ -780,18 +780,18 @@ pub fn project(
 
 /// D0: an approver reads readiness "only when needed for the approval packet".
 ///
-/// An actor whose ONLY binding in this namespace is Approver may read a
+/// An actor whose ONLY binding in this workspace is Approver may read a
 /// Restore preflight — the readiness of the thing it is being asked to
 /// authorize — and nothing else. It answers `not_found` rather than
-/// `forbidden`, for the same enumeration reason an ungranted namespace does:
+/// `forbidden`, for the same enumeration reason an ungranted workspace does:
 /// an approver must not be able to map which backup checks exist.
 fn narrow_for_approver(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     object: &PreflightCr,
 ) -> Result<(), ApiError> {
-    let roles = state.authorizer().roles(actor, namespace);
+    let roles = state.authorizer().roles(actor, workspace);
     let approver_only = roles.contains(&Role::Approver)
         && !roles
             .iter()
@@ -1108,7 +1108,7 @@ fn is_point_id(value: &str) -> bool {
 /// must use.
 async fn validate_legacy_source_for_point(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     request: &CreatePreflightRequest,
 ) -> Result<(), ApiError> {
     let Some(restore) = request.restore.as_ref() else {
@@ -1123,7 +1123,7 @@ async fn validate_legacy_source_for_point(
 
     match state
         .kube()
-        .get::<BackupCr>(namespace, &point.backup_name)
+        .get::<BackupCr>(workspace, &point.backup_name)
         .await
     {
         Ok(backup) => {
@@ -1182,7 +1182,6 @@ fn archive_ref(archive: &crate::contract::ArchiveRequest) -> ArchiveRef {
 /// Build the stored object for a validated request.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     labels: BTreeMap<String, String>,
@@ -1191,7 +1190,6 @@ pub fn build(
     PreflightCr {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             labels: Some(labels),
             ..ObjectMeta::default()
@@ -1312,17 +1310,82 @@ fn labels_for(request: &CreatePreflightRequest) -> BTreeMap<String, String> {
     labels
 }
 
+/// Every object a preflight body names must be in the path's workspace
+/// (PROD-19.1 §4.1).
+async fn refuse_references_elsewhere(
+    state: &AppState,
+    ws: &str,
+    request: &CreatePreflightRequest,
+) -> Result<(), ApiError> {
+    use super::refuse_reference_elsewhere as refuse;
+    let mut connections: Vec<(&str, &str)> = Vec::new();
+    let mut destinations: Vec<(&str, &str)> = Vec::new();
+    let mut restores: Vec<(&str, &str)> = Vec::new();
+    if let Some(b) = &request.backup {
+        connections.push(("backup.sourceConnection", &b.source_connection));
+        if let Some(d) = &b.destination {
+            destinations.push(("backup.destination", d));
+        }
+        if let Some(s) = &b.schedule {
+            refuse::<BackupSchedule>(state, ws, "backup.schedule", "schedule", s).await?;
+        }
+    }
+    if let Some(r) = &request.restore {
+        if let Some(t) = &r.target {
+            connections.push(("restore.target", t));
+        }
+        if let Some(d) = &r.source_destination {
+            destinations.push(("restore.sourceDestination", d));
+        }
+        if let Some(d) = &r.evidence_destination {
+            destinations.push(("restore.evidenceDestination", d));
+        }
+        if let Some(n) = &r.restore_name {
+            restores.push(("restore.restoreName", n));
+        }
+        if let Some(p) = &r.catalog_point {
+            refuse::<RecoveryCatalog>(
+                state,
+                ws,
+                "restore.catalogPoint.catalog",
+                "catalog",
+                &p.catalog,
+            )
+            .await?;
+        }
+    }
+    if let Some(d) = &request.destination_access {
+        destinations.push(("destinationAccess.destination", &d.destination));
+    }
+    if let Some(s) = &request.source_connection {
+        connections.push(("sourceConnection.connectionRef", &s.connection_ref));
+    }
+    if let Some(s) = &request.switchover {
+        restores.push(("switchover.restoreName", &s.restore_name));
+    }
+    for (field, name) in connections {
+        refuse::<KafkaCluster>(state, ws, field, "connection", name).await?;
+    }
+    for (field, name) in destinations {
+        refuse::<BackupDestination>(state, ws, field, "destination", name).await?;
+    }
+    for (field, name) in restores {
+        refuse::<RestoreCr>(state, ws, field, "restore", name).await?;
+    }
+    Ok(())
+}
+
 /// `POST .../preflights`.
 pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::RunPreflight)?;
+    authorize(&state, &actor, &ws, Action::RunPreflight)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreatePreflightRequest = read_json(body, MAX_JSON_BODY).await?;
@@ -1330,14 +1393,15 @@ pub async fn create(
     check_create_rate(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         PREFLIGHT_CREATES_PER_MINUTE,
     )?;
     // The limiter is the last synchronous gate: structurally invalid input is
     // still refused precisely, but an over-limit request performs no
     // recovery-point or other Kubernetes read.
-    validate_legacy_source_for_point(&state, &ns, &request).await?;
+    validate_legacy_source_for_point(&state, &ws, &request).await?;
+    refuse_references_elsewhere(&state, &ws, &request).await?;
     // Canonical form: an omitted budget IS the default, so both spellings hash
     // identically and replay as one request.
     request.timeout_seconds = Some(
@@ -1349,13 +1413,13 @@ pub async fn create(
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, labels.clone(), &request),
+        |name, annotations| build(name, annotations, labels.clone(), &request),
     )
     .await?;
     Ok(json(
@@ -1382,7 +1446,7 @@ pub async fn create(
 pub async fn start_destination_access(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     destination: &str,
     roles: &[DestinationRoleDto],
     key: &IdempotencyKey,
@@ -1391,7 +1455,7 @@ pub async fn start_destination_access(
     check_create_rate(
         state,
         actor,
-        namespace,
+        workspace,
         ROUTE_DESTINATION_TEST,
         PREFLIGHT_CREATES_PER_MINUTE,
     )?;
@@ -1413,13 +1477,13 @@ pub async fn start_destination_access(
     create_idempotent(
         state,
         actor,
-        namespace,
+        workspace,
         ROUTE_DESTINATION_TEST,
         NAME_PREFIX,
         key,
         request_id,
         &request,
-        |name, annotations| build(namespace, name, annotations, labels.clone(), &request),
+        |name, annotations| build(name, annotations, labels.clone(), &request),
     )
     .await
 }
@@ -1429,10 +1493,10 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, id)): ApiPath<(String, String)>,
+    ApiPath((ws, id)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadPreflights)?;
+    authorize(&state, &actor, &ws, Action::ReadPreflights)?;
     let query = crate::http::parse_query(uri.query(), &["planHash"])?;
     if let Some(hash) = query.get("planHash") {
         if !is_sha256(hash) {
@@ -1443,13 +1507,13 @@ pub async fn get_one(
             )]));
         }
     }
-    let object = get_object::<PreflightCr>(&state, &actor, &ns, &id).await?;
-    narrow_for_approver(&state, &actor, &ns, &object)?;
+    let object = get_object::<PreflightCr>(&state, &actor, &ws, &id).await?;
+    narrow_for_approver(&state, &actor, &ws, &object)?;
     // THE RECOMPUTATION THE CONTROLLER'S CONTRACT ASSIGNS TO THIS SERVICE.
     // Every recorded referent is read back before the verdict is projected;
     // this is the only route that answers a readiness verdict, so it is the
     // only one that owes the comparison.
-    let live = read_live_binding(&state, &ns, &object).await;
+    let live = read_live_binding(&state, &ws, &object).await;
     Ok(json(
         StatusCode::OK,
         &PreflightResponse {
@@ -1479,10 +1543,10 @@ pub async fn details(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, id)): ApiPath<(String, String)>,
+    ApiPath((ws, id)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadPreflights)?;
+    authorize(&state, &actor, &ws, Action::ReadPreflights)?;
     let query = crate::http::parse_query(uri.query(), &["check", "limit", "cursor"])?;
     let limit = match query.get("limit") {
         None => DEFAULT_LIMIT,
@@ -1505,8 +1569,8 @@ pub async fn details(
             "a check id is one bounded printable line",
         )]));
     }
-    let object = get_object::<PreflightCr>(&state, &actor, &ns, &id).await?;
-    narrow_for_approver(&state, &actor, &ns, &object)?;
+    let object = get_object::<PreflightCr>(&state, &actor, &ws, &id).await?;
+    narrow_for_approver(&state, &actor, &ws, &object)?;
     let Some(reference) = object
         .status
         .as_ref()
@@ -1529,7 +1593,7 @@ pub async fn details(
     let scope = CursorScope {
         actor_id: actor.id(),
         route: ROUTE_DETAILS.to_string(),
-        namespace: ns.clone(),
+        workspace: ws.clone(),
         filters: format!("id={id}&check={check}"),
     };
     let offset = match query.get("cursor") {
@@ -1538,14 +1602,13 @@ pub async fn details(
     };
     let document = state
         .kube()
-        .get_result_document(&reference.name)
+        .get_result_document(
+            object.meta().uid.as_deref().unwrap_or_default(),
+            &reference.name,
+        )
         .await
         .map_err(KubeFailureExt::details_failure)?;
-    verify_document(
-        &document,
-        object.meta().uid.as_deref().unwrap_or_default(),
-        reference.sha256.as_deref(),
-    )?;
+    verify_document(&document, reference.sha256.as_deref())?;
     let body = document.data.get(DETAILS_KEY).cloned().unwrap_or_default();
     let mut items = Vec::new();
     let mut scanned;
@@ -1617,9 +1680,9 @@ fn open_offset(state: &AppState, scope: &CursorScope, cursor: &str) -> Result<us
 }
 
 /// D2 §5.6's integrity rule, applied to every stored result this API serves.
+/// The owner half is the adapter's ([`crate::kube::KubeAdapter::get_result_document`]).
 pub(crate) fn verify_document(
     document: &crate::kube::ResultDocument,
-    owner_uid: &str,
     expected_sha256: Option<&str>,
 ) -> Result<(), ApiError> {
     let integrity = |why: &str| {
@@ -1631,9 +1694,6 @@ pub(crate) fn verify_document(
             ),
         )
     };
-    if document.controller_owner_uid() != Some(owner_uid) {
-        return Err(integrity("it is not owned by this check"));
-    }
     if document.immutable != Some(true) {
         return Err(integrity("it is not immutable"));
     }
@@ -1673,11 +1733,11 @@ pub async fn cancel(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, target)): ApiPath<(String, String)>,
+    ApiPath((ws, target)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CancelPreflight)?;
+    authorize(&state, &actor, &ws, Action::CancelPreflight)?;
     let Some(id) = target.strip_suffix(CANCEL) else {
         return Err(ApiError::new(ProblemCode::NotFound, "No such command."));
     };
@@ -1687,7 +1747,7 @@ pub async fn cancel(
     let (object, already_terminal) = cancel_check::<PreflightCr>(
         &state,
         &actor,
-        &ns,
+        &ws,
         id,
         |o| is_terminal(state_of(o)),
         |o| o.spec.cancel_requested,
@@ -1713,12 +1773,12 @@ pub async fn operation(
     state: &AppState,
     request_id: String,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<Response, ApiError> {
-    authorize(state, actor, namespace, Action::ReadPreflights)?;
-    let object = get_object::<PreflightCr>(state, actor, namespace, name).await?;
-    narrow_for_approver(state, actor, namespace, &object)?;
+    authorize(state, actor, workspace, Action::ReadPreflights)?;
+    let object = get_object::<PreflightCr>(state, actor, workspace, name).await?;
+    narrow_for_approver(state, actor, workspace, &object)?;
     let projected = project(&object, state.now(), None, None);
     Ok(json(
         StatusCode::OK,

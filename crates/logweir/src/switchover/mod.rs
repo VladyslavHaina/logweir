@@ -75,6 +75,7 @@ pub struct RunArgs {
     pub scorecard_key: String,
     /// The `Switchover` object, for the record.
     pub namespace: String,
+    pub workspace: String,
     pub name: String,
     pub uid: String,
     /// D2 §3.5's store contract, as `restore run` takes it.
@@ -436,6 +437,7 @@ fn verify_approval(args: &RunArgs, plan_bytes: &[u8]) -> Result<so::ApprovalSumm
             &read(policy)?,
             &crate::drill::phase1_approval::ContractSubject {
                 namespace: args.namespace.clone(),
+                workspace: args.workspace.clone(),
                 name: args.name.clone(),
                 uid: args.uid.clone(),
             },

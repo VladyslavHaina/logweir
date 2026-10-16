@@ -17,7 +17,7 @@ use crate::contract as c;
 use crate::problem::{Problem, ProblemCode};
 
 /// The document version. `/api/v1` is not yet a stability promise.
-pub const DOCUMENT_VERSION: &str = "1.0.0-alpha.3";
+pub const DOCUMENT_VERSION: &str = "1.0.0-alpha.4";
 
 fn schema_ref(name: &str) -> Value {
     json!({ "$ref": format!("#/components/schemas/{name}") })
@@ -41,7 +41,7 @@ const COMMON: &[ProblemCode] = &[
     ProblemCode::SessionExpired,
 ];
 
-const NAMESPACED: &[ProblemCode] = &[ProblemCode::NamespaceForbidden, ProblemCode::Forbidden];
+const WORKSPACED: &[ProblemCode] = &[ProblemCode::WorkspaceForbidden, ProblemCode::Forbidden];
 
 const KUBE: &[ProblemCode] = &[
     ProblemCode::RateLimited,
@@ -137,7 +137,7 @@ fn ws() -> Value {
     param(
         "ws",
         "path",
-        "A workspace of this install the actor holds a role in. Any other workspace is namespace_forbidden whether or not it exists.",
+        "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
         json!({ "type": "string" }),
         true,
     )
@@ -176,7 +176,7 @@ fn list_params() -> Vec<Value> {
         param(
             "cursor",
             "query",
-            "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             json!({ "type": "string" }),
             false,
         ),
@@ -194,7 +194,7 @@ fn idempotency_key() -> Value {
     param(
         "Idempotency-Key",
         "header",
-        "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+        "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
         json!({ "type": "string", "minLength": 8, "maxLength": 128 }),
         true,
     )
@@ -261,7 +261,7 @@ fn paths() -> Value {
         parameters: list_params(),
         request: None,
         success: vec![("200", "One page.", schema)],
-        problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+        problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST]),
     };
     let get_one = |id: &'static str, summary: &'static str, schema: &'static str| Op {
         method: "get",
@@ -270,7 +270,7 @@ fn paths() -> Value {
         parameters: vec![ws(), name()],
         request: None,
         success: vec![("200", "The object.", schema)],
-        problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+        problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
     };
     let create =
         |id: &'static str, summary: &'static str, request: &'static str, schema: &'static str| Op {
@@ -287,7 +287,7 @@ fn paths() -> Value {
                     schema,
                 ),
             ],
-            problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE]),
+            problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE]),
         };
 
     let table: Vec<(&str, Vec<Op<'_>>)> = vec![
@@ -324,7 +324,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "getSession",
-                summary: "The actor, its roles and explicit namespace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
+                summary: "The actor, its roles and explicit workspace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
                 parameters: vec![],
                 request: None,
                 success: vec![("200", "The session.", "SessionResponse")],
@@ -396,7 +396,7 @@ fn paths() -> Value {
                 summary: "The actor's workspace grants. Core Namespace objects are never listed.",
                 parameters: vec![],
                 request: None,
-                success: vec![("200", "The grants.", "NamespaceListResponse")],
+                success: vec![("200", "The grants.", "WorkspaceListResponse")],
                 problems: all_codes(&[COMMON]),
             }],
         ),
@@ -421,7 +421,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "previewCadence",
-                summary: "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no namespace, so it needs permission to read schedules in at least one granted namespace.",
+                summary: "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no workspace, so it needs permission to read schedules in at least one workspace.",
                 parameters: vec![
                     param("schedule", "query", "A five-field cron expression or @hourly/@daily/@weekly. Exactly one of schedule or preset.", json!({ "type": "string", "maxLength": 128 }), false),
                     param("preset", "query", "hourly, everyNHours, daily, weekly or monthly, with that preset's parameters. The response carries the canonical expression it compiled to.", json!({ "type": "string", "enum": ["hourly", "everyNHours", "daily", "weekly", "monthly"] }), false),
@@ -457,7 +457,7 @@ fn paths() -> Value {
                     parameters: vec![ws(), name(), origin()],
                     request: Some("UpdateSchedulePolicyRequest"),
                     success: vec![("200", "The edited schedule, with its new generation.", "ScheduleResponse")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, COMMAND]),
                 },
             ],
         ),
@@ -470,7 +470,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name(), origin()],
                 request: Some("SetSuspensionRequest"),
                 success: vec![("200", "The updated schedule.", "ScheduleResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, COMMAND]),
             }],
         ),
         (
@@ -487,7 +487,7 @@ fn paths() -> Value {
                         ("201", "Created; the run and the schedule it came from.", "ManualBackupResponse"),
                         ("200", "Replayed an identical earlier request; the same run and the same UID.", "ManualBackupResponse"),
                     ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, &[ProblemCode::PolicyChanged, ProblemCode::NotFound]]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE, &[ProblemCode::PolicyChanged, ProblemCode::NotFound]]),
                 },
             ],
         ),
@@ -516,7 +516,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "submitGovernedApproval",
-                summary: "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+                summary: "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a workspace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
                 parameters: vec![ws(), name(), origin()],
                 request: Some("SubmitApprovalRequest"),
                 success: vec![
@@ -525,7 +525,7 @@ fn paths() -> Value {
                 ],
                 problems: all_codes(&[
                     COMMON,
-                    NAMESPACED,
+                    WORKSPACED,
                     KUBE,
                     UNSAFE,
                     &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
@@ -537,11 +537,11 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "getApprovalRequest",
-                summary: "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
+                summary: "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a workspace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The request.", "ApprovalRequestResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
             }],
         ),
         (
@@ -549,7 +549,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "approveInConsole",
-                summary: "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+                summary: "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a workspace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
                 parameters: vec![ws(), name(), origin()],
                 request: Some("ConsoleApprovalRequest"),
                 success: vec![
@@ -558,7 +558,7 @@ fn paths() -> Value {
                 ],
                 problems: all_codes(&[
                     COMMON,
-                    NAMESPACED,
+                    WORKSPACED,
                     KUBE,
                     UNSAFE,
                     &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
@@ -571,7 +571,7 @@ fn paths() -> Value {
                 list("listSwitchovers", "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.", "SwitchoverList"),
                 create(
                     "createSwitchover",
-                    "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
+                    "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound workspace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
                     "CreateSwitchoverRequest",
                     "SwitchoverResponse",
                 ),
@@ -586,7 +586,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "submitSwitchoverApproval",
-                summary: "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+                summary: "PROD-04.2: the restore route's submission, by the same functions. In an unbound workspace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
                 parameters: vec![ws(), name(), origin()],
                 request: Some("SubmitApprovalRequest"),
                 success: vec![
@@ -595,7 +595,7 @@ fn paths() -> Value {
                 ],
                 problems: all_codes(&[
                     COMMON,
-                    NAMESPACED,
+                    WORKSPACED,
                     KUBE,
                     UNSAFE,
                     &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
@@ -611,7 +611,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The request.", "SwitchoverApprovalRequestResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
             }],
         ),
         (
@@ -619,7 +619,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "approveSwitchoverInConsole",
-                summary: "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
+                summary: "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person workspace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
                 parameters: vec![ws(), name(), origin()],
                 request: Some("ConsoleApprovalRequest"),
                 success: vec![
@@ -628,7 +628,7 @@ fn paths() -> Value {
                 ],
                 problems: all_codes(&[
                     COMMON,
-                    NAMESPACED,
+                    WORKSPACED,
                     KUBE,
                     UNSAFE,
                     &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
@@ -639,7 +639,7 @@ fn paths() -> Value {
             "/api/v1/workspaces/{ws}/approval-policy",
             vec![get_one(
                 "getApprovalPolicy",
-                "PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy.",
+                "PLAT-19.2: the workspace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the install's TrustPolicy.",
                 "ApprovalPolicyResponse",
             )],
         ),
@@ -677,7 +677,7 @@ fn paths() -> Value {
                         ("201", "Created.", "DestinationResponse"),
                         ("200", "Replayed an identical earlier request; the same object.", "DestinationResponse"),
                     ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, DESTINATION]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE, DESTINATION]),
                 },
             ],
         ),
@@ -694,7 +694,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name(), origin()],
                 request: Some("UpdateDestinationAccessRequest"),
                 success: vec![("200", "The rotated destination.", "DestinationResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, DESTINATION, &[ProblemCode::StateConflict]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, COMMAND, DESTINATION, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
@@ -709,7 +709,7 @@ fn paths() -> Value {
                     ("202", "The started test.", "PreflightResponse"),
                     ("200", "Replayed an identical earlier request.", "PreflightResponse"),
                 ],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE, CHECK]),
             }],
         ),
         (
@@ -721,7 +721,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The bounded usage.", "DestinationUsageResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -741,19 +741,19 @@ fn paths() -> Value {
                     success: vec![
                         ("200", "One page, or the two slots with latest=true.", "TopicDiscoveryList"),
                     ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, GET]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST, GET]),
                 },
                 Op {
                     method: "post",
                     operation_id: "createTopicDiscovery",
-                    summary: "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace.",
+                    summary: "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and workspace.",
                     parameters: vec![ws(), name(), idempotency_key(), origin()],
                     request: Some("CreateTopicDiscoveryRequest"),
                     success: vec![
                         ("202", "Accepted; the check has been created.", "TopicDiscoveryResponse"),
                         ("200", "A replay, or a reused fresh result.", "TopicDiscoveryResponse"),
                     ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE, CHECK]),
                 },
             ],
         ),
@@ -767,7 +767,7 @@ fn paths() -> Value {
                     parameters: vec![ws(), id()],
                     request: None,
                     success: vec![("200", "The discovery.", "TopicDiscoveryResponse")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
                 },
             ],
         ),
@@ -776,11 +776,11 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "cancelTopicDiscovery",
-                summary: "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
+                summary: "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the workspace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
                 parameters: vec![ws(), id(), origin()],
                 request: None,
                 success: vec![("200", "The state after the request.", "CancelResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
@@ -801,7 +801,7 @@ fn paths() -> Value {
                 ],
                 request: None,
                 success: vec![("200", "One page, in stored (bytewise name) order.", "TopicPageResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST, RESULT_PAGE]),
             }],
         ),
         (
@@ -816,7 +816,7 @@ fn paths() -> Value {
                     ("202", "Accepted; the check has been created.", "PreflightResponse"),
                     ("200", "Replayed an identical earlier request.", "PreflightResponse"),
                 ],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE, CHECK]),
             }],
         ),
         (
@@ -833,7 +833,7 @@ fn paths() -> Value {
                     ],
                     request: None,
                     success: vec![("200", "The result.", "PreflightResponse")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::ValidationFailed]]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET, &[ProblemCode::ValidationFailed]]),
                 },
             ],
         ),
@@ -846,7 +846,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), id(), origin()],
                 request: None,
                 success: vec![("200", "The state after the request.", "CancelResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
@@ -864,7 +864,7 @@ fn paths() -> Value {
                 ],
                 request: None,
                 success: vec![("200", "One page, in stored order.", "DetailPageResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST, RESULT_PAGE]),
             }],
         ),
         (
@@ -888,7 +888,7 @@ fn paths() -> Value {
                 success: vec![
                     ("200", "The normalized durable run (backup, restore), or the normalized transient check (discovery, preflight) — two shapes, because a check has no archive result, no signed evidence and no verification verdict.", "OperationViewResponse"),
                 ],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -896,7 +896,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "streamOperationEvents",
-                summary: "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
+                summary: "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per workspace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
                 parameters: vec![
                     ws(),
                     param(
@@ -917,7 +917,7 @@ fn paths() -> Value {
                 ],
                 request: None,
                 success: vec![("200", "The event stream. text/event-stream, not application/json.", "")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::RateLimited]]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET, &[ProblemCode::RateLimited]]),
             }],
         ),
         (
@@ -929,7 +929,7 @@ fn paths() -> Value {
                 parameters: list_params(),
                 request: None,
                 success: vec![("200", "One page of protection policies.", "ProtectionPolicyList")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST]),
             }],
         ),
         (
@@ -941,7 +941,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The policy.", "ProtectionPolicyResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -954,7 +954,7 @@ fn paths() -> Value {
                     parameters: list_params(),
                     request: None,
                     success: vec![("200", "One page of catalogs.", "CatalogList")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST]),
                 },
                 Op {
                     method: "post",
@@ -966,7 +966,7 @@ fn paths() -> Value {
                         ("201", "Created.", "CatalogResponse"),
                         ("200", "Replayed an identical earlier request.", "CatalogResponse"),
                     ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE]),
+                    problems: all_codes(&[COMMON, WORKSPACED, KUBE, UNSAFE, CREATE]),
                 },
             ],
         ),
@@ -979,7 +979,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The catalog.", "CatalogResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -997,7 +997,7 @@ fn paths() -> Value {
                 ],
                 request: None,
                 success: vec![("200", "One page of recovery points.", "PointPageResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST, RESULT_PAGE]),
             }],
         ),
         (
@@ -1009,7 +1009,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The signers.", "SignerPageResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -1021,7 +1021,7 @@ fn paths() -> Value {
                 parameters: list_params(),
                 request: None,
                 success: vec![("200", "One page of retention policies.", "RetentionPolicyList")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, LIST]),
             }],
         ),
         (
@@ -1033,7 +1033,7 @@ fn paths() -> Value {
                 parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The policy.", "RetentionPolicyResponse")],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                problems: all_codes(&[COMMON, WORKSPACED, KUBE, GET]),
             }],
         ),
         (
@@ -1041,7 +1041,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "listTrustPolicies",
-                summary: "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no namespace and requires the administrator role in at least one bound namespace. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
+                summary: "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no workspace and requires the administrator role in at least one workspace; it serves the policies that govern the install's namespace and the installation default. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
                 parameters: vec![
                     param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
                     param("cursor", "query", "The opaque nextCursor of the previous page.", json!({ "type": "string" }), false),
@@ -1086,7 +1086,7 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<Problem>();
     let _ = generator.subschema_for::<c::HealthStatus>();
     let _ = generator.subschema_for::<c::SessionResponse>();
-    let _ = generator.subschema_for::<c::NamespaceListResponse>();
+    let _ = generator.subschema_for::<c::WorkspaceListResponse>();
     let _ = generator.subschema_for::<c::CreateConnectionRequest>();
     let _ = generator.subschema_for::<c::ConnectionList>();
     let _ = generator.subschema_for::<c::ConnectionResponse>();

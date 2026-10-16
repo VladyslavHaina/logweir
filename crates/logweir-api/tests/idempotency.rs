@@ -375,7 +375,8 @@ async fn an_object_deleted_between_conflict_and_read_is_created_again() {
         .iter()
         .map(|r| r.method.clone())
         .collect();
-    assert_eq!(methods, vec!["POST", "GET", "POST"]);
+    // The leading GET is the reference check on `sourceRef` (PROD-19.1).
+    assert_eq!(methods, vec!["GET", "POST", "GET", "POST"]);
     other.fake.assert_strict();
 }
 

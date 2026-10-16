@@ -184,7 +184,7 @@ fn console(binding: &str, with_key: bool) -> Console {
     let key = SigningKey::generate_ed25519();
     let public = key.verifying_key();
     let policies =
-        ApprovalPolicySet::parse(&format!("{POLICIES}namespaces:\n  {NS_A}: {binding}\n"))
+        ApprovalPolicySet::parse(&format!("{POLICIES}workspaces:\n  {NS_A}: {binding}\n"))
             .expect("valid");
     Console {
         settings: Arc::new(ApprovalSettings {
@@ -945,7 +945,8 @@ async fn a_second_person_approves_a_switchover_in_the_console() {
         .expect("bound");
     let expected = |kind: &str| ExpectedSubject {
         kind: kind.to_string(),
-        namespace: NS_A.to_string(),
+        namespace: support::INSTALL_NS.to_string(),
+        workspace: NS_A.to_string(),
         name: name.clone(),
         uid: uid.clone(),
         plan_hash: logweir_core::ids::sha256_prefixed(p.as_bytes()),

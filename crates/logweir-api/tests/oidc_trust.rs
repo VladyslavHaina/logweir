@@ -342,11 +342,11 @@ async fn the_configured_bundle_reaches_the_client_through_the_preflight() {
          uiDirectory: {ui}\n\
          oidc:\n  issuer: https://idp.example/realms/logweir\n  clientId: logweir-console\n  \
          clientSecretFile: client.secret\n  caBundleFile: ca.crt\n\
-         roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    namespace: team-a\n    \
+         roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    workspace: team-a\n    \
          groups: [lw-viewers]\n\
          sessionKey:\n  file: session.key.yaml\n  expectedVersion: 1\n\
          cursorKey:\n  file: cursor.key.yaml\n  expectedVersion: 1\n\
-         namespaces: [team-a]\nkubernetes:\n  source: inCluster\n",
+         namespace: logweir-system\nworkspaces: [team-a]\nkubernetes:\n  source: inCluster\n",
         ui = ui.display(),
     );
     let config = logweir_api::config::Config::parse(&text, &dir).expect("the file validates");

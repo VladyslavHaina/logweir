@@ -611,7 +611,7 @@ fn counts(fake: &FakeKube) -> Vec<(String, usize)> {
 /// team-a (where the role's table decides) and in team-b (where the actor has
 /// no binding at all and must get the nonexistent-resource answer).
 #[tokio::test]
-async fn the_matrix_holds_over_http_in_two_namespaces() {
+async fn the_matrix_holds_over_http_in_two_workspaces() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -696,12 +696,12 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
         let session = app.get("/api/v1/session", &cookie).await.json();
         assert_eq!(session["bindingRevision"], "matrix-1");
         assert_eq!(
-            session["namespaces"].as_array().unwrap().len(),
+            session["workspaces"].as_array().unwrap().len(),
             1,
             "{role:?} sees only its bound namespace"
         );
-        assert_eq!(session["namespaces"][0]["name"], NS_A);
-        assert_eq!(session["namespaces"][0]["roles"][0], role.as_str());
+        assert_eq!(session["workspaces"][0]["name"], NS_A);
+        assert_eq!(session["workspaces"][0]["roles"][0], role.as_str());
     }
     app.app.fake.assert_strict();
 }
@@ -719,7 +719,7 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
 /// this actor bound anywhere" would admit it and still pass every other test
 /// in this crate; these four rows are what kill it.
 ///
-/// KILLS: `authorize_any` relaxed to `!authorizer.namespaces(actor).is_empty()`
+/// KILLS: `authorize_any` relaxed to `!authorizer.workspaces(actor).is_empty()`
 /// (the approver arm answers 200 and this fails); the `ReadSchedules` check
 /// renamed or dropped in a refactor; the route registered outside the
 /// authenticated router (the unauthenticated arm answers 200).
@@ -817,7 +817,7 @@ async fn the_cadence_preview_needs_permission_to_read_schedules_somewhere() {
 /// **An unbound namespace and a nonexistent object are the same answer, byte
 /// for byte apart from the request id.**
 #[tokio::test]
-async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
+async fn an_unbound_workspace_is_indistinguishable_from_a_missing_object() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -876,7 +876,7 @@ async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
 /// **Bindings union: two roles in one namespace grant the union, and a role in
 /// each of two namespaces grants each one separately.**
 #[tokio::test]
-async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
+async fn bindings_union_within_a_workspace_and_stay_separate_across_them() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -902,7 +902,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
     let csrf = app.csrf_for("u-both");
 
     let session = app.get("/api/v1/session", &cookie).await.json();
-    let grants: Vec<(String, Vec<String>)> = session["namespaces"]
+    let grants: Vec<(String, Vec<String>)> = session["workspaces"]
         .as_array()
         .unwrap()
         .iter()
@@ -1065,9 +1065,9 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
 
     let session = app.get("/api/v1/session", &cookie).await.json();
     assert_eq!(session["bindingRevision"], "after");
-    assert_eq!(session["namespaces"][0]["roles"][0], "viewer");
+    assert_eq!(session["workspaces"][0]["roles"][0], "viewer");
     assert_eq!(
-        session["namespaces"][0]["capabilities"]["scheduleCreate"],
+        session["workspaces"][0]["capabilities"]["scheduleCreate"],
         false
     );
 
@@ -1093,7 +1093,7 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
         bindings: vec![support::binding(Role::Viewer, NS_B, &["someone-else"])],
     });
     let session = app.get("/api/v1/session", &cookie).await.json();
-    assert_eq!(session["namespaces"].as_array().unwrap().len(), 0);
+    assert_eq!(session["workspaces"].as_array().unwrap().len(), 0);
     app.get("/api/v1/workspaces/team-a/schedules", &cookie)
         .await
         .assert_problem(404, "not_found");
@@ -1263,12 +1263,12 @@ async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbe
     );
     let session = app.get("/api/v1/session", &cookie).await.json();
     assert_eq!(
-        session["namespaces"][0]["capabilities"]["approvalSubmit"],
+        session["workspaces"][0]["capabilities"]["approvalSubmit"],
         true
     );
     let operator_session = app.get("/api/v1/session", &operator_cookie).await.json();
     assert_eq!(
-        operator_session["namespaces"][0]["capabilities"]["approvalSubmit"],
+        operator_session["workspaces"][0]["capabilities"]["approvalSubmit"],
         false
     );
 }

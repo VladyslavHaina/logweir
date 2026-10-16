@@ -15,7 +15,7 @@
 //! (`restores::authorize_submission`), an approver's submission
 //! (`restores::submitted_files`, `restores::submit_for`) and the second
 //! person's click (`console_approval::switchover_request`,
-//! `console_approval::switchover_approve`). Routing, by the namespace's
+//! `console_approval::switchover_approve`). Routing, by the workspace's
 //! binding: unbound — the approver records `logweir drill approve
 //! --subject-kind Switchover`'s files through `POST .../approval`; `confirm`
 //! — the console signs the authorization document (subject kind
@@ -141,7 +141,6 @@ pub fn validate_create(r: &CreateSwitchoverRequest) -> Result<(), ApiError> {
 /// The stored object.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     r: &CreateSwitchoverRequest,
@@ -149,7 +148,6 @@ pub fn build(
     Switchover {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -173,12 +171,12 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadRestores)?;
+    authorize(&state, &actor, &ws, Action::ReadRestores)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<Switchover>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<Switchover>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &SwitchoverList {
@@ -194,12 +192,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadRestores)?;
+    authorize(&state, &actor, &ws, Action::ReadRestores)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Switchover>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<Switchover>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &SwitchoverResponse {
@@ -216,27 +214,43 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateRestore)?;
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: CreateSwitchoverRequest = read_json(body, MAX_JSON_BODY).await?;
+    super::refuse_reference_elsewhere::<weirkeeper::crds::restore::Restore>(
+        &state,
+        &ws,
+        "restoreRef.name",
+        "restore",
+        &request.restore_ref.name,
+    )
+    .await?;
+    super::refuse_reference_elsewhere::<weirkeeper::crds::approval::Approval>(
+        &state,
+        &ws,
+        "approvalRef.name",
+        "approval",
+        &request.approval_ref.name,
+    )
+    .await?;
     let policies = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?;
-    let effective = policies.resolve(&ns);
+    let effective = policies.resolve(&ws);
     // THE RESTORE CREATE'S GATES, BY THE SAME FUNCTION, before the plan's own
-    // grammar: in a two-person namespace a plan too large to show in full is
+    // grammar: in a two-person workspace a plan too large to show in full is
     // refused `scope_incomplete` by name (it would wait for an approval
     // nobody is ever offered).
     restores::refuse_before_create(
         &state,
         &actor,
-        &ns,
+        &ws,
         &effective,
         &CreateGate {
             ticket: request.ticket.as_deref(),
@@ -247,31 +261,31 @@ pub async fn create(
     validate_create(&request)?;
     restores::refuse_taken_approval::<Switchover>(
         &state,
-        &ns,
+        &ws,
         &effective,
         &request.approval_ref.name,
-        &super::deterministic_name(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key),
+        &super::deterministic_name(&actor, &ws, ROUTE_CREATE, NAME_PREFIX, &key),
         "Switchover",
     )
     .await?;
-    super::run_create_rate(&state, &actor, &ns, super::ManualRun::Restore)?;
+    super::run_create_rate(&state, &actor, &ws, super::ManualRun::Restore)?;
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
     let authorization = restores::authorize_submission(
         &state,
         &actor,
-        &ns,
-        &Subject::of_switchover(&ns, &created.object),
+        &ws,
+        &Subject::of_switchover(&ws, &created.object),
         &effective,
         SignedBesideThePlan {
             ticket: request.ticket.as_deref(),
@@ -291,7 +305,7 @@ pub async fn create(
 }
 
 /// `POST .../switchovers/{name}/approval`: the restore route's submission,
-/// by the same functions — in an unbound namespace the files `logweir drill
+/// by the same functions — in an unbound workspace the files `logweir drill
 /// approve --subject-kind Switchover` wrote; under a strict policy an
 /// approver's countersignature over the console's stored request; refused
 /// under `confirm` and `two-person` (a second person approves in the console).
@@ -304,21 +318,21 @@ pub async fn submit_approval(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::SubmitApproval)?;
+    authorize(&state, &actor, &ws, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: SubmitApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
     let submitted = restores::submitted_files(&actor, &request)?;
-    let switchover = get_object::<Switchover>(&state, &actor, &ns, &name).await?;
+    let switchover = get_object::<Switchover>(&state, &actor, &ws, &name).await?;
     restores::submit_for(
         &state,
         &actor,
         request_id,
-        &ns,
-        &Subject::of_switchover(&ns, &switchover),
+        &ws,
+        &Subject::of_switchover(&ws, &switchover),
         request,
         submitted,
     )

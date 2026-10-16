@@ -65,12 +65,12 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadConnections)?;
+    authorize(&state, &actor, &ws, Action::ReadConnections)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<KafkaCluster>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<KafkaCluster>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionList {
@@ -92,7 +92,7 @@ pub async fn list(
 /// ONE SELECTOR, PAGED TO EXHAUSTION, BOUNDED — `destinations::last_test`'s
 /// shape, because it answers the same question about the other half of a run.
 /// [`CONNECTION_TEST_LABEL`] is set only by a connectivity check, the loop
-/// follows the continue token so a namespace with many checks cannot hide the
+/// follows the continue token so a workspace with many checks cannot hide the
 /// newest one behind a first page in name order, and [`MAX_PAGES`] caps the
 /// work with the cap REPORTED rather than swallowed.
 ///
@@ -110,7 +110,7 @@ pub async fn list(
 /// connection's last test and is skipped.
 async fn last_test(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     name: &str,
     cluster_uid: &str,
 ) -> Result<Option<LastTestView>, ApiError> {
@@ -129,7 +129,7 @@ async fn last_test(
         };
         let list = state
             .kube()
-            .list::<PreflightCr>(namespace, &page)
+            .list::<PreflightCr>(workspace, &page)
             .await
             .map_err(KubeFailure::into_api_error)?;
         for item in list.items {
@@ -153,7 +153,7 @@ async fn last_test(
     let Some(newest) = newest else {
         return Ok(None);
     };
-    let live = super::preflights::read_live_binding(state, namespace, &newest).await;
+    let live = super::preflights::read_live_binding(state, workspace, &newest).await;
     let projected = super::preflights::project(&newest, now, None, Some(&live));
     Ok(Some(LastTestView {
         preflight_id: projected.id.clone(),
@@ -183,13 +183,13 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadConnections)?;
+    authorize(&state, &actor, &ws, Action::ReadConnections)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<KafkaCluster>(&state, &actor, &ns, &name).await?;
-    let test = last_test(&state, &ns, &name, &object.uid().unwrap_or_default()).await?;
+    let object = get_object::<KafkaCluster>(&state, &actor, &ws, &name).await?;
+    let test = last_test(&state, &ws, &name, &object.uid().unwrap_or_default()).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionResponse {
@@ -430,7 +430,6 @@ pub fn credential_secret_name(connection: &str) -> String {
 /// Secret the request chose.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     request: &CreateConnectionRequest,
@@ -445,7 +444,6 @@ pub fn build(
     KafkaCluster {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -515,7 +513,6 @@ pub fn build(
 /// built from a validated request, so that is a defect) or the contract
 /// refuses a value validation already accepted.
 fn credential_secret(
-    namespace: &str,
     created: &KafkaCluster,
     credential: &crate::contract::NewConnectionCredentialRequest,
     request_id: &str,
@@ -535,6 +532,7 @@ fn credential_secret(
         .ok_or_else(|| internal("the connection has no UID to bind the credential to"))?;
     let name = created.metadata.name.clone().unwrap_or_default();
     let uid = created.metadata.uid.clone().unwrap_or_default();
+    let namespace = created.metadata.namespace.as_deref().unwrap_or_default();
     let secret_name = credential_secret_name(&name);
     let request_id = (!request_id.is_empty() && request_id.len() <= 128).then_some(request_id);
     let built = match (
@@ -571,11 +569,10 @@ fn credential_secret(
 }
 
 /// The name-only dry-run probe for the credential Secret.
-fn probe_secret(namespace: &str, name: &str, type_: &str) -> WriteOnlyCredential {
+fn probe_secret(name: &str, type_: &str) -> WriteOnlyCredential {
     WriteOnlyCredential {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
             labels: Some(BTreeMap::from([(
                 weirkeeper::connection::credential::MANAGED_BY_LABEL.to_string(),
                 weirkeeper::connection::credential::MANAGED_BY_VALUE.to_string(),
@@ -604,12 +601,12 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateConnection)?;
+    authorize(&state, &actor, &ws, Action::CreateConnection)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: CreateConnectionRequest = read_json(body, MAX_JSON_BODY).await?;
@@ -620,7 +617,7 @@ pub async fn create(
         .as_ref()
         .filter(|_| request.auth.carries_a_value());
     if credential.is_some() {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
+        authorize_also(&state, &actor, &ws, Action::WriteCredential)?;
     }
     // The name the object will have, decided before anything is written, so
     // the credential's name is known and can be checked free first.
@@ -631,9 +628,9 @@ pub async fn create(
         )
     })?;
     let name =
-        crate::idempotency::identity(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key, &canonical).name;
+        crate::idempotency::identity(&actor, &ws, ROUTE_CREATE, NAME_PREFIX, &key, &canonical).name;
     let replaying =
-        is_own_replay::<KafkaCluster, _>(&state, &actor, &ns, ROUTE_CREATE, &name, &key, &request)
+        is_own_replay::<KafkaCluster, _>(&state, &actor, &ws, ROUTE_CREATE, &name, &key, &request)
             .await?;
     let secret_type = if request.auth.mode == ConnectionAuthMode::Mtls {
         weirkeeper::connection::credential::CLIENT_CERTIFICATE_SECRET_TYPE
@@ -642,7 +639,7 @@ pub async fn create(
     };
     let secret_name = credential_secret_name(&name);
     if credential.is_some() && !replaying {
-        let probe = probe_secret(&ns, &secret_name, secret_type);
+        let probe = probe_secret(&secret_name, secret_type);
         if state
             .kube()
             .credential_name_is_taken(&probe)
@@ -663,23 +660,23 @@ pub async fn create(
     let created = create_named_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         &name,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
     if let Some(credential) = credential {
-        let secret = credential_secret(&ns, &created.object, credential, &request_id)?;
-        match state.kube().create_credential(&ns, &secret).await {
+        let secret = credential_secret(&created.object, credential, &request_id)?;
+        match state.kube().create_credential(&ws, &secret).await {
             Ok(reference) => {
                 // THE LOG LINE IS A NAME — the only non-secret fact about a
                 // credential is which object holds it.
                 tracing::info!(
-                    namespace = %ns,
+                    workspace = %ws,
                     secret = %reference.name,
                     connection = %name,
                     "connection credential secret created"

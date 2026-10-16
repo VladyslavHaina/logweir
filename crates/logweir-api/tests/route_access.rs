@@ -512,7 +512,7 @@ async fn the_namespaceless_routes_are_decided_over_every_grant() {
 /// **localAdmin mode keeps working unchanged through the layer.** Every
 /// declared route is reachable by the local administrator in a configured
 /// namespace (no 401, no access 403), and an unconfigured namespace is still
-/// the informative `403 namespace_forbidden` rather than shared mode's 404.
+/// the informative `403 workspace_forbidden` rather than shared mode's 404.
 #[tokio::test]
 async fn local_admin_mode_passes_the_layer_on_every_route() {
     let app = TestApp::new();
@@ -544,7 +544,7 @@ async fn local_admin_mode_passes_the_layer_on_every_route() {
     }
     app.get("/api/v1/workspaces/elsewhere/backups")
         .await
-        .assert_problem(403, "namespace_forbidden");
+        .assert_problem(403, "workspace_forbidden");
 }
 
 static DUMMY_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

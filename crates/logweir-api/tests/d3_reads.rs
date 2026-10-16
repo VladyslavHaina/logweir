@@ -18,6 +18,10 @@
 
 mod support;
 
+/// The `metadata.uid` of `tests/fixtures/recovery-catalog.json`, which its
+/// pages carry as `logweir.dev/catalog-uid`.
+const CATALOG_UID: &str = "catalog-primary-uid";
+
 use logweir_api::routes::retention::ApprovedPlanState;
 use serde_json::{json, Value};
 use support::{repo_root, FakeKube, Options, SharedApp, SharedOptions, TestApp, NS_A, NS_B};
@@ -419,6 +423,7 @@ fn seed_page(fake: &FakeKube, name: &str, lines: &[String]) -> String {
         json!({
             "metadata": {
                 "name": name,
+                "labels": {weirkeeper::catalog_view::LABEL_CATALOG_UID: CATALOG_UID},
                 "annotations": {
                     weirkeeper::catalog_view::PAGE_DIGEST_ANNOTATION: digest.clone()
                 }
@@ -584,7 +589,10 @@ async fn a_page_that_fails_its_digest_or_immutability_serves_nothing() {
         "configmaps",
         NS_A,
         json!({
-            "metadata": {"name": "primary-g1-p0"},
+            "metadata": {
+                "name": "primary-g1-p0",
+                "labels": {weirkeeper::catalog_view::LABEL_CATALOG_UID: CATALOG_UID}
+            },
             "immutable": false,
             "data": { weirkeeper::catalog_view::PAGE_DATA_KEY: lines.join("\n") },
         }),
@@ -1125,9 +1133,11 @@ fn wide_policy(name: &str, namespaces: &[&str], default: bool) -> Value {
     policy
 }
 
-/// **A namespace administrator cannot enumerate the installation.**
+/// **A workspace administrator cannot enumerate the installation.**
 ///
-/// An actor holding `trustPolicy.read` in one bound namespace must not read
+/// PROD-19.1: an administrator of any workspace reads the policies that govern
+/// the install's one namespace, filtered to that namespace. An actor holding
+/// `trustPolicy.read` must not read
 /// `spec.namespaces`, `status.boundNamespaces` and `conflicts[].namespace`
 /// for the entire installation. D0's matrix row is "installation-admin only,
 /// cluster scope"; this model has no installation-scoped role, so the
@@ -1136,13 +1146,13 @@ fn wide_policy(name: &str, namespaces: &[&str], default: bool) -> Value {
 /// every namespace-bearing list is filtered to the administered set with
 /// `namespacesFiltered` saying so.
 #[tokio::test]
-async fn a_namespace_administrator_never_enumerates_another_namespace() {
+async fn a_workspace_administrator_never_enumerates_another_namespace() {
     let fake = seeded();
     fake.seed_cluster(
         "trustpolicies",
         wide_policy(
             "org-wide",
-            &["team-a", "team-b", "finance-prod", "hr-secrets"],
+            &[support::INSTALL_NS, "team-b", "finance-prod", "hr-secrets"],
             false,
         ),
     );
@@ -1173,8 +1183,8 @@ async fn a_namespace_administrator_never_enumerates_another_namespace() {
         );
     }
     let item = &response.json()["item"];
-    assert_eq!(item["namespaces"], json!(["team-a"]));
-    assert_eq!(item["boundNamespaces"], json!(["team-a"]));
+    assert_eq!(item["namespaces"], json!([support::INSTALL_NS]));
+    assert_eq!(item["boundNamespaces"], json!([support::INSTALL_NS]));
     assert_eq!(
         item["namespacesFiltered"], true,
         "a filtered list that did not say so would look complete"
@@ -1182,7 +1192,7 @@ async fn a_namespace_administrator_never_enumerates_another_namespace() {
     // The conflict about a namespace the reader administers survives; the one
     // about `hr-secrets` does not.
     assert_eq!(item["conflicts"].as_array().unwrap().len(), 1);
-    assert_eq!(item["conflicts"][0]["namespace"], "team-a");
+    assert_eq!(item["conflicts"][0]["namespace"], support::INSTALL_NS);
     // The keys view §7.7 needs is untouched by the filter.
     assert_eq!(item["keys"][0]["state"], "Active");
     assert_eq!(item["keyCount"], 1);
@@ -1219,7 +1229,7 @@ async fn the_default_policy_is_in_scope_and_an_unfiltered_one_says_so() {
     fake.seed_cluster("trustpolicies", wide_policy("org-default", &[], true));
     fake.seed_cluster(
         "trustpolicies",
-        wide_policy("just-team-a", &["team-a"], false),
+        wide_policy("just-team-a", &[support::INSTALL_NS], false),
     );
     let shared = SharedApp::new(
         fake,
@@ -1254,7 +1264,10 @@ async fn the_default_policy_is_in_scope_and_an_unfiltered_one_says_so() {
         .await
         .json();
     assert_eq!(unfiltered["item"]["namespacesFiltered"], false);
-    assert_eq!(unfiltered["item"]["namespaces"], json!(["team-a"]));
+    assert_eq!(
+        unfiltered["item"]["namespaces"],
+        json!([support::INSTALL_NS])
+    );
 }
 
 /// **A legacy archive URL comes back with its userinfo redacted.**

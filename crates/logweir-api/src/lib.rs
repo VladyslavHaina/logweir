@@ -16,10 +16,10 @@
 //!
 //! TWO IDENTITY MODES, NAMED IN THE CONFIGURATION. `localAdmin` is a
 //! loopback-only listener with the configured administrator as the actor and
-//! namespaces from configuration alone. `shared` is the SSO console: OpenID
+//! workspaces from configuration alone. `shared` is the SSO console: OpenID
 //! Connect Authorization Code + PKCE, a short-lived authenticated and encrypted
 //! stateless session cookie, a synchronizer CSRF token on every unsafe method,
-//! exact group-to-role and namespace bindings, and one structured audit record
+//! exact group-to-role and workspace bindings, and one structured audit record
 //! per request ([`auth`], [`authz`], [`audit`]). Both plug into the same two
 //! trait objects, so no route knows which mode it is serving.
 //!
@@ -87,7 +87,7 @@ pub struct Preflight {
     /// Shared mode's key material.
     pub shared: Option<SharedPreflight>,
     /// The approval-policy document and the console confirmation
-    /// key. A served namespace bound to an explicit policy without a key is a
+    /// key. A workspace bound to an explicit policy without a key is a
     /// refusal here.
     pub approval: approval::ApprovalSettings,
 }
@@ -157,7 +157,7 @@ pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
         config.approval_policy_file.as_deref(),
         config.confirmation_key_file.as_deref(),
         config.confirmation_key_managed,
-        &config.namespaces,
+        &config.workspaces,
     )?;
     approval.installation = config.installation_identity.clone();
     Ok(Preflight {
@@ -195,7 +195,7 @@ pub fn state_from_parts(
                 &admin.subject,
                 &admin.display_name,
             )),
-            Arc::new(authz::LocalAdminAuthorizer::new(config.namespaces.clone())),
+            Arc::new(authz::LocalAdminAuthorizer::new(config.workspaces.clone())),
             None,
         ),
         (config::Mode::Shared(settings), Some(material)) => {
@@ -253,7 +253,7 @@ pub fn state_from_parts(
     Ok(app::AppState::new(app::Settings {
         authenticator,
         authorizer,
-        kube: kube::KubeAdapter::new(client, config.namespaces[0].clone()),
+        kube: kube::KubeAdapter::new(client, config.namespace.clone()),
         cursor_key: cursor::CursorKey::new(preflight.cursor_key),
         clock,
         public_origin: config.public_origin.clone(),

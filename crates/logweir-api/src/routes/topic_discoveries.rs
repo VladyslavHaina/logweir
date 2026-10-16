@@ -370,7 +370,6 @@ pub fn parameters_hash(connection: &str, request: &CreateTopicDiscoveryRequest) 
 /// Build the stored object for a validated request.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     connection: &str,
@@ -379,7 +378,6 @@ pub fn build(
     TopicDiscoveryCr {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             labels: Some(BTreeMap::from([
                 (CONNECTION_LABEL.to_string(), connection.to_string()),
@@ -415,10 +413,10 @@ pub fn build(
 async fn connection_or_404(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<KafkaCluster, ApiError> {
-    get_object::<KafkaCluster>(state, actor, namespace, name).await
+    get_object::<KafkaCluster>(state, actor, workspace, name).await
 }
 
 /// `POST .../connections/{name}/topic-discoveries`.
@@ -427,12 +425,12 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, connection)): ApiPath<(String, String)>,
+    ApiPath((ws, connection)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::DiscoverTopics)?;
+    authorize(&state, &actor, &ws, Action::DiscoverTopics)?;
     check_name(&connection)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
@@ -441,11 +439,11 @@ pub async fn create(
     // THE CONNECTION IS READ FIRST. A discovery against a name that does not
     // exist would otherwise be a durable object nobody can explain, and the
     // controller would have to refuse it after the fact.
-    let cluster = connection_or_404(&state, &actor, &ns, &connection).await?;
+    let cluster = connection_or_404(&state, &actor, &ws, &connection).await?;
     check_create_rate(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         DISCOVERY_CREATES_PER_MINUTE,
     )?;
@@ -462,7 +460,7 @@ pub async fn create(
         request.expected_topics = Some(names);
     }
     if reuse_fresh {
-        if let Some(fresh) = fresh_identical(&state, &actor, &ns, &connection, &request).await? {
+        if let Some(fresh) = fresh_identical(&state, &actor, &ws, &connection, &request).await? {
             actor.audit.note("reused", "true");
             return Ok(json(
                 StatusCode::OK,
@@ -478,13 +476,13 @@ pub async fn create(
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &connection, &request),
+        |name, annotations| build(name, annotations, &connection, &request),
     )
     .await?;
     Ok(json(
@@ -506,11 +504,11 @@ pub async fn create(
 async fn fresh_identical(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     connection: &str,
     request: &CreateTopicDiscoveryRequest,
 ) -> Result<Option<TopicDiscoveryCr>, ApiError> {
-    let cluster = get_object::<KafkaCluster>(state, actor, namespace, connection).await?;
+    let cluster = get_object::<KafkaCluster>(state, actor, workspace, connection).await?;
     let page = PageRequest {
         limit: LATEST_SCAN,
         continue_token: None,
@@ -521,7 +519,7 @@ async fn fresh_identical(
     };
     let list = state
         .kube()
-        .list::<TopicDiscoveryCr>(namespace, &page)
+        .list::<TopicDiscoveryCr>(workspace, &page)
         .await
         .map_err(KubeFailure::into_api_error)?;
     let now = state.now();
@@ -542,13 +540,13 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, id)): ApiPath<(String, String)>,
+    ApiPath((ws, id)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadTopicDiscoveries)?;
+    authorize(&state, &actor, &ws, Action::ReadTopicDiscoveries)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<TopicDiscoveryCr>(&state, &actor, &ns, &id).await?;
-    let connection = read_connection(&state, &ns, &object).await;
+    let object = get_object::<TopicDiscoveryCr>(&state, &actor, &ws, &id).await?;
+    let connection = read_connection(&state, &ws, &object).await;
     Ok(json(
         StatusCode::OK,
         &TopicDiscoveryResponse {
@@ -565,12 +563,12 @@ pub async fn get_one(
 /// what says the binding can no longer be compared.
 async fn read_connection(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     object: &TopicDiscoveryCr,
 ) -> Option<KafkaCluster> {
     state
         .kube()
-        .get::<KafkaCluster>(namespace, &object.spec.request.connection_ref.name)
+        .get::<KafkaCluster>(workspace, &object.spec.request.connection_ref.name)
         .await
         .ok()
 }
@@ -580,14 +578,14 @@ pub async fn by_connection(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, connection)): ApiPath<(String, String)>,
+    ApiPath((ws, connection)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadTopicDiscoveries)?;
+    authorize(&state, &actor, &ws, Action::ReadTopicDiscoveries)?;
     check_name(&connection)?;
     let params = crate::http::parse_query(uri.query(), &["latest", "limit", "cursor"])?;
     let latest = params.get("latest").is_some_and(|v| v == "true");
-    let cluster = connection_or_404(&state, &actor, &ns, &connection).await?;
+    let cluster = connection_or_404(&state, &actor, &ws, &connection).await?;
     let now = state.now();
     if latest {
         let page = PageRequest {
@@ -597,7 +595,7 @@ pub async fn by_connection(
         };
         let list = state
             .kube()
-            .list::<TopicDiscoveryCr>(&ns, &page)
+            .list::<TopicDiscoveryCr>(&ws, &page)
             .await
             .map_err(KubeFailure::into_api_error)?;
         let newest = |items: &[TopicDiscoveryCr]| -> Option<TopicDiscoveryCr> {
@@ -626,7 +624,7 @@ pub async fn by_connection(
     let mut query = list_query(uri.query().map(strip_latest).as_deref())?;
     query.label_selector = Some(format!("{CONNECTION_LABEL}={connection}"));
     let (items, page) =
-        super::list_page::<TopicDiscoveryCr>(&state, &actor, &ns, ROUTE_BY_CONNECTION, &query)
+        super::list_page::<TopicDiscoveryCr>(&state, &actor, &ws, ROUTE_BY_CONNECTION, &query)
             .await?;
     Ok(json(
         StatusCode::OK,
@@ -805,10 +803,10 @@ pub async fn topics(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, id)): ApiPath<(String, String)>,
+    ApiPath((ws, id)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadTopicDiscoveries)?;
+    authorize(&state, &actor, &ws, Action::ReadTopicDiscoveries)?;
     let params = crate::http::parse_query(
         uri.query(),
         &["limit", "cursor", "q", "prefix", "internal", "errored"],
@@ -827,7 +825,7 @@ pub async fn topics(
         },
     };
     let filters = parse_filters(&params)?;
-    let object = get_object::<TopicDiscoveryCr>(&state, &actor, &ns, &id).await?;
+    let object = get_object::<TopicDiscoveryCr>(&state, &actor, &ws, &id).await?;
     let uid = object.meta().uid.clone().unwrap_or_default();
     let Some(result) = object.status.as_ref().and_then(|s| s.result.as_ref()) else {
         return Err(ApiError::new(
@@ -840,7 +838,7 @@ pub async fn topics(
     let scope = CursorScope {
         actor_id: actor.id(),
         route: ROUTE_TOPICS.to_string(),
-        namespace: ns.clone(),
+        workspace: ws.clone(),
         filters: filters.canonical(&uid, &topics_sha256),
     };
     let (mut chunk_index, mut offset) = match params.get("cursor") {
@@ -877,7 +875,7 @@ pub async fn topics(
         }
         let document = state
             .kube()
-            .get_result_document(&chunk.name)
+            .get_result_document(&uid, &chunk.name)
             .await
             .map_err(|failure| match failure {
                 KubeFailure::NotFound => ApiError::new(
@@ -886,7 +884,7 @@ pub async fn topics(
                 ),
                 other => other.into_api_error(),
             })?;
-        super::preflights::verify_document(&document, &uid, Some(&chunk.sha256))?;
+        super::preflights::verify_document(&document, Some(&chunk.sha256))?;
         chunks_scanned += 1;
         let body = document.data.get(CHUNK_KEY).cloned().unwrap_or_default();
         let mut consumed = offset;
@@ -976,11 +974,11 @@ pub async fn cancel(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, target)): ApiPath<(String, String)>,
+    ApiPath((ws, target)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CancelTopicDiscovery)?;
+    authorize(&state, &actor, &ws, Action::CancelTopicDiscovery)?;
     let Some(id) = target.strip_suffix(CANCEL) else {
         return Err(ApiError::new(ProblemCode::NotFound, "No such command."));
     };
@@ -990,7 +988,7 @@ pub async fn cancel(
     let (object, already_terminal) = cancel_check::<TopicDiscoveryCr>(
         &state,
         &actor,
-        &ns,
+        &ws,
         id,
         |o| lifecycle_of(o).is_terminal(),
         |o| o.spec.cancel_requested,
@@ -1016,11 +1014,11 @@ pub async fn operation(
     state: &AppState,
     request_id: String,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<Response, ApiError> {
-    authorize(state, actor, namespace, Action::ReadTopicDiscoveries)?;
-    let object = get_object::<TopicDiscoveryCr>(state, actor, namespace, name).await?;
+    authorize(state, actor, workspace, Action::ReadTopicDiscoveries)?;
+    let object = get_object::<TopicDiscoveryCr>(state, actor, workspace, name).await?;
     let projected = project(&object, None, state.now());
     Ok(json(
         StatusCode::OK,

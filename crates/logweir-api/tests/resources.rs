@@ -845,7 +845,7 @@ async fn approvals_hide_documents_except_on_the_packet_route() {
 }
 
 #[tokio::test]
-async fn session_and_namespaces_come_from_configuration_only() {
+async fn session_and_workspaces_come_from_configuration_only() {
     let app = TestApp::new();
     let session = app.get("/api/v1/session").await;
     assert_eq!(session.status, 200);
@@ -854,7 +854,7 @@ async fn session_and_namespaces_come_from_configuration_only() {
     assert_eq!(v["actor"]["issuer"], "urn:logweir:local-admin");
     assert_eq!(v["actor"]["subject"], "admin");
     assert!(v["expiresAt"].is_null() && v["csrfToken"].is_null());
-    let names: Vec<&str> = v["namespaces"]
+    let names: Vec<&str> = v["workspaces"]
         .as_array()
         .unwrap()
         .iter()
@@ -912,7 +912,7 @@ async fn session_and_namespaces_come_from_configuration_only() {
         assert_eq!(caps[disabled], false, "{disabled}");
     }
     let namespaces = app.get("/api/v1/workspaces").await.json();
-    assert_eq!(namespaces["items"], v["namespaces"]);
+    assert_eq!(namespaces["items"], v["workspaces"]);
     // Neither route asked Kubernetes anything: no core Namespace list.
     assert!(app.fake.requests().is_empty());
 }

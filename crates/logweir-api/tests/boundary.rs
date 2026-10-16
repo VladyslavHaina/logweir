@@ -261,7 +261,7 @@ async fn forged_identity_headers_do_not_change_the_actor() {
         .await
         .json();
     assert_eq!(baseline["actor"], forged["actor"]);
-    assert_eq!(baseline["namespaces"], forged["namespaces"]);
+    assert_eq!(baseline["workspaces"], forged["workspaces"]);
     assert_eq!(forged["actor"]["id"], "urn:logweir:local-admin#admin");
 }
 

@@ -495,12 +495,8 @@ pub fn approved_document(
     approved_at: DateTime<Utc>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        format_version: logweir_core::approval_policy::restore_authorization_format_version(
-            request.approval_subject.as_deref(),
-            request.original_name_confirmation.as_ref(),
-            true,
-        )
-        .to_string(),
+        format_version: logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+            .to_string(),
         approver: Some(approver),
         approved_at: Some(approved_at),
         ..request.clone()
@@ -539,17 +535,17 @@ pub struct ApprovalSettings {
 }
 
 impl ApprovalSettings {
-    /// Load both files and check that they fit the namespaces this console
+    /// Load both files and check that they fit the workspaces this console
     /// serves.
     ///
     /// # Errors
     ///
-    /// A reason naming the file or the namespace.
+    /// A reason naming the file or the workspace.
     pub fn load(
         policy_file: Option<&Path>,
         key_file: Option<&Path>,
         key_managed: bool,
-        namespaces: &[String],
+        workspaces: &[String],
     ) -> Result<Self, String> {
         let policies = match policy_file {
             None => ApprovalPolicySet::default(),
@@ -579,7 +575,7 @@ impl ApprovalSettings {
             pending_confirmation_file,
             ..Self::default()
         };
-        settings.check(namespaces)?;
+        settings.check(workspaces)?;
         Ok(settings)
     }
 
@@ -613,7 +609,7 @@ impl ApprovalSettings {
         Ok(self.late_confirmation.get())
     }
 
-    /// A served namespace bound to an explicit policy needs the console key:
+    /// A workspace bound to an explicit policy needs the console key:
     /// both modes carry the console's signature, and without the key every
     /// Restore there would be created and then never authorisable.
     ///
@@ -622,21 +618,21 @@ impl ApprovalSettings {
     ///
     /// # Errors
     ///
-    /// A reason naming the first such namespace.
-    pub fn check(&self, namespaces: &[String]) -> Result<(), String> {
+    /// A reason naming the first such workspace.
+    pub fn check(&self, workspaces: &[String]) -> Result<(), String> {
         if self.confirmation.is_some() || self.pending_confirmation_file.is_some() {
             return Ok(());
         }
-        if let Some(namespace) = namespaces
+        if let Some(workspace) = workspaces
             .iter()
-            .find(|ns| !self.policies.resolve(ns).is_legacy())
+            .find(|ws| !self.policies.resolve(ws).is_legacy())
         {
             return Err(format!(
-                "namespace {namespace} is bound to approval policy {} and this console has no \
+                "workspace {workspace} is bound to approval policy {} and this console has no \
                  `confirmationKeyFile`: both ordinary and governed requests carry the console's \
                  ConsoleConfirmation signature (D0), so configure the key or unbind the \
-                 namespace",
-                self.policies.resolve(namespace).name()
+                 workspace",
+                self.policies.resolve(workspace).name()
             ));
         }
         Ok(())
@@ -742,6 +738,7 @@ pub fn carries_private_key(text: &str) -> bool {
 pub fn document(
     policy: &ApprovalPolicy,
     namespace: &str,
+    workspace: &str,
     name: &str,
     uid: &str,
     plan_hash: &str,
@@ -752,20 +749,15 @@ pub fn document(
     original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        // 2.1.0 exactly when the document carries the approval
-        // subject or the typed confirmation; every other document is 2.0.0,
-        // byte for byte what it was.
-        format_version: logweir_core::approval_policy::restore_authorization_format_version_for(
-            approval_subject.wire(),
-            original_name_confirmation.as_ref(),
-        )
-        .to_string(),
+        format_version: logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+            .to_string(),
         kind: RESTORE_AUTHORIZATION_KIND.to_string(),
         authorization_mode: policy.mode,
         subject: AuthorizedSubject {
             api_version: SUBJECT_API_VERSION.to_string(),
             kind: SUBJECT_KIND_RESTORE.to_string(),
             namespace: namespace.to_string(),
+            workspace: workspace.to_string(),
             name: name.to_string(),
             uid: uid.to_string(),
         },
@@ -862,13 +854,13 @@ mod tests {
 
     fn policies() -> ApprovalPolicySet {
         ApprovalPolicySet::parse(
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nnamespaces:\n  team-a: o\n",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: o\n    mode: Ordinary\nworkspaces:\n  team-a: o\n",
         )
         .expect("valid")
     }
 
     #[test]
-    fn a_bound_namespace_without_a_console_key_is_a_startup_refusal() {
+    fn a_bound_workspace_without_a_console_key_is_a_startup_refusal() {
         let settings = ApprovalSettings {
             policies: policies(),
             ..ApprovalSettings::default()
@@ -903,6 +895,7 @@ mod tests {
         let at = Utc::now();
         let doc = document(
             policy,
+            "logweir",
             "team-a",
             "rst-1",
             "uid",

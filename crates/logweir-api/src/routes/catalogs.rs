@@ -80,7 +80,7 @@ pub const MAX_PAGES_PER_REQUEST: usize = 8;
 pub const MAX_SIGNERS: usize = 16;
 /// The most histogram days a response carries.
 pub const MAX_HISTOGRAM_DAYS: usize = 400;
-/// The page size of the namespace `Backup` listing a point page joins against.
+/// The page size of the workspace `Backup` listing a point page joins against.
 pub const BACKUP_SCAN_PAGE: u32 = 500;
 /// The most `Backup` pages one point request reads — 2 000 objects.
 pub const MAX_BACKUP_SCAN_PAGES: usize = 4;
@@ -190,7 +190,7 @@ pub struct SyncCursorView {
 pub struct CatalogView {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -804,7 +804,7 @@ pub struct PointPageResponse {
     pub view_expires_at: Option<DateTime<Utc>>,
     /// Present when the controller's `Backup` verdicts could not ALL be read,
     /// so `selectable` and `backupVerdict` reflect only the ones that were —
-    /// for the rest, the catalog row alone. `Truncated`: the namespace holds
+    /// for the rest, the catalog row alone. `Truncated`: the workspace holds
     /// more `Backup`s than one request reads (2 000). `Unavailable`: the
     /// `Backup` list failed (transport, RBAC, a missing CRD), or a refusal
     /// named no receipt digest and no set id and so could be tied to no row.
@@ -824,7 +824,7 @@ pub enum BackupVerdictsIncomplete {
     Unavailable,
 }
 
-/// The reached refusals among the namespace's `Backup`s, and why the join is
+/// The reached refusals among the workspace's `Backup`s, and why the join is
 /// incomplete when it is.
 ///
 /// NEVER AN ERROR. Every `Backup` is read through the lenient
@@ -835,7 +835,7 @@ pub enum BackupVerdictsIncomplete {
 /// `Unavailable`.
 async fn backup_refusals(
     state: &AppState,
-    ns: &str,
+    ws: &str,
 ) -> (ControllerRefusals, Option<BackupVerdictsIncomplete>) {
     let mut facts: Vec<BackupVerdictFacts> = Vec::new();
     let mut continue_token: Option<String> = None;
@@ -846,11 +846,11 @@ async fn backup_refusals(
             continue_token: continue_token.take(),
             label_selector: None,
         };
-        let list = match state.kube().list_untyped::<BackupCr>(ns, &page).await {
+        let list = match state.kube().list_untyped::<BackupCr>(ws, &page).await {
             Ok(list) => list,
             Err(failure) => {
                 tracing::warn!(
-                    namespace = %ns,
+                    workspace = %ws,
                     failure = ?failure,
                     "the Backup verdicts could not be listed; the point page is served with \
                      backupVerdictsIncomplete: Unavailable"
@@ -1071,7 +1071,6 @@ pub fn validate_connect(request: &ConnectArchiveRequest) -> Result<(), ApiError>
 }
 
 fn build(
-    namespace: &str,
     name: String,
     annotations: std::collections::BTreeMap<String, String>,
     request: &ConnectArchiveRequest,
@@ -1093,7 +1092,6 @@ fn build(
     RecoveryCatalog {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -1124,13 +1122,13 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadCatalogs)?;
+    authorize(&state, &actor, &ws, Action::ReadCatalogs)?;
     let query = list_query(uri.query())?;
     let (items, page) =
-        list_page::<RecoveryCatalog>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+        list_page::<RecoveryCatalog>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     let now = state.now();
     Ok(json(
         StatusCode::OK,
@@ -1147,26 +1145,39 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ConnectCatalog)?;
+    authorize(&state, &actor, &ws, Action::ConnectCatalog)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: ConnectArchiveRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_connect(&request)?;
+    super::refuse_name_in_use::<RecoveryCatalog>(&state, &ws, &request.name).await?;
+    if let Some(destination) = &request.destination_ref {
+        super::refuse_reference_elsewhere::<
+            weirkeeper::crds::backup_destination::BackupDestination,
+        >(
+            &state,
+            &ws,
+            "destinationRef.name",
+            "destination",
+            &destination.name,
+        )
+        .await?;
+    }
     let created = create_named_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         &request.name,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
     let now = state.now();
@@ -1185,12 +1196,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
-    authorize(&state, &actor, &ns, Action::ReadCatalogs)?;
-    let object = get_object::<RecoveryCatalog>(&state, &actor, &ns, &name).await?;
+    authorize(&state, &actor, &ws, Action::ReadCatalogs)?;
+    let object = get_object::<RecoveryCatalog>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &CatalogResponse {
@@ -1206,12 +1217,12 @@ pub async fn signers(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
-    authorize(&state, &actor, &ns, Action::ReadCatalogs)?;
-    let object = get_object::<RecoveryCatalog>(&state, &actor, &ns, &name).await?;
+    authorize(&state, &actor, &ws, Action::ReadCatalogs)?;
+    let object = get_object::<RecoveryCatalog>(&state, &actor, &ws, &name).await?;
     let projected = view(&object, state.now());
     Ok(json(
         StatusCode::OK,
@@ -1226,11 +1237,11 @@ pub async fn signers(
 
 /// The cursor a point page carries: the view generation and the offset into
 /// the concatenated pages.
-fn point_scope(actor: &Actor, ns: &str, name: &str, generation: &str) -> CursorScope {
+fn point_scope(actor: &Actor, ws: &str, name: &str, generation: &str) -> CursorScope {
     CursorScope {
         actor_id: actor.id(),
         route: ROUTE_POINTS.to_string(),
-        namespace: ns.to_string(),
+        workspace: ws.to_string(),
         // THE GENERATION IS PART OF THE SCOPE, WHICH IS WHAT MAKES A REPLACED
         // VIEW AN ERROR RATHER THAN A DIFFERENT PAGE. A sync publishes a new
         // set of pages under a new `syncedAt`; a cursor minted against the old
@@ -1275,10 +1286,10 @@ pub async fn points(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadCatalogs)?;
+    authorize(&state, &actor, &ws, Action::ReadCatalogs)?;
     let query = crate::http::parse_query(uri.query(), &["limit", "cursor", "selectable"])?;
     let limit = match query.get("limit") {
         None => super::DEFAULT_LIMIT,
@@ -1306,10 +1317,10 @@ pub async fn points(
         }
     };
     check_name(&name)?;
-    let catalog = get_object::<RecoveryCatalog>(&state, &actor, &ns, &name).await?;
+    let catalog = get_object::<RecoveryCatalog>(&state, &actor, &ws, &name).await?;
     let projected = view(&catalog, state.now());
     let generation = view_generation(&catalog);
-    let scope = point_scope(&actor, &ns, &name, &generation);
+    let scope = point_scope(&actor, &ws, &name, &generation);
     let offset = match query.get("cursor") {
         None => 0usize,
         Some(cursor) => match cursor::open(state.cursor_key(), &scope, cursor, state.now()) {
@@ -1348,14 +1359,19 @@ pub async fn points(
     // THE CONTROLLER'S OWN VERDICTS, before any row is published as
     // selectable: the catalog decides only where the controller could not
     // look (`weirkeeper::catalog_view::ControllerRefusals`).
-    let (refusals, backup_verdicts_incomplete) = backup_refusals(&state, &ns).await;
+    let (refusals, backup_verdicts_incomplete) = backup_refusals(&state, &ws).await;
 
     let mut items: Vec<PointView> = Vec::new();
     let mut scanned = 0usize;
     let mut next_cursor = None;
     let mut incomplete = false;
+    let catalog_uid = catalog.metadata.uid.clone().unwrap_or_default();
     'pages: for (page_name, digest, _count) in &pages {
-        let document = match state.kube().get_result_document(page_name).await {
+        let document = match state
+            .kube()
+            .get_result_document(&catalog_uid, page_name)
+            .await
+        {
             Ok(document) => document,
             // A PAGE THAT IS GONE IS NOT AN EMPTY ARCHIVE. The view may have
             // aged out before its status was refreshed, so this response names

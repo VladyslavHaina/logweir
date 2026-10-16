@@ -690,8 +690,8 @@ fn policy_refusal(
     let bound = match (admission.policy, is_authorization_v2(approval)) {
         (EffectivePolicy::Legacy, false) => return None,
         (EffectivePolicy::Legacy, true) => {
-            return Some(mismatch(approval_policy::unbound_namespace_refusal(
-                &namespace,
+            return Some(mismatch(approval_policy::unbound_workspace_refusal(
+                crate::workspace::label_of(restore).unwrap_or_default(),
             )))
         }
         (EffectivePolicy::Bound(bound), false) => {
@@ -708,6 +708,9 @@ fn policy_refusal(
     let expected = ExpectedSubject {
         kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace,
+        workspace: crate::workspace::label_of(restore)
+            .unwrap_or_default()
+            .to_string(),
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),
         plan_hash: recomputed_plan_hash(restore),
@@ -1871,6 +1874,12 @@ pub fn execution_contract_env_with_policy(
         ),
         (contract::SUBJECT_NAME_ENV.to_string(), restore.name_any()),
         (contract::SUBJECT_NAMESPACE_ENV.to_string(), namespace),
+        (
+            contract::SUBJECT_WORKSPACE_ENV.to_string(),
+            crate::workspace::label_of(restore)
+                .unwrap_or_default()
+                .to_string(),
+        ),
         (contract::SUBJECT_UID_ENV.to_string(), restore_uid),
         (contract::APPROVAL_NAME_ENV.to_string(), approval.name_any()),
         (contract::APPROVAL_UID_ENV.to_string(), approval_uid),
@@ -6381,9 +6390,10 @@ async fn reconcile_restore_inner(
     let namespace = restore
         .namespace()
         .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
-    // What this namespace is bound to now, resolved once per pass for
+    // What this workspace is bound to now, resolved once per pass for
     // admission, the bundle, the argv and the environment alike.
-    let effective_policy = policies.resolve(&namespace);
+    let effective_policy =
+        policies.resolve(crate::workspace::label_of(restore).unwrap_or_default());
     // The Job is named after the CR, verbatim.
     let job_name = name.clone();
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);

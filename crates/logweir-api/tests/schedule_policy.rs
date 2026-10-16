@@ -952,7 +952,7 @@ async fn the_ordinary_refusals_still_apply() {
         &edit().to_string(),
     )
     .await
-    .assert_problem(403, "namespace_forbidden");
+    .assert_problem(403, "workspace_forbidden");
     let no_origin = app
         .send(
             http::Request::builder()
