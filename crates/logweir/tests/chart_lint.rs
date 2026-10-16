@@ -1421,6 +1421,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
                 "backupdestinations",
                 "backupschedules",
                 "preflights",
+                "restores",
                 "topicdiscoveries",
             ]
             .iter()
@@ -1782,7 +1783,7 @@ const RENDER_NAMESPACE: &str = "logweir-system";
 /// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
 /// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
 /// derives them from `kube.rs`; this list pins what is REACHABLE.
-const API_NAMESPACED_GRANTS: [&str; 40] = [
+const API_NAMESPACED_GRANTS: [&str; 41] = [
     "get logweir.dev/approvals",
     "list logweir.dev/approvals",
     "create logweir.dev/approvals",
@@ -1807,6 +1808,8 @@ const API_NAMESPACED_GRANTS: [&str; 40] = [
     "get logweir.dev/restores",
     "list logweir.dev/restores",
     "create logweir.dev/restores",
+    // PROD-07.2: the cancel and clean-up annotations.
+    "patch logweir.dev/restores",
     "get logweir.dev/topicdiscoveries",
     "list logweir.dev/topicdiscoveries",
     "create logweir.dev/topicdiscoveries",
