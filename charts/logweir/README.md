@@ -80,7 +80,7 @@ points ([docs/install.md](../../docs/install.md#upgrade-crds-before-upgrading-th
 
 | object | when |
 |---|---|
-| the thirteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always, from `crds/`, once (*Upgrading the CRDs by hand*) |
+| the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always, from `crds/`, once (*Upgrading the CRDs by hand*) |
 | `ServiceAccount`, `Role` and `RoleBinding` `weirkeeper`; `ClusterRole` and binding `weirkeeper-cluster-scope` (`trustrosters`, `trustpolicies` only) | always: the controller watches and runs Jobs in the release namespace only |
 | `Deployment` `weirkeeper` | always; probed by `weirkeeper --probe live` / `--probe ready` against `127.0.0.1:8081` (`LOGWEIR_HEALTH_ADDR`), restarted after three misses 20 s apart |
 | `ConfigMap` `weirkeeper-policy` | always: the installation policy |
@@ -580,7 +580,7 @@ and keeps its old schema while an `Established` wait still passes.
 
 ## Uninstall
 
-`helm uninstall logweir -n logweir-system` leaves the thirteen CRDs (`kubectl
+`helm uninstall logweir -n logweir-system` leaves the fourteen CRDs (`kubectl
 delete crd <name>` removes each with every object under it), the namespace,
 `TrustRoster`, the retained signing Secrets, `logweir-signing-trust`,
 `logweir-identity-singleton` and your RoleBindings. Keep the identity objects
