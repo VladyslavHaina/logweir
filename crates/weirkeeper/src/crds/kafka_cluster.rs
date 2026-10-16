@@ -306,7 +306,12 @@ pub const CLIENT_CERTIFICATE_IFF_MTLS_MESSAGE: &str =
 
 /// The connection contract's CEL rules, as `(schema path under .spec, rule,
 /// message)`. Injected by `crds::render_all`, the only caller.
-pub const CONNECTION_RULES: [(&[&str], &str, &str); 5] = [
+pub const CONNECTION_RULES: [(&[&str], &str, &str); 6] = [
+    (
+        &["schemaRegistry"],
+        REGISTRY_USERNAME_IFF_SECRET_RULE,
+        REGISTRY_USERNAME_IFF_SECRET_MESSAGE,
+    ),
     (
         &["auth"],
         TLS_CA_REQUIRES_TLS_RULE,
@@ -382,10 +387,71 @@ pub struct KafkaClusterSpec {
     /// is listed, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strimzi: Option<StrimziRef>,
+    /// The cluster's Confluent-compatible Schema
+    /// Registry. A backup of this (source) connection snapshots it beside the
+    /// receipt; a restore into this (target) connection imports, before any
+    /// topic is created, the schemas the restored records reference, keeping
+    /// their IDs. Absent: no registry is contacted. Immutable with the rest of
+    /// `spec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistryBlock>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub unrecognized_fields: UnrecognizedFields,
 }
+
+/// The data key a registry password is read from when
+/// `schemaRegistry.secretRef.passwordKey` is absent.
+pub const DEFAULT_REGISTRY_PASSWORD_KEY: &str = "registry-password";
+
+/// `schemaRegistry.url`: `http://` or `https://`, a host with no userinfo,
+/// an optional path, no query, fragment or whitespace.
+pub const REGISTRY_URL_PATTERN: &str = r"^https?://[^\s/@?#]+(/[^\s?#]*)?$";
+
+/// A connection's Schema Registry.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaRegistryBlock {
+    /// The registry's base URL. TLS uses the connection's `auth.tlsCa`, when
+    /// set, added to the system roots.
+    #[schemars(regex(path = "REGISTRY_URL_PATTERN"), length(min = 1, max = 2048))]
+    pub url: String,
+    /// The HTTP basic-auth username; set exactly when `secretRef` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 256))]
+    pub username: Option<String>,
+    /// The Secret in this namespace holding the basic-auth password, and its
+    /// key (default `registry-password`). It carries the connection's
+    /// `logweir-binding`, like every Secret the connection names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<RegistrySecretRef>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unrecognized_fields: UnrecognizedFields,
+}
+
+/// The Secret a registry password is in.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySecretRef {
+    /// The Secret's `metadata.name`, in this namespace.
+    #[schemars(regex(path = "OBJECT_NAME_PATTERN"), length(min = 1, max = 253))]
+    pub name: String,
+    /// The data key. Absent means `registry-password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(path = "DATA_KEY_PATTERN"), length(min = 1, max = 253))]
+    pub password_key: Option<String>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unrecognized_fields: UnrecognizedFields,
+}
+
+/// **PROD-03.1.** The CEL rule on `spec.schemaRegistry`: a username exactly
+/// when a password Secret is named.
+pub const REGISTRY_USERNAME_IFF_SECRET_RULE: &str = "has(self.username) == has(self.secretRef)";
+/// The message paired with [`REGISTRY_USERNAME_IFF_SECRET_RULE`].
+pub const REGISTRY_USERNAME_IFF_SECRET_MESSAGE: &str =
+    "schemaRegistry.username and schemaRegistry.secretRef are set together (HTTP basic auth) or not at all";
 
 /// Where a Strimzi cluster's `KafkaTopic` resources live.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

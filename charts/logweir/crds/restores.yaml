@@ -837,6 +837,29 @@ spec:
                     description: '`pass`, `partial` or `fail`. `partial` is a selection whose evidence was inconclusive — something in the sample was not examined — and is NOT a pass.'
                     nullable: true
                     type: string
+                  schemas:
+                    description: 'What the signed scorecard''s `target.schemas` says: how many subject-versions the run imported into the target registry with their source IDs, how many were already there, or why none were. ABSENT: the scorecard carries no block (no registry on either side).'
+                    nullable: true
+                    properties:
+                      alreadyPresent:
+                        description: '`target.schemas.already_present`.'
+                        format: uint64
+                        minimum: 0
+                        type: integer
+                      imported:
+                        description: '`target.schemas.imported_count`.'
+                        format: uint64
+                        minimum: 0
+                        type: integer
+                      notImported:
+                        description: '`target.schemas.not_imported`: `noTargetRegistry` or `noSnapshot`.'
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    required:
+                    - alreadyPresent
+                    - imported
+                    type: object
                   selection:
                     description: |-
                       The signed `source.selection` (scorecard format 1.7.0 for a window start, 2.0.0 for a partition subset): this restore restored a SELECTION — a window from a stated start, or only the listed partitions of a narrowed topic — not every record of every partition of every restored topic from the archive's floor. Every verdict above (`result`, `coverage`, `complete`) is the selection's.

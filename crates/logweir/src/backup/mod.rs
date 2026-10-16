@@ -44,6 +44,7 @@ pub mod document_budget;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 pub mod schema_dependency;
+pub mod schema_registry;
 pub mod topic_ids;
 
 use crate::exit::ExitCode;
@@ -210,6 +211,12 @@ pub struct BackupOutcome {
     /// binds (`<run_id>.consumer-positions.json`, beside the receipt), put
     /// before the receipt is: `Some` exactly when `consumer_positions` is.
     pub consumer_positions_document: Option<Vec<u8>>,
+    /// The source registry's capture (PROD-03.1), or `None` when the plan
+    /// names no registry: the receipt's 1.9.0 `schema_registry` block.
+    pub schema_registry: Option<logweir_core::schema_registry::ReceiptSchemaRegistry>,
+    /// The exact snapshot bytes the block names, put before the receipt:
+    /// `Some` exactly when the block says captured.
+    pub schema_registry_snapshot: Option<Vec<u8>>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -734,6 +741,7 @@ fn execute_with_signer(
         owner_detection: &inputs.owner_detection,
         selected_groups: &selected,
         signing: crate::catalog::signing_of(&signer.verifying_key()),
+        schema_registry: inputs.spec.source.schema_registry.is_some(),
     }) {
         return Err(logweir_core::guard::GuardRefusal(format!(
             "{why}. NO backup was taken: this is refused before the engine is spawned and \
@@ -839,6 +847,33 @@ fn execute_with_signer(
         Some(b) => (Some(b.block), Some(b.document_bytes)),
         None => (None, None),
     };
+    // PROD-03.1: the source registry, after the engine (so every ID a
+    // captured record carries was registered before the snapshot), written
+    // create-only beside the receipt before the receipt is signed. Never a
+    // failed backup: a capture or a put that fails is the block's reason.
+    let schema_registry = inputs.spec.source.schema_registry.as_ref().map(|registry| {
+        let mut captured =
+            schema_registry::snapshot(registry, &backup_id, run_id, &ran.schema_dependency);
+        if let (Some(bytes), Some(key)) = (&captured.bytes, &captured.block.snapshot_key) {
+            if let Err(e) = evidence.put_create_only(key, bytes) {
+                tracing::warn!(
+                    key = %key,
+                    error = %e,
+                    "the Schema Registry snapshot could not be written; the receipt records the \
+                     registry as not captured"
+                );
+                captured = schema_registry::Captured {
+                    block: logweir_core::schema_registry::ReceiptSchemaRegistry::not_captured(
+                        &logweir_core::schema_registry::CaptureFailure::Incomplete(
+                            "the snapshot could not be written".to_string(),
+                        ),
+                    ),
+                    bytes: None,
+                };
+            }
+        }
+        captured
+    });
     let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
     let topic_configuration =
         config_coverage::model(&observed, &ran.manifest_layouts, &factors, &inputs.owners);
@@ -872,6 +907,8 @@ fn execute_with_signer(
         generations,
         consumer_positions,
         consumer_positions_document,
+        schema_registry_snapshot: schema_registry.as_ref().and_then(|c| c.bytes.clone()),
+        schema_registry: schema_registry.map(|c| c.block),
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

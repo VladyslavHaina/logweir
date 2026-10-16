@@ -370,3 +370,190 @@ pub fn blocked(id: CheckId, why: &str, now: DateTime<Utc>) -> CheckOutcome {
     .with_message(why)
     .with_remedy(remedy_for(CheckCode::BlockedByPrerequisite))
 }
+
+/// The connection's Schema Registry, dialled with its credential: `Ok` with a
+/// client that answered `GET /subjects`, or the row's state, code and message.
+fn registry_answers(
+    connection: &ConnectionPlan,
+) -> Result<
+    (
+        crate::backup::schema_registry::RegistryClient,
+        &logweir_core::check_contract::RegistryPlan,
+    ),
+    (CheckState, CheckCode, String),
+> {
+    use logweir_core::schema_registry::Rest as _;
+    let Some(plan) = connection.schema_registry.as_ref() else {
+        return Err((
+            CheckState::Unknown,
+            CheckCode::RegistryUnreachable,
+            "this connection names no Schema Registry".to_string(),
+        ));
+    };
+    let side = if plan
+        .password_env
+        .as_deref()
+        .is_some_and(|v| v.starts_with("LOGWEIR_TARGET_"))
+    {
+        crate::tls_ca::Side::Target
+    } else {
+        crate::tls_ca::Side::Source
+    };
+    let password = crate::credential_binding::registry_password(side).map_err(|e| {
+        (
+            CheckState::NotReady,
+            CheckCode::CredentialBindingMismatch,
+            e.to_string(),
+        )
+    })?;
+    let spec = logweir_core::spec::SchemaRegistrySpec {
+        url: plan.url.clone(),
+        username: plan.username.clone(),
+    };
+    let mut client = crate::backup::schema_registry::RegistryClient::new(
+        &spec,
+        password.as_deref(),
+        connection.ca_file.as_deref(),
+    )
+    .map_err(|e| (CheckState::Unknown, CheckCode::RegistryUnreachable, e))?;
+    match client.call("GET", "/subjects", None) {
+        Ok((200, _)) => Ok((client, plan)),
+        Ok((status @ (401 | 403), _)) => Err((
+            CheckState::NotReady,
+            CheckCode::RegistryUnauthorized,
+            format!(
+                "the Schema Registry at {} refused this connection's registry credential \
+                 (GET /subjects answered {status})",
+                plan.url
+            ),
+        )),
+        Ok((status, _)) => Err((
+            CheckState::Unknown,
+            CheckCode::RegistryUnreachable,
+            format!(
+                "the Schema Registry at {} answered GET /subjects with {status}",
+                plan.url
+            ),
+        )),
+        Err(e) => Err((
+            CheckState::Unknown,
+            CheckCode::RegistryUnreachable,
+            format!("the Schema Registry at {} did not answer: {e}", plan.url),
+        )),
+    }
+}
+
+/// `registry.reachable` (PROD-03.1): the connection's Schema Registry answers
+/// with its credential. Advisory: a backup whose registry does not answer
+/// still runs, and its receipt says the registry was not captured.
+#[must_use]
+pub fn registry_reachable(connection: &ConnectionPlan, now: DateTime<Utc>) -> CheckOutcome {
+    let id = CheckId::RegistryReachable;
+    match registry_answers(connection) {
+        Ok((_, plan)) => ready(id, CheckCode::RegistryAnswered, now).with_message(&format!(
+            "the Schema Registry at {} answered with this connection's registry credential",
+            plan.url
+        )),
+        Err((state, code, message)) => catalogue::outcome(id, state, code, now)
+            .with_message(&message)
+            .with_remedy(remedy_for(code)),
+    }
+}
+
+/// `target.schemas` (PROD-03.2): the target registry answers, the bound
+/// point's snapshot verifies, and the subjects holding the IDs its receipt
+/// lists for the selected topics, with their references, can be imported
+/// keeping their IDs or are already there. Read only: nothing is written. The
+/// run recomputes the set from every record it restores.
+#[must_use]
+pub fn target_schemas(
+    target: &ConnectionPlan,
+    topics: &[String],
+    receipt: Option<&logweir_core::backup_receipt::BackupReceipt>,
+    snapshot: Option<&Result<logweir_core::schema_registry::Snapshot, String>>,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    use logweir_core::schema_registry as sr;
+    let id = CheckId::TargetSchemas;
+    let refuse = |state: CheckState, code: CheckCode, message: String| {
+        catalogue::outcome(id, state, code, now)
+            .with_message(&message)
+            .with_remedy(remedy_for(code))
+    };
+    let (mut client, plan) = match registry_answers(target) {
+        Ok(ok) => ok,
+        Err((state, code, message)) => return refuse(state, code, message),
+    };
+    let Some(snapshot) = snapshot else {
+        return ready(id, CheckCode::SchemasImportable, now).with_message(&format!(
+            "the target registry at {} answers; the recovery point carries no captured \
+             registry snapshot, so the run imports nothing and its scorecard says so (noSnapshot)",
+            plan.url
+        ));
+    };
+    let snapshot = match snapshot {
+        Ok(s) => s,
+        Err(e) => {
+            return refuse(
+                CheckState::NotReady,
+                CheckCode::SchemaSnapshotInvalid,
+                e.clone(),
+            )
+        }
+    };
+    let needed: std::collections::BTreeSet<u32> = receipt
+        .and_then(|r| r.schema_dependency.as_ref())
+        .map(|block| {
+            topics
+                .iter()
+                .filter_map(|t| block.get(t))
+                .flat_map(|e| logweir_core::schema_dependency::dependent_ids(e).0)
+                .collect::<std::collections::BTreeSet<u32>>()
+        })
+        .unwrap_or_default()
+        .intersection(&snapshot.ids())
+        .copied()
+        .collect();
+    let entries = sr::closure(snapshot, &needed);
+    match sr::classify(&mut client, &entries) {
+        Ok(classes) => {
+            let import = classes.iter().filter(|c| **c == sr::Class::Import).count();
+            ready(id, CheckCode::SchemasImportable, now).with_message(&format!(
+                "the target registry at {} answers; the IDs the point's receipt lists for the \
+                 selected topics need {} subject-version(s): {import} will be imported with \
+                 their source IDs, {} are already there, none conflict. The run recomputes the \
+                 set from every record it restores",
+                plan.url,
+                entries.len(),
+                entries.len() - import
+            ))
+        }
+        Err(e @ sr::ImportRefusal::Conflict { .. }) => refuse(
+            CheckState::NotReady,
+            CheckCode::SchemaConflict,
+            e.to_string(),
+        ),
+        Err(e) => refuse(
+            CheckState::Unknown,
+            CheckCode::RegistryUnreachable,
+            e.to_string(),
+        ),
+    }
+}
+
+/// A capability row when the Kafka connection did not authenticate: blocked,
+/// except `registry.reachable`, which asks the registry and is answered
+/// anyway.
+#[must_use]
+pub fn blocked_unless_registry(
+    id: CheckId,
+    connection: &ConnectionPlan,
+    why: &str,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    if id == CheckId::RegistryReachable {
+        registry_reachable(connection, now)
+    } else {
+        blocked(id, why, now)
+    }
+}

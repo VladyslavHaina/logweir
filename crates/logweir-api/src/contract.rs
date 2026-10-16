@@ -326,6 +326,63 @@ pub struct CreateConnectionRequest {
     /// The marker topic that proves a scratch target.
     #[serde(default)]
     pub marker_topic: Option<String>,
+    /// **PROD-03.1.** The cluster's Schema Registry: captured by a backup of
+    /// this connection, written by a restore into it. The password, when
+    /// given, goes into the connection's own Secret under
+    /// `registry-password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistryRequest>,
+}
+
+/// A new connection's Schema Registry. `Debug` and `Serialize` never carry the
+/// password.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchemaRegistryRequest {
+    /// `http://` or `https://`, no userinfo, query or fragment.
+    pub url: String,
+    /// The basic-auth username; given exactly when `password` is.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The basic-auth password, entered once.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for SchemaRegistryRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchemaRegistryRequest")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &write_only(self.password.as_ref()))
+            .finish()
+    }
+}
+
+impl Serialize for SchemaRegistryRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("SchemaRegistryRequest", 3)?;
+        out.serialize_field("url", &self.url)?;
+        out.serialize_field("username", &self.username)?;
+        out.serialize_field("password", &write_only(self.password.as_ref()))?;
+        out.end()
+    }
+}
+
+/// A stored connection's Schema Registry: the URL, the username and the
+/// Secret's NAME. Never the password.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaRegistryView {
+    /// The registry URL.
+    pub url: String,
+    /// The basic-auth username.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The Secret holding the password, by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<NameRef>,
 }
 
 /// Where a stored connection's CA certificate is — a reference, never the
@@ -432,6 +489,9 @@ pub struct Connection {
     /// bounded label scan, and a page of connections would be one per row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_test: Option<LastTestView>,
+    /// The connection's Schema Registry (PROD-03.1), when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistryView>,
 }
 
 // SCHEDULES (BackupSchedule).
@@ -1633,6 +1693,25 @@ pub struct RestoreCoverageView {
     /// a scorecard not read), never bound and never unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub positions_mapping: Option<PositionsMappingView>,
+    /// **PROD-03.2.** The schemas the run imported into the target registry
+    /// keeping their IDs, how many were there already, or why none were:
+    /// copied from `status.integrity.schemas`. ABSENT: no registry on either
+    /// side, or not recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<RestoreSchemasView>,
+}
+
+/// `Restore.coverage.schemas` (PROD-03.2).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSchemasView {
+    /// Subject-versions imported with their source IDs.
+    pub imported: u64,
+    /// Subject-versions the target already held.
+    pub already_present: u64,
+    /// `noTargetRegistry` or `noSnapshot` when nothing was imported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_imported: Option<String>,
 }
 
 /// **DUI-50.** `Restore.coverage.positionsMapping`: what the signed scorecard

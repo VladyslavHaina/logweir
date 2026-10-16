@@ -510,7 +510,7 @@ mod tests {
         // The connection's canonical form has no `kind=` line, so no digest of
         // this module can equal a connection's for the same UID.
         let auth = crate::spec::AuthSpec::default();
-        let kafka = crate::connection::credential_binding("uid-1", &[], &auth, None);
+        let kafka = crate::connection::credential_binding("uid-1", &[], &auth, None, None);
         assert_ne!(kafka, destination_binding("uid-1", &s3("b", "", None)));
     }
 

@@ -5127,6 +5127,7 @@ fn fixture_connection_plan() -> logweir_core::check_contract::ConnectionPlan {
         client_cert_file: None,
         client_key_file: None,
         principal: "User:backup".to_string(),
+        schema_registry: None,
     }
 }
 
@@ -5214,7 +5215,15 @@ fn the_expected_rows_include_the_capability_rows_a_plan_lists() {
         unreachable!()
     };
     let without = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
-    r.capability_checks = capability_checks_for(CheckOperation::Backup).to_vec();
+    // What this controller lists for a connection with no Schema Registry: the
+    // two registry rows are listed only beside one (PROD-03.1/03.2).
+    let no_registry = |ids: &[CheckId]| -> Vec<CheckId> {
+        ids.iter()
+            .copied()
+            .filter(|id| !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas))
+            .collect()
+    };
+    r.capability_checks = no_registry(capability_checks_for(CheckOperation::Backup));
     let with = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
     assert_eq!(
         with.difference(&without).copied().collect::<Vec<_>>(),
@@ -5242,7 +5251,7 @@ fn the_expected_rows_include_the_capability_rows_a_plan_lists() {
     };
     let without = job_rows(&CheckRequest::RestorePreflight(r.clone()), true);
     assert!(!without.contains(&CheckId::TargetEngineProtocol));
-    r.capability_checks = capability_checks_for(CheckOperation::Restore).to_vec();
+    r.capability_checks = no_registry(capability_checks_for(CheckOperation::Restore));
     let with = job_rows(&CheckRequest::RestorePreflight(r), true);
     assert_eq!(
         with.difference(&without).copied().collect::<Vec<_>>(),
@@ -5323,10 +5332,11 @@ fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
     // The pure function, for the operations with no engine to ask about.
     assert_eq!(
         pf::capability_checks(CheckOperation::Restore, &[]),
-        vec![CheckId::TargetEngineProtocol]
+        vec![CheckId::TargetEngineProtocol, CheckId::TargetSchemas]
     );
-    assert!(
-        pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]).is_empty()
+    assert_eq!(
+        pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]),
+        vec![CheckId::TargetSchemas]
     );
     // FX-46: a connection test asks what the endpoint could be used for.
     assert_eq!(
@@ -5334,7 +5344,8 @@ fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
         vec![
             CheckId::ConnectionEngineProtocol,
             CheckId::TargetEngineProtocol,
-            CheckId::ConnectionGroupTypes
+            CheckId::ConnectionGroupTypes,
+            CheckId::RegistryReachable,
         ]
     );
     assert!(pf::capability_checks(CheckOperation::DestinationAccess, &[]).is_empty());
@@ -5544,11 +5555,17 @@ fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
     assert_eq!(r.connection.principal, "User:backup");
     // FX-46: the test asks what the endpoint could be used for, and the
     // rows the result must hold include them.
+    // The registry row only beside a `schemaRegistry`, which this fixture
+    // connection does not name.
     assert_eq!(
         r.capability_checks,
         logweir_core::check_contract::capability_checks_for(
             logweir_core::check_contract::CheckOperation::SourceConnection
         )
+        .iter()
+        .copied()
+        .filter(|id| *id != CheckId::RegistryReachable)
+        .collect::<Vec<_>>()
     );
     let expected = job_rows(&shape.plan.request, false);
     for id in &r.capability_checks {

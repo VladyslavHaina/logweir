@@ -177,6 +177,8 @@ ones listed. Each names what is missing and what to do instead.
 | `target.engineProtocol` | restore | The same for what the engine sends to write (Metadata v9, Produce v8, and the SASL pair). | `notReady`, **blocking**, `EngineProtocolUnsupported`. | Restore the archive into a cluster that serves them; an endpoint that cannot be a target can still be a source. |
 | `connection.topicConfigsReadable` | backup | Does DescribeConfigs answer for every selected topic, as this principal? | `notReady`, advisory, `TopicConfigsNotReadable`, naming the topics. The backup runs. | Grant DescribeConfigs on the topic, or accept a point whose configuration is `captureDenied` and whose timestamp type is not recorded. |
 | `connection.groupTypes` | backup | Does the endpoint's group listing name each group's type (ListGroups v5)? | `notReady`, advisory, `GroupTypesNotListed`. The backup runs. | Back up from an endpoint that serves ListGroups v5, or select no group and export positions with the endpoint's own tooling. |
+| `registry.reachable` | backup, connection test (only for a connection with `spec.schemaRegistry`) | Does the connection's Schema Registry answer `GET /subjects` with its credential? | `notReady`, advisory, `RegistryUnauthorized`; `unknown`, `RegistryUnreachable`. The backup runs and its receipt says the registry was not captured. | Fix the URL, the egress or the credential (a new connection). |
+| `target.schemas` | restore (only for a target connection with `spec.schemaRegistry`) | Can the schemas the point's records reference be put in the target registry keeping their IDs, or are they there already? | `notReady`, **blocking**, `SchemaConflict` or `SchemaSnapshotInvalid`. | Restore into a registry that holds none of these schemas, or the source's own; or into a connection without a registry (nothing is imported). |
 
 An answer that could not be read is `unknown` (`ApiVersionsNotObserved`), never
 `ready`. The served ranges are read from each broker's own ApiVersions answer
@@ -583,6 +585,20 @@ A backup of it is whole: exit 0, a receipt both readers verify, the records,
 the topic IDs and the topic's configuration with the entries Redpanda reports.
 SCRAM-SHA-256 and SCRAM-SHA-512 against Redpanda's own SCRAM both authenticate
 for a backup, and a wrong password or the other mechanism's user is refused.
+
+## Schema Registries: which keep IDs
+
+A restore imports schemas keeping their source IDs, so the target registry must
+support `IMPORT` mode (`docs/to-do/decisions/OD-23-core.md` §1.1, measured
+2026-10-16). Capture uses only the portable read calls, which every registry
+below answers alike.
+
+| Registry | Capture (backup source) | Import keeping IDs (restore target) | Evidence |
+|---|---|---|---|
+| Confluent Schema Registry 8.0.0 | yes | yes | the design prototype only (its image is not used in this repository) |
+| Redpanda v26.2.4 Schema Registry | yes | yes | `e2e/tests/schema_registry.rs::schemas_are_captured_and_imported_keeping_their_ids` (compose `registry-target`) |
+| Karapace 6.2.3 | yes | **refused**, `SchemaRegistryCannotKeepIds` (`PUT /mode` answers 405) | the same row, SR-1 and SR-7 |
+| Apicurio 3.0.9 (Confluent API) | yes | **refused**, `SchemaRegistryCannotKeepIds` (`GET /mode` does not answer `IMPORT`) | the design prototype only |
 
 ## Object stores: conditional create is required
 

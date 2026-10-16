@@ -60,6 +60,11 @@ ureq.workspace = true
 # in the graph (`logweir-store`, and `weirkeeper` with the same `signal`
 # feature); no package is added.
 tokio = { workspace = true, features = ["signal"] }
+# PROD-03.1: the Schema Registry client trusts the webpki roots plus the
+# connection's `auth.tlsCa`, so it names the root list ureq's `tls` feature
+# already links. No package is added: webpki-roots 0.26.11 is in the graph
+# through ureq 2.12.1, so THIRD_PARTY_NOTICES.md and `cargo deny` are unchanged.
+webpki-roots = "0.26"
 
 [dev-dependencies]
 insta.workspace = true

@@ -88,6 +88,7 @@ fn connection() -> ConnectionPlan {
         client_cert_file: None,
         client_key_file: None,
         principal: "User:ANONYMOUS".to_string(),
+        schema_registry: None,
     }
 }
 
@@ -3037,12 +3038,23 @@ fn source_connection_plan_with_capabilities() -> CheckPlan {
     plan_of(CheckRequest::SourceConnection(
         logweir_core::check_contract::SourceConnectionRequest {
             connection: connection(),
-            capability_checks: logweir_core::check_contract::capability_checks_for(
-                logweir_core::check_contract::CheckOperation::SourceConnection,
-            )
-            .to_vec(),
+            capability_checks: without_registry_rows(
+                logweir_core::check_contract::capability_checks_for(
+                    logweir_core::check_contract::CheckOperation::SourceConnection,
+                ),
+            ),
         },
     ))
+}
+
+/// What a controller lists for a connection that names no Schema Registry:
+/// every capability row but the two registry rows (PROD-03.1/03.2), which are
+/// listed only beside a `schemaRegistry`.
+fn without_registry_rows(ids: &[CheckId]) -> Vec<CheckId> {
+    ids.iter()
+        .copied()
+        .filter(|id| !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas))
+        .collect()
 }
 
 /// **FX-46: a connection test says what the endpoint can be used for.** On
@@ -3685,10 +3697,9 @@ const REDPANDA_26_2: [(i16, i16, i16); 8] = [
 ];
 
 fn backup_capabilities() -> Vec<CheckId> {
-    logweir_core::check_contract::capability_checks_for(
+    without_registry_rows(logweir_core::check_contract::capability_checks_for(
         logweir_core::check_contract::CheckOperation::Backup,
-    )
-    .to_vec()
+    ))
 }
 
 /// `readiness_plan`, listing the capability rows `listed`.
@@ -7756,6 +7767,9 @@ fn every_failing_code_the_runner_emits_has_a_remedy() {
         CheckCode::EngineProtocolSupported,
         CheckCode::TopicConfigsReadable,
         CheckCode::GroupTypesListed,
+        // The registry rows' ready codes (PROD-03.1/03.2).
+        CheckCode::RegistryAnswered,
+        CheckCode::SchemasImportable,
         // `switchoverReadiness`'s ready codes (PROD-04.2 §3.8).
         CheckCode::RestoreEvidenceVerified,
         CheckCode::TargetIsTheRestores,
@@ -8163,6 +8177,7 @@ mod live {
             client_cert_file: None,
             client_key_file: None,
             principal: format!("User:{SCRAM_USER}"),
+            schema_registry: None,
         }
     }
 
@@ -9861,6 +9876,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         schema_dependency: None,
         generations: None,
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 

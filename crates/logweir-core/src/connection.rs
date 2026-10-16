@@ -287,6 +287,21 @@ pub const TARGET_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_TARGET_CREDENTIAL_BINDI
 pub const TARGET_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
     "LOGWEIR_TARGET_CREDENTIAL_BINDING_EXPECTED";
 
+/// **PROD-03.1.** The SOURCE side's Schema Registry password (an optional
+/// `secretKeyRef` from the connection's registry Secret): the backup runner
+/// and the connection test read it.
+pub const SOURCE_REGISTRY_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_REGISTRY_PASSWORD";
+/// **PROD-03.2.** The TARGET side's twin: the restore runner reads it.
+pub const TARGET_REGISTRY_PASSWORD_ENV: &str = "LOGWEIR_TARGET_REGISTRY_PASSWORD";
+/// The SOURCE side's binding as the REGISTRY Secret carries it (optional),
+/// compared with [`SOURCE_CREDENTIAL_BINDING_EXPECTED_ENV`] before the
+/// registry password is presented.
+pub const SOURCE_REGISTRY_CREDENTIAL_BINDING_ENV: &str =
+    "LOGWEIR_SOURCE_REGISTRY_CREDENTIAL_BINDING";
+/// The TARGET side's twin of [`SOURCE_REGISTRY_CREDENTIAL_BINDING_ENV`].
+pub const TARGET_REGISTRY_CREDENTIAL_BINDING_ENV: &str =
+    "LOGWEIR_TARGET_REGISTRY_CREDENTIAL_BINDING";
+
 /// The binding of a credential to ONE connection and its endpoint:
 /// `v1:<uid>:sha256:<hex>`, where the digest covers the endpoint fields named
 /// in this section's header. A pure function of public values, so the console
@@ -295,16 +310,23 @@ pub const TARGET_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
 /// `KafkaCluster.status.credentialBinding`) compute one string.
 ///
 /// `ca` is the CA REFERENCE as `<kind>/<name>/<key>`, or `None`.
+///
+/// `registry` is the connection's Schema Registry (PROD-03.1) as
+/// `(url, username)`: when set, `registry=<url>` and `registryUsername=<u>`
+/// are appended, so a Secret bound to the connection is bound to its registry
+/// endpoint too; when absent the binding is the one every earlier release
+/// computed, byte for byte.
 #[must_use]
 pub fn credential_binding(
     uid: &str,
     bootstrap_servers: &[String],
     auth: &crate::spec::AuthSpec,
     ca: Option<&str>,
+    registry: Option<(&str, Option<&str>)>,
 ) -> String {
     let servers: std::collections::BTreeSet<&str> =
         bootstrap_servers.iter().map(|s| s.trim()).collect();
-    let canonical = format!(
+    let mut canonical = format!(
         "logweir-credential-binding/v1\nuid={uid}\nbootstrap={}\nmode={}\nusername={}\ntls={}\nca={}\n",
         servers.into_iter().collect::<Vec<_>>().join(","),
         auth.mode_str(),
@@ -312,6 +334,12 @@ pub fn credential_binding(
         auth.tls(),
         ca.unwrap_or("none"),
     );
+    if let Some((url, username)) = registry {
+        canonical.push_str(&format!(
+            "registry={url}\nregistryUsername={}\n",
+            username.unwrap_or_default()
+        ));
+    }
     let digest = crate::ids::sha256_prefixed(canonical.as_bytes());
     format!("v1:{uid}:{digest}")
 }
@@ -338,6 +366,8 @@ impl std::fmt::Display for CredentialBindingRefusal {
             || self.binding_env.starts_with("LOGWEIR_EVIDENCE_")
         {
             Some(("destination or archive location", "object store"))
+        } else if self.binding_env.contains("_REGISTRY_") {
+            Some(("connection's Schema Registry password", "Schema Registry"))
         } else {
             None
         };
@@ -451,22 +481,29 @@ mod tests {
             username: "u".into(),
             tls: true,
         };
-        let base = credential_binding("uid-1", &servers, &auth, Some("configMap/ca/ca.crt"));
+        let base = credential_binding("uid-1", &servers, &auth, Some("configMap/ca/ca.crt"), None);
         assert!(base.starts_with("v1:uid-1:sha256:"), "{base}");
         // Order and whitespace of the bootstrap list are not a different endpoint.
         let reordered = vec![" b2:9093".to_string(), "b1:9093".to_string()];
         assert_eq!(
-            credential_binding("uid-1", &reordered, &auth, Some("configMap/ca/ca.crt")),
+            credential_binding(
+                "uid-1",
+                &reordered,
+                &auth,
+                Some("configMap/ca/ca.crt"),
+                None
+            ),
             base
         );
         // Every field moves it.
         for other in [
-            credential_binding("uid-2", &servers, &auth, Some("configMap/ca/ca.crt")),
+            credential_binding("uid-2", &servers, &auth, Some("configMap/ca/ca.crt"), None),
             credential_binding(
                 "uid-1",
                 &["evil:9093".to_string()],
                 &auth,
                 Some("configMap/ca/ca.crt"),
+                None,
             ),
             credential_binding(
                 "uid-1",
@@ -476,6 +513,7 @@ mod tests {
                     tls: true,
                 },
                 Some("configMap/ca/ca.crt"),
+                None,
             ),
             credential_binding(
                 "uid-1",
@@ -485,9 +523,31 @@ mod tests {
                     tls: true,
                 },
                 Some("configMap/ca/ca.crt"),
+                None,
             ),
-            credential_binding("uid-1", &servers, &auth, None),
-            credential_binding("uid-1", &servers, &auth, Some("configMap/evil/ca.crt")),
+            credential_binding("uid-1", &servers, &auth, None, None),
+            credential_binding(
+                "uid-1",
+                &servers,
+                &auth,
+                Some("configMap/evil/ca.crt"),
+                None,
+            ),
+            // PROD-03.1: the registry endpoint and its username move it too.
+            credential_binding(
+                "uid-1",
+                &servers,
+                &auth,
+                Some("configMap/ca/ca.crt"),
+                Some(("https://sr:8081", None)),
+            ),
+            credential_binding(
+                "uid-1",
+                &servers,
+                &auth,
+                Some("configMap/ca/ca.crt"),
+                Some(("https://sr:8081", Some("u"))),
+            ),
         ] {
             assert_ne!(other, base);
         }
@@ -499,8 +559,8 @@ mod tests {
             tls,
         };
         assert_ne!(
-            credential_binding("uid-1", &servers, &scram(true), None),
-            credential_binding("uid-1", &servers, &scram(false), None),
+            credential_binding("uid-1", &servers, &scram(true), None, None),
+            credential_binding("uid-1", &servers, &scram(false), None, None),
             "the binding ignores the TLS switch"
         );
     }

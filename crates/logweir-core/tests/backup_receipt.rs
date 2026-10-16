@@ -11,7 +11,7 @@
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
 //! closes over them, while
-//! `validate_invariants_has_exactly_forty_seven_return_err_statements` counts
+//! `validate_invariants_has_exactly_fifty_one_return_err_statements` counts
 //! the function's statements in its source text, so neither number can go stale
 //! under cover of the other.
 //!
@@ -91,6 +91,7 @@ fn pristine() -> BackupReceipt {
         generations: None,
         consumer_positions: None,
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 
@@ -103,7 +104,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_forty_seven_return_err_statements` pins the
+/// `validate_invariants_has_exactly_fifty_one_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -380,8 +381,8 @@ fn the_written_version_follows_the_auth_mode() {
     );
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly forty-seven refusing
-/// statements (arm 5 is three statements, so forty-five arms make forty-seven).
+/// **THE TOTAL.** `validate_invariants` has exactly fifty-one refusing
+/// statements (arm 5 is three statements, so forty-nine arms make fifty-one).
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -394,7 +395,7 @@ fn the_written_version_follows_the_auth_mode() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_forty_seven_return_err_statements() {
+fn validate_invariants_has_exactly_fifty_one_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -415,9 +416,9 @@ fn validate_invariants_has_exactly_forty_seven_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 47,
+        total, 51,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 47. Every one of them needs a per-arm test in this file with \
+         statement(s), not 51. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -442,7 +443,7 @@ fn validate_invariants_has_exactly_forty_seven_return_err_statements() {
 /// with its exact message, and a pristine receipt accepted. Arm 5 is
 /// `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the function's
 /// total is
-/// `validate_invariants_has_exactly_forty_seven_return_err_statements`.
+/// `validate_invariants_has_exactly_fifty_one_return_err_statements`.
 #[test]
 fn backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message() {
     let cases = arm_cases();
@@ -3780,4 +3781,81 @@ fn a_receipt_without_source_watermarks_round_trips_byte_for_byte() {
         bytes
     );
     assert!(back.source_watermarks.is_none());
+}
+
+/// **PROD-03.1, arms 46 to 49**: the `schema_registry` block, each arm with its
+/// exact message, and a captured and an uncaptured block accepted.
+#[test]
+fn the_schema_registry_arms_refuse_each_contradiction_with_its_exact_message() {
+    use logweir_core::schema_registry::{CaptureFailure, ReceiptSchemaRegistry};
+    let with = |block: ReceiptSchemaRegistry| {
+        let mut r = pristine();
+        r.format_version = "1.9.0".to_string();
+        r.schema_registry = Some(block);
+        r
+    };
+    let captured = || ReceiptSchemaRegistry {
+        captured: true,
+        reason: None,
+        snapshot_key: Some(logweir_core::schema_registry::snapshot_key(
+            &pristine().backup_id,
+            &pristine().run_id,
+        )),
+        snapshot_sha256: Some(format!("sha256:{}", "a".repeat(64))),
+        subjects: 5,
+        versions: 6,
+        unresolved_references: vec!["customer@1".to_string()],
+        ids_not_in_snapshot: vec![3, 9],
+    };
+    with(captured()).validate_invariants().unwrap();
+    with(ReceiptSchemaRegistry::not_captured(
+        &CaptureFailure::Unauthorized,
+    ))
+    .validate_invariants()
+    .unwrap();
+
+    let mut arm46 = with(captured());
+    arm46.format_version = "1.8.0".to_string();
+    let mut arm47 = captured();
+    arm47.reason = Some("registryUnreachable".to_string());
+    let mut arm47b = ReceiptSchemaRegistry::not_captured(&CaptureFailure::TooLarge);
+    arm47b.reason = Some("somethingElse".to_string());
+    let mut arm48 = captured();
+    arm48.snapshot_key = Some("logweir/backups/other/x.schema-registry.json".to_string());
+    let mut arm48b = ReceiptSchemaRegistry::not_captured(&CaptureFailure::Unauthorized);
+    arm48b.versions = 3;
+    let mut arm48c = captured();
+    arm48c.subjects = 7;
+    let mut arm49 = captured();
+    arm49.ids_not_in_snapshot = vec![9, 3];
+    let mut arm49b = captured();
+    arm49b.ids_not_in_snapshot = vec![0];
+    let mut arm49c = captured();
+    arm49c.unresolved_references = (0..33).map(|i| format!("s{i:02}@1")).collect();
+    let r47 = "schema_registry.reason is present exactly when captured is false, and is \
+               registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete";
+    let r48 = "schema_registry names its snapshot \
+               (logweir/backups/<backup_id>/<run_id>.schema-registry.json and its sha256) and \
+               counts no more subjects than versions exactly when captured, and names and counts \
+               nothing otherwise";
+    let r49 = "schema_registry.unresolved_references and ids_not_in_snapshot list at most 32 \
+               entries each, sorted and distinct, every reference at most 256 characters and \
+               every ID from 1 to 16777215";
+    for (doc, want) in [
+        (
+            arm46,
+            "schema_registry is present but format_version \"1.8.0\" predates it: the field \
+             is defined from 1.9.0",
+        ),
+        (with(arm47), r47),
+        (with(arm47b), r47),
+        (with(arm48), r48),
+        (with(arm48b), r48),
+        (with(arm48c), r48),
+        (with(arm49), r49),
+        (with(arm49b), r49),
+        (with(arm49c), r49),
+    ] {
+        assert_eq!(doc.validate_invariants().unwrap_err(), want);
+    }
 }

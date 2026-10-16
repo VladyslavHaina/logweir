@@ -34,7 +34,11 @@ use crate::scorecard::Scorecard;
 /// frozen 2.3.0 file without the block
 /// (`the_frozen_2_2_0_scorecard_schema_is_the_frozen_2_3_0_one_without_the_topic_configuration`).
 ///
-/// **2.4.0**, this file, adds `integrity.verification.positions_mapping`
+/// **2.5.0**, this file, adds `target.schemas` (PROD-03.2): the frozen 2.4.0
+/// file plus that optional block and its two definitions. The `$id` is built
+/// from [`crate::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS`].
+///
+/// **2.4.0** (frozen) added `integrity.verification.positions_mapping`
 /// (PROD-04.2): 2.3.0's fields plus that optional block and its three
 /// definitions, exactly as the type derives them; the frozen 2.3.0 file is
 /// this file without the block
@@ -57,7 +61,7 @@ pub fn scorecard_schema() -> String {
         .into_root_schema_for::<Scorecard>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+        crate::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
     ));
     fn def<'a>(
         definitions: &'a mut schemars::Map<String, Schema>,
@@ -165,12 +169,19 @@ pub const TOPIC_CONFIGURATION_DEFINITIONS: [&str; 7] = [
 pub fn scorecard_format_1_schema(frozen_predecessor: &str) -> String {
     format_1_minor(
         frozen_predecessor,
-        crate::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING,
-        "Verification",
-        POSITIONS_MAPPING_PROPERTY,
-        &POSITIONS_MAPPING_DEFINITIONS,
+        crate::scorecard::FORMAT_VERSION_WITH_SCHEMAS,
+        "TargetInfo",
+        SCHEMAS_PROPERTY,
+        &SCHEMAS_DEFINITIONS,
     )
 }
+
+/// `TargetInfo`'s property for the `schemas` block (PROD-03.2, 1.13.0 and
+/// 2.5.0).
+pub const SCHEMAS_PROPERTY: &str = "schemas";
+
+/// The two definitions the `target.schemas` block brings with it.
+pub const SCHEMAS_DEFINITIONS: [&str; 2] = ["ScorecardSchemas", "ImportedVersion"];
 
 /// `Verification`'s property for the `positions_mapping` block (PROD-04.2).
 pub const POSITIONS_MAPPING_PROPERTY: &str = "positions_mapping";
@@ -242,10 +253,11 @@ fn format_1_minor(
 /// `diff -u`s it against the CURRENT schema file on every build.
 ///
 /// **The current file is the newest MINOR**:
-/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_SOURCE_WATERMARKS>.json`,
+/// `schemas/logweir-backup-receipt-<FORMAT_VERSION_WITH_SCHEMA_REGISTRY>.json`,
 /// its `$id` built from that ONE constant, so a renumber is the constant and a
 /// file name. The older files (1.0.0 to 1.7.0) are FROZEN beside it and never
-/// regenerated; `tests/schema_drift.rs` holds each to what it published.
+/// regenerated; `tests/schema_drift.rs` holds each to what it published
+/// (1.8.0 frozen since PROD-03.1's 1.9.0).
 pub fn backup_receipt_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
         s.option_nullable = true;
@@ -256,7 +268,7 @@ pub fn backup_receipt_schema() -> String {
         .into_root_schema_for::<BackupReceipt>();
     root.schema.metadata().id = Some(format!(
         "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-        crate::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+        crate::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY
     ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');

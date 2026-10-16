@@ -627,7 +627,27 @@ pub struct TargetSpec {
     /// what it always did and claims nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<crate::topic_transition::TopicConfigurationPlan>,
+    /// **PROD-03.2.** The target connection's Schema Registry: before any
+    /// topic is created, the schemas the restored records reference are
+    /// imported into it keeping their IDs. The controller checks it equals the
+    /// target connection's. ABSENT: nothing is imported, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistrySpec>,
 }
+
+/// **PROD-03.1/03.2.** A connection's Schema Registry as a plan names it: the
+/// URL and the basic-auth username. The password reaches the runner as
+/// `LOGWEIR_SOURCE_REGISTRY_PASSWORD` / `LOGWEIR_TARGET_REGISTRY_PASSWORD`,
+/// never through a plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaRegistrySpec {
+    /// `http://` or `https://`, no userinfo.
+    pub url: String,
+    /// The basic-auth username, when the registry asks for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
 impl TargetSpec {
     /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the
     /// shape rule ([`crate::original_name::refuse_shape`]) is what refuses it
@@ -1226,6 +1246,11 @@ pub struct BackupSourceSpec {
     /// older runner ignores the key and records no positions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_groups: Option<Vec<String>>,
+    /// **PROD-03.1.** The source connection's Schema Registry, rendered by
+    /// the controller from the `KafkaCluster`: after the engine, the runner
+    /// snapshots it beside the receipt. ABSENT: no registry is contacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistrySpec>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins

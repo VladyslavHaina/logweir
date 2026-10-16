@@ -270,6 +270,12 @@ closed_vocabulary! {
         EngineProtocolSupported => "EngineProtocolSupported",
         TopicConfigsReadable => "TopicConfigsReadable",
         GroupTypesListed => "GroupTypesListed",
+        // PROD-03.1/03.2: the connection's Schema Registry answered with its
+        // credential (`registry.reachable`); the schemas a restore of the
+        // bound point needs can be imported into the target registry keeping
+        // their IDs, or are already there (`target.schemas`).
+        RegistryAnswered => "RegistryAnswered",
+        SchemasImportable => "SchemasImportable",
         // PROD-04.2 §3.8, `switchoverReadiness`: the restore's signed
         // scorecard and the positions mapping it binds verified; the target
         // is the cluster and the topic generations the restore wrote; every
@@ -400,6 +406,14 @@ closed_vocabulary! {
         EngineProtocolUnsupported => "EngineProtocolUnsupported",
         TopicConfigsNotReadable => "TopicConfigsNotReadable",
         GroupTypesNotListed => "GroupTypesNotListed",
+        // PROD-03.1/03.2: the registry refused the connection's registry
+        // credential; did not answer (unknown); a needed ID or subject-version
+        // is held in the target with other content; the point's snapshot is
+        // not the one its receipt names.
+        RegistryUnauthorized => "RegistryUnauthorized",
+        RegistryUnreachable => "RegistryUnreachable",
+        SchemaConflict => "SchemaConflict",
+        SchemaSnapshotInvalid => "SchemaSnapshotInvalid",
         // PROD-04.2 §3.8: the `Restore` a switchover readiness check names is
         // not there (or not that UID), or did not succeed with a verified
         // scorecard; its evidence or mapping did not verify (the message
@@ -489,6 +503,12 @@ closed_vocabulary! {
         ConnectionEngineProtocol => "connection.engineProtocol",
         ConnectionTopicConfigsReadable => "connection.topicConfigsReadable",
         ConnectionGroupTypes => "connection.groupTypes",
+        // PROD-03.1/03.2: the connection's Schema Registry answers (a
+        // backup source and a connection test, advisory), and the schemas a
+        // restore needs can be imported keeping their IDs (blocking). Listed
+        // only when the connection names a registry.
+        RegistryReachable => "registry.reachable",
+        TargetSchemas => "target.schemas",
         DestinationResolved => "destination.resolved",
         DestinationCredentialProjected => "destination.credentialProjected",
         DestinationArchiveListable => "destination.archiveListable",
@@ -563,11 +583,13 @@ impl CheckId {
 /// the id vocabulary is closed on the reading side too, so a runner that
 /// volunteered a new id to an older controller would make that controller
 /// refuse the whole result as unreadable.
-pub const CAPABILITY_CHECKS: [CheckId; 4] = [
+pub const CAPABILITY_CHECKS: [CheckId; 6] = [
     CheckId::ConnectionEngineProtocol,
     CheckId::ConnectionTopicConfigsReadable,
     CheckId::ConnectionGroupTypes,
     CheckId::TargetEngineProtocol,
+    CheckId::RegistryReachable,
+    CheckId::TargetSchemas,
 ];
 
 /// The capability rows that exist for one operation — what a
@@ -589,12 +611,14 @@ pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
             CheckId::ConnectionEngineProtocol,
             CheckId::ConnectionTopicConfigsReadable,
             CheckId::ConnectionGroupTypes,
+            CheckId::RegistryReachable,
         ],
-        CheckOperation::Restore => &[CheckId::TargetEngineProtocol],
+        CheckOperation::Restore => &[CheckId::TargetEngineProtocol, CheckId::TargetSchemas],
         CheckOperation::SourceConnection => &[
             CheckId::ConnectionEngineProtocol,
             CheckId::TargetEngineProtocol,
             CheckId::ConnectionGroupTypes,
+            CheckId::RegistryReachable,
         ],
         CheckOperation::DestinationAccess | CheckOperation::Switchover => &[],
     }
@@ -943,6 +967,26 @@ pub struct ConnectionPlan {
     /// `mtls:secret/<name>` — the client certificate's subject is the Kafka
     /// principal, and the controller, which reads no Secret, cannot know it.
     pub principal: String,
+    /// **PROD-03.1/03.2.** The connection's Schema Registry, when it names
+    /// one: the plan's grammar (URL, username), and the NAME of the variable
+    /// its password is projected into. Absent for every other connection, so
+    /// its plan serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<RegistryPlan>,
+}
+
+/// A connection's Schema Registry in a check plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RegistryPlan {
+    /// The registry URL.
+    pub url: String,
+    /// The basic-auth username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The NAME of the variable the password is in, never the password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_env: Option<String>,
 }
 
 /// A destination, rendered into the plan from the resolved `BackupDestination`

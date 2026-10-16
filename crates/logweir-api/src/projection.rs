@@ -115,6 +115,15 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
             observed_at: status.and_then(|s| s.observed_at),
         },
         last_test,
+        schema_registry: cluster.spec.schema_registry.as_ref().map(|r| {
+            crate::contract::SchemaRegistryView {
+                url: r.url.clone(),
+                username: r.username.clone(),
+                credential_ref: r.secret_ref.as_ref().map(|s| NameRef {
+                    name: s.name.clone(),
+                }),
+            }
+        }),
     }
 }
 
@@ -609,6 +618,16 @@ pub fn restore_coverage(object: &RestoreCr) -> crate::contract::RestoreCoverageV
                 groups: pm.groups,
                 omitted: pm.omitted.as_ref().map(|o| crate::validate::bounded(o, 64)),
             }),
+        schemas: integrity.and_then(|i| i.schemas.as_ref()).map(|sc| {
+            crate::contract::RestoreSchemasView {
+                imported: sc.imported,
+                already_present: sc.already_present,
+                not_imported: sc
+                    .not_imported
+                    .as_ref()
+                    .map(|o| crate::validate::bounded(o, 64)),
+            }
+        }),
     }
 }
 

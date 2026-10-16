@@ -640,7 +640,14 @@ FORMAT_VERSION = "1.4.0"
 # does: one `PUBLIC KEY` block, then nothing but whitespace. A trailing blank
 # line stays accepted, and so does RFC 7468's explanatory text before the
 # block; text after it is refused.
-SCRIPT_VERSION = "1.34.0"
+#
+# 1.35.0 (PROD-03.1, 03.2) knows receipt format 1.9.0 and its `schema_registry`
+# (arms 46 to 49, in position after 45: the block only from 1.9.0, a reason
+# exactly when not captured, the snapshot named beside the receipt exactly
+# when captured, bounded sorted lists) with one `schema_registry` line, and
+# scorecard 1.13.0 and 2.5.0's `target.schemas` (arms SC-1 to SC-3, after PM)
+# with one `schemas:` line, both in the Rust reader's words.
+SCRIPT_VERSION = "1.35.0"
 
 # PROD-11.1b: the format of a partition-subset restore and its major --
 # `FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR` in
@@ -1122,6 +1129,26 @@ RECEIPT_GENERATIONS_SINCE_MINOR = 6
 # PROD-02.1: the first minor that defines `source_watermarks` (arm 41) --
 # `SOURCE_WATERMARKS_SINCE_MINOR` in `crates/logweir-core/src/backup_receipt.rs`.
 RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR = 8
+# PROD-03.1: the first minor that defines `schema_registry` (arm 46) --
+# `SCHEMA_REGISTRY_SINCE_MINOR` in `crates/logweir-core/src/backup_receipt.rs`
+# -- and the closed sets and bounds of `crates/logweir-core/src/schema_registry.rs`.
+RECEIPT_SCHEMA_REGISTRY_SINCE_MINOR = 9
+SR_CAPTURE_REASONS = (
+    "registryUnreachable",
+    "registryUnauthorized",
+    "snapshotTooLarge",
+    "snapshotIncomplete",
+)
+SR_LISTED = 32
+SR_SNAPSHOT_KEY_TEMPLATE = "logweir/backups/<backup_id>/<run_id>.schema-registry.json"
+SR_LISTED_TEXT_CHARS = 256
+SR_IMPORTED_LISTED = 256
+SR_NOT_IMPORTED_REASONS = ("noTargetRegistry", "noSnapshot")
+# PROD-03.2: the first minors of formats 1 and 2 that define `target.schemas`
+# (arm SC-1) -- `SCHEMAS_SINCE_MINOR` and `SCHEMAS_SINCE_MINOR_OF_MAJOR_2` in
+# `crates/logweir-core/src/scorecard.rs`.
+SCORECARD_SCHEMAS_SINCE_MINOR = 13
+SCORECARD_SCHEMAS_SINCE_MINOR_OF_MAJOR_2 = 5
 
 # PROD-01.4a: why a topic ID is null (arm 39) and where a recorded one came
 # from (arm 40) — `TOPIC_ID_REASONS` and `TOPIC_ID_SOURCES` in
@@ -2706,6 +2733,13 @@ def check_invariants(doc) -> str:
     # anything that is not the writer's shape is refused at DESERIALISATION.
     # Arms TCR-1 to TCR-5 below compare its fields, so the shape is asserted
     # first.
+    schemas = target.get("schemas")
+    if schemas is not None and not _schemas_shape_ok(schemas):
+        return (
+            "target.schemas is not an object of the shape the writer gives it: optional "
+            "strings not_imported, snapshot_sha256 and target_registry_url, a list of "
+            "imported subject-versions, u64 counts and a list of schema IDs"
+        )
     creation = target.get("creation")
     if creation is not None and not _target_creation_shape_ok(creation):
         return (
@@ -3876,6 +3910,12 @@ def check_invariants(doc) -> str:
     if pm_fault:
         return pm_fault
 
+    # SC-1 to SC-3 (PROD-03.2), mirrored in this position (after PM, before
+    # `redactions`) from `logweir_core::schema_registry::check_scorecard_block`.
+    schemas_fault = _schemas_fault(doc, version)
+    if schemas_fault:
+        return schemas_fault
+
     # T0-3, mirrored: see the `redactions` arm at the end of
     # `Scorecard::validate_invariants` (crates/logweir-core/src/scorecard.rs)
     # for the full argument. `docs/formats/drill-scorecard.md` states "Always
@@ -4140,7 +4180,38 @@ def _receipt_shape(doc) -> str:
                     f"source_watermarks[{_rust_debug_str(topic)}] is not a list of "
                     "[low, high] u64 pairs"
                 )
+    # PROD-03.1, format 1.9.0: `schema_registry` is
+    # `Option<ReceiptSchemaRegistry>`; Rust refuses any other shape at
+    # DESERIALISATION.
+    if not _schema_registry_shape_ok(doc.get("schema_registry")):
+        return (
+            "schema_registry is not an object of a bool captured, an optional reason, "
+            "snapshot key and digest, u64 subjects and versions and two optional lists"
+        )
     return ""
+
+
+def _schema_registry_shape_ok(block) -> bool:
+    """`True` when `block` is absent or has the shape `ReceiptSchemaRegistry`
+    reads (PROD-03.1)."""
+    if block is None:
+        return True
+    if not isinstance(block, dict) or not isinstance(block.get("captured"), bool):
+        return False
+    for name in ("reason", "snapshot_key", "snapshot_sha256"):
+        if block.get(name) is not None and not isinstance(block[name], str):
+            return False
+    for name in ("subjects", "versions"):
+        if not _is_int_in(block.get(name), 0, 2 ** 64 - 1):
+            return False
+    refs = block.get("unresolved_references", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    return (
+        isinstance(refs, list)
+        and all(isinstance(r, str) for r in refs)
+        and isinstance(ids, list)
+        and all(_is_int_in(i, 0, 2 ** 32 - 1) for i in ids)
+    )
 
 
 def _is_int_in(value, low, high) -> bool:
@@ -5020,7 +5091,233 @@ def check_backup_receipt_invariants(doc) -> str:
                     "equal low and high watermarks for every partition"
                 )
 
+    # ARMS 46-49 (format 1.9.0, PROD-03.1): `schema_registry`, and ONLY when it
+    # is present.
+    registry = doc.get("schema_registry")
+    if registry is not None:
+        # ARM 46. A document declaring a minor before 9 cannot carry it.
+        if parsed[1] < RECEIPT_SCHEMA_REGISTRY_SINCE_MINOR:
+            return (
+                f"schema_registry is present but format_version {_rust_debug_str(version)} "
+                "predates it: the field is defined from "
+                f"1.{RECEIPT_SCHEMA_REGISTRY_SINCE_MINOR}.0"
+            )
+        # ARM 47. A reason exactly when not captured, from the closed set.
+        reason = registry.get("reason")
+        if registry["captured"]:
+            reason_ok = reason is None
+        else:
+            reason_ok = reason in SR_CAPTURE_REASONS
+        if not reason_ok:
+            return (
+                "schema_registry.reason is present exactly when captured is false, and is "
+                f"{', '.join(SR_CAPTURE_REASONS[:-1])} or {SR_CAPTURE_REASONS[-1]}"
+            )
+        # ARM 48. A captured block names its snapshot beside this receipt and
+        # counts no more subjects than versions; an uncaptured one names and
+        # counts nothing.
+        if not _schema_registry_names_its_snapshot(registry, doc["backup_id"], doc["run_id"]):
+            return (
+                f"schema_registry names its snapshot ({SR_SNAPSHOT_KEY_TEMPLATE} and its sha256) "
+                "and counts no more subjects than versions exactly when captured, and names "
+                "and counts nothing otherwise"
+            )
+        # ARM 49. The two lists are bounded, sorted and distinct.
+        if not _schema_registry_lists_ok(registry):
+            return (
+                "schema_registry.unresolved_references and ids_not_in_snapshot list at "
+                f"most {SR_LISTED} entries each, sorted and distinct, every reference at most "
+                f"{SR_LISTED_TEXT_CHARS} characters and every ID from 1 to 16777215"
+            )
+
     return ""
+
+
+def _sorted_distinct(items) -> bool:
+    return all(a < b for a, b in zip(items, items[1:]))
+
+
+def _schema_registry_names_its_snapshot(block, backup_id, run_id) -> bool:
+    """Arm 48's predicate -- the twin of `logweir_core::schema_registry::
+    receipt_block_shape_ok`."""
+    refs = block.get("unresolved_references", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    if block["captured"]:
+        return (
+            block.get("snapshot_key")
+            == f"logweir/backups/{backup_id}/{run_id}.schema-registry.json"
+            and _is_sha256_prefixed(block.get("snapshot_sha256"))
+            and block["subjects"] <= block["versions"]
+            and (block["subjects"] == 0) == (block["versions"] == 0)
+        )
+    return (
+        block.get("snapshot_key") is None
+        and block.get("snapshot_sha256") is None
+        and block["subjects"] == 0
+        and block["versions"] == 0
+        and not refs
+        and not ids
+    )
+
+
+def _schema_registry_lists_ok(block) -> bool:
+    """Arm 49's predicate -- the twin of `logweir_core::schema_registry::
+    receipt_block_lists_ok`."""
+    refs = block.get("unresolved_references", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    return (
+        len(refs) <= SR_LISTED
+        and len(ids) <= SR_LISTED
+        and _sorted_distinct(refs)
+        and _sorted_distinct(ids)
+        and all(len(r) <= SR_LISTED_TEXT_CHARS for r in refs)
+        and all(1 <= i <= SCHEMA_ID_MAX for i in ids)
+    )
+
+
+def _schema_registry_lines(block):
+    """The receipt's `schema_registry` line -- the twin of
+    `logweir_core::schema_registry::receipt_lines`, in the same words
+    (PROD-03.1)."""
+    tail = (
+        "this receipt holds no schema snapshot, so a restore cannot put the schemas its "
+        "records reference in a target registry"
+    )
+    if block is None:
+        return [f"schema_registry: registry not captured: {tail}"]
+    if not block["captured"]:
+        return [f"schema_registry: registry not captured ({block.get('reason') or ''}): {tail}"]
+    line = (
+        f"schema_registry: captured {block['subjects']} subject(s), {block['versions']} "
+        f"version(s) in {block.get('snapshot_key') or ''} ({block.get('snapshot_sha256') or ''})"
+    )
+    refs = block.get("unresolved_references", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    if refs:
+        line += "; INCOMPLETE: references to versions the snapshot lacks: " + ", ".join(refs)
+    if ids:
+        line += "; INCOMPLETE: record schema IDs the snapshot lacks: " + ", ".join(
+            str(i) for i in ids
+        )
+    return [line]
+
+
+def _defines_schemas(version) -> bool:
+    """Whether a document of `version` defines `target.schemas` (arm SC-1): a
+    1.x document from 1.13.0 on, a 2.x document from 2.5.0 on -- the twin of
+    `logweir_core::scorecard::defines_schemas`."""
+    major, minor = _major(version), _minor(version)
+    if minor is None:
+        return False
+    if major == 1:
+        return minor >= SCORECARD_SCHEMAS_SINCE_MINOR
+    if major == SCORECARD_PARTITION_SUBSETS_MAJOR:
+        return minor >= SCORECARD_SCHEMAS_SINCE_MINOR_OF_MAJOR_2
+    return False
+
+
+def _schemas_shape_ok(block) -> bool:
+    """`True` when `block` has the shape `ScorecardSchemas` reads (PROD-03.2)."""
+    if not isinstance(block, dict):
+        return False
+    for name in ("not_imported", "snapshot_sha256", "target_registry_url"):
+        if block.get(name) is not None and not isinstance(block[name], str):
+            return False
+    for name in ("imported_count", "already_present"):
+        if not _is_int_in(block.get(name, 0), 0, 2 ** 64 - 1):
+            return False
+    imported = block.get("imported", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    return (
+        isinstance(imported, list)
+        and all(
+            isinstance(e, dict)
+            and isinstance(e.get("subject"), str)
+            and _is_int_in(e.get("version"), 0, 2 ** 32 - 1)
+            and _is_int_in(e.get("id"), 0, 2 ** 32 - 1)
+            for e in imported
+        )
+        and isinstance(ids, list)
+        and all(_is_int_in(i, 0, 2 ** 32 - 1) for i in ids)
+    )
+
+
+def _schemas_fault(doc, version) -> str:
+    """Arms SC-1 to SC-3 over `target.schemas` -- the twin of
+    `logweir_core::schema_registry::check_scorecard_block`, in order, with the
+    same text. "" when the block is absent or holds."""
+    block = doc["target"].get("schemas")
+    if block is None:
+        return ""
+    # SC-1.
+    if not _defines_schemas(version):
+        return (
+            "target.schemas is present but format_version does not define it: the block is "
+            "defined from 1.13.0 of format 1 and from 2.5.0 of format 2"
+        )
+    imported = block.get("imported", [])
+    ids = block.get("ids_not_in_snapshot", [])
+    count = block.get("imported_count", 0)
+    # SC-2.
+    reason = block.get("not_imported")
+    if reason is not None:
+        shape_ok = (
+            reason in SR_NOT_IMPORTED_REASONS
+            and block.get("snapshot_sha256") is None
+            and block.get("target_registry_url") is None
+            and not imported
+            and count == 0
+            and block.get("already_present", 0) == 0
+            and not ids
+        )
+    else:
+        url = block.get("target_registry_url")
+        shape_ok = _is_sha256_prefixed(block.get("snapshot_sha256")) and (
+            isinstance(url, str) and url.strip() != ""
+        )
+    if not shape_ok:
+        return (
+            "target.schemas carries not_imported (noTargetRegistry or noSnapshot) and nothing "
+            "else, or names the snapshot's sha256 and the target registry"
+        )
+    # SC-3.
+    keys = [(e["subject"], e["version"], e["id"]) for e in imported]
+    if (
+        len(imported) != min(count, SR_IMPORTED_LISTED)
+        or not _sorted_distinct(keys)
+        or len(ids) > SR_LISTED
+        or not _sorted_distinct(ids)
+        or not all(1 <= i <= SCHEMA_ID_MAX for i in ids)
+    ):
+        return (
+            f"target.schemas.imported lists the first {SR_IMPORTED_LISTED} of imported_count, "
+            f"sorted and distinct, and ids_not_in_snapshot at most {SR_LISTED} IDs from 1 to "
+            "16777215, sorted and distinct"
+        )
+    return ""
+
+
+def _schemas_lines(block):
+    """`target.schemas` as a line -- the twin of `logweir_core::
+    schema_registry::scorecard_lines` (PROD-03.2). Absent prints nothing."""
+    if block is None:
+        return []
+    reason = block.get("not_imported")
+    if reason is not None:
+        return [
+            f"schemas: not imported ({reason}): the restored records carry their source "
+            "schema IDs, which the target registry may not hold"
+        ]
+    line = (
+        f"schemas: imported {block.get('imported_count', 0)} subject-version(s) into "
+        f"{block.get('target_registry_url') or ''} keeping their source IDs, "
+        f"{block.get('already_present', 0)} already present; snapshot "
+        f"{block.get('snapshot_sha256') or ''}"
+    )
+    ids = block.get("ids_not_in_snapshot", [])
+    if ids:
+        line += "; record schema IDs the snapshot lacks: " + ", ".join(str(i) for i in ids)
+    return [line]
 
 
 def _empty_capture_contradiction(records, watermarks) -> str:
@@ -6299,6 +6596,10 @@ def main(
         # (`crates/logweir/src/verify.rs::target_creation_lines`).
         for line in _target_creation_lines(doc["target"].get("creation")):
             print(f"       target:   {line}")
+        # PROD-03.2: the schemas the run put in the target registry, in the
+        # words `logweir drill verify` prints (`schema_registry::scorecard_lines`).
+        for line in _schemas_lines(doc["target"].get("schemas")):
+            print(f"       target:   {line}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -6366,6 +6667,9 @@ def main(
             "integrity.verification.positions_mapping only from 1.12.0 of format 1 or 2.4.0 of "
             "format 2, only over a passing complete verification, a document or the reason "
             "there is none, the run's own key, and at least one group; "
+            "target.schemas only from 1.13.0 of format 1 or 2.5.0 of format 2, a closed "
+            "not-imported reason alone or the snapshot's digest and the target registry, and "
+            "bounded sorted lists; "
             "approval.self_attested derived, not echoed)"
         )
         return 0
@@ -6486,6 +6790,10 @@ def main(
             doc.get("source_watermarks"), covered.get("from_ms") == covered.get("to_ms")
         ):
             print(f"       {line}")
+        # PROD-03.1: the source registry's snapshot, in the words `logweir
+        # drill verify` prints (`schema_registry::receipt_lines`).
+        for line in _schema_registry_lines(doc.get("schema_registry")):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -6520,7 +6828,9 @@ def main(
             "reason exactly for a null ID, and a source exactly for a recorded one, "
             "and the source watermarks' five: present only from 1.8.0, covering exactly the "
             "named topic set, at least one partition, low never above high, and an empty "
-            "window only over no record and every partition empty)"
+            "window only over no record and every partition empty, and schema_registry's "
+            "four: its version, a closed reason exactly when not captured, the snapshot named "
+            "beside the receipt exactly when captured, and bounded sorted lists)"
         )
         if verified_positions is not None:
             print(

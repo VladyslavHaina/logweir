@@ -399,6 +399,26 @@ pub struct Integrity {
     /// scorecard not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub positions_mapping: Option<PositionsMappingRecord>,
+    /// What the signed scorecard's `target.schemas` says: how
+    /// many subject-versions the run imported into the target registry with
+    /// their source IDs, how many were already there, or why none were.
+    /// ABSENT: the scorecard carries no block (no registry on either side).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<SchemasRecord>,
+}
+
+/// `status.integrity.schemas`, copied from the signed scorecard.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemasRecord {
+    /// `target.schemas.imported_count`.
+    pub imported: u64,
+    /// `target.schemas.already_present`.
+    pub already_present: u64,
+    /// `target.schemas.not_imported`: `noTargetRegistry` or `noSnapshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
+    pub not_imported: Option<String>,
 }
 
 /// `status.integrity.positionsMapping` (DUI-50): what the signed scorecard

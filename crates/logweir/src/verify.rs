@@ -178,6 +178,9 @@ pub struct VerifyReport {
     /// `target.creation` (scorecard 1.10.0 and 2.2.0, PROD-11.1a), carried as
     /// read: `None` is a run that created no topic, or a document before it.
     pub target_creation: Option<Box<logweir_core::target_creation::TargetCreation>>,
+    /// `target.schemas` (scorecard 1.13.0 and 2.5.0, PROD-03.2), carried as
+    /// read: `None` is a run with no registry on either side.
+    pub schemas: Option<Box<logweir_core::schema_registry::ScorecardSchemas>>,
 }
 
 /// The `target creation:` line both readers print for a run that created
@@ -1060,6 +1063,9 @@ pub enum Verdict {
         source_watermarks: Option<BTreeMap<String, Vec<[u64; 2]>>>,
         /// PROD-02.1: the receipt is an EMPTY CAPTURE (its window is empty).
         empty_capture: bool,
+        /// The 1.9.0 block (PROD-03.1), as read; `None` is "registry not
+        /// captured".
+        schema_registry: Option<Box<logweir_core::schema_registry::ReceiptSchemaRegistry>>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -1320,6 +1326,7 @@ fn verify_bytes_with(
             positions,
             empty_capture,
             source_watermarks: receipt.source_watermarks,
+            schema_registry: receipt.schema_registry.map(Box::new),
         });
     }
     if payload_type == PAYLOAD_TYPE_CATALOG_POINT {
@@ -1428,6 +1435,7 @@ fn verify_bytes_with(
         original_name: sc.target.original_name.clone().map(Box::new),
         console_approval: sc.approval.console.clone().map(Box::new),
         target_creation: sc.target.creation.clone().map(Box::new),
+        schemas: sc.target.schemas.clone().map(Box::new),
     }))
 }
 
@@ -1532,6 +1540,10 @@ fn print_report_with(
     for line in target_creation_lines(r.target_creation.as_deref()) {
         println!("target:    {line}");
     }
+    // PROD-03.2: the schemas the run put in the target registry.
+    for line in logweir_core::schema_registry::scorecard_lines(r.schemas.as_deref()) {
+        println!("target:    {line}");
+    }
 }
 
 /// The receipt blocks the verdict prints per topic, beside the identity
@@ -1559,6 +1571,8 @@ struct ReceiptBlocks<'a> {
     source_watermarks: Option<&'a BTreeMap<String, Vec<[u64; 2]>>>,
     /// PROD-02.1: the receipt is an EMPTY CAPTURE.
     empty_capture: bool,
+    /// PROD-03.1's 1.9.0 block; `None` is "registry not captured".
+    schema_registry: Option<&'a logweir_core::schema_registry::ReceiptSchemaRegistry>,
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -1634,8 +1648,13 @@ fn print_backup_receipt(
     for line in source_watermark_lines(blocks.source_watermarks, blocks.empty_capture) {
         println!("source:    {line}");
     }
+    // PROD-03.1: the source registry's snapshot — or the line that says it
+    // was not captured.
+    for line in logweir_core::schema_registry::receipt_lines(blocks.schema_registry) {
+        println!("registry:  {line}");
+    }
     println!(
-        "checked:   the signature AND all forty-five backup-receipt invariants \
+        "checked:   the signature AND all forty-nine backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window (empty \
          only beside source_watermarks), \
          source.auth.mode, config_coverage's six: its version, its topic set, \
@@ -1655,7 +1674,9 @@ fn print_backup_receipt(
          Kafka's text and never the zero ID, a reason exactly for a null ID, a source \
          exactly for a recorded one, and the source watermarks' five: their version, their \
          topic set, at least one partition, low never above high, and an empty window only \
-         over no record and every partition empty)"
+         over no record and every partition empty, and schema_registry's four: its version, a \
+         closed reason exactly when not captured, the snapshot named beside the receipt exactly \
+         when captured, and bounded sorted lists)"
     );
     if blocks.positions.is_some() {
         println!(
@@ -1852,6 +1873,7 @@ pub fn run_with(
             positions,
             source_watermarks,
             empty_capture,
+            schema_registry,
         }) => {
             print_backup_receipt(
                 &payload_type,
@@ -1870,6 +1892,7 @@ pub fn run_with(
                     positions: positions.as_ref(),
                     source_watermarks: source_watermarks.as_ref(),
                     empty_capture,
+                    schema_registry: schema_registry.as_deref(),
                 },
             );
             ExitCode::Ok

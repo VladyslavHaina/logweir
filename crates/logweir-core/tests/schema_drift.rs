@@ -36,15 +36,15 @@ fn justfile_schema_version(name: &str) -> String {
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
         justfile_schema_version("scorecard"),
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
     );
     assert_eq!(
         justfile_schema_version("scorecard_format_1"),
-        logweir_core::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SCHEMAS
     );
     assert_eq!(
         justfile_schema_version("receipt"),
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY
     );
 }
 
@@ -55,7 +55,7 @@ fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS,
     );
     assert_eq!(
         generated.trim_end(),
@@ -63,7 +63,7 @@ fn checked_in_schema_matches_the_types() {
         "schemas/logweir-drill-scorecard-{}.json is stale. \
          Run `just schema` and review the diff — a field added is a MINOR bump, \
          a field removed or retyped is a MAJOR bump (Global Constraint 12).",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
     );
 }
 
@@ -99,7 +99,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
         )
     );
     let parity = &current["definitions"]["TopicParity"];
@@ -342,7 +342,7 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     .expect("the frozen 1.1.0 scorecard schema parses");
     let checked_in: serde_json::Value = serde_json::from_str(&current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING,
+        logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS,
     ))
     .expect("the checked-in scorecard schema parses");
     let generated: serde_json::Value =
@@ -387,7 +387,7 @@ fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
     let checked_in = current_schema(
         "backup-receipt",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS,
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY,
     );
     assert_eq!(
         generated.trim_end(),
@@ -396,7 +396,7 @@ fn backup_receipt_schema_has_no_drift() {
          review the diff — a field added is a MINOR bump, a field removed or \
          retyped is a MAJOR bump (Global Constraint 12), and the receipt's \
          format_version is its own and not the scorecard's.",
-        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+        logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY
     );
 }
 
@@ -452,7 +452,7 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
         v["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-backup-receipt-{}.json",
-            logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+            logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY
         )
     );
     assert!(
@@ -745,7 +745,7 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
         )
     );
     assert_eq!(
@@ -870,9 +870,19 @@ const FROZEN_1_11_0_SCORECARD_SCHEMA: &str =
 const FROZEN_2_3_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-2.3.0.json");
 
-/// What `just schema` writes as format 1's newest minor (the 1.12.0 file).
+/// The text of the frozen 1.12.0 scorecard schema, format 1's last file before
+/// the `target.schemas` block (PROD-03.2).
+const FROZEN_1_12_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-1.12.0.json");
+
+/// The text of the frozen 2.4.0 scorecard schema, format 2's last file before
+/// the `target.schemas` block.
+const FROZEN_2_4_0_SCORECARD_SCHEMA: &str =
+    include_str!("../../../schemas/logweir-drill-scorecard-2.4.0.json");
+
+/// What `just schema` writes as format 1's newest minor (the 1.13.0 file).
 fn format_1_scorecard_schema() -> String {
-    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_11_0_SCORECARD_SCHEMA)
+    logweir_core::schema::scorecard_format_1_schema(FROZEN_1_12_0_SCORECARD_SCHEMA)
 }
 
 /// The two definitions the `target.creation` block brings with it.
@@ -947,15 +957,14 @@ fn without_the_console_approval(
 fn checked_in_format_1_scorecard_schema_matches_the_types() {
     let checked_in = current_schema(
         "drill-scorecard",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING,
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SCHEMAS,
     );
     assert_eq!(
         format_1_scorecard_schema().trim_end(),
         checked_in.trim_end(),
         "schemas/logweir-drill-scorecard-{}.json is stale. Run `just schema` and review the \
-         diff: only `integrity.verification.positions_mapping` and its three definitions may \
-         move.",
-        logweir_core::scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING
+         diff: only `target.schemas` and its two definitions may move.",
+        logweir_core::scorecard::FORMAT_VERSION_WITH_SCHEMAS
     );
 }
 
@@ -1331,7 +1340,7 @@ fn the_format_2_scorecard_schema_does_not_describe_the_original_name() {
         current["$id"],
         format!(
             "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json",
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
         )
     );
     assert!(current["definitions"]["TargetInfo"]["properties"]
@@ -1634,9 +1643,11 @@ fn the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block() {
         serde_json::from_str(FROZEN_1_11_0_SCORECARD_SCHEMA).expect("the frozen 1.11.0 parses");
     let frozen_2: serde_json::Value =
         serde_json::from_str(FROZEN_2_3_0_SCORECARD_SCHEMA).expect("the frozen 2.3.0 parses");
-    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    // Frozen since PROD-03.2 (1.13.0, 2.5.0): the files as they were generated.
+    let format_1: serde_json::Value =
+        serde_json::from_str(FROZEN_1_12_0_SCORECARD_SCHEMA).expect("the frozen 1.12.0 parses");
     let format_2: serde_json::Value =
-        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+        serde_json::from_str(FROZEN_2_4_0_SCORECARD_SCHEMA).expect("the frozen 2.4.0 parses");
     assert_eq!(
         format_1["$id"],
         "https://logweir.dev/schemas/logweir-drill-scorecard-1.12.0.json"
@@ -1688,4 +1699,94 @@ fn the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block() {
         logweir_core::scorecard::POSITIONS_MAPPING_SINCE_MINOR_OF_MAJOR_2,
         4
     );
+}
+
+/// `schema` with the `target.schemas` block set aside and its `$id` replaced:
+/// what is left must be the file the block was added to.
+fn without_the_schemas(mut schema: serde_json::Value, id: &serde_json::Value) -> serde_json::Value {
+    schema["$id"] = id.clone();
+    let definitions = schema["definitions"].as_object_mut().unwrap();
+    for name in logweir_core::schema::SCHEMAS_DEFINITIONS {
+        assert!(definitions.remove(name).is_some(), "it defines {name}");
+    }
+    assert!(schema["definitions"]["TargetInfo"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove(logweir_core::schema::SCHEMAS_PROPERTY)
+        .is_some());
+    schema
+}
+
+/// **PROD-03.2: 1.13.0 and 2.5.0 each add exactly one optional block.** The
+/// 1.13.0 file is the frozen 1.12.0 file and the 2.5.0 file the frozen 2.4.0
+/// file, value for value, once `target.schemas`, its two definitions and the
+/// `$id` are set aside; the block is optional and the same in both lines.
+/// KILLS: a block made required; a generator that moves anything else; a hand
+/// edit of either frozen file.
+#[test]
+fn the_schemas_minors_are_their_frozen_predecessors_plus_one_block() {
+    let frozen_1: serde_json::Value =
+        serde_json::from_str(FROZEN_1_12_0_SCORECARD_SCHEMA).expect("the frozen 1.12.0 parses");
+    let frozen_2: serde_json::Value =
+        serde_json::from_str(FROZEN_2_4_0_SCORECARD_SCHEMA).expect("the frozen 2.4.0 parses");
+    let format_1: serde_json::Value = serde_json::from_str(&format_1_scorecard_schema()).unwrap();
+    let format_2: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
+    assert_eq!(
+        format_1["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-1.13.0.json"
+    );
+    assert_eq!(
+        format_2["$id"],
+        "https://logweir.dev/schemas/logweir-drill-scorecard-2.5.0.json"
+    );
+    for (v, frozen) in [(&format_1, &frozen_1), (&format_2, &frozen_2)] {
+        assert!(frozen["definitions"]["TargetInfo"]["properties"]
+            .get("schemas")
+            .is_none());
+        assert!(
+            !v["definitions"]["TargetInfo"]["required"]
+                .as_array()
+                .expect("TargetInfo has required fields")
+                .iter()
+                .any(|r| r == "schemas"),
+            "the block is OPTIONAL"
+        );
+        assert_eq!(without_the_schemas(v.clone(), &frozen["$id"]), *frozen);
+    }
+    for name in logweir_core::schema::SCHEMAS_DEFINITIONS {
+        assert_eq!(
+            format_1["definitions"][name], format_2["definitions"][name],
+            "{name}"
+        );
+    }
+    assert_eq!(logweir_core::scorecard::SCHEMAS_SINCE_MINOR, 13);
+    assert_eq!(logweir_core::scorecard::SCHEMAS_SINCE_MINOR_OF_MAJOR_2, 5);
+}
+
+/// **The 1.8.0 receipt schema is FROZEN** beside the current one and has no
+/// `schema_registry`; the current file carries it, optional, at the minor arm
+/// SR-R1 gates on.
+#[test]
+fn the_frozen_1_8_0_receipt_schema_has_no_schema_registry() {
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-backup-receipt-1.8.0.json"
+    ))
+    .expect("the frozen 1.8.0 receipt schema parses");
+    assert!(frozen["properties"]["schema_registry"].is_null());
+    assert!(frozen["properties"]["source_watermarks"].is_object());
+    let mut current: serde_json::Value =
+        serde_json::from_str(&logweir_core::schema::backup_receipt_schema()).unwrap();
+    assert!(current["properties"]["schema_registry"].is_object());
+    current["$id"] = frozen["$id"].clone();
+    current["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_registry");
+    current["definitions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("ReceiptSchemaRegistry");
+    assert_eq!(current, frozen, "1.9.0 is 1.8.0 plus one optional block");
+    assert_eq!(logweir_core::backup_receipt::SCHEMA_REGISTRY_SINCE_MINOR, 9);
 }

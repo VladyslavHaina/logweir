@@ -159,6 +159,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     // The bound point's receipt, once the binding's judgement accepted it,
     // serves the topic configuration preview below (PROD-05.2).
     let mut bound_receipt = None;
+    let mut bound_snapshot = None;
     archive_checks(
         req,
         &spec,
@@ -168,7 +169,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
         &want,
         &mut checks,
         &mut details,
-        &mut bound_receipt,
+        (&mut bound_receipt, &mut bound_snapshot),
     );
 
     // 3 — the target broker.
@@ -183,6 +184,17 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
         &mut details,
         bound_receipt.as_ref(),
     );
+    // PROD-03.2: the schemas the restore would import, when the target
+    // connection names a registry (the plan lists the row only then).
+    if req.capability_checks.contains(&CheckId::TargetSchemas) {
+        checks.push(super::capability::target_schemas(
+            &req.target,
+            &spec.source.topics,
+            bound_receipt.as_ref(),
+            bound_snapshot.as_ref(),
+            now,
+        ));
+    }
 
     // 4 — the evidence destination.
     //
@@ -581,7 +593,10 @@ fn archive_checks(
     want: &dyn Fn(CheckId) -> bool,
     checks: &mut Vec<CheckOutcome>,
     details: &mut Vec<String>,
-    bound_receipt: &mut Option<BackupReceipt>,
+    (bound_receipt, bound_snapshot): (
+        &mut Option<BackupReceipt>,
+        &mut Option<Result<logweir_core::schema_registry::Snapshot, String>>,
+    ),
 ) {
     let dest = &req.source_destination;
     let scope = catalogue::scope("BackupDestination", &dest.name, Some(&dest.uid));
@@ -702,6 +717,28 @@ fn archive_checks(
             access.as_ref(),
         ) {
             Ok((note, receipt)) => {
+                // PROD-03.2: the snapshot the receipt names, read beside it
+                // and held to its digest, for `target.schemas`.
+                if let Some(block) = receipt.schema_registry.as_ref().filter(|b| b.captured) {
+                    let key = block.snapshot_key.clone().unwrap_or_default();
+                    let sha = block.snapshot_sha256.clone().unwrap_or_default();
+                    *bound_snapshot = Some(
+                        access
+                            .get(
+                                &key,
+                                logweir_core::schema_registry::MAX_SNAPSHOT_BYTES as u64,
+                            )
+                            .map_err(|e| {
+                                format!(
+                                    "{}: the schema snapshot {key} could not be read: {e}",
+                                    logweir_core::schema_registry::SNAPSHOT_INVALID
+                                )
+                            })
+                            .and_then(|bytes| {
+                                logweir_core::schema_registry::Snapshot::parse(&bytes, &sha)
+                            }),
+                    );
+                }
                 *bound_receipt = Some(receipt);
                 note
             }
@@ -1082,7 +1119,15 @@ fn target_checks(
     // The capability rows the plan lists (`capabilityChecks`), and
     // only those: `checks` being empty never includes one. A skipped one is
     // refused by the plan validation, so the list is taken as written.
-    let capabilities = &req.capability_checks;
+    // `target.schemas` is answered by `run`, after this function, from the
+    // registry and the bound point: it reads no broker.
+    let capabilities: Vec<CheckId> = req
+        .capability_checks
+        .iter()
+        .copied()
+        .filter(|id| *id != CheckId::TargetSchemas)
+        .collect();
+    let capabilities = &capabilities;
     let probe = match wiring.broker(&req.target, budget) {
         Ok(p) => p,
         Err(f) => {

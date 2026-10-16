@@ -964,6 +964,35 @@ services:
       retries: 36
       start_period: 10s
 
+  # --- profile `registry`: the TARGET registry of a schema-aware restore -----
+  # PROD-03.2: one Redpanda node used only for its Schema Registry, which keeps
+  # schema IDs in IMPORT mode (Karapace, the source above, cannot: its
+  # `PUT /mode` is 405). HTTP basic auth on (user `logweir`, the stack's
+  # fixture password, a superuser: changing a subject's mode needs one on
+  # Redpanda), published as 9145. Its own Kafka API is internal and
+  # unused by the tests. `rpk` in this image is also the rows' deserializing
+  # consumer (`rpk topic consume --use-schema-registry`, against
+  # kafka-broker-1). LICENCE: Redpanda is BSL 1.1 (non-production use is
+  # granted; the image is pulled, never redistributed), as for `redpanda`.
+  registry-target:
+    image: redpandadata/redpanda:v26.2.4@sha256:c98c2f04a751e6646012cc701bac5183252cee44c88ba1dfa412e4c7124f2e89
+    hostname: registry-target
+    profiles: [registry]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_REGISTRY_TARGET_PORT:-9145}:8081"
+    environment:
+      REGISTRY_PASSWORD: logweir-e2e-not-a-secret
+    entrypoint: ["/bin/bash", "/start.sh"]
+    volumes:
+      - ./profiles/registry/target-start.sh:/start.sh:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
   # --- profile `redpanda`: a Kafka-compatible endpoint that is not Apache Kafka
   # (PROD-01.2) ----------------------------------------------------------------
   # One Redpanda node, pinned by its index digest, as a reachable row of the

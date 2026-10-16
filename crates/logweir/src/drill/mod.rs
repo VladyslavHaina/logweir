@@ -18,6 +18,7 @@ pub mod phase8_score;
 pub mod phase9_teardown;
 pub mod phase9_transition;
 pub mod reconcile;
+pub mod schema_import;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
@@ -2395,11 +2396,29 @@ fn execute_with_validated_approval(
         ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
             .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
     };
+    // PROD-03.2: whether this run imports schemas, and the verified snapshot
+    // when it does, before the pass that collects the IDs the restored records
+    // carry. A run that does not import says why in its scorecard.
+    let schemas = schema_import::prepare(&c.spec, c.bound_set.as_ref(), &c.archive)?;
+    let mut schema_ids = match &schemas {
+        schema_import::Prepared::Import(p) => Some(logweir_core::schema_registry::NeededIds::new(
+            p.snapshot.ids(),
+        )),
+        _ => None,
+    };
+    if let schema_import::Prepared::NotImported(reason) = &schemas {
+        sc.target.schemas =
+            Some(logweir_core::schema_registry::ScorecardSchemas::not_imported(reason));
+        sc.format_version =
+            logweir_core::scorecard::format_version_with_schemas(&sc.format_version, true)
+                .to_string();
+    }
     let scan = archive_scan::run(
         &c.archive,
         &facts,
         &window,
         !c.spec.restore.allow_transaction_markers,
+        schema_ids.as_mut(),
     )?;
     let manifest_facts = facts;
     let facts = logweir_core::record_times::widen(&manifest_facts, &scan.times);
@@ -2688,6 +2707,16 @@ fn execute_with_validated_approval(
         // Nothing of this run's own to tear down.
         Vec::new()
     } else {
+        // PROD-03.2: the schemas the restored records reference, imported
+        // into the target registry with their source IDs, the last step
+        // before any topic is created: a refusal here (exit 3) leaves no
+        // target topic, and no record byte is ever rewritten.
+        if let (schema_import::Prepared::Import(p), Some(ids)) = (&schemas, schema_ids.as_ref()) {
+            sc.target.schemas = Some(schema_import::import(p, ids)?);
+            sc.format_version =
+                logweir_core::scorecard::format_version_with_schemas(&sc.format_version, true)
+                    .to_string();
+        }
         // The rendered `restore.yaml` says `create_topics: false`, so this is
         // what creates them, with `TARGET_TOPIC_CONFIGS` on every one (or,
         // with `target.topic_configuration`, each topic's own creation set).
@@ -3666,6 +3695,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             original_name: None,
             creation: None,
             topic_configuration: None,
+            schemas: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -4001,6 +4031,8 @@ fn target_info(
         // Filled once the creation step has created the topics with it
         // (`topic_configuration_block`).
         topic_configuration: None,
+        // Filled by the schema import, before topic creation.
+        schemas: None,
     })
 }
 
@@ -5443,6 +5475,7 @@ mod tests {
             manifest_key: key.into(),
             manifest_sha256: format!("sha256:{}", "a".repeat(64)),
             manifest_version_id: None,
+            schema_registry: None,
         };
 
         for key in [

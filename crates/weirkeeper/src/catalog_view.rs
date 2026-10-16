@@ -1125,6 +1125,10 @@ pub struct RunnerEntry {
     /// listing more is malformed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
+    /// **PROD-03.1.** The point's registry capture, from its record. Absent
+    /// is not captured, or not published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<logweir_core::schema_registry::PointSchemaRegistry>,
 }
 
 impl RunnerEntry {
@@ -1247,6 +1251,9 @@ pub struct ViewEntry {
     /// See [`RunnerEntry::consumer_positions`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
+    /// See [`RunnerEntry::schema_registry`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<logweir_core::schema_registry::PointSchemaRegistry>,
 }
 
 /// What the sync counted over the whole walk, not only over the window (the
@@ -1886,6 +1893,9 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                     }
                     _ => {}
                 }
+                if kept.schema_registry.is_none() {
+                    kept.schema_registry = entry.schema_registry;
+                }
             }
         }
     }
@@ -2313,6 +2323,7 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         topics_omitted: entry.topics_omitted,
         owner_detection: entry.owner_detection,
         consumer_positions: entry.consumer_positions,
+        schema_registry: entry.schema_registry,
     }
 }
 

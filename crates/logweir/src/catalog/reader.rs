@@ -279,6 +279,7 @@ pub fn cross_check(
     disagreements.extend(unbacked_configuration(point, receipt));
     disagreements.extend(unbacked_owner_detection(point, receipt));
     disagreements.extend(unbacked_consumer_positions(point, receipt));
+    disagreements.extend(unbacked_schema_registry(point, receipt));
     disagreements.extend(unbacked_schema_dependency(point, receipt));
     disagreements.extend(unbacked_identity(point, receipt));
     if disagreements.is_empty() {
@@ -412,6 +413,18 @@ fn unbacked_consumer_positions(point: &CatalogPoint, receipt: &BackupReceipt) ->
         )),
         Some(Ok(_)) => None,
     }
+}
+
+/// **Rule 3 for `schema_registry`** (PROD-03.1): a record may carry none,
+/// never a summary its verified receipt does not back.
+fn unbacked_schema_registry(point: &CatalogPoint, receipt: &BackupReceipt) -> Option<String> {
+    let claimed = point.schema_registry.as_ref()?;
+    let backed = receipt
+        .schema_registry
+        .as_ref()
+        .map(logweir_core::schema_registry::PointSchemaRegistry::of);
+    (backed.as_ref() != Some(claimed))
+        .then(|| "schema_registry: the summary is not the receipt block's".to_string())
 }
 
 /// **Rule 4.** Two records of one point must carry the same
