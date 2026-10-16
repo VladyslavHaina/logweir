@@ -1177,12 +1177,14 @@ pub fn import(
                 detail,
             };
             if !importing.contains(v.subject.as_str()) {
+                // Before the PUT: one that took effect and lost its answer
+                // is still put back.
+                importing.insert(&v.subject);
                 let path = format!("/mode/{s}?force=true");
                 let (status, _) = call(rest, "PUT", &path, Some(&json!({"mode": "IMPORT"})))?;
                 if !(200..300).contains(&status) {
                     return Err(cannot(format!("PUT /mode answered {status}")));
                 }
-                importing.insert(&v.subject);
                 let path = format!("/mode/{s}");
                 let (status, mode) = call(rest, "GET", &path, None)?;
                 if status != 200 || mode.get("mode").and_then(Value::as_str) != Some("IMPORT") {

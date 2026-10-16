@@ -46,6 +46,8 @@ struct Fake {
     /// `(method, exact route without query, status, body)` answered once
     /// instead.
     forced: Vec<(String, String, u16, Value)>,
+    /// The first `PUT /mode/{s}` IMPORT takes effect and its answer is lost.
+    lose_import_answer: bool,
 }
 
 impl Fake {
@@ -63,6 +65,7 @@ impl Fake {
             refuse_mode_delete: false,
             fail_register: None,
             forced: Vec::new(),
+            lose_import_answer: false,
         }
     }
 
@@ -209,6 +212,9 @@ impl Rest for Fake {
                     return Ok((204, Value::Null));
                 }
                 self.modes.insert(decode(s), mode.clone());
+                if mode == "IMPORT" && std::mem::take(&mut self.lose_import_answer) {
+                    return Err("connection reset".into());
+                }
                 Ok((200, json!({"mode": mode})))
             }
             ("GET", ["mode"]) => Ok((200, json!({"mode": self.global_mode}))),
@@ -716,6 +722,29 @@ fn a_failure_mid_import_puts_the_prior_mode_back() {
         Some("READWRITE")
     );
     assert_eq!(target.modes.get("customer"), None);
+}
+
+/// od23 review L-1: a `PUT /mode` IMPORT that took effect but whose answer
+/// was lost still puts the prior mode back. The control is the row above,
+/// where the answer arrives.
+#[test]
+fn an_import_mode_whose_answer_was_lost_is_put_back() {
+    let mut target = Fake::new(Kind::KeepsIds);
+    target
+        .modes
+        .insert("orders-value".into(), "READWRITE".into());
+    target.lose_import_answer = true;
+    let err = run(&mut target, &[5]).unwrap_err();
+    assert_eq!(
+        err.reason(),
+        logweir_core::schema_registry::UNREACHABLE,
+        "{err}"
+    );
+    assert!(
+        target.modes.values().all(|m| m != "IMPORT"),
+        "{:?}",
+        target.modes
+    );
 }
 
 #[test]
