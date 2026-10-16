@@ -51,9 +51,9 @@ use crate::kube::KubeFailure;
 use crate::problem::{ApiError, FieldError};
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/switchovers";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/switchovers";
 /// The create route identifier.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/switchovers";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/switchovers";
 /// The deterministic name prefix.
 pub const NAME_PREFIX: &str = "swo-";
 

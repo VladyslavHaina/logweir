@@ -6,9 +6,9 @@
 //! line calling `routes::authorize` is a convention, not a boundary: a route
 //! added later that forgot it would answer an authenticated viewer -- or, for
 //! a route that took no `Actor` at all, anybody. D0 §"Application role and
-//! namespace matrix" says the namespace is checked BEFORE resource lookup on
-//! every route; this module makes that a property of the router rather than
-//! of each author's memory.
+//! namespace matrix", read per workspace (PROD-19.1), says the workspace is
+//! checked BEFORE resource lookup on every route; this module makes that a
+//! property of the router rather than of each author's memory.
 //!
 //! * [`ROUTES`] declares one [`Access`] per `(method, path)` the router serves,
 //!   public routes included, so "this route is deliberately public" is written
@@ -53,14 +53,14 @@ use crate::problem::{ApiError, ProblemCode};
 pub enum Access {
     /// No identity is consulted: the probes, the static page and its
     /// redirects, and the two sign-in steps an unauthenticated browser must be
-    /// able to reach. None of them reads a namespace or a Kubernetes object.
+    /// able to reach. None of them reads a workspace or a Kubernetes object.
     Public,
     /// Any authenticated actor. The route reads only the actor's own session
-    /// and grants (`/session`, `/namespaces`, logout).
+    /// and grants (`/session`, `/workspaces`, logout).
     Authenticated,
-    /// Every listed action, in the namespace named by the `{ns}` path
-    /// parameter, decided namespace first.
-    Namespaced(&'static [Action]),
+    /// Every listed action, in the workspace named by the `{ws}` path
+    /// parameter, decided workspace first.
+    Workspaced(&'static [Action]),
     /// A `POST …/{target}` command route whose action is chosen by the
     /// target's `:verb` suffix. A target that names no declared verb FAILS
     /// CLOSED — `404 not_found`, audit code `unknown_command` — before any
@@ -70,11 +70,11 @@ pub enum Access {
         /// `(suffix, action)` pairs, matched against the target's end.
         verbs: &'static [(&'static str, Action)],
     },
-    /// The action in AT LEAST ONE granted namespace. For the two routes that
-    /// carry no `{ns}`: the cadence preview (reads nothing) and the
+    /// The action in AT LEAST ONE granted workspace. For the two routes that
+    /// carry no `{ws}`: the cadence preview (reads nothing) and the
     /// cluster-scoped trust-policy reads (which the handler then narrows to
-    /// the namespaces the actor administers).
-    AnyNamespace(Action),
+    /// what the actor administers).
+    AnyWorkspace(Action),
 }
 
 impl Access {
@@ -84,9 +84,9 @@ impl Access {
         match self {
             Access::Public => "public",
             Access::Authenticated => "authenticated",
-            Access::Namespaced(_) => "namespaced",
+            Access::Workspaced(_) => "workspaced",
             Access::Command { .. } => "command",
-            Access::AnyNamespace(_) => "anyNamespace",
+            Access::AnyWorkspace(_) => "anyWorkspace",
         }
     }
 
@@ -95,9 +95,9 @@ impl Access {
     pub fn actions(self) -> Vec<Action> {
         match self {
             Access::Public | Access::Authenticated => Vec::new(),
-            Access::Namespaced(actions) => actions.to_vec(),
+            Access::Workspaced(actions) => actions.to_vec(),
             Access::Command { verbs } => verbs.iter().map(|(_, action)| *action).collect(),
-            Access::AnyNamespace(action) => vec![action],
+            Access::AnyWorkspace(action) => vec![action],
         }
     }
 }
@@ -121,8 +121,8 @@ const fn route(method: &'static str, path: &'static str, access: Access) -> Rout
     }
 }
 
-const fn ns(actions: &'static [Action]) -> Access {
-    Access::Namespaced(actions)
+const fn ws(actions: &'static [Action]) -> Access {
+    Access::Workspaced(actions)
 }
 
 /// The destination commands `routes::destinations::command` dispatches.
@@ -155,75 +155,75 @@ pub const ROUTES: &[RouteAccess] = &[
     // ------------------------------------------ the actor's own session
     route("GET", "/api/v1/session", Access::Authenticated),
     route("POST", "/api/v1/session/logout", Access::Authenticated),
-    route("GET", "/api/v1/namespaces", Access::Authenticated),
+    route("GET", "/api/v1/workspaces", Access::Authenticated),
     route(
         "GET",
         "/api/v1/cadence-previews",
-        Access::AnyNamespace(Action::ReadSchedules),
+        Access::AnyWorkspace(Action::ReadSchedules),
     ),
     // ------------------------------------------------------ connections
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/connections",
-        ns(&[Action::ReadConnections]),
+        "/api/v1/workspaces/{ws}/connections",
+        ws(&[Action::ReadConnections]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/connections",
-        ns(&[Action::CreateConnection]),
+        "/api/v1/workspaces/{ws}/connections",
+        ws(&[Action::CreateConnection]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/connections/{name}",
-        ns(&[Action::ReadConnections]),
+        "/api/v1/workspaces/{ws}/connections/{name}",
+        ws(&[Action::ReadConnections]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
-        ns(&[Action::ReadTopicDiscoveries]),
+        "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries",
+        ws(&[Action::ReadTopicDiscoveries]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
-        ns(&[Action::DiscoverTopics]),
+        "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries",
+        ws(&[Action::DiscoverTopics]),
     ),
     // ----------------------------------------------------- destinations
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/destinations",
-        ns(&[Action::ReadDestinations]),
+        "/api/v1/workspaces/{ws}/destinations",
+        ws(&[Action::ReadDestinations]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/destinations",
-        ns(&[Action::ManageDestinations]),
+        "/api/v1/workspaces/{ws}/destinations",
+        ws(&[Action::ManageDestinations]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/destinations/{name}",
-        ns(&[Action::ReadDestinations]),
+        "/api/v1/workspaces/{ws}/destinations/{name}",
+        ws(&[Action::ReadDestinations]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/destinations/{name}",
+        "/api/v1/workspaces/{ws}/destinations/{name}",
         Access::Command {
             verbs: DESTINATION_VERBS,
         },
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/destinations/{name}/usage",
-        ns(&[Action::ReadDestinations]),
+        "/api/v1/workspaces/{ws}/destinations/{name}/usage",
+        ws(&[Action::ReadDestinations]),
     ),
     // ------------------------------------------------ transient checks
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
-        ns(&[Action::ReadTopicDiscoveries]),
+        "/api/v1/workspaces/{ws}/topic-discoveries/{id}",
+        ws(&[Action::ReadTopicDiscoveries]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+        "/api/v1/workspaces/{ws}/topic-discoveries/{id}",
         Access::Command {
             verbs: &[(
                 crate::routes::topic_discoveries::CANCEL,
@@ -233,55 +233,55 @@ pub const ROUTES: &[RouteAccess] = &[
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
-        ns(&[Action::ReadTopicDiscoveries]),
+        "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics",
+        ws(&[Action::ReadTopicDiscoveries]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/preflights",
-        ns(&[Action::RunPreflight]),
+        "/api/v1/workspaces/{ws}/preflights",
+        ws(&[Action::RunPreflight]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/preflights/{id}",
-        ns(&[Action::ReadPreflights]),
+        "/api/v1/workspaces/{ws}/preflights/{id}",
+        ws(&[Action::ReadPreflights]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/preflights/{id}",
+        "/api/v1/workspaces/{ws}/preflights/{id}",
         Access::Command {
             verbs: &[(crate::routes::preflights::CANCEL, Action::CancelPreflight)],
         },
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/preflights/{id}/details",
-        ns(&[Action::ReadPreflights]),
+        "/api/v1/workspaces/{ws}/preflights/{id}/details",
+        ws(&[Action::ReadPreflights]),
     ),
     // -------------------------------------------------------- schedules
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/schedules",
-        ns(&[Action::ReadSchedules]),
+        "/api/v1/workspaces/{ws}/schedules",
+        ws(&[Action::ReadSchedules]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/schedules",
-        ns(&[Action::CreateSchedule]),
+        "/api/v1/workspaces/{ws}/schedules",
+        ws(&[Action::CreateSchedule]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/schedules/{name}",
-        ns(&[Action::ReadSchedules]),
+        "/api/v1/workspaces/{ws}/schedules/{name}",
+        ws(&[Action::ReadSchedules]),
     ),
     route(
         "PUT",
-        "/api/v1/namespaces/{ns}/schedules/{name}",
-        ns(&[Action::EditSchedulePolicy]),
+        "/api/v1/workspaces/{ws}/schedules/{name}",
+        ws(&[Action::EditSchedulePolicy]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/schedules/{name}",
+        "/api/v1/workspaces/{ws}/schedules/{name}",
         Access::Command {
             verbs: &[(
                 crate::routes::schedules::SET_SUSPENSION,
@@ -292,178 +292,178 @@ pub const ROUTES: &[RouteAccess] = &[
     // ------------------------------------------ backups and restores
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/backups",
-        ns(&[Action::ReadBackups]),
+        "/api/v1/workspaces/{ws}/backups",
+        ws(&[Action::ReadBackups]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/backups",
-        ns(&[Action::CreateManualBackup]),
+        "/api/v1/workspaces/{ws}/backups",
+        ws(&[Action::CreateManualBackup]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/backups/{name}",
-        ns(&[Action::ReadBackups]),
+        "/api/v1/workspaces/{ws}/backups/{name}",
+        ws(&[Action::ReadBackups]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/restores",
-        ns(&[Action::ReadRestores]),
+        "/api/v1/workspaces/{ws}/restores",
+        ws(&[Action::ReadRestores]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/restores",
-        ns(&[Action::CreateRestore]),
+        "/api/v1/workspaces/{ws}/restores",
+        ws(&[Action::CreateRestore]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/restores/{name}",
-        ns(&[Action::ReadRestores]),
+        "/api/v1/workspaces/{ws}/restores/{name}",
+        ws(&[Action::ReadRestores]),
     ),
     // PROD-04.2: switchovers, under the restore actions (reading one is
     // reading a restore's consequence; requesting one is an operator's).
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/switchovers",
-        ns(&[Action::ReadRestores]),
+        "/api/v1/workspaces/{ws}/switchovers",
+        ws(&[Action::ReadRestores]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/switchovers",
-        ns(&[Action::CreateRestore]),
+        "/api/v1/workspaces/{ws}/switchovers",
+        ws(&[Action::CreateRestore]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/switchovers/{name}",
-        ns(&[Action::ReadRestores]),
+        "/api/v1/workspaces/{ws}/switchovers/{name}",
+        ws(&[Action::ReadRestores]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
-        ns(&[Action::SubmitApproval]),
+        "/api/v1/workspaces/{ws}/switchovers/{name}/approval",
+        ws(&[Action::SubmitApproval]),
     ),
     // A two-person switchover request: the restore routes' actions.
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
-        ns(&[Action::ReadApprovals]),
+        "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request",
+        ws(&[Action::ReadApprovals]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
-        ns(&[Action::SubmitApproval]),
+        "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval",
+        ws(&[Action::SubmitApproval]),
     ),
     // A governed approver's countersignature. The handler keeps its own role
     // check (it decides by the frozen policy's mode as well).
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/restores/{name}/approval",
-        ns(&[Action::SubmitApproval]),
+        "/api/v1/workspaces/{ws}/restores/{name}/approval",
+        ws(&[Action::SubmitApproval]),
     ),
     // Two-person approval in the console. The read shows a
     // request; the POST is the second person's click, and only the Approver
     // role holds `approval.submit` (an Administrator does not).
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
-        ns(&[Action::ReadApprovals]),
+        "/api/v1/workspaces/{ws}/restores/{name}/approval-request",
+        ws(&[Action::ReadApprovals]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
-        ns(&[Action::SubmitApproval]),
+        "/api/v1/workspaces/{ws}/restores/{name}/console-approval",
+        ws(&[Action::SubmitApproval]),
     ),
     // -------------------------------------------------------- approvals
-    // The namespace's approval-policy binding, as the console routes a
+    // The workspace's approval-policy binding, as the console routes a
     // submission by it. The handler keeps its own role check.
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/approval-policy",
-        ns(&[Action::ReadApprovals]),
+        "/api/v1/workspaces/{ws}/approval-policy",
+        ws(&[Action::ReadApprovals]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/approvals",
-        ns(&[Action::ReadApprovals]),
+        "/api/v1/workspaces/{ws}/approvals",
+        ws(&[Action::ReadApprovals]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/approvals/{name}",
-        ns(&[Action::ReadApprovals]),
+        "/api/v1/workspaces/{ws}/approvals/{name}",
+        ws(&[Action::ReadApprovals]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/approvals/{name}/packet",
-        ns(&[Action::ReadApprovalPacket]),
+        "/api/v1/workspaces/{ws}/approvals/{name}/packet",
+        ws(&[Action::ReadApprovalPacket]),
     ),
     // ------------------------------------ operations and the event stream
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
-        ns(&[Action::ReadOperations]),
+        "/api/v1/workspaces/{ws}/operations/{kind}/{name}",
+        ws(&[Action::ReadOperations]),
     ),
     // THE STREAM NEEDS BOTH. Opening it is a read of the operation AND the
     // stream action, decided here before any slot is taken or any watch opens.
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
-        ns(&[Action::ReadOperations, Action::StreamOperationEvents]),
+        "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events",
+        ws(&[Action::ReadOperations, Action::StreamOperationEvents]),
     ),
     // ------------------------------------------------ D3 read families
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/protection-policies",
-        ns(&[Action::ReadProtectionPolicies]),
+        "/api/v1/workspaces/{ws}/protection-policies",
+        ws(&[Action::ReadProtectionPolicies]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/protection-policies/{name}",
-        ns(&[Action::ReadProtectionPolicies]),
+        "/api/v1/workspaces/{ws}/protection-policies/{name}",
+        ws(&[Action::ReadProtectionPolicies]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/catalogs",
-        ns(&[Action::ReadCatalogs]),
+        "/api/v1/workspaces/{ws}/catalogs",
+        ws(&[Action::ReadCatalogs]),
     ),
     route(
         "POST",
-        "/api/v1/namespaces/{ns}/catalogs",
-        ns(&[Action::ConnectCatalog]),
+        "/api/v1/workspaces/{ws}/catalogs",
+        ws(&[Action::ConnectCatalog]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/catalogs/{name}",
-        ns(&[Action::ReadCatalogs]),
+        "/api/v1/workspaces/{ws}/catalogs/{name}",
+        ws(&[Action::ReadCatalogs]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/catalogs/{name}/points",
-        ns(&[Action::ReadCatalogs]),
+        "/api/v1/workspaces/{ws}/catalogs/{name}/points",
+        ws(&[Action::ReadCatalogs]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
-        ns(&[Action::ReadCatalogs]),
+        "/api/v1/workspaces/{ws}/catalogs/{name}/signers",
+        ws(&[Action::ReadCatalogs]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/retention-policies",
-        ns(&[Action::ReadRetentionPolicies]),
+        "/api/v1/workspaces/{ws}/retention-policies",
+        ws(&[Action::ReadRetentionPolicies]),
     ),
     route(
         "GET",
-        "/api/v1/namespaces/{ns}/retention-policies/{name}",
-        ns(&[Action::ReadRetentionPolicies]),
+        "/api/v1/workspaces/{ws}/retention-policies/{name}",
+        ws(&[Action::ReadRetentionPolicies]),
     ),
     route(
         "GET",
         "/api/v1/trust-policies",
-        Access::AnyNamespace(Action::ReadTrustPolicies),
+        Access::AnyWorkspace(Action::ReadTrustPolicies),
     ),
     route(
         "GET",
         "/api/v1/trust-policies/{name}",
-        Access::AnyNamespace(Action::ReadTrustPolicies),
+        Access::AnyWorkspace(Action::ReadTrustPolicies),
     ),
 ];
 
@@ -550,15 +550,15 @@ pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) ->
     };
     let decision = match access {
         Access::Public | Access::Authenticated => Ok(()),
-        Access::Namespaced(actions) => match namespace_of(&mut parts, &state).await {
-            Ok(namespace) => decide_all(&state, &actor, &namespace, actions),
+        Access::Workspaced(actions) => match workspace_of(&mut parts, &state).await {
+            Ok(workspace) => decide_all(&state, &actor, &workspace, actions),
             Err(error) => Err(error),
         },
         Access::Command { verbs } => match params(&mut parts, &state).await {
-            Ok((namespace, target)) => {
+            Ok((workspace, target)) => {
                 match verbs.iter().find(|(suffix, _)| target.ends_with(suffix)) {
                     Some((_, action)) => {
-                        crate::routes::authorize(&state, &actor, &namespace, *action)
+                        crate::routes::authorize(&state, &actor, &workspace, *action)
                     }
                     None => {
                         actor.audit.set_failure("unknown_command");
@@ -568,7 +568,7 @@ pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) ->
             }
             Err(error) => Err(error),
         },
-        Access::AnyNamespace(action) => decide_anywhere(&state, &actor, action),
+        Access::AnyWorkspace(action) => decide_anywhere(&state, &actor, action),
     };
     if let Err(error) = decision {
         return error.into_response();
@@ -610,16 +610,16 @@ async fn path_params(
         .map_err(|_| ApiError::not_found())
 }
 
-async fn namespace_of(
+async fn workspace_of(
     parts: &mut http::request::Parts,
     state: &AppState,
 ) -> Result<String, ApiError> {
     path_params(parts, state)
         .await?
         .into_iter()
-        .find(|(k, _)| k == "ns")
+        .find(|(k, _)| k == "ws")
         .map(|(_, v)| v)
-        // A namespaced declaration on a path with no `{ns}` is a table error,
+        // A workspaced declaration on a path with no `{ws}` is a table error,
         // and it fails closed.
         .ok_or_else(undeclared)
 }
@@ -629,18 +629,18 @@ async fn params(
     state: &AppState,
 ) -> Result<(String, String), ApiError> {
     let all = path_params(parts, state).await?;
-    let namespace = all
+    let workspace = all
         .iter()
-        .find(|(k, _)| k == "ns")
+        .find(|(k, _)| k == "ws")
         .map(|(_, v)| v.clone())
         .ok_or_else(undeclared)?;
     let target = all
         .iter()
         .rev()
-        .find(|(k, _)| k != "ns")
+        .find(|(k, _)| k != "ws")
         .map(|(_, v)| v.clone())
         .ok_or_else(undeclared)?;
-    Ok((namespace, target))
+    Ok((workspace, target))
 }
 
 /// The first action is the audit record's action; the rest are recorded as
@@ -648,15 +648,15 @@ async fn params(
 fn decide_all(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     actions: &[Action],
 ) -> Result<(), ApiError> {
     let Some((first, rest)) = actions.split_first() else {
         return Err(undeclared());
     };
-    crate::routes::authorize(state, actor, namespace, *first)?;
+    crate::routes::authorize(state, actor, workspace, *first)?;
     for action in rest {
-        crate::routes::authorize_also(state, actor, namespace, *action)?;
+        crate::routes::authorize_also(state, actor, workspace, *action)?;
     }
     Ok(())
 }
@@ -666,7 +666,7 @@ fn decide_anywhere(state: &AppState, actor: &Actor, action: Action) -> Result<()
     let allowed = authorizer
         .namespaces(actor)
         .iter()
-        .any(|ns| authorizer.allows(actor, ns, action));
+        .any(|ws| authorizer.allows(actor, ws, action));
     if allowed {
         actor
             .audit
@@ -679,7 +679,7 @@ fn decide_anywhere(state: &AppState, actor: &Actor, action: Action) -> Result<()
     actor.audit.set_failure("forbidden");
     Err(ApiError::new(
         ProblemCode::Forbidden,
-        "This route requires the action in at least one granted namespace.",
+        "This route requires the action in at least one granted workspace.",
     ))
 }
 
@@ -717,19 +717,19 @@ mod tests {
     }
 
     #[test]
-    fn every_namespaced_route_has_a_namespace_parameter_and_nothing_else_does() {
+    fn every_workspaced_route_has_a_workspace_parameter_and_nothing_else_does() {
         for entry in ROUTES {
-            let has_ns = entry.path.contains("{ns}");
+            let has_ws = entry.path.contains("{ws}");
             match entry.access {
-                Access::Namespaced(actions) => {
-                    assert!(has_ns, "{}", entry.path);
+                Access::Workspaced(actions) => {
+                    assert!(has_ws, "{}", entry.path);
                     assert!(!actions.is_empty(), "{}", entry.path);
                 }
-                Access::Command { .. } => assert!(has_ns, "{}", entry.path),
-                Access::Public | Access::Authenticated | Access::AnyNamespace(_) => {
+                Access::Command { .. } => assert!(has_ws, "{}", entry.path),
+                Access::Public | Access::Authenticated | Access::AnyWorkspace(_) => {
                     assert!(
-                        !has_ns,
-                        "{} carries {{ns}} but is not namespaced",
+                        !has_ws,
+                        "{} carries {{ws}} but is not workspaced",
                         entry.path
                     );
                 }

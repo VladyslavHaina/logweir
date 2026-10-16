@@ -1,4 +1,4 @@
-//! `POST /api/v1/namespaces/{ns}/backups` (D1 §8).
+//! `POST /api/v1/workspaces/{ws}/backups` (D1 §8).
 //!
 //! THE SIX ROWS D1 §12 REQUIRES, and the API half of each: double click, lost
 //! HTTP response, refresh, paused schedule, failed preflight, and a successful
@@ -110,7 +110,7 @@ async fn the_answer_names_the_created_run_in_the_create_envelope() {
     for (attempt, expected_status) in [("create", 201), ("replay", 200)] {
         let answer = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/backups"),
+                &format!("/api/v1/workspaces/{NS_A}/backups"),
                 Some(KEY),
                 &from_schedule(),
             )
@@ -174,7 +174,7 @@ async fn same_key_same_body_returns_200_and_uid() {
 
     let first = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -191,7 +191,7 @@ async fn same_key_same_body_returns_200_and_uid() {
 
     let second = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -223,7 +223,7 @@ async fn a_lost_response_replays_the_original_run_after_an_edit() {
     // The response never reached the client: the object exists all the same.
     let first = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -234,7 +234,7 @@ async fn a_lost_response_replays_the_original_run_after_an_edit() {
 
     // Somebody edits the schedule. The replay must not pick that up.
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &json!({
             "expectedGeneration": 7,
             "schedule": "0 2 * * *",
@@ -248,7 +248,7 @@ async fn a_lost_response_replays_the_original_run_after_an_edit() {
 
     let replay = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -261,7 +261,7 @@ async fn a_lost_response_replays_the_original_run_after_an_edit() {
     // Same key, different body: a conflict, and still one run.
     let conflict = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "nightly", "expectedGeneration": 8}}).to_string(),
         )
@@ -272,7 +272,7 @@ async fn a_lost_response_replays_the_original_run_after_an_edit() {
     // A NEW key is a new, deliberate run.
     let deliberate = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-0002"),
             &from_schedule(),
         )
@@ -300,7 +300,7 @@ async fn a_reload_can_find_the_run_by_label() {
     let schedule = seed_schedule(&app.fake, "nightly", false);
     let uid = schedule["metadata"]["uid"].as_str().unwrap().to_string();
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some(KEY),
         &from_schedule(),
     )
@@ -323,7 +323,7 @@ async fn a_reload_can_find_the_run_by_label() {
 
     let listed = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/backups?labelSelector=logweir.dev/trigger%3Dmanual,logweir.dev/schedule-uid%3D{uid}"
+            "/api/v1/workspaces/{NS_A}/backups?labelSelector=logweir.dev/trigger%3Dmanual,logweir.dev/schedule-uid%3D{uid}"
         ))
         .await
         .json();
@@ -349,7 +349,7 @@ async fn run_from_suspended_schedule_is_allowed_and_reported() {
     seed_schedule(&app.fake, "nightly", true);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -388,7 +388,7 @@ async fn an_active_forbid_run_does_not_block_a_manual_run() {
     seed_schedule(&app.fake, "nightly", false);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -432,7 +432,7 @@ async fn the_api_never_gates_on_readiness_but_records_the_acknowledgement() {
     .to_string();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &body,
         )
@@ -455,7 +455,7 @@ async fn the_api_never_gates_on_readiness_but_records_the_acknowledgement() {
     // No acknowledgement, no annotation: the API never invents one.
     let plain = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-0002"),
             &from_schedule(),
         )
@@ -488,7 +488,7 @@ async fn the_copied_policy_digest_equals_the_schedules_own() {
     seed_schedule(&app.fake, "nightly", false);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &from_schedule(),
         )
@@ -555,7 +555,7 @@ async fn a_schedule_whose_policy_cannot_run_is_refused_by_a_clean_path() {
     );
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "empty"}}).to_string(),
         )
@@ -578,7 +578,7 @@ async fn a_schedule_whose_policy_cannot_run_is_refused_by_a_clean_path() {
     // form the person is looking at.
     let ad_hoc = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-7777"),
             &json!({
                 "sourceRef": {"name": "source"},
@@ -605,7 +605,7 @@ async fn an_expected_generation_that_moved_is_policy_changed() {
     seed_schedule(&app.fake, "nightly", false);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "nightly", "expectedGeneration": 6}}).to_string(),
         )
@@ -619,7 +619,7 @@ async fn an_expected_generation_that_moved_is_policy_changed() {
     // The matching generation runs.
     let ok = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "nightly", "expectedGeneration": 7}}).to_string(),
         )
@@ -640,7 +640,7 @@ async fn the_two_bodies_do_not_mix() {
     seed_schedule(&app.fake, "nightly", false);
     let mixed = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({
                 "scheduleRef": {"name": "nightly"},
@@ -682,7 +682,7 @@ async fn the_two_bodies_do_not_mix() {
     ] {
         let response = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/backups"),
+                &format!("/api/v1/workspaces/{NS_A}/backups"),
                 Some("back-up-now-9999"),
                 &body.to_string(),
             )
@@ -692,7 +692,7 @@ async fn the_two_bodies_do_not_mix() {
     }
     // A schedule that is not there is `not_found`, not a run against nothing.
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some("back-up-now-8888"),
         &json!({"scheduleRef": {"name": "absent"}}).to_string(),
     )
@@ -719,7 +719,7 @@ async fn an_ad_hoc_run_reads_nothing_and_records_no_schedule() {
     .to_string();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &body,
         )
@@ -745,7 +745,7 @@ async fn an_ad_hoc_run_reads_nothing_and_records_no_schedule() {
     // here and never accepted from a body.
     let with_destination = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-0002"),
             &json!({
                 "sourceRef": {"name": "source"},
@@ -763,7 +763,7 @@ async fn an_ad_hoc_run_reads_nothing_and_records_no_schedule() {
     );
     assert_eq!(posted["spec"]["destinationRef"], json!({"name": "primary"}));
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some("back-up-now-0003"),
         &json!({
             "sourceRef": {"name": "source"},
@@ -807,7 +807,7 @@ async fn dynamic_selection_is_copied_whole() {
     );
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "dyn"}}).to_string(),
         )
@@ -826,7 +826,7 @@ async fn dynamic_selection_is_copied_whole() {
     // REQUIRED with no default: both possible defaults are wrong in a way the
     // operator would not notice.
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some("back-up-now-0002"),
         &json!({
             "sourceRef": {"name": "source"},
@@ -867,7 +867,7 @@ async fn a_run_copies_and_shows_its_schedules_consumer_groups() {
     );
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": "grouped"}}).to_string(),
         )
@@ -879,7 +879,7 @@ async fn a_run_copies_and_shows_its_schedules_consumer_groups() {
         .unwrap()
         .to_string();
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/backups/{name}"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/backups/{name}"))
         .await;
     assert_eq!(read.status, 200, "{}", read.text());
     assert_eq!(read.json()["item"]["consumerGroups"], groups);
@@ -888,7 +888,7 @@ async fn a_run_copies_and_shows_its_schedules_consumer_groups() {
     seed_schedule(&app.fake, "nightly", false);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-0003"),
             &from_schedule(),
         )
@@ -899,7 +899,7 @@ async fn a_run_copies_and_shows_its_schedules_consumer_groups() {
         .unwrap()
         .to_string();
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/backups/{name}"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/backups/{name}"))
         .await;
     assert!(
         read.json()["item"].get("consumerGroups").is_none(),
@@ -946,10 +946,24 @@ async fn the_shipped_sample_is_what_this_route_creates() {
     // generation, and the policy fields the sample carries. `FakeKube::seed`
     // keeps a `uid` that is already in the metadata, so the copy can be
     // compared literally rather than after a substitution.
-    let app = TestApp::new();
+    // The run is made in the workspace the sample's label names.
+    let workspace = sample
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(support::WORKSPACE_LABEL))
+        .expect("the sample names its workspace")
+        .clone();
+    let app = TestApp::with(
+        FakeKube::new(),
+        support::Options {
+            namespaces: vec![workspace.clone()],
+            ..support::Options::default()
+        },
+    );
     app.fake.seed(
         "backupschedules",
-        NS_A,
+        &workspace,
         json!({
             "metadata": {
                 "name": reference.name,
@@ -968,7 +982,7 @@ async fn the_shipped_sample_is_what_this_route_creates() {
     );
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{workspace}/backups"),
             Some(KEY),
             &json!({"scheduleRef": {"name": reference.name}}).to_string(),
         )
@@ -980,7 +994,7 @@ async fn the_shipped_sample_is_what_this_route_creates() {
         .to_string();
     let stored = app
         .fake
-        .object("backups", NS_A, &name)
+        .object("backups", &workspace, &name)
         .expect("the route stored it");
 
     // THE COMPARISON. The spec is the whole policy and the whole identity.
@@ -1232,7 +1246,7 @@ async fn fx33_a_schedule_naming_more_than_the_maximum_cannot_be_run_now() {
     seed(&app, "wide", MAX_BACKUP_TOPICS + 1);
     let over = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-fx33-over"),
             &json!({"scheduleRef": {"name": "wide"}}).to_string(),
         )
@@ -1256,7 +1270,7 @@ async fn fx33_a_schedule_naming_more_than_the_maximum_cannot_be_run_now() {
     seed(&app, "full", MAX_BACKUP_TOPICS);
     let at = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            &format!("/api/v1/workspaces/{NS_A}/backups"),
             Some("back-up-now-fx33-full"),
             &json!({"scheduleRef": {"name": "full"}}).to_string(),
         )

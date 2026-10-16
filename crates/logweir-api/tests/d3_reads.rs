@@ -92,7 +92,7 @@ fn at(app: &TestApp, rfc3339: &str) {
 async fn protection_health_is_published_beside_its_basis_and_its_schedules() {
     let app = app();
     let body = app
-        .get("/api/v1/namespaces/team-a/protection-policies")
+        .get("/api/v1/workspaces/team-a/protection-policies")
         .await;
     assert_eq!(body.status.as_u16(), 200);
     let v = body.json();
@@ -128,7 +128,7 @@ async fn protection_health_is_published_beside_its_basis_and_its_schedules() {
     assert!(item.get("lastAvailablePoint").is_none());
 
     let one = app
-        .get("/api/v1/namespaces/team-a/protection-policies/protect-a")
+        .get("/api/v1/workspaces/team-a/protection-policies/protect-a")
         .await;
     assert_eq!(one.status.as_u16(), 200);
     assert_eq!(one.json()["item"]["health"], "Unprotected");
@@ -146,7 +146,7 @@ async fn protection_health_is_published_beside_its_basis_and_its_schedules() {
 async fn a_protection_response_names_no_secret_and_no_sink() {
     let app = app();
     let text = app
-        .get("/api/v1/namespaces/team-a/protection-policies")
+        .get("/api/v1/workspaces/team-a/protection-policies")
         .await
         .text();
     // The live object really does reference one, or this proves nothing.
@@ -165,7 +165,7 @@ async fn a_protection_response_names_no_secret_and_no_sink() {
     // Alert sinks are withdrawn: the policy's routes are not published at
     // all, and its own condition says why.
     let item = &app
-        .get("/api/v1/namespaces/team-a/protection-policies")
+        .get("/api/v1/workspaces/team-a/protection-policies")
         .await
         .json()["items"][0];
     assert!(item.get("notifications").is_none(), "{item}");
@@ -177,7 +177,7 @@ async fn a_protection_response_names_no_secret_and_no_sink() {
 async fn retention_publishes_what_is_actually_enforcing_and_never_the_credential() {
     let app = app();
     let body = app
-        .get("/api/v1/namespaces/team-a/retention-policies")
+        .get("/api/v1/workspaces/team-a/retention-policies")
         .await;
     assert_eq!(body.status.as_u16(), 200);
     let items = body.json();
@@ -359,7 +359,7 @@ async fn the_degraded_condition_is_published_as_a_flag() {
     let app = TestApp::with(fake, Options::default());
 
     let v = app
-        .get("/api/v1/namespaces/team-a/retention-policies/degraded")
+        .get("/api/v1/workspaces/team-a/retention-policies/degraded")
         .await
         .json();
     assert_eq!(v["item"]["enforcementDegraded"], true);
@@ -368,7 +368,7 @@ async fn the_degraded_condition_is_published_as_a_flag() {
     // And the policy that is NOT degraded says so, so the flag is a fact and
     // not a default.
     let v = app
-        .get("/api/v1/namespaces/team-a/retention-policies/keep-a")
+        .get("/api/v1/workspaces/team-a/retention-policies/keep-a")
         .await
         .json();
     assert_eq!(v["item"]["enforcementDegraded"], false);
@@ -380,7 +380,7 @@ async fn the_degraded_condition_is_published_as_a_flag() {
 async fn a_catalog_publishes_ten_counts_a_window_flag_and_its_signers() {
     let app = app();
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary")
+        .get("/api/v1/workspaces/team-a/catalogs/primary")
         .await
         .json();
     let item = &v["item"];
@@ -395,7 +395,7 @@ async fn a_catalog_publishes_ten_counts_a_window_flag_and_its_signers() {
     assert_eq!(item["signers"][0]["trusted"], true);
 
     let signers = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/signers")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/signers")
         .await
         .json();
     assert_eq!(signers["items"][0]["keyId"].as_str().unwrap().len(), 64);
@@ -459,7 +459,7 @@ fn catalog_with_page(digest_override: Option<&str>) -> (TestApp, Vec<String>) {
 async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
     let (app, lines) = catalog_with_page(None);
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(v["items"].as_array().unwrap().len(), lines.len());
@@ -527,9 +527,9 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
     let mut cursor: Option<String> = None;
     for _ in 0..lines.len() + 1 {
         let url = match &cursor {
-            None => "/api/v1/namespaces/team-a/catalogs/primary/points?limit=1".to_string(),
+            None => "/api/v1/workspaces/team-a/catalogs/primary/points?limit=1".to_string(),
             Some(c) => {
-                format!("/api/v1/namespaces/team-a/catalogs/primary/points?limit=1&cursor={c}")
+                format!("/api/v1/workspaces/team-a/catalogs/primary/points?limit=1&cursor={c}")
             }
         };
         let page = app.get(&url).await.json();
@@ -557,7 +557,7 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
 #[tokio::test]
 async fn a_page_that_fails_its_digest_or_immutability_serves_nothing() {
     let (app, _) = catalog_with_page(Some(&format!("sha256:{}", "a".repeat(64))));
-    app.get("/api/v1/namespaces/team-a/catalogs/primary/points")
+    app.get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .assert_problem(409, "result_integrity_failed");
 
@@ -571,7 +571,7 @@ async fn a_page_that_fails_its_digest_or_immutability_serves_nothing() {
         json!([{ "configMapName": "primary-g1-p0", "index": 0, "count": lines.len() }]);
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
-    app.get("/api/v1/namespaces/team-a/catalogs/primary/points")
+    app.get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .assert_problem(409, "result_integrity_failed");
 
@@ -595,7 +595,7 @@ async fn a_page_that_fails_its_digest_or_immutability_serves_nothing() {
     }]);
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
-    app.get("/api/v1/namespaces/team-a/catalogs/primary/points")
+    app.get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .assert_problem(409, "result_integrity_failed");
 }
@@ -605,7 +605,7 @@ async fn a_page_that_fails_its_digest_or_immutability_serves_nothing() {
 async fn a_point_cursor_is_bound_to_the_view_generation() {
     let (app, _) = catalog_with_page(None);
     let page = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points?limit=1")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points?limit=1")
         .await
         .json();
     let cursor = page["page"]["nextCursor"]
@@ -624,14 +624,14 @@ async fn a_point_cursor_is_bound_to_the_view_generation() {
 
     let refused = app
         .get(&format!(
-            "/api/v1/namespaces/team-a/catalogs/primary/points?limit=1&cursor={cursor}"
+            "/api/v1/workspaces/team-a/catalogs/primary/points?limit=1&cursor={cursor}"
         ))
         .await;
     refused.assert_problem(400, "cursor_invalid");
 
     // And a cursor from another catalog's list is not this one's either.
     let other = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points?limit=1&cursor=not-a-cursor")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points?limit=1&cursor=not-a-cursor")
         .await;
     other.assert_problem(400, "cursor_invalid");
     assert!(!generation.is_empty());
@@ -648,7 +648,7 @@ async fn an_expired_view_is_named_rather_than_reported_as_an_empty_archive() {
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(v["items"].as_array().unwrap().len(), 0);
@@ -656,7 +656,7 @@ async fn an_expired_view_is_named_rather_than_reported_as_an_empty_archive() {
     // The count the sync recorded is still published, so "no rows" and "no
     // points" are distinguishable.
     let catalog = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary")
+        .get("/api/v1/workspaces/team-a/catalogs/primary")
         .await
         .json();
     assert_eq!(catalog["item"]["counts"]["total"], 5);
@@ -681,7 +681,7 @@ async fn a_missing_materialized_page_is_explicitly_incomplete() {
     let app = TestApp::with(fake, Options::default());
 
     let response = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(response["items"], json!([]));
@@ -691,7 +691,7 @@ async fn a_missing_materialized_page_is_explicitly_incomplete() {
     // the UI incomplete merely because no archived point exists yet.
     let (normal_app, _) = catalog_with_page(None);
     let normal = normal_app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert!(normal.get("incomplete").is_none());
@@ -709,7 +709,7 @@ async fn connecting_an_archive_creates_one_catalog_and_replays_the_same_one() {
     .to_string();
     let created = app
         .post(
-            "/api/v1/namespaces/team-a/catalogs",
+            "/api/v1/workspaces/team-a/catalogs",
             Some("connect-0001"),
             &body,
         )
@@ -730,7 +730,7 @@ async fn connecting_an_archive_creates_one_catalog_and_replays_the_same_one() {
 
     let replay = app
         .post(
-            "/api/v1/namespaces/team-a/catalogs",
+            "/api/v1/workspaces/team-a/catalogs",
             Some("connect-0001"),
             &body,
         )
@@ -748,7 +748,7 @@ async fn connecting_an_archive_creates_one_catalog_and_replays_the_same_one() {
     })
     .to_string();
     app.post(
-        "/api/v1/namespaces/team-a/catalogs",
+        "/api/v1/workspaces/team-a/catalogs",
         Some("connect-0001"),
         &other,
     )
@@ -797,7 +797,7 @@ async fn a_connect_request_names_exactly_one_location_and_bounded_numbers() {
     for (body, field) in cases {
         let response = app
             .post(
-                "/api/v1/namespaces/team-a/catalogs",
+                "/api/v1/workspaces/team-a/catalogs",
                 Some("validation-0001"),
                 &body.to_string(),
             )
@@ -808,7 +808,7 @@ async fn a_connect_request_names_exactly_one_location_and_bounded_numbers() {
     }
     // An unknown field is refused rather than dropped.
     app.post(
-        "/api/v1/namespaces/team-a/catalogs",
+        "/api/v1/workspaces/team-a/catalogs",
         Some("validation-0002"),
         &json!({"name": "c", "syncMode": "full", "destinationRef": {"name": "d"}, "extra": 1})
             .to_string(),
@@ -956,7 +956,7 @@ async fn every_family_pages_with_a_cursor_bound_to_its_own_route() {
     let app = TestApp::with(fake, Options::default());
 
     let protection = app
-        .get("/api/v1/namespaces/team-a/protection-policies?limit=2")
+        .get("/api/v1/workspaces/team-a/protection-policies?limit=2")
         .await
         .json();
     assert_eq!(protection["items"].as_array().unwrap().len(), 2);
@@ -969,29 +969,29 @@ async fn every_family_pages_with_a_cursor_bound_to_its_own_route() {
     // the route, so a page of protection policies can never be replayed as a
     // page of catalogs.
     app.get(&format!(
-        "/api/v1/namespaces/team-a/catalogs?limit=2&cursor={cursor}"
+        "/api/v1/workspaces/team-a/catalogs?limit=2&cursor={cursor}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
     // Nor in another namespace.
     app.get(&format!(
-        "/api/v1/namespaces/team-b/protection-policies?limit=2&cursor={cursor}"
+        "/api/v1/workspaces/team-b/protection-policies?limit=2&cursor={cursor}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
     // Its own route continues.
     let next = app
         .get(&format!(
-            "/api/v1/namespaces/team-a/protection-policies?limit=2&cursor={cursor}"
+            "/api/v1/workspaces/team-a/protection-policies?limit=2&cursor={cursor}"
         ))
         .await;
     assert_eq!(next.status.as_u16(), 200);
 
     // The page bound is the shared one.
-    app.get("/api/v1/namespaces/team-a/protection-policies?limit=201")
+    app.get("/api/v1/workspaces/team-a/protection-policies?limit=201")
         .await
         .assert_problem(422, "validation_failed");
-    app.get("/api/v1/namespaces/team-a/catalogs/primary/points?limit=201")
+    app.get("/api/v1/workspaces/team-a/catalogs/primary/points?limit=201")
         .await
         .assert_problem(422, "validation_failed");
     app.fake.assert_strict();
@@ -1014,9 +1014,9 @@ async fn the_read_families_are_narrowed_by_role_and_trust_needs_an_administrator
     let admin = shared.session_cookie("u-adm", &["lw-a-admins"]);
 
     let reads = [
-        "/api/v1/namespaces/team-a/protection-policies",
-        "/api/v1/namespaces/team-a/catalogs",
-        "/api/v1/namespaces/team-a/retention-policies",
+        "/api/v1/workspaces/team-a/protection-policies",
+        "/api/v1/workspaces/team-a/catalogs",
+        "/api/v1/workspaces/team-a/retention-policies",
     ];
     for path in reads {
         for (who, cookie) in [
@@ -1052,7 +1052,7 @@ async fn the_read_families_are_narrowed_by_role_and_trust_needs_an_administrator
     // An ungranted namespace is 404 in shared mode, for the new families too:
     // the answer never depends on cluster state the actor may not see.
     let response = shared
-        .get("/api/v1/namespaces/team-c/protection-policies", &viewer)
+        .get("/api/v1/workspaces/team-c/protection-policies", &viewer)
         .await;
     assert_eq!(response.status.as_u16(), 404);
     assert!(
@@ -1088,7 +1088,7 @@ async fn connecting_an_archive_is_refused_to_a_viewer_and_an_approver() {
         let csrf = shared.csrf_for(who);
         let response = shared
             .post(
-                "/api/v1/namespaces/team-a/catalogs",
+                "/api/v1/workspaces/team-a/catalogs",
                 &cookie,
                 Some(&csrf),
                 Some(&format!("connect-{who}-01")),
@@ -1292,9 +1292,9 @@ async fn an_archive_url_that_carries_userinfo_comes_back_redacted() {
 
     let app = TestApp::with(fake, Options::default());
     for path in [
-        "/api/v1/namespaces/team-a/catalogs/adopted",
-        "/api/v1/namespaces/team-a/catalogs",
-        "/api/v1/namespaces/team-a/protection-policies/adopted-protection",
+        "/api/v1/workspaces/team-a/catalogs/adopted",
+        "/api/v1/workspaces/team-a/catalogs",
+        "/api/v1/workspaces/team-a/protection-policies/adopted-protection",
     ] {
         let text = app.get(path).await.text();
         assert!(
@@ -1367,7 +1367,7 @@ async fn a_point_the_controller_refused_is_never_listed_as_selectable() {
         );
 
         let v = app
-            .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+            .get("/api/v1/workspaces/team-a/catalogs/primary/points")
             .await
             .json();
         let items = v["items"].as_array().expect("items");
@@ -1391,7 +1391,7 @@ async fn a_point_the_controller_refused_is_never_listed_as_selectable() {
         assert!(v.get("backupVerdictsIncomplete").is_none());
 
         let selectable = app
-            .get("/api/v1/namespaces/team-a/catalogs/primary/points?selectable=true")
+            .get("/api/v1/workspaces/team-a/catalogs/primary/points?selectable=true")
             .await
             .json();
         let ids: Vec<&str> = selectable["items"]
@@ -1423,7 +1423,7 @@ async fn a_not_attempted_or_valid_backup_leaves_the_catalog_in_charge() {
             verdict_backup("b-unread", &receipt_of(&lines[0]), result),
         );
         let v = app
-            .get("/api/v1/namespaces/team-a/catalogs/primary/points?selectable=true")
+            .get("/api/v1/workspaces/team-a/catalogs/primary/points?selectable=true")
             .await
             .json();
         let items = v["items"]
@@ -1453,7 +1453,7 @@ async fn a_backup_listing_past_its_bound_is_published_as_truncated() {
         );
     }
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(v["backupVerdictsIncomplete"], "Truncated");
@@ -1486,7 +1486,7 @@ async fn one_malformed_backup_never_fails_the_point_page() {
         json!({"metadata": {"name": "b-bare"}, "status": {"phase": "Running"}}),
     );
     let body = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await;
     assert_eq!(body.status.as_u16(), 200, "{}", body.text());
     let v = body.json();
@@ -1512,7 +1512,7 @@ async fn an_unreadable_verdict_refuses_only_its_own_point() {
     odd["status"]["evidence"]["verification"]["result"] = json!(42);
     app.fake.seed("backups", NS_A, odd);
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     let items = v["items"].as_array().expect("items");
@@ -1539,14 +1539,14 @@ async fn a_failed_backup_list_serves_the_page_and_says_so() {
     );
     app.fake.inject(support::Fault {
         method: "GET",
-        path_contains: "/namespaces/team-a/backups".to_string(),
+        path_contains: "/namespaces/logweir-system/backups".to_string(),
         status: 403,
         reason: "Forbidden",
         delay: None,
         remaining: 1,
     });
     let body = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await;
     assert_eq!(body.status.as_u16(), 200, "{}", body.text());
     let v = body.json();
@@ -1578,7 +1578,7 @@ async fn an_unattributable_refusal_marks_the_page_incomplete() {
         .remove("receiptSha256");
     app.fake.seed("backups", NS_A, anonymous);
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(v["backupVerdictsIncomplete"], "Unavailable");
@@ -1612,7 +1612,7 @@ async fn listed_with_topics(topics: Value, detection: Option<Value>) -> (Value, 
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     app.fake.assert_strict();
@@ -1745,7 +1745,7 @@ async fn listed_with_positions(cp: Value) -> (Value, Vec<Value>) {
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     app.fake.assert_strict();
@@ -1853,7 +1853,7 @@ async fn fx38_an_unreadable_view_line_marks_the_points_page_incomplete() {
     fake.seed("recoverycatalogs", NS_A, catalog);
     let app = TestApp::with(fake, Options::default());
     let v = app
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert_eq!(v["items"].as_array().unwrap().len(), good);
@@ -1861,7 +1861,7 @@ async fn fx38_an_unreadable_view_line_marks_the_points_page_incomplete() {
 
     let (normal, _) = catalog_with_page(None);
     let v = normal
-        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .get("/api/v1/workspaces/team-a/catalogs/primary/points")
         .await
         .json();
     assert!(v.get("incomplete").is_none(), "CONTROL");
@@ -1894,7 +1894,7 @@ async fn fx38_an_absent_truncated_is_not_published_as_false() {
         fake.seed("recoverycatalogs", NS_A, catalog);
         let app = TestApp::with(fake, Options::default());
         let item = app
-            .get("/api/v1/namespaces/team-a/catalogs/primary")
+            .get("/api/v1/workspaces/team-a/catalogs/primary")
             .await
             .json()["item"]
             .clone();
@@ -1904,7 +1904,7 @@ async fn fx38_an_absent_truncated_is_not_published_as_false() {
             "{said:?}"
         );
         let page = app
-            .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+            .get("/api/v1/workspaces/team-a/catalogs/primary/points")
             .await
             .json();
         assert_eq!(

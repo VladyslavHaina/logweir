@@ -133,11 +133,11 @@ fn param(name: &str, location: &str, description: &str, schema: Value, required:
     })
 }
 
-fn ns() -> Value {
+fn ws() -> Value {
     param(
-        "ns",
+        "ws",
         "path",
-        "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+        "A workspace of this install the actor holds a role in. Any other workspace is namespace_forbidden whether or not it exists.",
         json!({ "type": "string" }),
         true,
     )
@@ -165,7 +165,7 @@ fn id() -> Value {
 
 fn list_params() -> Vec<Value> {
     vec![
-        ns(),
+        ws(),
         param(
             "limit",
             "query",
@@ -267,7 +267,7 @@ fn paths() -> Value {
         method: "get",
         operation_id: id,
         summary,
-        parameters: vec![ns(), name()],
+        parameters: vec![ws(), name()],
         request: None,
         success: vec![("200", "The object.", schema)],
         problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
@@ -277,7 +277,7 @@ fn paths() -> Value {
             method: "post",
             operation_id: id,
             summary,
-            parameters: vec![ns(), idempotency_key(), origin()],
+            parameters: vec![ws(), idempotency_key(), origin()],
             request: Some(request),
             success: vec![
                 ("201", "Created.", schema),
@@ -389,11 +389,11 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces",
+            "/api/v1/workspaces",
             vec![Op {
                 method: "get",
-                operation_id: "listNamespaces",
-                summary: "The configured namespace grants. Core Namespace objects are never listed.",
+                operation_id: "listWorkspaces",
+                summary: "The actor's workspace grants. Core Namespace objects are never listed.",
                 parameters: vec![],
                 request: None,
                 success: vec![("200", "The grants.", "NamespaceListResponse")],
@@ -401,7 +401,7 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/connections",
+            "/api/v1/workspaces/{ws}/connections",
             vec![
                 list("listConnections", "KafkaCluster projections. Secret reference names only.", "ConnectionList"),
                 create(
@@ -413,7 +413,7 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/connections/{name}",
+            "/api/v1/workspaces/{ws}/connections/{name}",
             vec![get_one("getConnection", "One KafkaCluster projection.", "ConnectionResponse")],
         ),
         (
@@ -440,21 +440,21 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/schedules",
+            "/api/v1/workspaces/{ws}/schedules",
             vec![
                 list("listSchedules", "BackupSchedule projections.", "ScheduleList"),
                 create("createSchedule", "Create a BackupSchedule.", "CreateScheduleRequest", "ScheduleResponse"),
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/schedules/{name}",
+            "/api/v1/workspaces/{ws}/schedules/{name}",
             vec![
                 get_one("getSchedule", "One BackupSchedule projection.", "ScheduleResponse"),
                 Op {
                     method: "put",
                     operation_id: "updateSchedulePolicy",
                     summary: "Replace a schedule's FUTURE policy under expectedGeneration. The whole policy is sent and a field omitted is removed. spec.sourceRef is not on the request: a different cluster is a different schedule, and naming it is 422 sourceRef: field_immutable. It never touches a Backup that already exists, its frozen inputs or its Job. Idempotency-Key is refused: the precondition is the idempotence.",
-                    parameters: vec![ns(), name(), origin()],
+                    parameters: vec![ws(), name(), origin()],
                     request: Some("UpdateSchedulePolicyRequest"),
                     success: vec![("200", "The edited schedule, with its new generation.", "ScheduleResponse")],
                     problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND]),
@@ -462,26 +462,26 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension",
+            "/api/v1/workspaces/{ws}/schedules/{name}:set-suspension",
             vec![Op {
                 method: "post",
                 operation_id: "setScheduleSuspension",
                 summary: "Set spec.suspend, the schedule's one mutable field, if expectedResourceVersion is current. Idempotency-Key is refused.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("SetSuspensionRequest"),
                 success: vec![("200", "The updated schedule.", "ScheduleResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/backups",
+            "/api/v1/workspaces/{ws}/backups",
             vec![
                 list("listBackups", "Backup projections with a status summary.", "BackupList"),
                 Op {
                     method: "post",
                     operation_id: "createBackup",
                     summary: "Back up now. With scheduleRef the schedule's current revision is copied and recorded (uid, generation, runPolicySha256) and a policy field beside it is 422; without it the body is the policy, for a cluster with no schedule yet. A suspended schedule, an invalid cadence, an active Forbid run and a schedule deleted a second later none of them block the run. Readiness is recorded, never obeyed.",
-                    parameters: vec![ns(), idempotency_key(), origin()],
+                    parameters: vec![ws(), idempotency_key(), origin()],
                     request: Some("CreateBackupRequest"),
                     success: vec![
                         ("201", "Created; the run and the schedule it came from.", "ManualBackupResponse"),
@@ -492,11 +492,11 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/backups/{name}",
+            "/api/v1/workspaces/{ws}/backups/{name}",
             vec![get_one("getBackup", "One Backup projection.", "BackupResponse")],
         ),
         (
-            "/api/v1/namespaces/{ns}/restores",
+            "/api/v1/workspaces/{ws}/restores",
             vec![
                 list("listRestores", "Restore projections with a status summary; planBytes omitted.", "RestoreList"),
                 create(
@@ -508,16 +508,16 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/restores/{name}",
+            "/api/v1/workspaces/{ws}/restores/{name}",
             vec![get_one("getRestore", "One Restore projection, planBytes included.", "RestoreResponse")],
         ),
         (
-            "/api/v1/namespaces/{ns}/restores/{name}/approval",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval",
             vec![Op {
                 method: "post",
                 operation_id: "submitGovernedApproval",
                 summary: "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("SubmitApprovalRequest"),
                 success: vec![
                     ("201", "The Approval was created.", "ApprovalResponse"),
@@ -533,24 +533,24 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval-request",
             vec![Op {
                 method: "get",
                 operation_id: "getApprovalRequest",
                 summary: "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The request.", "ApprovalRequestResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/restores/{name}/console-approval",
             vec![Op {
                 method: "post",
                 operation_id: "approveInConsole",
                 summary: "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("ConsoleApprovalRequest"),
                 success: vec![
                     ("201", "The Approval was created.", "ApprovalResponse"),
@@ -566,7 +566,7 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/switchovers",
+            "/api/v1/workspaces/{ws}/switchovers",
             vec![
                 list("listSwitchovers", "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.", "SwitchoverList"),
                 create(
@@ -578,16 +578,16 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/switchovers/{name}",
+            "/api/v1/workspaces/{ws}/switchovers/{name}",
             vec![get_one("getSwitchover", "PROD-04.2: one Switchover projection, planBytes included.", "SwitchoverResponse")],
         ),
         (
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval",
             vec![Op {
                 method: "post",
                 operation_id: "submitSwitchoverApproval",
                 summary: "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("SubmitApprovalRequest"),
                 success: vec![
                     ("201", "The Approval was created.", "ApprovalResponse"),
@@ -603,24 +603,24 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request",
             vec![Op {
                 method: "get",
                 operation_id: "getSwitchoverApprovalRequest",
                 summary: "PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The request.", "SwitchoverApprovalRequestResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::PolicyMismatch]]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval",
             vec![Op {
                 method: "post",
                 operation_id: "approveSwitchoverInConsole",
                 summary: "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("ConsoleApprovalRequest"),
                 success: vec![
                     ("201", "The Approval was created.", "ApprovalResponse"),
@@ -636,7 +636,7 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/approval-policy",
+            "/api/v1/workspaces/{ws}/approval-policy",
             vec![get_one(
                 "getApprovalPolicy",
                 "PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy.",
@@ -644,15 +644,15 @@ fn paths() -> Value {
             )],
         ),
         (
-            "/api/v1/namespaces/{ns}/approvals",
+            "/api/v1/workspaces/{ws}/approvals",
             vec![list("listApprovals", "Approval metadata; no documents.", "ApprovalList")],
         ),
         (
-            "/api/v1/namespaces/{ns}/approvals/{name}",
+            "/api/v1/workspaces/{ws}/approvals/{name}",
             vec![get_one("getApproval", "One Approval's metadata; no documents.", "ApprovalResponse")],
         ),
         (
-            "/api/v1/namespaces/{ns}/approvals/{name}/packet",
+            "/api/v1/workspaces/{ws}/approvals/{name}/packet",
             vec![get_one(
                 "getApprovalPacket",
                 "The approval and sidecar documents, verbatim.",
@@ -660,7 +660,7 @@ fn paths() -> Value {
             )],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations",
+            "/api/v1/workspaces/{ws}/destinations",
             vec![
                 list(
                     "listDestinations",
@@ -671,7 +671,7 @@ fn paths() -> Value {
                     method: "post",
                     operation_id: "createDestination",
                     summary: "Create a BackupDestination. The object's name is the `name` field, because every schedule, backup and restore references a destination by name. A grant may carry a credential VALUE once in access.*.secret.new; it becomes a Secret owned by the destination and is never read back or echoed.",
-                    parameters: vec![ns(), idempotency_key(), origin()],
+                    parameters: vec![ws(), idempotency_key(), origin()],
                     request: Some("CreateDestinationRequest"),
                     success: vec![
                         ("201", "Created.", "DestinationResponse"),
@@ -682,28 +682,28 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations/{name}",
+            "/api/v1/workspaces/{ws}/destinations/{name}",
             vec![get_one("getDestination", "One destination, with the last explicit access test.", "DestinationResponse")],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
+            "/api/v1/workspaces/{ws}/destinations/{name}:update-access",
             vec![Op {
                 method: "post",
                 operation_id: "updateDestinationAccess",
                 summary: "Rotate the four grants and the CA reference under an expectedGeneration precondition. It cannot name the location or the transport, and it refuses Idempotency-Key. A grant carrying a credential VALUE whose deterministic Secret already exists is state_conflict: this service holds `create` on Secrets and nothing else, so the value was NOT written and nothing was changed.",
-                parameters: vec![ns(), name(), origin()],
+                parameters: vec![ws(), name(), origin()],
                 request: Some("UpdateDestinationAccessRequest"),
                 success: vec![("200", "The rotated destination.", "DestinationResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, DESTINATION, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations/{name}:test",
+            "/api/v1/workspaces/{ws}/destinations/{name}:test",
             vec![Op {
                 method: "post",
                 operation_id: "testDestination",
                 summary: "Start a DestinationAccess Preflight for this destination and answer 202 with it. Absent roles means every role the destination configures.",
-                parameters: vec![ns(), name(), idempotency_key(), origin()],
+                parameters: vec![ws(), name(), idempotency_key(), origin()],
                 request: Some("TestDestinationRequest"),
                 success: vec![
                     ("202", "The started test.", "PreflightResponse"),
@@ -713,19 +713,19 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
+            "/api/v1/workspaces/{ws}/destinations/{name}/usage",
             vec![Op {
                 method: "get",
                 operation_id: "getDestinationUsage",
                 summary: "Schedules and backups labelled for this destination, bounded to 100 each. `basis` states how the lists were built, so an empty answer is not read as \"nothing uses this\".",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The bounded usage.", "DestinationUsageResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
+            "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries",
             vec![
                 Op {
                     method: "get",
@@ -747,7 +747,7 @@ fn paths() -> Value {
                     method: "post",
                     operation_id: "createTopicDiscovery",
                     summary: "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace.",
-                    parameters: vec![ns(), name(), idempotency_key(), origin()],
+                    parameters: vec![ws(), name(), idempotency_key(), origin()],
                     request: Some("CreateTopicDiscoveryRequest"),
                     success: vec![
                         ("202", "Accepted; the check has been created.", "TopicDiscoveryResponse"),
@@ -758,13 +758,13 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}",
             vec![
                 Op {
                     method: "get",
                     operation_id: "getTopicDiscovery",
                     summary: "One discovery. `visibility` is never better than unknown without an explicit attestation: a successful Kafka list alone says nothing about whether it was whole. `stale` is recomputed per read against the connection as it is now.",
-                    parameters: vec![ns(), id()],
+                    parameters: vec![ws(), id()],
                     request: None,
                     success: vec![("200", "The discovery.", "TopicDiscoveryResponse")],
                     problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
@@ -772,25 +772,25 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel",
             vec![Op {
                 method: "post",
                 operation_id: "cancelTopicDiscovery",
                 summary: "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
-                parameters: vec![ns(), id(), origin()],
+                parameters: vec![ws(), id(), origin()],
                 request: None,
                 success: vec![("200", "The state after the request.", "CancelResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics",
             vec![Op {
                 method: "get",
                 operation_id: "listDiscoveredTopics",
                 summary: "One page of a stored inventory, read from the immutable result chunks the controller committed. Each chunk is verified by owner UID, immutability and digest before a row is served. At most eight chunks are read per request: a sparse q returns a short page with scan.complete=false and a cursor.",
                 parameters: vec![
-                    ns(),
+                    ws(),
                     id(),
                     param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
                     param("cursor", "query", "The opaque nextCursor of the previous page, bound to the actor, the discovery UID, the inventory digest and the filters.", json!({ "type": "string" }), false),
@@ -805,12 +805,12 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/preflights",
+            "/api/v1/workspaces/{ws}/preflights",
             vec![Op {
                 method: "post",
                 operation_id: "createPreflight",
                 summary: "Start a readiness check for a Backup, a Restore or a destination's grants. planBytes is opaque: planHash is checked against the SHA-256 of exactly those bytes and they are stored unchanged. The verdict is advisory and every execution-time guard still runs.",
-                parameters: vec![ns(), idempotency_key(), origin()],
+                parameters: vec![ws(), idempotency_key(), origin()],
                 request: Some("CreatePreflightRequest"),
                 success: vec![
                     ("202", "Accepted; the check has been created.", "PreflightResponse"),
@@ -820,14 +820,14 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/preflights/{id}",
+            "/api/v1/workspaces/{ws}/preflights/{id}",
             vec![
                 Op {
                     method: "get",
                     operation_id: "getPreflight",
                     summary: "One readiness result. `applicable` and `stale` are recomputed on every read against the planHash the caller sends, so an edited plan, a replaced referent or an expired result is never rendered as current readiness. An actor bound only as Approver reads Restore results and nothing else.",
                     parameters: vec![
-                        ns(),
+                        ws(),
                         id(),
                         param("planHash", "query", "sha256:<64 lowercase hex> of the plan the caller is looking at now. A result bound to a different hash is stale.", json!({ "type": "string" }), false),
                     ],
@@ -838,25 +838,25 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
+            "/api/v1/workspaces/{ws}/preflights/{id}:cancel",
             vec![Op {
                 method: "post",
                 operation_id: "cancelPreflight",
                 summary: "Ask an unfinished preflight to stop. Same rules as a discovery cancel.",
-                parameters: vec![ns(), id(), origin()],
+                parameters: vec![ws(), id(), origin()],
                 request: None,
                 success: vec![("200", "The state after the request.", "CancelResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/preflights/{id}/details",
+            "/api/v1/workspaces/{ws}/preflights/{id}/details",
             vec![Op {
                 method: "get",
                 operation_id: "listPreflightDetails",
                 summary: "One page of a preflight's detail document, verified by owner UID, immutability and digest before a row is served.",
                 parameters: vec![
-                    ns(),
+                    ws(),
                     id(),
                     param("check", "query", "Only entries the producer attributed to this check id.", json!({ "type": "string" }), false),
                     param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
@@ -868,13 +868,13 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}",
             vec![Op {
                 method: "get",
                 operation_id: "getOperation",
                 summary: "The normalized status of one Backup, Restore, TopicDiscovery or Preflight. For a backup or a restore the body is an OperationResponse: result and evidence verification are separate, and NotAttempted is never verified success. For a discovery or a preflight it is a CheckOperationResponse, which carries none of those fields because a transient check has none of those facts.",
                 parameters: vec![
-                    ns(),
+                    ws(),
                     param(
                         "kind",
                         "path",
@@ -892,13 +892,13 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events",
             vec![Op {
                 method: "get",
                 operation_id: "streamOperationEvents",
                 summary: "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
                 parameters: vec![
-                    ns(),
+                    ws(),
                     param(
                         "kind",
                         "path",
@@ -921,7 +921,7 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/protection-policies",
+            "/api/v1/workspaces/{ws}/protection-policies",
             vec![Op {
                 method: "get",
                 operation_id: "listProtectionPolicies",
@@ -933,19 +933,19 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/protection-policies/{name}",
+            "/api/v1/workspaces/{ws}/protection-policies/{name}",
             vec![Op {
                 method: "get",
                 operation_id: "getProtectionPolicy",
                 summary: "One protection policy. `health` absent means nothing has been evaluated, which is not Healthy.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The policy.", "ProtectionPolicyResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/catalogs",
+            "/api/v1/workspaces/{ws}/catalogs",
             vec![
                 Op {
                     method: "get",
@@ -960,7 +960,7 @@ fn paths() -> Value {
                     method: "post",
                     operation_id: "connectArchive",
                     summary: "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
-                    parameters: vec![ns(), idempotency_key(), origin()],
+                    parameters: vec![ws(), idempotency_key(), origin()],
                     request: Some("ConnectArchiveRequest"),
                     success: vec![
                         ("201", "Created.", "CatalogResponse"),
@@ -971,25 +971,25 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/catalogs/{name}",
+            "/api/v1/workspaces/{ws}/catalogs/{name}",
             vec![Op {
                 method: "get",
                 operation_id: "getCatalog",
                 summary: "One catalog.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The catalog.", "CatalogResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/points",
             vec![Op {
                 method: "get",
                 operation_id: "listCatalogPoints",
                 summary: "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty. incomplete true means a named materialised page disappeared during this read; any rows are a prefix, never proof that omitted rows are absent.",
                 parameters: vec![
-                    ns(),
+                    ws(),
                     name(),
                     param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
                     param("cursor", "query", "The opaque nextCursor of the previous page.", json!({ "type": "string" }), false),
@@ -1001,19 +1001,19 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/signers",
             vec![Op {
                 method: "get",
                 operation_id: "listCatalogSigners",
                 summary: "The untrusted-signer panel: each key id that signed points in this archive, how many, and whether the bound TrustPolicy accepts it — with the out-of-band fingerprint command and NO route that would trust a key. Absent `trusted` means the catalog could not tell, which is not false and is certainly not true.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The signers.", "SignerPageResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/retention-policies",
+            "/api/v1/workspaces/{ws}/retention-policies",
             vec![Op {
                 method: "get",
                 operation_id: "listRetentionPolicies",
@@ -1025,12 +1025,12 @@ fn paths() -> Value {
             }],
         ),
         (
-            "/api/v1/namespaces/{ns}/retention-policies/{name}",
+            "/api/v1/workspaces/{ws}/retention-policies/{name}",
             vec![Op {
                 method: "get",
                 operation_id: "getRetentionPolicy",
                 summary: "One retention policy, with the plan preview its last evaluation produced. Nothing in `lastEvaluation` was deleted.",
-                parameters: vec![ns(), name()],
+                parameters: vec![ws(), name()],
                 request: None,
                 success: vec![("200", "The policy.", "RetentionPolicyResponse")],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),

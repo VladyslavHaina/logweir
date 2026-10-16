@@ -57,7 +57,7 @@ pub struct SharedMode {
     /// forwarded client behind a trusted proxy, else the peer
     /// (`crate::http::login_rate_key`).
     pub login_limiter: RateLimiter,
-    /// Per-actor, per-namespace concurrent stream slots, taken by the
+    /// Per-actor, per-workspace concurrent stream slots, taken by the
     /// operation event stream; see `crate::auth::ratelimit`.
     pub streams: Arc<StreamSlots>,
     /// The session lifetime in seconds.
@@ -96,8 +96,6 @@ pub struct Settings {
     pub allowed_hosts: Vec<String>,
     /// The static assets.
     pub assets: StaticAssets,
-    /// The namespace the readiness probe lists in.
-    pub readiness_namespace: String,
     /// Shared mode's extras, absent in localAdmin mode.
     pub shared: Option<Arc<SharedMode>>,
     /// The Kubernetes identity this process writes as, recorded on every
@@ -241,11 +239,7 @@ impl AppState {
                 return verdict;
             }
         }
-        let kubernetes = self
-            .kube()
-            .probe(&self.inner.settings.readiness_namespace)
-            .await
-            .is_ok();
+        let kubernetes = self.kube().probe().await.is_ok();
         // SHARED MODE STARTS NOT READY UNTIL ITS PROVIDER HAS INITIALISED (D0:
         // discovery and JWKS must initialise). Once it has, the provider half
         // stays true: an IdP outage later must not cut the sessions that are
@@ -271,138 +265,138 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
         approvals, backups, cadence_previews, catalogs, connections, console_approval,
-        destinations, health, namespaces, operations, preflights, protection, restores, retention,
-        schedules, session, switchovers, topic_discoveries, trust,
+        destinations, health, operations, preflights, protection, restores, retention, schedules,
+        session, switchovers, topic_discoveries, trust, workspaces,
     };
 
     let api = Router::new()
         .route("/api/v1/session", get(session::get_session))
-        // D1 §4.4's exact path. It has no `{ns}` because it reads nothing: a
+        // D1 §4.4's exact path. It has no `{ws}` because it reads nothing: a
         // draft cadence is not an object, and this route makes no Kubernetes
         // call at all.
         .route("/api/v1/cadence-previews", get(cadence_previews::preview))
-        .route("/api/v1/namespaces", get(namespaces::list_namespaces))
+        .route("/api/v1/workspaces", get(workspaces::list))
         .route(
-            "/api/v1/namespaces/{ns}/connections",
+            "/api/v1/workspaces/{ws}/connections",
             get(connections::list).post(connections::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/connections/{name}",
+            "/api/v1/workspaces/{ws}/connections/{name}",
             get(connections::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
+            "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries",
             get(topic_discoveries::by_connection).post(topic_discoveries::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/destinations",
+            "/api/v1/workspaces/{ws}/destinations",
             get(destinations::list).post(destinations::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/destinations/{name}",
+            "/api/v1/workspaces/{ws}/destinations/{name}",
             get(destinations::get_one).post(destinations::command),
         )
         .route(
-            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
+            "/api/v1/workspaces/{ws}/destinations/{name}/usage",
             get(destinations::usage),
         )
         .route(
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}",
             get(topic_discoveries::get_one).post(topic_discoveries::cancel),
         )
         .route(
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics",
             get(topic_discoveries::topics),
         )
         .route(
-            "/api/v1/namespaces/{ns}/preflights",
+            "/api/v1/workspaces/{ws}/preflights",
             axum::routing::post(preflights::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/preflights/{id}",
+            "/api/v1/workspaces/{ws}/preflights/{id}",
             get(preflights::get_one).post(preflights::cancel),
         )
         .route(
-            "/api/v1/namespaces/{ns}/preflights/{id}/details",
+            "/api/v1/workspaces/{ws}/preflights/{id}/details",
             get(preflights::details),
         )
         .route(
-            "/api/v1/namespaces/{ns}/schedules",
+            "/api/v1/workspaces/{ws}/schedules",
             get(schedules::list).post(schedules::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/schedules/{name}",
+            "/api/v1/workspaces/{ws}/schedules/{name}",
             get(schedules::get_one)
                 .put(schedules::update)
                 .post(schedules::command),
         )
         .route(
-            "/api/v1/namespaces/{ns}/backups",
+            "/api/v1/workspaces/{ws}/backups",
             get(backups::list).post(backups::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/backups/{name}",
+            "/api/v1/workspaces/{ws}/backups/{name}",
             get(backups::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/restores",
+            "/api/v1/workspaces/{ws}/restores",
             get(restores::list).post(restores::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/restores/{name}",
+            "/api/v1/workspaces/{ws}/restores/{name}",
             get(restores::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/restores/{name}/approval",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval",
             axum::routing::post(restores::submit_approval),
         )
         // A two-person request as the approver is shown it (a
         // read), and the second person's click (POST only: no GET approves).
         .route(
-            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval-request",
             get(console_approval::request),
         )
         .route(
-            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/restores/{name}/console-approval",
             axum::routing::post(console_approval::approve),
         )
         // PROD-04.2: switchovers, their creation and approval routing.
         .route(
-            "/api/v1/namespaces/{ns}/switchovers",
+            "/api/v1/workspaces/{ws}/switchovers",
             get(switchovers::list).post(switchovers::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/switchovers/{name}",
+            "/api/v1/workspaces/{ws}/switchovers/{name}",
             get(switchovers::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval",
             axum::routing::post(switchovers::submit_approval),
         )
         // A two-person switchover request, read and clicked as a restore's.
         .route(
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request",
             get(console_approval::switchover_request),
         )
         .route(
-            "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval",
             axum::routing::post(console_approval::switchover_approve),
         )
         .route(
-            "/api/v1/namespaces/{ns}/approval-policy",
+            "/api/v1/workspaces/{ws}/approval-policy",
             get(approvals::policy),
         )
-        .route("/api/v1/namespaces/{ns}/approvals", get(approvals::list))
+        .route("/api/v1/workspaces/{ws}/approvals", get(approvals::list))
         .route(
-            "/api/v1/namespaces/{ns}/approvals/{name}",
+            "/api/v1/workspaces/{ws}/approvals/{name}",
             get(approvals::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/approvals/{name}/packet",
+            "/api/v1/workspaces/{ws}/approvals/{name}/packet",
             get(approvals::packet),
         )
         .route(
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}",
             get(operations::get_one),
         )
         // D3 §2.6's stream. It is a SEPARATE path rather than a content
@@ -411,46 +405,46 @@ pub fn router(state: AppState) -> Router {
         // header, and the capability flag a console reads
         // (`operationEvents`) has to name something.
         .route(
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events",
             get(operations::events),
         )
         // THE D3 READ FAMILIES (D3 §10). Every one is a bounded GET with the same
         // cursor, and the only write among them is the catalog create that
         // "connect an existing archive" needs.
         .route(
-            "/api/v1/namespaces/{ns}/protection-policies",
+            "/api/v1/workspaces/{ws}/protection-policies",
             get(protection::list),
         )
         .route(
-            "/api/v1/namespaces/{ns}/protection-policies/{name}",
+            "/api/v1/workspaces/{ws}/protection-policies/{name}",
             get(protection::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/catalogs",
+            "/api/v1/workspaces/{ws}/catalogs",
             get(catalogs::list).post(catalogs::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/catalogs/{name}",
+            "/api/v1/workspaces/{ws}/catalogs/{name}",
             get(catalogs::get_one),
         )
         .route(
-            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/points",
             get(catalogs::points),
         )
         .route(
-            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/signers",
             get(catalogs::signers),
         )
         .route(
-            "/api/v1/namespaces/{ns}/retention-policies",
+            "/api/v1/workspaces/{ws}/retention-policies",
             get(retention::list),
         )
         .route(
-            "/api/v1/namespaces/{ns}/retention-policies/{name}",
+            "/api/v1/workspaces/{ws}/retention-policies/{name}",
             get(retention::get_one),
         )
         // CLUSTER-SCOPED, AND THE ONLY ONE. A `TrustPolicy` names the
-        // namespaces it governs, so it has no `{ns}` and its own
+        // namespaces it governs, so it has no `{ws}` and its own
         // administrator-only rule; `routes::trust::authorize_cluster` is that
         // rule and records the decision under the `*` pseudo-namespace.
         .route("/api/v1/trust-policies", get(trust::list))

@@ -87,7 +87,7 @@ async fn a_restore_preflight_forwards_its_plan_bytes_verbatim() {
     let plan = plan();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights"),
             Some("preflight-key-00001"),
             &restore_request(&plan).to_string(),
         )
@@ -127,7 +127,7 @@ async fn a_plan_hash_that_is_not_the_hash_of_the_bytes_is_refused_without_echoin
     request["restore"]["planHash"] = json!(format!("sha256:{}", "b".repeat(64)));
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights"),
             Some("preflight-key-00002"),
             &request.to_string(),
         )
@@ -146,7 +146,7 @@ async fn a_plan_hash_that_is_not_the_hash_of_the_bytes_is_refused_without_echoin
 #[tokio::test]
 async fn the_block_must_match_the_operation_and_the_exclusive_pairs_hold() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
 
     // P3: a block that is not the operation's.
     let response = app
@@ -235,7 +235,7 @@ async fn the_block_must_match_the_operation_and_the_exclusive_pairs_hold() {
 /// the guard from becoming a blanket ban that strands pre-destination runs.
 #[tokio::test]
 async fn legacy_source_archive_is_only_accepted_for_a_truly_legacy_point() {
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let plan = plan();
 
     let destination_backed = TestApp::new();
@@ -311,7 +311,7 @@ async fn a_recreated_recovery_point_never_supplies_legacy_destination_advice() {
 
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights"),
             Some("preflight-recreated-point01"),
             &legacy_restore_request(&plan(), point).to_string(),
         )
@@ -360,7 +360,7 @@ async fn a_recreated_recovery_point_never_supplies_legacy_destination_advice() {
 async fn an_over_limit_preflight_performs_no_kubernetes_read() {
     let app = TestApp::new();
     let namespace = support::NS_B;
-    let path = format!("/api/v1/namespaces/{namespace}/preflights");
+    let path = format!("/api/v1/workspaces/{namespace}/preflights");
     let plan = plan();
     let request = legacy_restore_request(&plan, "missing-point");
     logweir_api::routes::reset_check_rate_limits();
@@ -422,7 +422,7 @@ async fn an_over_limit_preflight_performs_no_kubernetes_read() {
 #[tokio::test]
 async fn backup_preflight_accepts_an_inline_archive_and_refuses_empty_topics() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let inline = json!({
         "operation": "backup",
         "backup": {
@@ -472,7 +472,7 @@ async fn backup_preflight_accepts_an_inline_archive_and_refuses_empty_topics() {
 #[tokio::test]
 async fn a_source_connection_check_needs_a_connection_and_nothing_else() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
 
     // The block is missing entirely.
     let response = app
@@ -577,7 +577,7 @@ async fn a_source_connection_check_needs_a_connection_and_nothing_else() {
 async fn a_duplicate_request_replays_and_a_changed_one_conflicts() {
     let app = TestApp::new();
     let plan = plan();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let first = app
         .post(
             &path,
@@ -622,7 +622,7 @@ async fn a_duplicate_request_replays_and_a_changed_one_conflicts() {
 #[tokio::test]
 async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let body = json!({
         "operation": "backup",
         "backup": {"sourceConnection": "source", "destination": "primary",
@@ -712,7 +712,7 @@ async fn a_result_names_its_gating_and_never_rounds_the_aggregate_up() {
         Some(LOCAL_ADMIN_ACTOR),
     );
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-0001"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-0001"))
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
     let v = response.json();
@@ -759,7 +759,7 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
     // Bound to the plan the caller is looking at: applicable.
     let same = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0002?planHash={bound}"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0002?planHash={bound}"
         ))
         .await;
     assert_eq!(same.json()["item"]["applicable"], true);
@@ -770,7 +770,7 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
     let edited = format!("sha256:{}", "c".repeat(64));
     let changed = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0002?planHash={edited}"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0002?planHash={edited}"
         ))
         .await;
     assert_eq!(changed.json()["item"]["applicable"], false);
@@ -784,7 +784,7 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
     app.clock.advance(3600);
     let expired = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0002?planHash={bound}"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0002?planHash={bound}"
         ))
         .await;
     assert_eq!(expired.json()["item"]["applicable"], false);
@@ -795,7 +795,7 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
 
     // A malformed hash is refused rather than silently treated as absent.
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/preflights/pf-0002?planHash=deadbeef"
+        "/api/v1/workspaces/{NS_A}/preflights/pf-0002?planHash=deadbeef"
     ))
     .await
     .assert_problem(422, "validation_failed");
@@ -815,7 +815,7 @@ async fn the_detail_page_is_verified_filtered_and_paged() {
     );
     let all = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0003/details"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0003/details"
         ))
         .await;
     assert_eq!(all.status.as_u16(), 200, "{}", all.text());
@@ -824,7 +824,7 @@ async fn the_detail_page_is_verified_filtered_and_paged() {
 
     let filtered = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0003/details?check=archive.segments"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0003/details?check=archive.segments"
         ))
         .await;
     assert_eq!(filtered.json()["items"].as_array().unwrap().len(), 1);
@@ -832,7 +832,7 @@ async fn the_detail_page_is_verified_filtered_and_paged() {
 
     let first = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0003/details?limit=1"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0003/details?limit=1"
         ))
         .await;
     assert_eq!(first.json()["items"].as_array().unwrap().len(), 1);
@@ -842,7 +842,7 @@ async fn the_detail_page_is_verified_filtered_and_paged() {
         .to_string();
     let next = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0003/details?limit=1&cursor={cursor}"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0003/details?limit=1&cursor={cursor}"
         ))
         .await;
     assert_eq!(next.json()["items"][0]["check"], "archive.segments");
@@ -851,7 +851,7 @@ async fn the_detail_page_is_verified_filtered_and_paged() {
     let mut bytes = cursor.into_bytes();
     bytes[0] = if bytes[0] == b'A' { b'B' } else { b'A' };
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/preflights/pf-0003/details?limit=1&cursor={}",
+        "/api/v1/workspaces/{NS_A}/preflights/pf-0003/details?limit=1&cursor={}",
         String::from_utf8(bytes).unwrap()
     ))
     .await
@@ -880,7 +880,7 @@ async fn a_details_document_that_fails_its_digest_refuses_the_page() {
     app.fake.seed("configmaps", NS_A, document);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0004/details"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0004/details"
         ))
         .await;
     response.assert_problem(409, "result_integrity_failed");
@@ -901,7 +901,7 @@ async fn a_preflight_with_no_details_answers_an_empty_page_rather_than_404() {
     );
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-0005/details"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-0005/details"
         ))
         .await;
     assert_eq!(response.status.as_u16(), 200);
@@ -913,7 +913,7 @@ async fn cancel_is_idempotent_and_exact_owner() {
     let app = TestApp::new();
     seed_running_preflight(&app.fake, NS_A, "pf-mine", LOCAL_ADMIN_ACTOR);
     seed_running_preflight(&app.fake, NS_A, "pf-theirs", "urn:test#another-operator");
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights/pf-mine:cancel");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights/pf-mine:cancel");
 
     let first = app.post(&path, None, "{}").await;
     assert_eq!(first.status.as_u16(), 200, "{}", first.text());
@@ -929,7 +929,7 @@ async fn cancel_is_idempotent_and_exact_owner() {
     assert!(!app.fake.requests().iter().any(|r| r.method == "PATCH"));
 
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/preflights/pf-theirs:cancel"),
+        &format!("/api/v1/workspaces/{NS_A}/preflights/pf-theirs:cancel"),
         None,
         "{}",
     )
@@ -955,7 +955,7 @@ async fn the_operation_route_reports_a_preflight_without_an_evidence_verdict() {
     );
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/operations/preflight/pf-0006"
+            "/api/v1/workspaces/{NS_A}/operations/preflight/pf-0006"
         ))
         .await;
     let v = response.json();
@@ -984,7 +984,7 @@ async fn a_completed_check_with_no_recorded_aggregate_is_unknown_and_not_ready()
         }),
     );
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-0007"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-0007"))
         .await;
     assert_eq!(response.json()["item"]["state"], "unknown");
 }
@@ -1134,7 +1134,7 @@ async fn the_two_reserved_reasons_are_never_emitted_by_any_reachable_path() {
     app.clock.advance(3600);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-res?planHash=sha256:{}",
+            "/api/v1/workspaces/{NS_A}/preflights/pf-res?planHash=sha256:{}",
             "c".repeat(64)
         ))
         .await;
@@ -1163,7 +1163,7 @@ async fn a_referent_whose_revision_moved_is_reported_with_its_kind_and_name() {
         );
         seed_bound_referent(&app, uid, generation);
         let response = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-ref"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-ref"))
             .await;
         let item = response.json()["item"].clone();
         assert_eq!(item["stale"], true, "{why}");
@@ -1201,7 +1201,7 @@ async fn a_referent_that_vanished_is_reported_as_changed() {
     );
     // The `KafkaCluster/target` the binding names is never seeded.
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-gone"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-gone"))
         .await;
     let reasons = response.json()["item"]["staleReasons"].clone();
     assert!(
@@ -1242,7 +1242,7 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
         remaining: 1,
     });
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-unread"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-unread"))
         .await;
     let item = response.json()["item"].clone();
     assert_eq!(item["stale"], true);
@@ -1286,7 +1286,7 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
     ]);
     app.fake.seed("preflights", NS_A, object);
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-future"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-future"))
         .await;
     let item = response.json()["item"].clone();
     assert_eq!(item["applicable"], false);
@@ -1360,7 +1360,7 @@ fn seed_trust_live(app: &TestApp, trust: &TrustKind, uid: &str, generation: i64)
 }
 
 async fn read_item(app: &TestApp, id: &str) -> Value {
-    app.get(&format!("/api/v1/namespaces/{NS_A}/preflights/{id}"))
+    app.get(&format!("/api/v1/workspaces/{NS_A}/preflights/{id}"))
         .await
         .json()["item"]
         .clone()
@@ -1594,7 +1594,7 @@ async fn a_result_with_no_binding_is_unverifiable() {
     object["status"].as_object_mut().unwrap().remove("binding");
     app.fake.seed("preflights", NS_A, object);
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-nobind"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-nobind"))
         .await;
     let item = response.json()["item"].clone();
     assert_eq!(item["stale"], true);
@@ -1674,7 +1674,7 @@ async fn the_expiry_the_plan_hash_and_the_referents_are_one_list() {
     app.clock.advance(3600);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-merge?planHash=sha256:{}",
+            "/api/v1/workspaces/{NS_A}/preflights/pf-merge?planHash=sha256:{}",
             "c".repeat(64)
         ))
         .await;
@@ -1727,7 +1727,7 @@ async fn a_verdict_whose_inputs_still_match_reports_no_change() {
     seed_bound_referent(&app, "uid-target", 1);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-same?planHash={bound}"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-same?planHash={bound}"
         ))
         .await;
     let item = response.json()["item"].clone();
@@ -1776,7 +1776,7 @@ async fn a_cancel_request_is_not_a_stale_reason() {
     app.fake.seed("preflights", NS_A, object);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/pf-cancelled"
+            "/api/v1/workspaces/{NS_A}/preflights/pf-cancelled"
         ))
         .await;
     let item = &response.json()["item"];
@@ -1817,7 +1817,7 @@ async fn a_source_connection_check_is_labelled_so_a_reload_can_find_it() {
     let app = TestApp::new();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights"),
             Some("preflight-label-00001"),
             &json!({"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}})
                 .to_string(),
@@ -1828,15 +1828,17 @@ async fn a_source_connection_check_is_labelled_so_a_reload_can_find_it() {
     let labels = app.fake.object("preflights", NS_A, &id).unwrap()["metadata"]["labels"].clone();
 
     assert_eq!(labels["logweir.dev/connection-test"], "source");
-    // ONE LABEL, AND NOT THE DESTINATION ONES. A connectivity check names no
-    // destination, so a `logweir.dev/destination` on it would put it in the
-    // "what uses this destination" view of a destination it never read.
+    // ONE LABEL BESIDE THE WORKSPACE, AND NOT THE DESTINATION ONES. A
+    // connectivity check names no destination, so a `logweir.dev/destination`
+    // on it would put it in the "what uses this destination" view of a
+    // destination it never read.
+    assert_eq!(labels[support::WORKSPACE_LABEL], NS_A);
     assert!(labels["logweir.dev/destination"].is_null());
     assert!(labels["logweir.dev/destination-test"].is_null());
     assert_eq!(
         labels.as_object().map(serde_json::Map::len),
-        Some(1),
-        "exactly the one label that finds it again: {labels}"
+        Some(2),
+        "exactly the workspace and the one label that finds it again: {labels}"
     );
 }
 
@@ -1900,7 +1902,7 @@ async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
     seed_check("pf-cccc", "2026-09-18T23:30:00Z", None, "ready");
 
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/connections/source"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/connections/source"))
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
     let last = &response.json()["item"]["lastTest"];
@@ -1933,11 +1935,11 @@ async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
     // A CONNECTION WITH NO CHECK SAYS SO, and a LIST never pays for the scan.
     seed_cluster(&app, "other", "uid-other");
     let none = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/connections/other"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/connections/other"))
         .await;
     assert!(none.json()["item"]["lastTest"].is_null());
     let list = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/connections"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/connections"))
         .await;
     for item in list.json()["items"].as_array().unwrap() {
         assert!(
@@ -1996,7 +1998,7 @@ async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
             }),
         );
         let response = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-point"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-point"))
             .await;
         let item = response.json()["item"].clone();
         let names_point = item["staleReasons"].as_array().unwrap().iter().any(|r| {
@@ -2065,7 +2067,7 @@ async fn a_catalog_referent_recorded_without_a_generation_is_read_and_compared_b
             }),
         );
         let response = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-catalog"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-catalog"))
             .await;
         let item = response.json()["item"].clone();
         let reasons = item["staleReasons"].as_array().unwrap();
@@ -2125,7 +2127,7 @@ async fn a_mutable_referent_recorded_without_a_generation_is_unverifiable() {
             app.fake.seed("backupdestinations", NS_A, destination);
         }
         let response = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-nogen"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/preflights/pf-nogen"))
             .await;
         let item = response.json()["item"].clone();
         assert_eq!(item["stale"], true, "{kind}: {}", item["staleReasons"]);
@@ -2175,7 +2177,7 @@ async fn a_catalog_point_is_stored_as_the_reference_the_controller_reads() {
     let plan = plan();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights"),
             Some("preflight-catalog-00001"),
             &catalog_point_request(&plan).to_string(),
         )
@@ -2204,7 +2206,7 @@ async fn a_catalog_point_is_stored_as_the_reference_the_controller_reads() {
 #[tokio::test]
 async fn a_catalog_point_is_refused_beside_a_backup_point_or_with_a_malformed_id() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let plan = plan();
 
     let mut both = catalog_point_request(&plan);
@@ -2276,7 +2278,7 @@ async fn a_catalog_point_is_refused_beside_a_backup_point_or_with_a_malformed_id
 #[tokio::test]
 async fn a_switchover_review_names_its_restore_and_bounded_groups() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let path = format!("/api/v1/workspaces/{NS_A}/preflights");
     let created = app
         .post(
             &path,

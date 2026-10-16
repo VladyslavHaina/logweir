@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn a_record_defaults_to_deny_and_a_failure_cannot_be_an_allow() {
-        let ctx = AuditContext::new("audit-1", "POST", "/api/v1/namespaces/team-a/restores");
+        let ctx = AuditContext::new("audit-1", "POST", "/api/v1/workspaces/team-a/restores");
         let blank = ctx.finish(500, 3);
         assert_eq!(blank.decision, "deny");
         assert_eq!(blank.failure_code, "http_500");

@@ -114,7 +114,7 @@ async fn a_shared_mode_restore_carries_actor_recovery_point_and_execution_identi
     let body = support::restore_body(&plan);
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             &cookie,
             Some(&app.csrf_for("u-op")),
             Some("attribution-restore-01"),
@@ -173,7 +173,7 @@ async fn a_credential_secret_is_attributed_and_its_annotations_hold_no_value() {
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             &cookie,
             Some(&app.csrf_for("u-op")),
             Some("attribution-secret-01"),
@@ -223,7 +223,7 @@ async fn a_local_admin_create_is_attributed_to_the_local_administrator() {
     let app = TestApp::new();
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/schedules"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules"),
             Some("attribution-sched-01"),
             &support::schedule_body().to_string(),
         )
@@ -253,7 +253,7 @@ async fn a_create_outside_any_request_is_refused_and_never_sent() {
     // subscriber can leave another test's capture empty.
     let (_log, _guard) = capture();
     let fake = FakeKube::new();
-    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client(), support::INSTALL_NS);
     let refused = adapter.create(NS_A, &cluster()).await;
     assert!(
         matches!(refused, Err(logweir_api::kube::KubeFailure::Unattributed)),
@@ -273,7 +273,7 @@ async fn a_create_before_the_actor_is_known_is_refused_and_never_sent() {
     // subscriber can leave another test's capture empty.
     let (_log, _guard) = capture();
     let fake = FakeKube::new();
-    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client(), support::INSTALL_NS);
     let context = Arc::new(AuditContext::new("audit-x", "POST", "/api/v1/x"));
     let refused = audit::scope(Arc::clone(&context), adapter.create(NS_A, &cluster())).await;
     assert!(matches!(

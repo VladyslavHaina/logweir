@@ -436,7 +436,7 @@ async fn a_saved_schedules_previews_are_the_same_shape() {
         }),
     );
     let saved = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/schedules/nightly"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/schedules/nightly"))
         .await
         .json();
     let drafted = app.get(BERLIN_FALL_BACK).await.json();
@@ -464,7 +464,7 @@ async fn a_saved_schedules_previews_are_the_same_shape() {
         }),
     );
     let odd = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/schedules/odd"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/schedules/odd"))
         .await
         .json();
     assert!(odd["item"]["status"]["nextRuns"][0]

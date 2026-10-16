@@ -67,14 +67,14 @@ use crate::status::{condition_view, MAX_CONDITIONS};
 use crate::validate;
 
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/connections/{name}/topic-discoveries";
 /// The per-connection list route identifier (cursor scope).
 pub const ROUTE_BY_CONNECTION: &str =
-    "GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries";
+    "GET /api/v1/workspaces/{ws}/connections/{name}/topic-discoveries";
 /// The topics route identifier (cursor scope).
-pub const ROUTE_TOPICS: &str = "GET /api/v1/namespaces/{ns}/topic-discoveries/{id}/topics";
+pub const ROUTE_TOPICS: &str = "GET /api/v1/workspaces/{ws}/topic-discoveries/{id}/topics";
 /// The cancel route identifier.
-pub const ROUTE_CANCEL: &str = "POST /api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel";
+pub const ROUTE_CANCEL: &str = "POST /api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel";
 /// The deterministic name prefix (D2 §5.1).
 pub const NAME_PREFIX: &str = "td-";
 /// The `:cancel` command suffix.
@@ -877,7 +877,7 @@ pub async fn topics(
         }
         let document = state
             .kube()
-            .get_result_document(&ns, &chunk.name)
+            .get_result_document(&chunk.name)
             .await
             .map_err(|failure| match failure {
                 KubeFailure::NotFound => ApiError::new(

@@ -1,4 +1,4 @@
-//! `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}`: the normalized
+//! `GET /api/v1/workspaces/{ws}/operations/{kind}/{name}`: the normalized
 //! status of one Backup, Restore, TopicDiscovery or Preflight, and
 //! `.../events`: the same thing as a bounded server-sent stream. `kind` is
 //! D0's closed set `backup|restore|discovery|preflight`; any other value is

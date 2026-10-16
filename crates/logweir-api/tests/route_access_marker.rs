@@ -56,7 +56,7 @@ fn notes_of(buffer: &Buffer, audit_id: &str) -> Value {
 }
 
 fn concrete(path: &str) -> String {
-    path.replace("{ns}", NS_A)
+    path.replace("{ws}", NS_A)
         .replace("{kind}", "backup")
         .replace("{*path}", "index.html")
         .replace("{name}", "x1")

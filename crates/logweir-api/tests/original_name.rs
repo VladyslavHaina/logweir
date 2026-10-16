@@ -140,7 +140,7 @@ fn errors_of(response: &support::TestResponse) -> Vec<(String, String, String)> 
 
 async fn post(app: &TestApp, ns: &str, key: &str, body: &Value) -> support::TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{ns}/restores"),
+        &format!("/api/v1/workspaces/{ns}/restores"),
         Some(key),
         &body.to_string(),
     )
@@ -584,7 +584,7 @@ async fn the_approval_view_shows_the_signed_subject() {
             }),
         );
         let view = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/approvals/{name}"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/approvals/{name}"))
             .await
             .json();
         assert_eq!(view["item"]["approvalSubject"], want, "{name}");
@@ -612,7 +612,7 @@ async fn a_legacy_approval_for_the_wrong_subject_is_refused_before_it_is_stored(
     let ordinary = json!({"plan_hash": plan_hash, "subject_kind": "Restore"}).to_string();
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"approvalBytes": ordinary, "sidecarBytes": sidecar}).to_string(),
         )
@@ -631,7 +631,7 @@ async fn a_legacy_approval_for_the_wrong_subject_is_refused_before_it_is_stored(
     .to_string();
     let recorded = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"approvalBytes": matching, "sidecarBytes": sidecar}).to_string(),
         )
@@ -934,7 +934,7 @@ async fn the_approval_view_reads_a_v2_document_through_the_version_rule() {
             }),
         );
         let view = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/approvals/{name}"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/approvals/{name}"))
             .await
             .json();
         assert_eq!(view["item"]["approvalSubject"], want, "{name}");

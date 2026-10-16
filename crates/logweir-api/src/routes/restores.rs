@@ -44,11 +44,11 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/restores";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/restores";
 /// The create route identifier.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/restores";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/restores";
 /// The governed approval submission route identifier.
-pub const ROUTE_SUBMIT_APPROVAL: &str = "POST /api/v1/namespaces/{ns}/restores/{name}/approval";
+pub const ROUTE_SUBMIT_APPROVAL: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/approval";
 /// The largest submitted sidecar, 64 KiB.
 pub const MAX_SIDECAR_BYTES: usize = 64 * 1024;
 /// The deterministic name prefix (30 characters in all).

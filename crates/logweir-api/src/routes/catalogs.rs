@@ -1,4 +1,4 @@
-//! `GET`/`POST /api/v1/namespaces/{ns}/catalogs`, plus the point view and the
+//! `GET`/`POST /api/v1/workspaces/{ws}/catalogs`, plus the point view and the
 //! signer panel -- the catalog's read half and "connect an existing archive".
 //!
 //! # Availability and verification are two columns, never one
@@ -66,11 +66,11 @@ use crate::status::condition_view;
 use crate::validate::{self, bounded};
 
 /// The list route identifier (cursor scope).
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/catalogs";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/catalogs";
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/catalogs";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/catalogs";
 /// The point-page route identifier (cursor scope).
-pub const ROUTE_POINTS: &str = "GET /api/v1/namespaces/{ns}/catalogs/{name}/points";
+pub const ROUTE_POINTS: &str = "GET /api/v1/workspaces/{ws}/catalogs/{name}/points";
 
 /// The largest point page.
 pub const MAX_POINT_PAGE: u32 = 200;
@@ -1355,7 +1355,7 @@ pub async fn points(
     let mut next_cursor = None;
     let mut incomplete = false;
     'pages: for (page_name, digest, _count) in &pages {
-        let document = match state.kube().get_result_document(&ns, page_name).await {
+        let document = match state.kube().get_result_document(page_name).await {
             Ok(document) => document,
             // A PAGE THAT IS GONE IS NOT AN EMPTY ARCHIVE. The view may have
             // aged out before its status was refreshed, so this response names

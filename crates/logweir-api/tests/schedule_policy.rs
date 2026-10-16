@@ -1,4 +1,4 @@
-//! `PUT /api/v1/namespaces/{ns}/schedules/{name}` (D1 §5).
+//! `PUT /api/v1/workspaces/{ws}/schedules/{name}` (D1 §5).
 //!
 //! THE FOUR THINGS THIS ROUTE HAS TO GET RIGHT, and what each test is for.
 //!
@@ -85,7 +85,7 @@ async fn the_edit_writes_the_whole_policy_under_a_precondition() {
 
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &edit().to_string(),
         )
         .await;
@@ -144,7 +144,7 @@ async fn a_field_omitted_is_removed() {
     let app = TestApp::new();
     seed_legacy(&app.fake, "nightly");
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &edit().to_string(),
     )
     .await;
@@ -166,7 +166,7 @@ async fn a_field_omitted_is_removed() {
     }
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &back.to_string(),
         )
         .await;
@@ -220,7 +220,7 @@ async fn an_edit_during_a_run_does_not_touch_the_running_backup() {
         }),
     );
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &edit().to_string(),
     )
     .await;
@@ -263,7 +263,7 @@ async fn a_concurrent_edit_is_412_at_either_precondition() {
     stale["expectedGeneration"] = json!(3);
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &stale.to_string(),
         )
         .await;
@@ -287,7 +287,7 @@ async fn a_concurrent_edit_is_412_at_either_precondition() {
     });
     let raced = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &edit().to_string(),
         )
         .await;
@@ -318,7 +318,7 @@ async fn source_ref_is_refused_before_any_write() {
     body["sourceRef"] = json!({"name": "somewhere-else"});
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &body.to_string(),
         )
         .await;
@@ -356,7 +356,7 @@ async fn dui2_a_stale_edit_is_412_before_any_field_rule() {
     app.fake.clear_requests();
     let stale = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &body.to_string(),
         )
         .await;
@@ -371,7 +371,7 @@ async fn dui2_a_stale_edit_is_412_before_any_field_rule() {
     // CONTROL: at the current generation the field rules answer.
     body["expectedGeneration"] = json!(4);
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &body.to_string(),
     )
     .await
@@ -405,7 +405,7 @@ async fn the_rules_the_api_does_not_pre_empt_are_mapped_from_the_refusal() {
     });
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &both.to_string(),
         )
         .await;
@@ -433,7 +433,7 @@ async fn the_rules_the_api_does_not_pre_empt_are_mapped_from_the_refusal() {
     seed_legacy(&app.fake, long);
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/{long}"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/{long}"),
             &edit().to_string(),
         )
         .await;
@@ -451,7 +451,7 @@ async fn the_rules_the_api_does_not_pre_empt_are_mapped_from_the_refusal() {
     seed_legacy(&app.fake, ok);
     let accepted = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/{ok}"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/{ok}"),
             &edit().to_string(),
         )
         .await;
@@ -591,7 +591,7 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
         mutate(&mut body);
         let response = app
             .put(
-                &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
                 &body.to_string(),
             )
             .await;
@@ -609,7 +609,7 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
         let mut body = edit();
         body[field] = value;
         app.put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &body.to_string(),
         )
         .await
@@ -618,7 +618,7 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
     let mut retries = edit();
     retries["retry"] = json!({"maxRetries": 4});
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &retries.to_string(),
     )
     .await
@@ -627,7 +627,7 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
     let mut glob = edit();
     glob["topicSelection"] = json!({"topics": ["orders*"]});
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &glob.to_string(),
     )
     .await
@@ -669,7 +669,7 @@ async fn the_three_cadence_routes_answer_one_code() {
         (
             "POST .../schedules",
             app.post(
-                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules"),
                 Some("one-code-probe-01"),
                 &create.to_string(),
             )
@@ -678,7 +678,7 @@ async fn the_three_cadence_routes_answer_one_code() {
         (
             "PUT .../schedules/{name}",
             app.put(
-                &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
                 &edit_body.to_string(),
             )
             .await,
@@ -710,7 +710,7 @@ async fn the_three_cadence_routes_answer_one_code() {
         (
             "PUT",
             app.put(
-                &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
                 &edit_body.to_string(),
             )
             .await,
@@ -723,7 +723,7 @@ async fn the_three_cadence_routes_answer_one_code() {
         (
             "POST .../schedules",
             app.post(
-                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules"),
                 Some("one-code-probe-03"),
                 &create.to_string(),
             )
@@ -741,7 +741,7 @@ async fn the_three_cadence_routes_answer_one_code() {
     create["name"] = json!(null);
     let ok = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/schedules"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules"),
             Some("one-code-probe-02"),
             &json!({
                 "schedule": "0 2 * * *",
@@ -769,7 +769,7 @@ async fn a_pre_plat_05_1_schedule_reads_and_edits_without_a_rewrite() {
     let app = TestApp::new();
     seed_legacy(&app.fake, "legacy");
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/schedules/legacy"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/schedules/legacy"))
         .await
         .json();
     let item = &read["item"];
@@ -806,7 +806,7 @@ async fn a_pre_plat_05_1_schedule_reads_and_edits_without_a_rewrite() {
     });
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/legacy"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/legacy"),
             &minimal.to_string(),
         )
         .await;
@@ -836,7 +836,7 @@ async fn a_destination_is_written_as_the_sentinel_and_never_read_from_a_body() {
     body["destinationRef"] = json!({"name": "primary"});
     let response = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &body.to_string(),
         )
         .await;
@@ -861,7 +861,7 @@ async fn a_destination_is_written_as_the_sentinel_and_never_read_from_a_body() {
     let mut smuggled = edit();
     smuggled["archive"] = json!({"url": "logweir-destination://primary"});
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &smuggled.to_string(),
     )
     .await
@@ -871,7 +871,7 @@ async fn a_destination_is_written_as_the_sentinel_and_never_read_from_a_body() {
     let mut both = edit();
     both["destinationRef"] = json!({"name": "primary"});
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &both.to_string(),
     )
     .await
@@ -879,7 +879,7 @@ async fn a_destination_is_written_as_the_sentinel_and_never_read_from_a_body() {
     let mut neither = edit();
     neither.as_object_mut().unwrap().remove("archive");
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &neither.to_string(),
     )
     .await
@@ -901,7 +901,7 @@ async fn the_edit_refuses_an_idempotency_key() {
         .send(
             http::Request::builder()
                 .method("PUT")
-                .uri(format!("/api/v1/namespaces/{NS_A}/schedules/nightly"))
+                .uri(format!("/api/v1/workspaces/{NS_A}/schedules/nightly"))
                 .header("host", support::HOST)
                 .header("origin", support::ORIGIN)
                 .header("content-type", "application/json")
@@ -917,13 +917,13 @@ async fn the_edit_refuses_an_idempotency_key() {
     // generation.
     let first = app
         .put(
-            &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
             &edit().to_string(),
         )
         .await;
     assert_eq!(first.status, 200);
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly"),
         &edit().to_string(),
     )
     .await
@@ -936,19 +936,19 @@ async fn the_edit_refuses_an_idempotency_key() {
 async fn the_ordinary_refusals_still_apply() {
     let app = TestApp::new();
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/absent"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/absent"),
         &edit().to_string(),
     )
     .await
     .assert_problem(404, "not_found");
     app.put(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/NOT..A..NAME"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/NOT..A..NAME"),
         &edit().to_string(),
     )
     .await
     .assert_problem(404, "not_found");
     app.put(
-        "/api/v1/namespaces/not-granted/schedules/nightly",
+        "/api/v1/workspaces/not-granted/schedules/nightly",
         &edit().to_string(),
     )
     .await
@@ -957,7 +957,7 @@ async fn the_ordinary_refusals_still_apply() {
         .send(
             http::Request::builder()
                 .method("PUT")
-                .uri(format!("/api/v1/namespaces/{NS_A}/schedules/nightly"))
+                .uri(format!("/api/v1/workspaces/{NS_A}/schedules/nightly"))
                 .header("host", support::HOST)
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(edit().to_string()))
@@ -972,7 +972,7 @@ async fn the_ordinary_refusals_still_apply() {
     let paths: Vec<&str> = recorded.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(
         paths,
-        vec!["/apis/logweir.dev/v1alpha1/namespaces/team-a/backupschedules/absent"]
+        vec!["/apis/logweir.dev/v1alpha1/namespaces/logweir-system/backupschedules/absent"]
     );
     assert!(
         !recorded.iter().any(|r| r.method == "PATCH"),

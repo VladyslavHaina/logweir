@@ -9,7 +9,6 @@ pub mod connections;
 pub mod console_approval;
 pub mod destinations;
 pub mod health;
-pub mod namespaces;
 pub mod operations;
 pub mod preflights;
 pub mod protection;
@@ -21,6 +20,7 @@ pub mod subject;
 pub mod switchovers;
 pub mod topic_discoveries;
 pub mod trust;
+pub mod workspaces;
 
 use std::collections::BTreeMap;
 
@@ -819,13 +819,13 @@ pub fn run_create_rate(
     let limits = state.run_rate_limits();
     let (route, per_window, message) = match run {
         ManualRun::Backup => (
-            "POST /api/v1/namespaces/{ns}/backups",
+            "POST /api/v1/workspaces/{ws}/backups",
             limits.manual_backups_per_minute,
             "Too many backups were started in this namespace in the last minute; wait for the \
              window to reset. Runs already accepted are queued and start as slots free.",
         ),
         ManualRun::Restore => (
-            "POST /api/v1/namespaces/{ns}/restores",
+            "POST /api/v1/workspaces/{ws}/restores",
             limits.manual_restores_per_minute,
             "Too many restores were started in this namespace in the last minute; wait for the \
              window to reset.",
@@ -939,11 +939,7 @@ where
             return Ok((object, false));
         }
         let version = object.meta().resource_version.clone().unwrap_or_default();
-        match state
-            .kube()
-            .request_check_cancel::<K>(namespace, name, &version)
-            .await
-        {
+        match state.kube().request_check_cancel::<K>(name, &version).await {
             Ok(updated) => {
                 tracing::info!(
                     namespace,

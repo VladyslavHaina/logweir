@@ -76,13 +76,13 @@ use crate::status::{condition_view, MAX_CONDITIONS};
 use crate::validate;
 
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/preflights";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/preflights";
 /// The details route identifier (cursor scope).
-pub const ROUTE_DETAILS: &str = "GET /api/v1/namespaces/{ns}/preflights/{id}/details";
+pub const ROUTE_DETAILS: &str = "GET /api/v1/workspaces/{ws}/preflights/{id}/details";
 /// The cancel route identifier.
-pub const ROUTE_CANCEL: &str = "POST /api/v1/namespaces/{ns}/preflights/{id}:cancel";
+pub const ROUTE_CANCEL: &str = "POST /api/v1/workspaces/{ws}/preflights/{id}:cancel";
 /// The destination-test route's idempotency scope.
-pub const ROUTE_DESTINATION_TEST: &str = "POST /api/v1/namespaces/{ns}/destinations/{name}:test";
+pub const ROUTE_DESTINATION_TEST: &str = "POST /api/v1/workspaces/{ws}/destinations/{name}:test";
 /// The deterministic name prefix (D2 §6.2).
 pub const NAME_PREFIX: &str = "pf-";
 /// The `:cancel` command suffix.
@@ -1538,7 +1538,7 @@ pub async fn details(
     };
     let document = state
         .kube()
-        .get_result_document(&ns, &reference.name)
+        .get_result_document(&reference.name)
         .await
         .map_err(KubeFailureExt::details_failure)?;
     verify_document(

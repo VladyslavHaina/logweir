@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn the_scope_is_mixed_in_and_the_replay_semantics_hold() {
         let body = br#"{"name":"primary","access":{"secretAccessKey":"<write-only>"}}"#;
-        let route = "POST /api/v1/namespaces/{ns}/destinations";
+        let route = "POST /api/v1/workspaces/{ws}/destinations";
         let published = identity(&actor("a"), "ns", route, "", &key("key-00001"), body);
         let other_key = identity(&actor("a"), "ns", route, "", &key("key-99999"), body);
         assert_ne!(other_key.request_hash, published.request_hash);

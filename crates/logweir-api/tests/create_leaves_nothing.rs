@@ -102,7 +102,7 @@ fn switchover_body(approval: &str) -> Value {
 async fn a_restore_refused_for_a_taken_approval_name_creates_nothing() {
     let app = app();
     seed_foreign_approval(&app, "approval-1234abcd", "Restore");
-    let path = format!("/api/v1/namespaces/{NS_A}/restores");
+    let path = format!("/api/v1/workspaces/{NS_A}/restores");
     let body = support::restore_body(&support::golden_plan());
     let refused = app
         .post(&path, Some("d3-restore-0001"), &body.to_string())
@@ -141,7 +141,7 @@ async fn a_restore_refused_for_a_taken_approval_name_creates_nothing() {
 async fn a_switchover_refused_for_a_taken_approval_name_creates_nothing() {
     let app = app();
     seed_foreign_approval(&app, "cutover", "Switchover");
-    let path = format!("/api/v1/namespaces/{NS_A}/switchovers");
+    let path = format!("/api/v1/workspaces/{NS_A}/switchovers");
     let refused = app
         .post(
             &path,
@@ -200,7 +200,7 @@ async fn a_governed_restore_refused_for_a_taken_confirmation_name_creates_nothin
         },
     );
     seed_foreign_approval(&app, "approval-1234abcd-confirmation", "Restore");
-    let path = format!("/api/v1/namespaces/{NS_A}/restores");
+    let path = format!("/api/v1/workspaces/{NS_A}/restores");
     let mut body = support::restore_body(&support::golden_plan());
     body["ticket"] = json!("CHG-4711");
     assert_eq!(body["approvalRef"]["name"], "approval-1234abcd");
