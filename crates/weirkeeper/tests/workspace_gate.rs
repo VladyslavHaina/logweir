@@ -654,3 +654,31 @@ async fn a_registry_secret_of_another_workspace_is_refused() {
         }
     }
 }
+
+/// **Review M1.** A finished run keeps its history: a Succeeded Backup with
+/// its verdict conditions, labelled `qa` (a workspace dropped from the list),
+/// is still refused, but nothing is written, so putting `qa` back finds it
+/// Succeeded and verified. CONTROL: the same Backup still `Pending` is marked
+/// `Failed`, `WorkspaceUnknown`.
+#[tokio::test]
+async fn a_finished_run_keeps_its_status_when_its_workspace_is_dropped() {
+    let with_phase = |phase: &str| -> Backup {
+        let mut value = backup_json(Some("qa"));
+        value["status"] = json!({"phase": phase, "conditions": [{
+            "type": "Verified", "status": "True", "reason": "SignatureVerified",
+            "message": "verified", "lastTransitionTime": "2026-10-01T00:00:00Z"}]});
+        serde_json::from_value(value).expect("a Backup")
+    };
+    let table = || routes(Some("dev"), Some("dev"), Some("dev"));
+
+    let (refused, status, methods) = run(&with_phase("Succeeded"), table()).await;
+    assert!(refused, "a finished run is still stopped");
+    assert!(status.is_none(), "{status:?}");
+    assert!(methods.is_empty(), "nothing written: {methods:?}");
+
+    let (refused, status, methods) = run(&with_phase("Pending"), table()).await;
+    assert!(refused);
+    assert_eq!(reason(&status), REASON_UNKNOWN);
+    assert_eq!(status.as_ref().unwrap()["phase"], "Failed");
+    assert_eq!(methods, vec!["PATCH".to_string()]);
+}
