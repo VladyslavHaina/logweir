@@ -1225,14 +1225,18 @@ impl KubeAdapter {
     ///
     /// # Errors
     ///
-    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`, `NotFound`
+    /// for a restore of another workspace (read through [`Self::get`] first,
+    /// as every other patch is).
     pub async fn request_restore(
         &self,
+        ws: &str,
         name: &str,
         expected_resource_version: &str,
         key: &str,
         by: &str,
     ) -> Result<Restore, KubeFailure> {
+        self.get::<Restore>(ws, name).await?;
         let api: Api<Restore> = self.api();
         let patch = serde_json::json!({
             "metadata": {

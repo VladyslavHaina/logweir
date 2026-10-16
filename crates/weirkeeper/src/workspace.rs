@@ -598,10 +598,24 @@ where
     referent.map_or(Ok(()), |referent| same(referrer, &referent))
 }
 
+/// The phases of a finished run, of every kind that has one. The gate stops
+/// new work and never rewrites history: a Succeeded Backup whose workspace
+/// was dropped from the list keeps its phase and conditions.
+const FINISHED: [&str; 7] = [
+    "Succeeded",
+    "Failed",
+    "Refused",
+    "PartiallyApplied",
+    "Completed",
+    "Cancelled",
+    "Interrupted",
+];
+
 /// [`admit`], and on a refusal the terminal status: `phase: Failed` (a kind
 /// with no phase prunes it) and one `Failed=True` condition with the reason
-/// and the sentence, written once. `Some(action)` when the object was refused
-/// and the reconcile must stop with it; nothing else is created for it.
+/// and the sentence, written once, and never over a finished run
+/// ([`FINISHED`]). `Some(action)` when the object was refused and the
+/// reconcile must stop with it; nothing else is created for it.
 ///
 /// # Errors
 ///
@@ -612,14 +626,19 @@ pub async fn gate<K: Referrer>(client: &Client, object: &K) -> Result<Option<Act
     };
     let reason = refusal.reason();
     let message = refusal.to_string();
-    let written = serde_json::to_value(object)
+    let status = serde_json::to_value(object)
         .ok()
-        .and_then(|v| v.pointer("/status/conditions").cloned())
-        .and_then(|c| c.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
+        .and_then(|v| v.get("status").cloned())
+        .unwrap_or_default();
+    let finished = status["phase"]
+        .as_str()
+        .is_some_and(|phase| FINISHED.contains(&phase));
+    let written = status["conditions"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .any(|c| c["reason"] == reason && c["message"] == message.as_str());
-    if !written {
+    if !finished && !written {
         let api = Api::<K>::namespaced(client.clone(), &object.namespace().unwrap_or_default());
         let patch = json!({
             "status": {

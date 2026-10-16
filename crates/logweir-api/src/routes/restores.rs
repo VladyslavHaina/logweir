@@ -666,7 +666,7 @@ async fn request(
         let version = object.metadata.resource_version.clone().unwrap_or_default();
         match state
             .kube()
-            .request_restore(name, &version, what.annotation(), &actor.id())
+            .request_restore(ws, name, &version, what.annotation(), &actor.id())
             .await
         {
             Ok(updated) => {

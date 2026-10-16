@@ -107,7 +107,8 @@ Nothing optional is on by default, and nothing is rendered outside the release
 namespace but the two opt-in Roles (`strimzi.namespaces`,
 `api.console.trustedProxyService`). `manifest_lint.rs` holds the controller's
 role to its calls: `get` on `secrets` for their workspace label only (the
-source scan allows a metadata read and nothing else), no `update`, and `delete` only on
+source scan allows a metadata read and nothing else; RBAC cannot grant metadata
+alone, so the grant itself could read data), no `update`, and `delete` only on
 `topicdiscoveries` and `preflights`. `patch` on `restores` (PROD-11.1a) adds
 and removes a TTL clone's finalizer `logweir.dev/clone-cleanup`; a rollback to
 a controller without it leaves the finalizer on clone `Restore`s, which an
@@ -189,7 +190,7 @@ statement**.
 | `kafka.security.protocol`, `.mechanism` | `PLAINTEXT`, `""` | the mapping in *`kafka:`* |
 | `kafka.secretRef`, `.secretKey` | `""`, `password` | the only accepted key |
 | `kafka.target.*` | `name: target`, same keys | the optional restore target; `markerTopic: logweir.scratch` proves it scratch |
-| `minio.enabled` | `false` | a demo archive (`kafka-backups`, `logweir-evidence`); its root user also mints `logweir-s3` |
+| `minio.enabled` | `false` | a demo archive (`kafka-backups`, `logweir-evidence`); its root user also mints `logweir-s3`, labelled with the first workspace. Never bind it to a location when `workspaces` lists more than one: every operator of the first workspace could then use the root pair through an inline archive |
 | `minio.image`, `.mcImage` | mirror digests | *Third-party images* |
 | `minio.rootUser`, `.rootPassword` | `minioadmin` | |
 | `minio.persistence.enabled`, `.size`, `.storageClassName` | `true`, `5Gi`, `""` | `false` is an emptyDir: the archive dies with the pod |
