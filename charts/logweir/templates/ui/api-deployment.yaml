@@ -5,8 +5,8 @@ The Service renders in `shared` mode only. `localAdmin` binds loopback, so a
 Service there would have endpoints that refuse every connection (an outage to
 every monitor); `kubectl port-forward` takes the Deployment directly. In that
 mode nothing in the cluster can dial the pod, and `create pods/portforward` in
-this namespace IS full console-administrator authority over every bound
-namespace: grant it as such. The Service is ClusterIP only, with no value to
+this namespace IS full console-administrator authority over every
+workspace: grant it as such. The Service is ClusterIP only, with no value to
 change it; the Ingress is the one public path.
 
 Probes in `shared` mode only: `/healthz` (liveness, consults nothing) and

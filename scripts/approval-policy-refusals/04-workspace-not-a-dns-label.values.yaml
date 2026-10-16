@@ -2,5 +2,5 @@
 approvalPolicy:
   policies:
     - {name: prod, mode: Governed}
-  namespaces:
+  workspaces:
     Bad_NS: prod

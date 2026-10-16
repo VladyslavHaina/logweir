@@ -12,29 +12,19 @@ and a NetworkPolicy can name "what ran as the deleter", with its own
 `imagePullSecrets`. It deletes nothing by itself: `charts/logweir/README.md`
 lists the other gates.
 
-Rendered in the release namespace and every
-`identity.authorizedRunnerNamespaces` entry, because the Job runs in the
-RetentionPolicy's namespace (read even when `identity.enabled` is false: the
-list is where Jobs run). Any other namespace applies
-`config/samples/retention-serviceaccount.yaml` (`docs/install.md` step 4).
+Rendered in the release namespace, where the Job runs.
 */}}
 {{- if .Values.retention.enabled }}
-{{- $namespaces := prepend (.Values.identity.authorizedRunnerNamespaces | default list) .Release.Namespace | uniq }}
-{{- range $index, $namespace := $namespaces }}
-{{- if $index }}
----
-{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: logweir-retention
-  namespace: {{ $namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "logweir.labels" $ | nindent 4 }}
+    {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: retention
 automountServiceAccountToken: false
-{{- with (include "logweir.imagePullSecrets" $) }}
+{{- with (include "logweir.imagePullSecrets" .) }}
 {{ . }}
-{{- end }}
 {{- end }}
 {{- end }}

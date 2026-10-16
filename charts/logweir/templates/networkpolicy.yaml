@@ -1,5 +1,5 @@
 {{- /*
-Rendered in the release namespace and every authorized runner namespace. The
+Rendered in the release namespace, where every runner Job runs. The
 runner policy permits broker and object-store destinations by port; the
 identity bootstrap and distribution pods are excluded from it and get DNS plus
 the Kubernetes API only. Service DNAT matching differs by CNI, so the API is
@@ -8,7 +8,6 @@ and `identity.kubernetesApiCIDRs`. Docker Desktop commonly has no enforcing
 CNI: local traffic proves the objects' shape, not deny behaviour.
 */ -}}
 {{- $root := . }}
-{{- $namespaces := prepend .Values.identity.authorizedRunnerNamespaces .Release.Namespace | uniq }}
 {{- $apiCIDRs := list }}
 {{- range $cidr := .Values.identity.kubernetesApiCIDRs }}
 {{- $apiCIDRs = append $apiCIDRs $cidr }}
@@ -29,7 +28,6 @@ CNI: local traffic proves the objects' shape, not deny behaviour.
 {{- end }}
 {{- end }}
 {{- $apiCIDRs = uniq $apiCIDRs }}
-{{- range $namespace := $namespaces }}
 ---
 # [UNVERIFIED — enforcement: Docker Desktop may accept this object without a
 # NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
@@ -38,7 +36,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: logweir-runner-egress
-  namespace: {{ $namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "logweir.labels" $root | nindent 4 }}
     app.kubernetes.io/component: runner
@@ -83,7 +81,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: logweir-identity-kubernetes-api-egress
-  namespace: {{ $namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "logweir.labels" $root | nindent 4 }}
     app.kubernetes.io/component: identity-bootstrap
@@ -119,5 +117,4 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
-{{- end }}
 {{- end }}

@@ -1,7 +1,7 @@
 {{/*
 `approvalPolicy`: ordinary confirmation versus governed approval.
 
-One document, two readers, one digest. The policies and namespace bindings
+One document, two readers, one digest. The policies and workspace bindings
 render once, into an immutable ConfigMap named by the first ten characters of
 the document's sha256, mounted into both `weirkeeper`
 (`LOGWEIR_APPROVAL_POLICY_FILE`) and the console (`approvalPolicyFile`); both
@@ -13,7 +13,7 @@ signed request names the policy's snapshot digest, so one confirmed under the
 old policy and not yet admitted is refused `ApprovalPolicyMismatch` after the
 rollout.
 
-Nothing renders when nothing is configured, and every namespace then resolves
+Nothing renders when nothing is configured, and every workspace then resolves
 to `legacy-governed-v1`.
 
 Modes: the operator writes `confirm`, `two-person` or `strict` (`Ordinary` and
@@ -30,7 +30,7 @@ refusals are in `_validate.tpl`; they are the binary's, made at render time,
 and `scripts/approval-policy-refusals/` holds each case once for both.
 */}}
 {{- define "logweir.approvalPolicy.configured" -}}
-{{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces .Values.approvalPolicy.default -}}true{{- end -}}
+{{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.workspaces .Values.approvalPolicy.default -}}true{{- end -}}
 {{- end -}}
 
 {{- /* An operator mode name, or an internal one, as the internal one. */ -}}
@@ -65,8 +65,8 @@ defaultMode: {{ . }}
 {{- end }}
 policies:
 {{ toYaml $policies | indent 2 }}
-namespaces:
-{{ toYaml (.Values.approvalPolicy.namespaces | default dict) | indent 2 }}
+workspaces:
+{{ toYaml (.Values.approvalPolicy.workspaces | default dict) | indent 2 }}
 {{- end -}}
 
 {{- /*

@@ -2,4 +2,4 @@
 approvalPolicy:
   policies:
     - {name: legacy-governed-v1, mode: Governed}
-  namespaces: {}
+  workspaces: {}

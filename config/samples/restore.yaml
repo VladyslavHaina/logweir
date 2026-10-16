@@ -28,6 +28,7 @@ metadata:
   name: drill-001
   labels:
     app.kubernetes.io/name: logweir
+    logweir.dev/workspace: default   # required: the workspace this object belongs to
 spec:
   sourceArchive:
     url: s3://kafka-backups/logweir

@@ -2,4 +2,4 @@
 approvalPolicy:
   default: confirm
   policies: []
-  namespaces: {}
+  workspaces: {}

@@ -1,37 +1,30 @@
 {{- /*
-The five human roles, shipped UNBOUND. Who may view, operate, approve,
-administer trust or administer retention in which namespace is your decision:
+The two human roles, shipped UNBOUND (PROD-19.1 §4.4). People use the console,
+whose role bindings are per workspace; Kubernetes RBAC stops at the namespace
+and cannot see workspaces.
 
-    kubectl create rolebinding logweir-approver \
-      --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
+`logweir-viewer` is a Role in the release namespace: it reads every Logweir
+kind in EVERY workspace, and no Secret. It is the one role to hand out for
+`kubectl`:
 
-`logweir-approver` is `create` on `approvals` (and a read of `preflights` for
-context); bind it to somebody who is not the operator (`self_attested: false`
-means only "two different keys"). What `logweir-operator` may change in a
-`backupschedules` object is the CRD's own CEL rule (`spec.sourceRef` is
-immutable), applied to every subject: an RBAC rule has no field in which a CEL
-expression could be written, so the restriction lives in
-`charts/logweir/crds/backupschedules.yaml`. `patch` is granted because
-`kubectl edit` and `apply` send one.
+    kubectl create rolebinding logweir-viewer \
+      --role=logweir-viewer --user=<someone> -n <release namespace>
 
 `logweir-trust-admin` is cluster-scoped (a ClusterRoleBinding) and the only
 holder of a write verb on `TrustPolicy`, which decides whose keys may sign an
-approval; bind it to somebody who does not hold `logweir-operator`. No
-`delete`: deleting a policy sends its namespaces back to the legacy roster, a
-widening dressed as a cleanup.
+approval. No `delete`: deleting a policy sends its namespaces back to the
+legacy roster, a widening dressed as a cleanup.
 
-`logweir-retention-admin` is namespaced and the only holder of a write verb on
-`RetentionPolicy`, whose `spec.mode` moves an installation from reporting to
-deleting; bind it to somebody who does not hold `logweir-operator`. No
-`delete`: enforcement is turned off with `mode: Report`, and deleting the object
-while an enforcement Job holds its lease takes the lease record the restore-side
-hold reads. `charts/logweir/README.md` (`retention.enabled`) lists the other
-gates a deletion passes.
+There is no write role for the namespace. Whoever may create a Logweir object
+there may create it in any workspace, and one that names a Secret mounts that
+Secret into a runner Job: give that access only to the people you would make
+administrators of every workspace (Kubernetes' own `admin`).
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: logweir-viewer
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: human-role
@@ -39,99 +32,18 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals
+      - backupdestinations
       - backups
       - backupschedules
       - kafkaclusters
-      - restores
-      - trustrosters
-    verbs: ["get", "list", "watch"]
-  # Read only.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
       - preflights
       - protectionpolicies
       - recoverycatalogs
+      - restores
       - retentionpolicies
+      - switchovers
       - topicdiscoveries
-      - trustpolicies
     verbs: ["get", "list", "watch"]
-  # PROD-04.2: a switchover's groups, outcomes and record key. Read only.
-  - apiGroups: ["logweir.dev"]
-    resources: ["switchovers"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-operator
-  labels:
-    {{- include "logweir.labels" . | nindent 4 }}
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["backupschedules"]
-    verbs: ["update", "patch"]
-  # `patch` and not `update`: a destination's access grants and a check's
-  # `cancelRequested` are merge patches; what may change is the CRD's CEL rule.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["patch"]
-  # Declare protection, connect an archive…
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - protectionpolicies
-      - recoverycatalogs
-    verbs: ["create"]
-  # …tune an objective (no seal on that spec)…
-  - apiGroups: ["logweir.dev"]
-    resources: ["protectionpolicies"]
-    verbs: ["update", "patch"]
-  # …and flip the ONE field a catalog leaves mutable, `spec.syncRequest`.
-  # `patch` without `update`.
-  # `retentionpolicies` is NOT here — its writes are
-  # `logweir-retention-admin`'s.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - recoverycatalogs
-    verbs: ["patch"]
-  # PROD-04.2: request a switchover. It runs only under its own Approval
-  # (subject kind `Switchover`), which `logweir-approver` creates.
-  - apiGroups: ["logweir.dev"]
-    resources: ["switchovers"]
-    verbs: ["create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-approver
-  labels:
-    {{- include "logweir.labels" . | nindent 4 }}
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["approvals"]
-    verbs: ["create"]
-  # Approval context, read only.
-  - apiGroups: ["logweir.dev"]
-    resources: ["preflights"]
-    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -143,16 +55,4 @@ metadata:
 rules:
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-retention-admin
-  labels:
-    {{- include "logweir.labels" . | nindent 4 }}
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]

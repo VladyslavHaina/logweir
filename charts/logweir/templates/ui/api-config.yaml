@@ -10,7 +10,7 @@ as it (this file, `api-deployment.yaml`, `api-ingress.yaml`,
 the crate's name, `api`.
 
 `logweir-api --config <file>` refuses to start without the file, so the mode,
-listen address, namespaces and role bindings are readable from `helm template`
+listen address, namespace, workspaces and role bindings are readable from `helm template`
 and `kubectl get cm`. It carries no credential: the OIDC client secret, the
 session key and the cursor key are paths into mounted Secrets the operator
 names, because a ConfigMap is readable with `get configmaps`, appears in
@@ -85,7 +85,6 @@ because a comment in a ConfigMap is one an operator scrolls past forever:
 */ -}}
 {{- define "logweir.api.config" -}}
 {{- $c := .Values.api.console -}}
-{{- $ns := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- $keys := include "logweir.api.keyDir" . -}}
 mode: {{ $c.mode }}
 {{- if eq $c.mode "localAdmin" }}
@@ -139,7 +138,7 @@ requireTrustedProxy: true
 {{- end }}
 {{- end }}
 {{- /*
-The manual-run ceilings (per person, per namespace, per minute, both modes)
+The manual-run ceilings (per person, per workspace, per minute, both modes)
 render only away from `RunRateLimits::default()` (10, 5, pinned by
 `logweir-api/tests/chart_config.rs`): an older console refuses the unknown key
 at start, so a default install carries none and an image-only rollback keeps
@@ -152,8 +151,9 @@ rateLimits:
   manualBackupsPerMinute: {{ $rlBackups }}
   manualRestoresPerMinute: {{ $rlRestores }}
 {{- end }}
-namespaces:
-{{ toYaml $ns | indent 2 }}
+namespace: {{ .Release.Namespace }}
+workspaces:
+{{ toYaml .Values.workspaces | indent 2 }}
 kubernetes:
   source: inCluster
   principal: {{ printf "system:serviceaccount:%s:%s" .Release.Namespace (include "logweir.api.consoleName" .) | quote }}

@@ -1,15 +1,22 @@
 {{- /*
-The `weirkeeper` ClusterRole. Every granted verb has a caller and every call
-has a grant: `manifest_lint.rs` (`every_granted_verb_has_a_caller`,
-`every_call_site_has_a_grant`) reads this role out of every rendered variant
-and the `Api<T>` calls out of `crates/weirkeeper/src/`. No verb on `secrets`;
-`delete` on exactly the two transient check kinds; one rule naming `pods/log`
-with `get`; nothing naming `pods/exec` or `pods/attach`.
+The controller's authority: `Role/weirkeeper` in the release namespace, the one
+namespace it watches and creates Jobs in, and `ClusterRole/weirkeeper-cluster-scope`
+for the two cluster-scoped trust kinds. A Job can mount any Secret in its
+namespace, so Job-create authority here is every Secret here (residual O1,
+docs/kubernetes.md *Workspaces*).
+
+Every granted verb has a caller and every call has a grant: `manifest_lint.rs`
+(`every_granted_verb_has_a_caller`, `every_call_site_has_a_grant`) reads both
+roles out of every rendered variant and the `Api<T>` calls out of
+`crates/weirkeeper/src/`. No verb on `secrets`; `delete` on exactly the two
+transient check kinds; one rule naming `pods/log` with `get`; nothing naming
+`pods/exec` or `pods/attach`.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: weirkeeper
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
@@ -21,9 +28,8 @@ rules:
       - backupschedules
       - kafkaclusters
       - restores
-      - trustrosters
     verbs: ["get", "list", "watch"]
-  # In its own rule so the six-kind list `logweir-viewer` shares is untouched.
+  # In its own rule so the kind list `logweir-viewer` shares is untouched.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
@@ -58,7 +64,6 @@ rules:
       - backupschedules/status
       - kafkaclusters/status
       - restores/status
-      - trustrosters/status
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations/status"]
@@ -94,14 +99,6 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
-  # `patch` on the object is the compromise-revocation finalizer and nothing
-  # else.
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies"]
-    verbs: ["list", "watch", "patch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies/status"]
-    verbs: ["patch"]
   # The `ProtectionPolicy` reconciler's watch and `patch_status`. No `get`, no
   # `update`.
   - apiGroups: ["logweir.dev"]
@@ -129,3 +126,59 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["switchovers/status"]
     verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+rules:
+  # The two cluster-scoped kinds. The one `patch` on a TrustPolicy itself
+  # places and releases the compromise-revocation finalizer.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch", "patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper-cluster-scope
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ .Release.Namespace }}

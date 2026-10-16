@@ -1,6 +1,7 @@
 # expect: which approvalPolicy.policies does not declare
+workspaces: [team-a]
 approvalPolicy:
   policies:
     - {name: prod, mode: Governed}
-  namespaces:
+  workspaces:
     team-a: nothing

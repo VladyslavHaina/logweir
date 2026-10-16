@@ -3,4 +3,4 @@ approvalPolicy:
   allowOrdinaryConfirmation: true
   policies:
     - {name: team, mode: Ordinary, requireDistinctPrincipal: true}
-  namespaces: {}
+  workspaces: {}

@@ -1,6 +1,6 @@
-# expect: set per namespace
+# expect: set per workspace
 approvalPolicy:
   default: two-person
   allowOrdinaryConfirmation: true
   policies: []
-  namespaces: {}
+  workspaces: {}

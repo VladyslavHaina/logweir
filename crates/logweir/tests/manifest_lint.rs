@@ -143,14 +143,15 @@ fn all_manifests() -> Vec<Manifest> {
     out
 }
 
-/// One `ClusterRole`'s rules, as `(apiGroups, resources, verbs)` triples with
-/// each list sorted so a comparison is about content and not about order.
+/// One `Role`'s or `ClusterRole`'s rules, by name, as `(apiGroups, resources,
+/// verbs)` triples with each list sorted so a comparison is about content and
+/// not about order.
 fn rules_of(rel: &str, role_name: &str) -> Vec<(Vec<String>, Vec<String>, Vec<String>)> {
     let docs = manifests_in(&repo().join(rel));
     let role = docs
         .iter()
-        .find(|m| m.kind == "ClusterRole" && m.name() == role_name)
-        .unwrap_or_else(|| panic!("{rel} carries no ClusterRole named {role_name}"));
+        .find(|m| (m.kind == "ClusterRole" || m.kind == "Role") && m.name() == role_name)
+        .unwrap_or_else(|| panic!("{rel} carries no Role or ClusterRole named {role_name}"));
     let rules = role.value["rules"]
         .as_sequence()
         .unwrap_or_else(|| panic!("{rel}: {role_name} has no `rules` sequence"));
@@ -177,47 +178,47 @@ fn rules_of(rel: &str, role_name: &str) -> Vec<(Vec<String>, Vec<String>, Vec<St
             assert!(
                 r.get("resourceNames").is_none(),
                 "{rel}: {role_name} has a rule with `resourceNames`; the four-role table in \
-                 `the_six_cluster_roles_are_exactly_as_specified` does not model it"
+                 `the_shipped_roles_are_exactly_as_specified` does not model it"
             );
             (take("apiGroups"), take("resources"), take("verbs"))
         })
         .collect()
 }
 
-const SIX_KINDS: [&str; 6] = [
+/// The controller's whole grant: `Role/weirkeeper` in the release namespace
+/// and `ClusterRole/weirkeeper-cluster-scope` for the two cluster-scoped trust
+/// kinds (OD-23).
+fn controller_rules(rel: &str) -> Vec<(Vec<String>, Vec<String>, Vec<String>)> {
+    let mut rules = rules_of(rel, "weirkeeper");
+    rules.extend(rules_of(rel, "weirkeeper-cluster-scope"));
+    rules
+}
+
+/// The five kinds the controller reads with `get`/`list`/`watch` in its first
+/// rule.
+const FIVE_KINDS: [&str; 5] = [
     "approvals",
     "backups",
     "backupschedules",
     "kafkaclusters",
     "restores",
-    "trustrosters",
 ];
 
-/// The seven kinds ADR 0008's Amendments F (D2) and G (D3) added, in the
-/// plural order `charts/logweir/crds/` lists them (G's `rehearsalschedules` is
-/// withdrawn in v1). `logweir-viewer` reads all seven in ONE rule; the
-/// controller's grants are per kind, in rules of their own, because each one
-/// has a different caller to name.
-const SEVEN_NEW_KINDS: [&str; 7] = [
+/// Every namespaced Logweir kind: what `logweir-viewer` reads, in one rule.
+const NAMESPACED_KINDS: [&str; 12] = [
+    "approvals",
     "backupdestinations",
+    "backups",
+    "backupschedules",
+    "kafkaclusters",
     "preflights",
     "protectionpolicies",
     "recoverycatalogs",
+    "restores",
     "retentionpolicies",
+    "switchovers",
     "topicdiscoveries",
-    "trustpolicies",
 ];
-
-/// The three kinds D2 §7.2 gives `logweir-operator` `create` and `patch` on.
-const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topicdiscoveries"];
-
-/// The two kinds D3 §9 gives `logweir-operator` `create` on.
-///
-/// `trustpolicies` is cluster-scoped and write-fenced to
-/// `logweir-trust-admin`, `retentionpolicies` is write-fenced to
-/// `logweir-retention-admin`, and `rehearsalschedules` is withdrawn in v1, so
-/// what an operator may bring into existence is protection and a catalog.
-const TWO_D3_OPERATOR_KINDS: [&str; 2] = ["protectionpolicies", "recoverycatalogs"];
 
 /// The chart's default render, the install. Every ClusterRole below is read
 /// from it.
@@ -241,7 +242,7 @@ fn v(items: &[&str]) -> Vec<String> {
 /// transient API error.
 #[test]
 fn weirkeeper_can_read_pod_logs_and_nothing_more() {
-    let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
+    let rules = controller_rules(DEFAULT_RENDER);
 
     let log_rules: Vec<_> = rules
         .iter()
@@ -297,7 +298,7 @@ fn weirkeeper_can_read_pod_logs_and_nothing_more() {
 /// The narrow statement is the one asserted here.
 #[test]
 fn weirkeeper_has_no_verb_on_secrets() {
-    for (groups, resources, verbs) in rules_of(DEFAULT_RENDER, "weirkeeper") {
+    for (groups, resources, verbs) in controller_rules(DEFAULT_RENDER) {
         for r in &resources {
             assert!(
                 r != "secrets" && !r.starts_with("secrets/"),
@@ -577,7 +578,7 @@ fn every_granted_verb_has_a_caller() {
     /// EXACTLY ONE ENTRY, asserted below: a second one must show up in a diff.
     const GRANTED_FOR_UNIFORMITY: [(&str, &str); 1] = [("backupschedules", "get")];
 
-    let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
+    let rules = controller_rules(DEFAULT_RENDER);
     assert!(!rules.is_empty(), "role.yaml granted no verb at all");
 
     // THE NAMED ONE: `delete`, ON EXACTLY TWO RESOURCES, WITH ITS CALLER.
@@ -1005,7 +1006,7 @@ fn every_call_site_has_a_grant() {
     );
 
     // EVERY RENDERED COPY. The Helm TEMPLATE
-    // (`charts/logweir/templates/clusterrole.yaml`) is not parseable YAML on
+    // (`charts/logweir/templates/controller-rbac.yaml`) is not parseable YAML on
     // its own — it carries `{{ include }}` lines — so the rendered outputs are
     // read.
     let mut files: Vec<String> = Vec::new();
@@ -1017,20 +1018,20 @@ fn every_call_site_has_a_grant() {
             .to_string();
         if manifests_in(&path)
             .iter()
-            .any(|m| m.kind == "ClusterRole" && m.name() == "weirkeeper")
+            .any(|m| m.kind == "Role" && m.name() == "weirkeeper")
         {
             files.push(rel);
         }
     }
     assert!(
         files.len() >= 4,
-        "only {} shipped copies of the weirkeeper ClusterRole were found: {files:?}",
+        "only {} shipped copies of the weirkeeper Role were found: {files:?}",
         files.len()
     );
 
     let mut checked = 0usize;
     for file in &files {
-        let mut rules = rules_of(file, "weirkeeper");
+        let mut rules = controller_rules(file);
         // The opt-in grant is a Role in each namespace the chart lists
         // (`strimzi-topics.yaml`), never the ClusterRole: a render without
         // `strimzi.readKafkaTopics` grants nothing on `kafkatopics`, and the
@@ -1171,26 +1172,21 @@ fn the_strimzi_grant_is_a_role_in_each_listed_namespace_and_only_when_asked() {
     assert_eq!(binding.value["roleRef"]["kind"].as_str(), Some("Role"));
 }
 
-/// The six ClusterRoles, verb for verb.
+/// The four shipped roles, verb for verb: `Role/weirkeeper`,
+/// `ClusterRole/weirkeeper-cluster-scope`, `Role/logweir-viewer` and
+/// `ClusterRole/logweir-trust-admin`.
 ///
-/// A table test and not five assertions, because the property is the WHOLE rule
-/// set of each role: an extra rule is as much a defect as a wrong verb, and a
-/// per-rule assertion cannot see one.
+/// A table test and not per-rule assertions, because the property is the WHOLE
+/// rule set of each role: an extra rule is as much a defect as a wrong verb, and
+/// a per-rule assertion cannot see one.
 ///
-/// Two of them are administrator roles that exist to NOT be held by whoever
-/// holds `logweir-operator`:
-///
-/// * `logweir-trust-admin` writes `TrustPolicy`, which decides whose keys may
-///   sign an approval. An operator who held it could add their own key and
-///   then approve their own restore.
-/// * `logweir-retention-admin` writes `RetentionPolicy`, whose `spec.mode` is
-///   what moves an installation from reporting to DELETING. D3 §12 calls
-///   `Enforce` "a separate, later, administrator decision with its own
-///   credential", and RBAC is the only layer that can say whose decision.
-///
-/// The count is in the name because the count is an assertion.
+/// OD-23 (PROD-19.1 §4.4, open point 3 (b)): there is no `kubectl` write role.
+/// Workspaces are invisible to RBAC, and whoever may create a Logweir object
+/// in the namespace may create it in any workspace and name any Secret there,
+/// so `logweir-operator`, `-approver` and `-retention-admin` are gone, and
+/// asserted gone below.
 #[test]
-fn the_six_cluster_roles_are_exactly_as_specified() {
+fn the_shipped_roles_are_exactly_as_specified() {
     // --- `weirkeeper` (interface I28) -------------------------------------
     //
     // The role grants what the reconcilers CALL:
@@ -1204,13 +1200,11 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     let weirkeeper = vec![
         (
             v(&["logweir.dev"]),
-            v(&SIX_KINDS),
+            v(&FIVE_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
         // The `BackupDestination` reconciler's `list`/`watch`
-        // and `destination::resolve_ref`'s `get_opt`. A SEPARATE rule, so the
-        // six-kind list the `logweir-viewer` role also names stays exactly what
-        // it was.
+        // and `destination::resolve_ref`'s `get_opt`, in a rule of its own.
         (
             v(&["logweir.dev"]),
             v(&["backupdestinations"]),
@@ -1225,8 +1219,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         ),
         // `Controller::new(api, …)` in `controllers/recovery_catalog.rs`, and
         // `controllers/protection_policy.rs`'s `get_opt` of the ONE catalog a
-        // `ProtectionPolicy` names. A SEPARATE rule: folding a ninth kind into
-        // the six-kind list would silently widen `logweir-viewer`.
+        // `ProtectionPolicy` names.
         (
             v(&["logweir.dev"]),
             v(&["recoverycatalogs"]),
@@ -1268,7 +1261,6 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
                 "backupschedules/status",
                 "kafkaclusters/status",
                 "restores/status",
-                "trustrosters/status",
             ]),
             v(&["patch"]),
         ),
@@ -1325,27 +1317,6 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // controller owns. `list` and nothing else.
         (v(&[""]), v(&["events"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
-        // The `TrustPolicy` reconciler's own two rows, SEPARATE from the
-        // six-kinds rule, which is shared verbatim with `viewer_role.yaml`.
-        //
-        // NO `get`: a namespace never names its own trust (D3 §7.1), and the
-        // conflict rule needs the whole set. NO `update`: editing a key's
-        // lifecycle is `logweir-trust-admin`'s.
-        //
-        // `patch` ON THE OBJECT is the compromise-revocation finalizer:
-        // `metadata.finalizers` under a resourceVersion precondition, from ONE
-        // call site whose body `trust_revocation_durable.rs` pins. RBAC cannot
-        // grant less than the object, which is why the call site is pinned.
-        (
-            v(&["logweir.dev"]),
-            v(&["trustpolicies"]),
-            v(&["list", "watch", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-        (
-            v(&["logweir.dev"]),
-            v(&["trustpolicies/status"]),
-            v(&["patch"]),
-        ),
         // The `ProtectionPolicy` reconciler's own rows. `list`/`watch` is
         // `Controller::new`; NO `get`, because the reconciler never re-reads a
         // policy it was handed by the watcher.
@@ -1398,184 +1369,75 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     assert_eq!(
         rules_of(DEFAULT_RENDER, "weirkeeper"),
         weirkeeper,
-        "the `weirkeeper` ClusterRole's rules are not the expected set"
+        "the `weirkeeper` Role's rules are not the expected set"
     );
 
-    // --- `logweir-viewer` -------------------------------------------------
-    // One rule. NO `/status` resource is named: `get` on the object already
-    // returns its status, and naming the subresource here would read to an
-    // auditor as though a viewer could write one.
-    let viewer = vec![
-        (
-            v(&["logweir.dev"]),
-            v(&SIX_KINDS),
-            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-        // D2 §7.2 and D3 §9 — the seven kinds Amendments F and G added, read
-        // only, in a SEPARATE rule so the six-kind list stays byte-identical
-        // to the controller's own first rule. `trustpolicies` is
-        // cluster-scoped, so a `RoleBinding` of this role does not convey it;
-        // a viewer who should read trust needs a `ClusterRoleBinding`, which
-        // is a separate and visible decision.
-        (
-            v(&["logweir.dev"]),
-            v(&SEVEN_NEW_KINDS),
-            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-        // PROD-04.2, in a rule of its own.
-        (
-            v(&["logweir.dev"]),
-            v(&["switchovers"]),
-            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-    ];
-    let got = rules_of(DEFAULT_RENDER, "logweir-viewer");
+    // --- `weirkeeper-cluster-scope`: the two cluster-scoped trust kinds ----
+    //
+    // `TrustRoster`: the reconciler's watch and `patch_status`. `TrustPolicy`:
+    // NO `get` (a namespace never names its own trust, D3 §7.1, and the
+    // conflict rule needs the whole set) and NO `update` (a key's lifecycle is
+    // `logweir-trust-admin`'s). `patch` ON THE OBJECT is the
+    // compromise-revocation finalizer: `metadata.finalizers` under a
+    // resourceVersion precondition, from ONE call site whose body
+    // `trust_revocation_durable.rs` pins.
     assert_eq!(
-        got, viewer,
-        "`logweir-viewer`'s rules are not the expected set"
-    );
-    for (_, resources, _) in &got {
-        for r in resources {
-            assert!(
-                !r.contains('/'),
-                "`logweir-viewer` names the subresource `{r}`; spec §9 says no `/status`"
-            );
-        }
-    }
-
-    // --- `logweir-operator` -----------------------------------------------
-    // `create` on the four operational kinds, plus PLAIN `update` AND `patch`
-    // on `backupschedules`. What may change is the CRD's CEL rule — see
-    // `the_schedule_edit_restriction_is_cel_not_rbac`. `patch` is there because
-    // the policy is editable and the two commands an operator
-    // runs (`kubectl edit`, `kubectl apply`) both send a PATCH, so `update`
-    // alone is a grant nobody can use.
-    let operator = vec![
-        (
-            v(&["logweir.dev"]),
-            v(&["backups", "backupschedules", "kafkaclusters", "restores"]),
-            v(&["create"]),
-        ),
-        (
-            v(&["logweir.dev"]),
-            v(&["backupschedules"]),
-            v(&["update", "patch"]),
-        ),
-        // D2 §7.2 — start a destination, an inventory or a readiness check…
-        (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["create"])),
-        // …and edit the two things their CRDs let anybody edit: a
-        // destination's access grants and CA, and a check's
-        // `cancelRequested`. `patch` WITHOUT `update`, because both are merge
-        // patches and what may change is the CRD's own CEL rule, exactly as
-        // `the_schedule_edit_restriction_is_cel_not_rbac` records for
-        // `backupschedules`.
-        (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["patch"])),
-        // D3 §9 — declare protection, connect an existing archive. TWO of
-        // D3's namespaced kinds; `retentionpolicies` is asserted ABSENT below.
-        (
-            v(&["logweir.dev"]),
-            v(&TWO_D3_OPERATOR_KINDS),
-            v(&["create"]),
-        ),
-        // A `ProtectionPolicy`'s `.spec` carries NO immutability seal —
-        // `charts/logweir/crds/protectionpolicies.yaml`'s only object-level rule is
-        // "exactly one of destinationRef or legacyArchive" — so an objective is
-        // policy an operator tunes, and both verbs are needed for the reason
-        // `backupschedules` needs both: `kubectl edit` and `kubectl apply` send
-        // a PATCH.
-        (
-            v(&["logweir.dev"]),
-            v(&["protectionpolicies"]),
-            v(&["update", "patch"]),
-        ),
-        // A catalog seals everything but `spec.syncRequest` ("a catalog of a
-        // different location is a different catalog"). A merge patch reaches
-        // exactly that field, so
-        // `patch` WITHOUT `update`: a PUT is the shape most likely to carry a
-        // second, unnoticed field, which the API server would then refuse for
-        // that field alone.
-        (v(&["logweir.dev"]), v(&["recoverycatalogs"]), v(&["patch"])),
-        // PROD-04.2: request a switchover; it runs only under its own
-        // Approval, which `logweir-approver` creates.
-        (v(&["logweir.dev"]), v(&["switchovers"]), v(&["create"])),
-    ];
-    let operator_rules = rules_of(DEFAULT_RENDER, "logweir-operator");
-    assert_eq!(
-        operator_rules, operator,
-        "`logweir-operator`'s rules are not the expected set"
-    );
-    // AND THE OPERATOR NEVER WRITES A `RetentionPolicy`, asserted on its own so
-    // that adding the kind to any rule above is a failure that names the
-    // decision rather than a table entry a reviewer has to spot. Read comes
-    // from `logweir-viewer`; the writes are `logweir-retention-admin`'s,
-    // because `spec.mode` is what moves an installation from reporting to
-    // deleting and D3 §16 calls deletion "the irreversible boundary".
-    for (_, resources, verbs) in &operator_rules {
-        assert!(
-            !resources.iter().any(|r| r == "retentionpolicies"),
-            "`logweir-operator` names `retentionpolicies` with {verbs:?}. It may not: an \
-             operator who could write one could set `mode: Enforce` on a policy they also \
-             authored, and the whole of D3 §12's \"separate, later, administrator decision\" \
-             would be one person's from end to end"
-        );
-    }
-
-    // --- `logweir-approver` -----------------------------------------------
-    // EXACTLY ONE RULE: `create` on `approvals`, and nothing else. No `get`, no
-    // `update` (which would let the bytes be swapped under a `Verified` status
-    // computed from different bytes), no `delete` (which would erase an
-    // authorisation a `Restore` already ran against).
-    let approver = rules_of(DEFAULT_RENDER, "logweir-approver");
-    assert_eq!(
-        approver,
+        rules_of(DEFAULT_RENDER, "weirkeeper-cluster-scope"),
         vec![
-            (v(&["logweir.dev"]), v(&["approvals"]), v(&["create"])),
-            // D2 §7.2 — approval context, READ ONLY. An approver is asked to
-            // authorise a restore, and whether the readiness check for that
-            // plan said `ready` is part of the question. A `Preflight` status
-            // is redacted by construction (D2 §6.5), references no Secret, and
-            // authorizes nothing on its own (§6.8), so reading one cannot
-            // approve anything.
             (
                 v(&["logweir.dev"]),
-                v(&["preflights"]),
-                v(&["get", "list"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+                v(&["trustrosters"]),
+                v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            ),
+            (
+                v(&["logweir.dev"]),
+                v(&["trustrosters/status"]),
+                v(&["patch"])
+            ),
+            (
+                v(&["logweir.dev"]),
+                v(&["trustpolicies"]),
+                v(&["list", "watch", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            ),
+            (
+                v(&["logweir.dev"]),
+                v(&["trustpolicies/status"]),
+                v(&["patch"])
             ),
         ],
-        "`logweir-approver` is `create` on `approvals` plus read on `preflights`, and \
-         nothing else"
+        "`weirkeeper-cluster-scope` holds the two cluster-scoped trust kinds and nothing else"
     );
-    for (_, resources, verbs) in &approver {
-        assert!(
-            !verbs
-                .iter()
-                .any(|x| x == "update" || x == "patch" || x == "delete"),
-            "`logweir-approver` may not write anything: `{resources:?}` carries {verbs:?}. \
-             `update` on an approval would let the bytes be swapped under a `Verified` status \
-             computed from different bytes, and `delete` would erase an authorisation a \
-             `Restore` already ran against"
-        );
-    }
+
+    // --- `logweir-viewer`: a Role, every namespaced kind, read only --------
+    // One rule. NO `/status` resource is named: `get` on the object already
+    // returns its status, and naming the subresource here would read to an
+    // auditor as though a viewer could write one. No `secrets`, no
+    // cluster-scoped kind (a Role cannot grant one).
+    assert_eq!(
+        rules_of(DEFAULT_RENDER, "logweir-viewer"),
+        vec![(
+            v(&["logweir.dev"]),
+            v(&NAMESPACED_KINDS),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        )],
+        "`logweir-viewer` reads every namespaced Logweir kind, and nothing else"
+    );
+    let rendered = manifests_in(&repo().join(DEFAULT_RENDER));
+    assert!(
+        rendered
+            .iter()
+            .any(|m| m.kind == "Role" && m.name() == "logweir-viewer"),
+        "`logweir-viewer` is a Role in the release namespace"
+    );
 
     // --- `logweir-trust-admin` (D3 §9) ------------------------------------
     // ONE RULE. The only holder of a write verb on `TrustPolicy`, which is what
-    // decides whose keys may sign an approval.
-    //
-    // `patch` BESIDE `update`, for the reason `logweir-operator`'s header
-    // records: `kubectl edit` and `kubectl apply` send a PATCH, so an
-    // `update`-only grant leaves the administrator unable to perform the edit
-    // the role exists for.
-    //
-    // **NO `delete`**, by D3 §9's own words, and it is asserted rather than
-    // merely absent: deleting a policy does not retire a key, it removes the
-    // binding that governs a namespace and silently sends every namespace it
-    // bound back to `legacy-roster-v1` — a widening dressed as a cleanup.
-    //
-    // **NO VERB ON `trustrosters`**: a different kind with a different
-    // lifecycle.
-    let trust_admin = rules_of(DEFAULT_RENDER, "logweir-trust-admin");
+    // decides whose keys may sign an approval. `patch` BESIDE `update`, because
+    // `kubectl edit` and `kubectl apply` send a PATCH. **NO `delete`**:
+    // deleting a policy removes the binding that governs a namespace and sends
+    // it back to `legacy-roster-v1`, a widening dressed as a cleanup.
     assert_eq!(
-        trust_admin,
+        rules_of(DEFAULT_RENDER, "logweir-trust-admin"),
         vec![(
             v(&["logweir.dev"]),
             v(&["trustpolicies"]),
@@ -1583,101 +1445,22 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         )],
         "`logweir-trust-admin` reads and writes `trustpolicies`, and names no other resource"
     );
-    for (_, resources, verbs) in &trust_admin {
-        assert!(
-            !verbs.iter().any(|x| x == "delete"),
-            "`logweir-trust-admin` carries `delete` on {resources:?}; D3 §9 says it does not"
-        );
-    }
 
-    // --- `logweir-retention-admin` (D3 §9) --------------------------------
-    // ONE RULE, and the same shape `logweir-trust-admin` has, for the same kind
-    // of reason: it is the only holder of a write verb on the one kind whose
-    // object can end in a deletion.
-    //
-    // `get`/`list`/`watch` BESIDE THE WRITES, unlike the operator's D3 rules.
-    // This role is bindable on its own — a storage owner who administers
-    // retention in one namespace should not need `logweir-viewer` beside it to
-    // read the evaluation they are about to change. The read is the same read
-    // `logweir-viewer` already publishes, so it widens nothing.
-    //
-    // **NO `delete`**, and it is asserted rather than merely absent, with a
-    // reason of its own: turning enforcement off is `mode: Report`, and
-    // deleting the object while an enforcement Job holds its lease takes the
-    // `status.lease` record the restore-side hold reads.
-    //
-    // **NAMESPACED**, unlike `logweir-trust-admin`: `RetentionPolicy` is a
-    // namespaced kind, so this is bound per namespace and an installation can
-    // have a different retention administrator for each one.
-    let retention_admin = rules_of(DEFAULT_RENDER, "logweir-retention-admin");
-    assert_eq!(
-        retention_admin,
-        vec![(
-            v(&["logweir.dev"]),
-            v(&["retentionpolicies"]),
-            v(&["get", "list", "watch", "create", "update", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        )],
-        "`logweir-retention-admin` reads and writes `retentionpolicies`, and names no other \
-         resource"
-    );
-    for (_, resources, verbs) in &retention_admin {
-        assert!(
-            !verbs.iter().any(|x| x == "delete"),
-            "`logweir-retention-admin` carries `delete` on {resources:?}; D3 §9 says it does \
-             not, and deleting a policy mid-run takes the lease the restore-side hold reads"
-        );
-    }
-
-    // --- AND THE OPERATOR IS NOT THE TRUST ADMIN, NOR THE RETENTION ADMIN --
-    // The separation is the whole reason the fifth role exists, so it is
-    // asserted here rather than left to the reader of two files.
-    for (file, role) in [
-        (DEFAULT_RENDER, "logweir-operator"),
-        (DEFAULT_RENDER, "logweir-approver"),
-        (DEFAULT_RENDER, "logweir-viewer"),
+    // --- AND THE THREE WRITE ROLES ARE GONE (OD-23 open point 3 (b)) -------
+    for gone in [
+        "logweir-operator",
+        "logweir-approver",
+        "logweir-retention-admin",
     ] {
-        for (_, resources, verbs) in rules_of(file, role) {
-            for (kind, admin, why) in [
-                (
-                    "trustpolicies",
-                    "logweir-trust-admin",
-                    "the kind that decides whose keys may sign an approval",
-                ),
-                (
-                    "retentionpolicies",
-                    "logweir-retention-admin",
-                    "the kind whose `spec.mode` moves an installation from reporting to deleting",
-                ),
-            ] {
-                if resources.iter().any(|r| r == kind) {
-                    assert_eq!(
-                        verbs,
-                        v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-                        "`{role}` may READ `{kind}` and never write one: only `{admin}` holds a \
-                         write verb on {why}"
-                    );
-                }
-            }
-        }
-    }
-    // AND NEITHER ADMIN ROLE HOLDS THE OTHER'S KIND. Two roles that had grown
-    // into one another would satisfy every assertion above and none of the
-    // separation either of them exists for.
-    for (file, role, own) in [
-        (DEFAULT_RENDER, "logweir-trust-admin", "trustpolicies"),
-        (
-            DEFAULT_RENDER,
-            "logweir-retention-admin",
-            "retentionpolicies",
-        ),
-    ] {
-        for (_, resources, verbs) in rules_of(file, role) {
-            for r in &resources {
-                assert_eq!(
-                    r, own,
-                    "`{role}` names `{r}` with {verbs:?}; it may name `{own}` and nothing else"
-                );
-            }
+        for file in files_under("charts/logweir/rendered") {
+            assert!(
+                !manifests_in(&file)
+                    .iter()
+                    .any(|m| m.name() == gone && (m.kind == "Role" || m.kind == "ClusterRole")),
+                "{} renders `{gone}`; a namespace write role grants every workspace and every \
+                 Secret it can name (PROD-19.1 §4.4)",
+                file.display()
+            );
         }
     }
 }
@@ -1827,40 +1610,44 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     const RULE_KEYS: [&str; 4] = ["apiGroups", "resources", "verbs", "resourceNames"];
     const DOC_KEYS: [&str; 5] = ["apiVersion", "kind", "metadata", "rules", "aggregationRule"];
     let rendered = manifests_in(&repo().join(DEFAULT_RENDER));
-    let doc = rendered
+    let roles: Vec<&Manifest> = rendered
         .iter()
-        .find(|m| m.kind == "ClusterRole" && m.name() == "logweir-operator")
-        .expect("the default render carries `logweir-operator`");
-    for key in doc
-        .value
-        .as_mapping()
-        .expect("a ClusterRole is a mapping")
-        .keys()
-        .filter_map(|k| k.as_str())
-    {
-        assert!(
-            DOC_KEYS.contains(&key),
-            "`logweir-operator` carries the top-level key `{key}`, which is not one \
-             of {DOC_KEYS:?}. RBAC has no expression language and the API server ignores what it \
-             does not know."
-        );
-    }
-    for rule in doc.value["rules"]
-        .as_sequence()
-        .expect("`logweir-operator` has rules")
-    {
-        for key in rule
+        .filter(|m| m.kind == "ClusterRole" || m.kind == "Role")
+        .collect();
+    assert!(
+        roles.len() >= 4,
+        "the default render carries the four roles"
+    );
+    for doc in roles {
+        let name = doc.name();
+        for key in doc
+            .value
             .as_mapping()
-            .expect("a rule is a mapping")
+            .expect("a role is a mapping")
             .keys()
             .filter_map(|k| k.as_str())
         {
             assert!(
-                RULE_KEYS.contains(&key),
-                "`logweir-operator` has a rule carrying `{key}`. A `rules[]` entry is \
-                 {RULE_KEYS:?} and nothing else, so \"CEL-restricted `update`\" is not \
-                 expressible here (critique B H13, claim C97)."
+                DOC_KEYS.contains(&key),
+                "`{name}` carries the top-level key `{key}`, which is not one of {DOC_KEYS:?}. \
+                 RBAC has no expression language and the API server ignores what it does not \
+                 know."
             );
+        }
+        for rule in doc.value["rules"].as_sequence().into_iter().flatten() {
+            for key in rule
+                .as_mapping()
+                .expect("a rule is a mapping")
+                .keys()
+                .filter_map(|k| k.as_str())
+            {
+                assert!(
+                    RULE_KEYS.contains(&key),
+                    "`{name}` has a rule carrying `{key}`. A `rules[]` entry is {RULE_KEYS:?} \
+                     and nothing else, so \"CEL-restricted `update`\" is not expressible here \
+                     (critique B H13, claim C97)."
+                );
+            }
         }
     }
     // And no CEL written as free text either — `oldSelf` is the token a
@@ -1873,15 +1660,6 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
              ClusterRole."
         );
     }
-
-    // The sentence that says where the restriction actually is.
-    assert!(
-        role.contains("no field in which a CEL")
-            && role.contains("charts/logweir/crds/backupschedules.yaml"),
-        "charts/logweir/templates/human-roles.yaml must carry the one-sentence explanation: that \
-         an RBAC rule has no field a CEL expression could go in, and that the restriction lives \
-         in charts/logweir/crds/backupschedules.yaml"
-    );
 
     // And the CRD really does carry it, over `sourceRef` and nothing else
     // (D1 §5.1).
@@ -1931,8 +1709,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     for field in &editable {
         assert!(
             !rule.contains(&format!("self.{field} == oldSelf.{field}")),
-            "the CEL rule seals `{field}`, which PLAT-05.1 makes editable policy — and the \
-             operator role's `update`/`patch` would then be grants nobody can use"
+            "the CEL rule seals `{field}`, which PLAT-05.1 makes editable policy"
         );
     }
 }
@@ -2174,10 +1951,8 @@ fn install_docs_name_all_operator_managed_secrets() {
         );
     }
     assert!(
-        docs.contains("short-lived bootstrap Job")
-            && docs.contains("identity.authorizedRunnerNamespaces")
-            && docs.contains("(the low-level path)"),
-        "managed signer bootstrap/distribution and low-level provisioning must be distinct"
+        docs.contains("short-lived bootstrap Job") && docs.contains("(the low-level path)"),
+        "managed signer bootstrap and low-level provisioning must be distinct"
     );
     assert!(
         docs.contains("logweir-approval-bundle") && docs.contains("legacy"),
