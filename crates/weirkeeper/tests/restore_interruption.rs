@@ -294,7 +294,12 @@ fn exit_routes(value: &Value, log_tail: &str, exit_code: i32) -> Vec<Route> {
             200,
             job(NAME, JOB_UID, run_args(), false, finished("Failed")),
         ),
-        route("GET", "/pods".into(), 200, pods(NAME, JOB_UID, Some(exit_code))),
+        route(
+            "GET",
+            "/pods".into(),
+            200,
+            pods(NAME, JOB_UID, Some(exit_code)),
+        ),
         route("GET", "/log".into(), 200, log(log_tail)),
         status_route(value),
         route(

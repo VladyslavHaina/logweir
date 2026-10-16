@@ -2891,6 +2891,9 @@ fn execute_with_validated_approval(
     })
     .map_err(torn_down)?;
     sc.integrity = verified.integrity.clone();
+    if let Some(kept) = reconcile {
+        kept.judge(&mut sc.integrity);
+    }
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
     complete_sample_info(&mut sc.sample, &sc.integrity);

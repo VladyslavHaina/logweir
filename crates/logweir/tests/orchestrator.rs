@@ -2390,7 +2390,11 @@ fn a_partition_subset_that_imports_no_schemas_signs_a_version_that_defines_the_b
         let bytes = scorecard_from_store(&f);
         let sc: logweir_core::scorecard::Scorecard = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(sc.outcome, Outcome::Pass);
-        assert!(sc.format_version.starts_with(major), "{}", sc.format_version);
+        assert!(
+            sc.format_version.starts_with(major),
+            "{}",
+            sc.format_version
+        );
         assert!(
             logweir_core::scorecard::defines_schemas(&sc.format_version),
             "{}",
