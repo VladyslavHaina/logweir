@@ -828,7 +828,9 @@ connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
   compatibility API), `SchemaRegistryReadOnly`, `SchemaRegistryModeNotRestored`,
   `SchemaSnapshotInvalid`, `SchemaRegistryUnreachable`. A target connection
   without a registry is not refused; the scorecard says the schemas were not
-  imported. Imported schemas are never removed. The plan's
+  imported. Imported schemas are never removed. The registry user must be
+  allowed to set a subject's mode (on Redpanda, a superuser). Any registry
+  answer other than the one that means "not there" refuses the run. The plan's
   `target.schema_registry` must equal the target connection's
   (`ConnectionPlanMismatch`).
 - **Checks:** `registry.reachable` (connection test and backup readiness,

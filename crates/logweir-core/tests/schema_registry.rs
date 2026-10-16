@@ -43,6 +43,9 @@ struct Fake {
     refuse_mode_delete: bool,
     /// Answer 500 to the registration of this ID.
     fail_register: Option<u32>,
+    /// `(method, exact route without query, status, body)` answered once
+    /// instead.
+    forced: Vec<(String, String, u16, Value)>,
 }
 
 impl Fake {
@@ -59,6 +62,7 @@ impl Fake {
             global_mode: "READWRITE".into(),
             refuse_mode_delete: false,
             fail_register: None,
+            forced: Vec::new(),
         }
     }
 
@@ -129,9 +133,19 @@ impl Rest for Fake {
             return Ok((status, Value::Null));
         }
         let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        // Answered once: the registry then behaves as before.
+        if let Some(i) = self
+            .forced
+            .iter()
+            .position(|(m, r, _, _)| m == method && r == route)
+        {
+            let (_, _, status, body) = self.forced.remove(i);
+            return Ok((status, body));
+        }
         let deleted = query.contains("deleted=true");
         let parts: Vec<&str> = route.trim_start_matches('/').split('/').collect();
         let not_found = Ok((404, json!({"error_code": 40401})));
+        let no_version = Ok((404, json!({"error_code": 40402})));
         match (method, parts.as_slice()) {
             ("GET", ["subjects"]) => Ok((
                 200,
@@ -159,16 +173,17 @@ impl Rest for Fake {
             ("GET", ["subjects", s, "versions", v]) => {
                 let s = decode(s);
                 let v: u32 = v.parse().unwrap();
-                match self.subjects.get(&s).and_then(|vs| vs.get(&v)) {
-                    Some((_, d)) if deleted || !d => Ok((200, self.version_body(&s, v))),
-                    _ => not_found,
+                match self.subjects.get(&s).map(|vs| vs.get(&v)) {
+                    Some(Some((_, d))) if deleted || !d => Ok((200, self.version_body(&s, v))),
+                    Some(_) => no_version,
+                    None => not_found,
                 }
             }
             ("GET", ["schemas", "ids", id]) => {
                 let id: u32 = id.parse().unwrap();
                 match self.schemas.get(&id) {
                     Some((_, schema, _)) => Ok((200, json!({"schema": schema}))),
-                    None => not_found,
+                    None => Ok((404, json!({"error_code": 40403}))),
                 }
             }
             ("POST", ["subjects", s]) => {
@@ -713,4 +728,68 @@ fn a_mode_that_cannot_be_put_back_is_said() {
         logweir_core::schema_registry::MODE_NOT_RESTORED
     );
     assert!(err.to_string().contains("customer"), "{err}");
+}
+
+/// The fail-closed rule: only the registry's own "not there" answers are read
+/// as "not there"; any other status or an odd body refuses before any write.
+#[test]
+fn every_unknown_answer_refuses_before_any_write() {
+    let cases: Vec<(&str, &str, u16, Value)> = vec![
+        // The registry's mode: a 500 is unreachable, a 404 or a body with no
+        // mode cannot keep IDs.
+        ("GET", "/mode", 500, Value::Null),
+        ("GET", "/mode", 404, json!({"error_code": 40401})),
+        ("GET", "/mode", 200, json!({})),
+        // A subject's own mode: only 40409 / 40401 mean "inherits".
+        (
+            "GET",
+            "/mode/customer",
+            404,
+            json!({"message": "not found"}),
+        ),
+        ("GET", "/mode/customer", 403, Value::Null),
+        ("GET", "/mode/customer", 200, json!({"m": 1})),
+        // The held versions: only 40401 means "holds none".
+        ("GET", "/subjects/customer/versions", 500, Value::Null),
+        ("GET", "/subjects/customer/versions", 404, json!({})),
+        (
+            "GET",
+            "/subjects/customer/versions",
+            200,
+            json!({"not": "a list"}),
+        ),
+        // An ID's lookup: only 40403 means "not held".
+        ("GET", "/schemas/ids/4", 404, json!({"error_code": 40401})),
+        ("GET", "/schemas/ids/4", 302, Value::Null),
+        // A version's lookup: only 40401 / 40402 mean "not held".
+        ("GET", "/subjects/customer/versions/1", 404, json!({})),
+    ];
+    for (method, route, status, body) in cases {
+        let mut target = Fake::new(Kind::KeepsIds);
+        target
+            .forced
+            .push((method.into(), route.into(), status, body.clone()));
+        let err = run(&mut target, &[4]).expect_err(&format!("{method} {route} {status} {body}"));
+        assert!(
+            matches!(
+                err.reason(),
+                "SchemaConflict" | "SchemaRegistryCannotKeepIds" | "SchemaRegistryUnreachable"
+            ),
+            "{method} {route} {status}: {err}"
+        );
+        assert!(
+            !target.writes.iter().any(|w| w.starts_with("register")),
+            "{method} {route} {status}: nothing registered: {:?}",
+            target.writes
+        );
+    }
+    // CONTROLS: the legitimate "not there" answers proceed.
+    let mut target = Fake::new(Kind::KeepsIds);
+    target.forced.push((
+        "GET".into(),
+        "/mode/customer".into(),
+        404,
+        json!({"error_code": 40401}),
+    ));
+    run(&mut target, &[4]).expect("a subject that does not exist yet inherits");
 }

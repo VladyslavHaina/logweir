@@ -941,7 +941,7 @@ pub fn classify(
     for v in entries {
         let s = encode(&v.subject);
         let path = format!("/schemas/ids/{}", v.id);
-        let (status, _) = call(rest, "GET", &path, None)?;
+        let (status, body) = call(rest, "GET", &path, None)?;
         if status == 200 {
             let path = format!("/subjects/{s}?deleted=true");
             let (status, look) = call(rest, "POST", &path, Some(&register_body(v, false)))?;
@@ -958,21 +958,27 @@ pub fn classify(
                 ));
             }
             classes.push(Class::Present);
-        } else if status == 404 {
+        } else if status == 404 && error_code(&body) == Some(SCHEMA_NOT_FOUND) {
             let path = format!("/subjects/{s}/versions/{}?deleted=true", v.version);
-            let (status, _) = call(rest, "GET", &path, None)?;
-            if status != 404 {
+            let (status, body) = call(rest, "GET", &path, None)?;
+            let absent = status == 404
+                && matches!(
+                    error_code(&body),
+                    Some(SUBJECT_NOT_FOUND | VERSION_NOT_FOUND)
+                );
+            if !absent {
                 return Err(conflict(
                     v,
                     format!(
-                        "the target holds version {} of the subject under another ID",
+                        "the target holds version {} of the subject under another ID, or \
+                         answered {status} {body}",
                         v.version
                     ),
                 ));
             }
             classes.push(Class::Import);
         } else {
-            return Err(conflict(v, format!("GET {path} answered {status}")));
+            return Err(conflict(v, format!("GET {path} answered {status} {body}")));
         }
     }
     // A subject the target holds holds only the snapshot's versions.
@@ -983,15 +989,25 @@ pub fn classify(
     for (subject, versions) in by_subject {
         let path = format!("/subjects/{}/versions?deleted=true", encode(subject));
         let (status, held) = call(rest, "GET", &path, None)?;
-        if status != 200 {
+        let first = entries
+            .iter()
+            .find(|v| v.subject == subject)
+            .expect("the subject came from the entries");
+        // Only "no such subject" means it holds nothing; any other answer,
+        // or a list that does not parse, is not read as empty.
+        if status == 404 && error_code(&held) == Some(SUBJECT_NOT_FOUND) {
             continue;
         }
-        let held: Vec<u32> = serde_json::from_value(held).unwrap_or_default();
+        let parsed: Option<Vec<u32>> = (status == 200)
+            .then(|| serde_json::from_value(held.clone()).ok())
+            .flatten();
+        let Some(held) = parsed else {
+            return Err(conflict(
+                first,
+                format!("GET {path} answered {status} {held}, not a list of versions"),
+            ));
+        };
         if let Some(extra) = held.iter().find(|h| !versions.contains(h)) {
-            let first = entries
-                .iter()
-                .find(|v| v.subject == subject)
-                .expect("the subject came from the entries");
             return Err(conflict(
                 first,
                 format!("the target's subject holds version {extra}, which the snapshot does not"),
@@ -1025,12 +1041,39 @@ pub struct ImportedVersion {
 
 /// The mode a subject had before the import touched it: its own
 /// (subject-level) mode, or `None` when it inherits the registry's.
-fn own_mode(rest: &mut dyn Rest, s: &str) -> Result<Option<String>, ImportRefusal> {
-    let (status, mode) = call(rest, "GET", &format!("/mode/{s}"), None)?;
-    Ok((status == 200)
-        .then(|| mode.get("mode").and_then(Value::as_str).map(str::to_string))
-        .flatten())
+fn own_mode(rest: &mut dyn Rest, subject: &str) -> Result<Option<String>, ImportRefusal> {
+    let path = format!("/mode/{}", encode(subject));
+    let (status, mode) = call(rest, "GET", &path, None)?;
+    match status {
+        200 => mode
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(|m| Some(m.to_string()))
+            .ok_or_else(|| ImportRefusal::CannotKeepIds {
+                subject: subject.to_string(),
+                detail: format!("GET {path} answered 200 without a mode"),
+            }),
+        // The one answer that means "no subject-level mode": the subject has
+        // none (40409, Confluent and Redpanda) or does not exist yet (40401).
+        404 if matches!(error_code(&mode), Some(NO_SUBJECT_MODE | SUBJECT_NOT_FOUND)) => Ok(None),
+        _ => Err(ImportRefusal::CannotKeepIds {
+            subject: subject.to_string(),
+            detail: format!("GET {path} answered {status} {mode}"),
+        }),
+    }
 }
+
+/// A registry error body's `error_code`.
+fn error_code(body: &Value) -> Option<u64> {
+    body.get("error_code").and_then(Value::as_u64)
+}
+
+/// Confluent's error codes for the answers that mean "not there", which the
+/// classifier and the import accept as such; any other 404 is not trusted.
+const SUBJECT_NOT_FOUND: u64 = 40401;
+const VERSION_NOT_FOUND: u64 = 40402;
+const SCHEMA_NOT_FOUND: u64 = 40403;
+const NO_SUBJECT_MODE: u64 = 40409;
 
 /// Put a subject's mode back to what it was: its own value, or, when it
 /// inherited, no subject-level mode at all (`DELETE /mode/{s}`).
@@ -1096,25 +1139,28 @@ pub fn import(
         return Ok(report);
     }
     // Every subject's mode, before any write.
-    let (status, global) = call(rest, "GET", "/mode", None)?;
-    let global = (status == 200)
-        .then(|| {
-            global
-                .get("mode")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .flatten();
+    // The registry's own mode: IMPORT needs the mode API, so a registry that
+    // does not answer it with a mode cannot keep IDs.
+    let (status, body) = call(rest, "GET", "/mode", None)?;
+    let global = match (status, body.get("mode").and_then(Value::as_str)) {
+        (200, Some(mode)) => mode.to_string(),
+        _ => {
+            let first = last.keys().next().expect("a subject to import");
+            return Err(ImportRefusal::CannotKeepIds {
+                subject: (*first).to_string(),
+                detail: format!("GET /mode answered {status} {body}, not a mode"),
+            });
+        }
+    };
     let mut before: BTreeMap<&str, Option<String>> = BTreeMap::new();
     for subject in last.keys() {
-        let own = own_mode(rest, &encode(subject))?;
-        if let Some(mode) = own.as_deref().or(global.as_deref()) {
-            if read_only(mode) {
-                return Err(ImportRefusal::ReadOnly {
-                    subject: (*subject).to_string(),
-                    mode: mode.to_string(),
-                });
-            }
+        let own = own_mode(rest, subject)?;
+        let mode = own.as_deref().unwrap_or(&global);
+        if read_only(mode) {
+            return Err(ImportRefusal::ReadOnly {
+                subject: (*subject).to_string(),
+                mode: mode.to_string(),
+            });
         }
         before.insert(subject, own);
     }

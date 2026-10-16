@@ -164,6 +164,7 @@ impl Auth {
             client_cert_file: None,
             client_key_file: None,
             principal: format!("User:{}", self.username.unwrap_or("ANONYMOUS")),
+            schema_registry: None,
         }
     }
 }
