@@ -80,6 +80,9 @@ pub mod slot;
 pub mod strimzi_topics;
 pub mod testing;
 pub mod verification;
+/// PROD-19.1: the workspace label, the install's workspace list, and the two
+/// refusals (`WorkspaceUnknown`, `WorkspaceMismatch`).
+pub mod workspace;
 
 /// The name of the one cluster-scoped `TrustRoster` (interface **I16**),
 /// declared beside its reconciler ([`controllers::approval::ROSTER_NAME`]) and
